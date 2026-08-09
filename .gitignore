@@ -1,0 +1,9 @@
+build/
+.vs/
+smtc-probe
+CMakeSettings.json
+out/
+vcpkg_installed/
+*.user 
+.vscode/ 
+Thumbs.db 
