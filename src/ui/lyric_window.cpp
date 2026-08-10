@@ -1,4 +1,5 @@
 #include "lyric_window.h"
+#include "lyric_renderer.h"
 
 #include <commdlg.h>
 #include <cstdio>
@@ -24,6 +25,7 @@ constexpr UINT kCmdFontUp = 1002;
 constexpr UINT kCmdFontDown = 1003;
 constexpr UINT kCmdExit = 1004;
 constexpr UINT kCmdPickFont = 1005;
+constexpr UINT kCmdToggleTaskbar = 1006;
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricOverlay";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
@@ -211,14 +213,7 @@ struct OverlayHost::Impl {
     ID2D1PathGeometry* icoPrev = nullptr;               // 左向三角
 
     // D2D / GDI 资源
-    HDC memdc = nullptr;
-    HBITMAP dib = nullptr;
-    HGDIOBJ oldBmp = nullptr;
-    int bmpW = 0;
-    int bmpH = 0;
-    ID2D1Factory* d2d = nullptr;
-    IDWriteFactory* dwrite = nullptr;
-    ID2D1DCRenderTarget* rt = nullptr;
+    LyricRenderer renderer;
     ID2D1SolidColorBrush* brushBg = nullptr;
     ID2D1SolidColorBrush* brushNormal = nullptr;
     ID2D1SolidColorBrush* brushCurrent = nullptr;
@@ -230,33 +225,22 @@ struct OverlayHost::Impl {
     IDWriteTextFormat* fmtCurrent = nullptr;
 
     bool dragging = false;
+    bool quitting = false;
     POINT dragCursor{};
     RECT dragWnd{};
+
+    std::function<void()> onToggle;
 
     float scale() const { return (float)dpi / 96.0f; }
 
     // ---------- 资源 ----------
 
     void createDeviceResources() {
-        if (rt) return;
-        if (!d2d) {
-            D2D1_FACTORY_OPTIONS opts{};
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), &opts,
-                              reinterpret_cast<void**>(&d2d));
-        }
-        if (!dwrite) {
-            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                reinterpret_cast<IUnknown**>(&dwrite));
-        }
-        if (!d2d || !dwrite) return;
-        auto props = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        if (FAILED(d2d->CreateDCRenderTarget(&props, &rt))) {
-            rt = nullptr;
-            return;
-        }
-        rt->SetDpi((float)dpi, (float)dpi);
+        if (brushBg) return;
+        renderer.initialize();
+        auto* rt = renderer.renderTarget();
+        if (!rt) return;
+        rt->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.30f), &brushBg);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f), &brushNormal);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f), &brushCurrent); // QQ 绿
@@ -270,6 +254,7 @@ struct OverlayHost::Impl {
     }
 
     void ensureGradientBrush() {
+        auto* rt = renderer.renderTarget();
         if (!gradientDirty || !rt) return;
         gradientDirty = false;
         if (brushGradient) {
@@ -304,6 +289,7 @@ struct OverlayHost::Impl {
     }
 
     void recreateFormats() {
+        IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite) return;
         auto make = [&](float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT ta,
                         DWRITE_PARAGRAPH_ALIGNMENT pa, IDWriteTextFormat** out) {
@@ -340,6 +326,7 @@ struct OverlayHost::Impl {
     // 先用无限宽度测单行最大宽度，再限制到内容宽度得到折行高度
     IDWriteTextLayout* buildLayout(IDWriteTextFormat* fmt, const std::wstring& text,
                                    float& naturalW, float& height) {
+        IDWriteFactory* dwrite = renderer.dwrite();
         IDWriteTextLayout* lay = nullptr;
         if (FAILED(dwrite->CreateTextLayout(text.c_str(), (UINT32)text.size(), fmt, 100000.0f,
                                             100000.0f, &lay)))
@@ -367,6 +354,7 @@ struct OverlayHost::Impl {
     void rebuildLayouts() {
         layoutsDirty = false;
         releaseLayouts();
+        IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite || !fmtLine || !fmtCurrent) {
             layoutsDirty = true; // 资源未就绪，渲染时重试
             return;
@@ -428,6 +416,7 @@ struct OverlayHost::Impl {
             coverBmp->Release();
             coverBmp = nullptr;
         }
+        auto* rt = renderer.renderTarget();
         if (!rt || !media.thumbnail || media.thumbnail->empty()) return;
 
         HGLOBAL hglobal = GlobalAlloc(GHND, media.thumbnail->size());
@@ -486,6 +475,7 @@ struct OverlayHost::Impl {
             artistLayout->Release();
             artistLayout = nullptr;
         }
+        IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite || !fmtTitle || !fmtArtist) {
             barTextDirty = true;
             return;
@@ -504,6 +494,7 @@ struct OverlayHost::Impl {
     }
 
     void ensureBarGeometry() {
+        ID2D1Factory* d2d = renderer.d2d();
         if (!barGeomDirty || !d2d) return;
         barGeomDirty = false;
         if (coverClip) {
@@ -546,6 +537,7 @@ struct OverlayHost::Impl {
 
     // 单位三角形图标（设备无关）：dir=1 右向（播放/下一首），dir=-1 左向（上一首）
     void ensureIcons() {
+        ID2D1Factory* d2d = renderer.d2d();
         if (!d2d || icoPlay) return;
         auto tri = [&](float dir, ID2D1PathGeometry** out) {
             if (FAILED(d2d->CreatePathGeometry(out))) return;
@@ -563,6 +555,8 @@ struct OverlayHost::Impl {
     }
 
     void drawButton(int idx) {
+        auto* rt = renderer.renderTarget();
+        if (!rt) return;
         D2D1_POINT_2F c = btnCenter(idx);
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
         ID2D1SolidColorBrush* brush = enabled ? brushBtn : brushDivider;
@@ -593,6 +587,8 @@ struct OverlayHost::Impl {
     }
 
     void drawBar() {
+        auto* rt = renderer.renderTarget();
+        if (!rt) return;
         float top = lyricH();
         // 控制条独立背景，和歌词区明确分区；底部与窗口同圆角
         if (brushBarBg && barBgPath)
@@ -656,7 +652,7 @@ struct OverlayHost::Impl {
         r(brushBarBg);
         r(brushDivider);
         r(brushBtn);
-        r(rt);
+        renderer.discard();
         coverDirty = true;
         barTextDirty = true;
         gradientDirty = true;
@@ -681,62 +677,15 @@ struct OverlayHost::Impl {
             icoPrev->Release();
             icoPrev = nullptr;
         }
-        if (dwrite) {
-            dwrite->Release();
-            dwrite = nullptr;
-        }
-        if (d2d) {
-            d2d->Release();
-            d2d = nullptr;
-        }
-        if (memdc) {
-            if (oldBmp) SelectObject(memdc, oldBmp);
-            if (dib) DeleteObject(dib);
-            DeleteDC(memdc);
-            memdc = nullptr;
-            dib = nullptr;
-            oldBmp = nullptr;
-        }
-    }
-
-    // 按窗口目标尺寸（设备像素）重建 DIB
-    void ensureBitmap() {
-        int w = (int)std::lround(wndW * scale());
-        int h = (int)std::lround(wndH() * scale());
-        if (w == bmpW && h == bmpH && memdc) return;
-        if (memdc) {
-            if (oldBmp) SelectObject(memdc, oldBmp);
-            if (dib) DeleteObject(dib);
-            DeleteDC(memdc);
-            memdc = nullptr;
-            dib = nullptr;
-            oldBmp = nullptr;
-        }
-        HDC screen = GetDC(nullptr);
-        memdc = CreateCompatibleDC(screen);
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h; // 自上而下
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        dib = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, nullptr, nullptr, 0);
-        ReleaseDC(nullptr, screen);
-        if (!dib) {
-            DeleteDC(memdc);
-            memdc = nullptr;
-            return;
-        }
-        oldBmp = SelectObject(memdc, dib);
-        bmpW = w;
-        bmpH = h;
+        renderer.releaseAll();
     }
 
     // ---------- 渲染 ----------
 
     void drawText(IDWriteTextFormat* fmt, const std::wstring& text, const D2D1_RECT_F& rect,
                   ID2D1SolidColorBrush* brush) {
+        auto* rt = renderer.renderTarget();
+        if (!rt) return;
         rt->DrawTextW(text.c_str(), (UINT32)text.size(), fmt, rect, brush,
                       D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
     }
@@ -744,14 +693,13 @@ struct OverlayHost::Impl {
     void render() {
         if (!visible || !hwnd) return;
         createDeviceResources();
-        ensureBitmap();
-        if (!rt || !memdc) return;
-        float dpiX = 0.0f, dpiY = 0.0f;
-        rt->GetDpi(&dpiX, &dpiY);
-        if (dpiX != (float)dpi) rt->SetDpi((float)dpi, (float)dpi);
+        int pxW = (int)std::lround(wndW * scale());
+        int pxH = (int)std::lround(wndH() * scale());
+        if (!renderer.bindDC(pxW, pxH)) return;
+        auto* rt = renderer.renderTarget();
+        if (!rt) return;
+        renderer.setDpi(dpi);
 
-        RECT rc{0, 0, bmpW, bmpH};
-        if (FAILED(rt->BindDC(memdc, &rc))) return;
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
@@ -804,10 +752,7 @@ struct OverlayHost::Impl {
             return;
         }
 
-        POINT ptSrc{0, 0};
-        SIZE sz{bmpW, bmpH};
-        BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-        UpdateLayeredWindow(hwnd, nullptr, nullptr, &sz, memdc, &ptSrc, 0, &blend, ULW_ALPHA);
+        renderer.present(hwnd);
     }
 
     // ---------- 事件 ----------
@@ -900,6 +845,7 @@ struct OverlayHost::Impl {
         AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
         AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING, kCmdToggleTaskbar, L"任务栏歌词");
         AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
         POINT pt;
         GetCursorPos(&pt);
@@ -920,7 +866,12 @@ struct OverlayHost::Impl {
         case kCmdPickFont:
             pickFont();
             break;
+        case kCmdToggleTaskbar:
+            if (onToggle)
+                onToggle();
+            break;
         case kCmdExit:
+            quitting = true;
             DestroyWindow(hwnd);
             break;
         default:
@@ -989,7 +940,8 @@ struct OverlayHost::Impl {
             KillTimer(hwnd, kTimerId);
             removeTray();
             releaseAll();
-            PostQuitMessage(0);
+            if (quitting)
+                PostQuitMessage(0);
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1115,4 +1067,20 @@ void OverlayHost::setCurrentLine(int index) {
 void OverlayHost::setStatusText(const std::wstring& text) {
     impl_->statusText = text;
     impl_->render();
+}
+
+bool OverlayHost::isTaskbar() const {
+    return false;
+}
+
+int OverlayHost::currentLine() const {
+    return impl_->currentLine;
+}
+
+const std::wstring& OverlayHost::statusText() const {
+    return impl_->statusText;
+}
+
+void OverlayHost::setHostToggleCallback(std::function<void()> cb) {
+    impl_->onToggle = std::move(cb);
 }

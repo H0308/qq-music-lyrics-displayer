@@ -14,6 +14,8 @@ add_executable(QQMusicLyric
     src/lyric/lyric_provider.cpp
     src/lyric/cover_provider.cpp
     src/ui/lyric_window.cpp
+    src/ui/lyric_renderer.cpp
+    src/ui/taskbar_host.cpp
     src/util/base64.cpp
 )
 
@@ -35,4 +37,5 @@ target_link_libraries(QQMusicLyric PRIVATE
     ole32
     comdlg32
     windowscodecs
+    advapi32
 )

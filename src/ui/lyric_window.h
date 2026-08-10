@@ -28,6 +28,20 @@ struct OverlayMediaInfo {
 class ILyricHost {
 public:
     virtual ~ILyricHost() = default;
+    virtual bool create(HINSTANCE inst) = 0;
+    virtual HWND hwnd() const = 0;
+
+    virtual void setTickCallback(std::function<void()> cb) = 0;
+    virtual void setMediaInfo(const OverlayMediaInfo& info) = 0;
+    virtual void setControlCallback(std::function<void(MediaControl)> cb) = 0;
+
+    virtual const std::vector<LyricLine>& lyrics() const = 0;
+
+    virtual bool isTaskbar() const = 0;
+    virtual int currentLine() const = 0;
+    virtual const std::wstring& statusText() const = 0;
+    virtual void setHostToggleCallback(std::function<void()> cb) = 0;
+
     virtual void show() = 0;
     virtual void hide() = 0;
     virtual void setLyrics(const std::vector<LyricLine>& lines) = 0;
@@ -40,16 +54,21 @@ public:
     OverlayHost();
     ~OverlayHost() override;
 
-    bool create(HINSTANCE inst);
-    HWND hwnd() const;
+    bool create(HINSTANCE inst) override;
+    HWND hwnd() const override;
 
     // 每帧（约 30fps）回调：驱动进度推算与当前行更新
-    void setTickCallback(std::function<void()> cb);
+    void setTickCallback(std::function<void()> cb) override;
 
-    void setMediaInfo(const OverlayMediaInfo& info);      // 底部控制条内容
-    void setControlCallback(std::function<void(MediaControl)> cb); // 控制条按钮点击
+    void setMediaInfo(const OverlayMediaInfo& info) override;      // 底部控制条内容
+    void setControlCallback(std::function<void(MediaControl)> cb) override; // 控制条按钮点击
 
-    const std::vector<LyricLine>& lyrics() const; // UI 线程内读取
+    const std::vector<LyricLine>& lyrics() const override; // UI 线程内读取
+
+    bool isTaskbar() const override;
+    int currentLine() const override;
+    const std::wstring& statusText() const override;
+    void setHostToggleCallback(std::function<void()> cb) override;
 
     void show() override;
     void hide() override;
