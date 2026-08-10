@@ -137,6 +137,9 @@ struct TaskbarHost::Impl {
     float lyricWidth_ = 0.0f;
     float lyricHeight_ = 0.0f;
     float lyricScrollOffset_ = 0.0f;
+    std::wstring lastTitle_;
+    std::wstring lastArtist_;
+    std::wstring lastLyric_;
     ULONGLONG lastTickMs_ = 0;
 
     // 渲染
@@ -578,10 +581,24 @@ struct TaskbarHost::Impl {
                 lyricHeight_ = m.height;
             }
         }
-        titleScrollOffset_ = 0.0f;
-        artistScrollOffset_ = 0.0f;
-        lyricScrollOffset_ = 0.0f;
-        lastTickMs_ = 0;
+        bool titleChanged = media.title != lastTitle_;
+        bool artistChanged = media.artist != lastArtist_;
+        bool lyricChanged = lyric != lastLyric_;
+        if (titleChanged) {
+            titleScrollOffset_ = 0.0f;
+            lastTitle_ = media.title;
+        }
+        if (artistChanged) {
+            artistScrollOffset_ = 0.0f;
+            lastArtist_ = media.artist;
+        }
+        if (lyricChanged) {
+            lyricScrollOffset_ = 0.0f;
+            lastLyric_ = lyric;
+        }
+        if (titleChanged || artistChanged || lyricChanged) {
+            lastTickMs_ = 0;
+        }
     }
 
     float coverSize() const {
