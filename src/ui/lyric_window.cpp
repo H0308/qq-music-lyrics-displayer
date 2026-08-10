@@ -51,6 +51,103 @@ private:
     ULONG_PTR token_ = 0;
 };
 
+// 进程级初始化一次 GDI+（封面解码、颜色抽取共用）
+GdiplusInit g_gdiplusInit;
+
+// 从封面字节抽取两个差异较大的主色，用于渐变背景
+std::pair<D2D1_COLOR_F, D2D1_COLOR_F> extractGradientColors(const std::vector<uint8_t>& bytes) {
+    D2D1_COLOR_F fallback1 = D2D1::ColorF(0.07f, 0.07f, 0.07f, 1.0f);
+    D2D1_COLOR_F fallback2 = D2D1::ColorF(0.12f, 0.12f, 0.12f, 1.0f);
+    if (bytes.empty()) return {fallback1, fallback2};
+
+    HGLOBAL hglobal = GlobalAlloc(GHND, bytes.size());
+    if (!hglobal) return {fallback1, fallback2};
+    void* ptr = GlobalLock(hglobal);
+    if (ptr) {
+        memcpy(ptr, bytes.data(), bytes.size());
+        GlobalUnlock(hglobal);
+    }
+    IStream* stream = nullptr;
+    HRESULT hr = CreateStreamOnHGlobal(hglobal, TRUE, &stream);
+    if (FAILED(hr) || !stream) {
+        GlobalFree(hglobal);
+        return {fallback1, fallback2};
+    }
+    Gdiplus::Bitmap bitmap(stream);
+    stream->Release();
+    if (bitmap.GetLastStatus() != Gdiplus::Ok) return {fallback1, fallback2};
+
+    UINT w = bitmap.GetWidth();
+    UINT h = bitmap.GetHeight();
+    Gdiplus::BitmapData data{};
+    Gdiplus::Rect rect(0, 0, (INT)w, (INT)h);
+    if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &data) !=
+        Gdiplus::Ok)
+        return {fallback1, fallback2};
+
+    struct Bucket {
+        uint32_t r = 0, g = 0, b = 0, n = 0;
+    };
+    Bucket buckets[16][16][16]{};
+    const uint8_t* pixels = static_cast<const uint8_t*>(data.Scan0);
+    int stride = data.Stride;
+    for (UINT y = 0; y < h; y += 4) {
+        for (UINT x = 0; x < w; x += 4) {
+            const uint8_t* p = pixels + y * stride + x * 4;
+            BYTE bb = p[0], pg = p[1], pr = p[2];
+            int luma = (pr * 299 + pg * 587 + bb * 114) / 1000;
+            if (luma < 24 || luma > 235) continue;
+            auto& bk = buckets[pr >> 4][pg >> 4][bb >> 4];
+            bk.r += pr;
+            bk.g += pg;
+            bk.b += bb;
+            bk.n++;
+        }
+    }
+    bitmap.UnlockBits(&data);
+
+    struct Cand {
+        float w;
+        uint8_t r, g, b;
+    };
+    std::vector<Cand> cands;
+    cands.reserve(64);
+    for (int R = 0; R < 16; ++R)
+        for (int G = 0; G < 16; ++G)
+            for (int B = 0; B < 16; ++B) {
+                auto& bk = buckets[R][G][B];
+                if (bk.n < 8) continue;
+                float fr = bk.r / (float)bk.n / 255.0f;
+                float fg = bk.g / (float)bk.n / 255.0f;
+                float fb = bk.b / (float)bk.n / 255.0f;
+                float mx = std::max(fr, std::max(fg, fb));
+                float mn = std::min(fr, std::min(fg, fb));
+                float sat = mx > 0 ? (mx - mn) / mx : 0;
+                cands.push_back({bk.n * (0.3f + sat), (uint8_t)(fr * 255), (uint8_t)(fg * 255),
+                                 (uint8_t)(fb * 255)});
+            }
+    if (cands.empty()) return {fallback1, fallback2};
+
+    std::sort(cands.begin(), cands.end(),
+              [](const Cand& a, const Cand& b) { return a.w > b.w; });
+
+    auto makeColor = [](uint8_t r, uint8_t g, uint8_t b) {
+        return D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f);
+    };
+    D2D1_COLOR_F primary = makeColor(cands[0].r, cands[0].g, cands[0].b);
+    D2D1_COLOR_F secondary = primary;
+    for (auto& c : cands) {
+        int dr = (int)c.r - (int)cands[0].r;
+        int dg = (int)c.g - (int)cands[0].g;
+        int db = (int)c.b - (int)cands[0].b;
+        if (dr * dr + dg * dg + db * db > 3264) {
+            secondary = makeColor(c.r, c.g, c.b);
+            break;
+        }
+    }
+    return {primary, secondary};
+}
+
 } // namespace
 
 struct OverlayHost::Impl {
@@ -74,6 +171,11 @@ struct OverlayHost::Impl {
     int currentLine = -1;
     float scroll = 0.0f;
     float scrollTarget = 0.0f;
+
+    // 歌词背板渐变
+    D2D1_COLOR_F bgPrimary = D2D1::ColorF(0, 0, 0, 0);
+    D2D1_COLOR_F bgSecondary = D2D1::ColorF(0, 0, 0, 0);
+    bool gradientDirty = true;
 
     // 每行预计算的排版：正常 / 高亮两种格式各自的单行最大宽度与折行结果
     struct LineLayout {
@@ -103,9 +205,10 @@ struct OverlayHost::Impl {
     ID2D1SolidColorBrush* brushDivider = nullptr; // 分隔线/占位/置灰
     ID2D1SolidColorBrush* brushBtn = nullptr;     // 按钮/标题文字
     ID2D1RoundedRectangleGeometry* coverClip = nullptr; // 设备无关，跨重建存活
-    ID2D1Layer* coverLayer = nullptr;                 // 设备相关
-    ID2D1PathGeometry* icoPlay = nullptr;             // 右向三角（播放/下一首共用）
-    ID2D1PathGeometry* icoPrev = nullptr;             // 左向三角
+    ID2D1PathGeometry* barBgPath = nullptr;             // 底部控制条背景（底部圆角）
+    ID2D1Layer* coverLayer = nullptr;                   // 设备相关
+    ID2D1PathGeometry* icoPlay = nullptr;               // 右向三角（播放/下一首共用）
+    ID2D1PathGeometry* icoPrev = nullptr;               // 左向三角
 
     // D2D / GDI 资源
     HDC memdc = nullptr;
@@ -120,6 +223,9 @@ struct OverlayHost::Impl {
     ID2D1SolidColorBrush* brushNormal = nullptr;
     ID2D1SolidColorBrush* brushCurrent = nullptr;
     ID2D1SolidColorBrush* brushShadow = nullptr;
+    ID2D1SolidColorBrush* brushGradientOverlay = nullptr; // 渐变背景上的暗色遮罩
+    ID2D1LinearGradientBrush* brushGradient = nullptr;     // 封面主辅色渐变
+    ID2D1SolidColorBrush* brushBarBg = nullptr;            // 底部控制条独立背景
     IDWriteTextFormat* fmtLine = nullptr;
     IDWriteTextFormat* fmtCurrent = nullptr;
 
@@ -133,7 +239,6 @@ struct OverlayHost::Impl {
 
     void createDeviceResources() {
         if (rt) return;
-        static GdiplusInit gdiplusInit;
         if (!d2d) {
             D2D1_FACTORY_OPTIONS opts{};
             D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), &opts,
@@ -156,10 +261,46 @@ struct OverlayHost::Impl {
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f), &brushNormal);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f), &brushCurrent); // QQ 绿
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &brushShadow);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushGradientOverlay);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &brushBarBg);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f), &brushDivider);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.88f), &brushBtn);
         rt->CreateLayer(&coverLayer);
         recreateFormats();
+    }
+
+    void ensureGradientBrush() {
+        if (!gradientDirty || !rt) return;
+        gradientDirty = false;
+        if (brushGradient) {
+            brushGradient->Release();
+            brushGradient = nullptr;
+        }
+        // alpha 为 0 表示没有有效颜色（无封面），此时不创建渐变画刷
+        if (bgPrimary.a == 0.0f && bgSecondary.a == 0.0f) return;
+
+        ID2D1GradientStopCollection* stops = nullptr;
+        D2D1_GRADIENT_STOP gs[2];
+        gs[0].position = 0.0f;
+        gs[0].color = bgPrimary;
+        gs[1].position = 1.0f;
+        gs[1].color = bgSecondary;
+        if (FAILED(rt->CreateGradientStopCollection(gs, 2, &stops))) return;
+
+        float h = wndH();
+        HRESULT hr = rt->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                D2D1::Point2F(0.0f, h)),
+            stops, &brushGradient);
+        stops->Release();
+    }
+
+    void invalidateGradient() {
+        gradientDirty = true;
+        if (brushGradient) {
+            brushGradient->Release();
+            brushGradient = nullptr;
+        }
     }
 
     void recreateFormats() {
@@ -369,8 +510,38 @@ struct OverlayHost::Impl {
             coverClip->Release();
             coverClip = nullptr;
         }
+        if (barBgPath) {
+            barBgPath->Release();
+            barBgPath = nullptr;
+        }
+
         D2D1_ROUNDED_RECT rr{coverRect(), 7.0f, 7.0f};
         d2d->CreateRoundedRectangleGeometry(rr, &coverClip);
+
+        // 控制条背景：顶部平直，底部与窗口同圆角
+        if (FAILED(d2d->CreatePathGeometry(&barBgPath))) return;
+        ID2D1GeometrySink* sink = nullptr;
+        if (FAILED(barBgPath->Open(&sink))) {
+            barBgPath->Release();
+            barBgPath = nullptr;
+            return;
+        }
+        constexpr float r = 14.0f;
+        float top = lyricH();
+        float bottom = wndH();
+        float left = 0.0f;
+        float right = wndW;
+        sink->BeginFigure(D2D1::Point2F(left, top), D2D1_FIGURE_BEGIN_FILLED);
+        sink->AddLine(D2D1::Point2F(right, top));
+        sink->AddLine(D2D1::Point2F(right, bottom - r));
+        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+            D2D1::Point2F(right, bottom), D2D1::Point2F(right - r, bottom)));
+        sink->AddLine(D2D1::Point2F(left + r, bottom));
+        sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+            D2D1::Point2F(left, bottom), D2D1::Point2F(left, bottom - r)));
+        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        sink->Close();
+        sink->Release();
     }
 
     // 单位三角形图标（设备无关）：dir=1 右向（播放/下一首），dir=-1 左向（上一首）
@@ -423,6 +594,9 @@ struct OverlayHost::Impl {
 
     void drawBar() {
         float top = lyricH();
+        // 控制条独立背景，和歌词区明确分区；底部与窗口同圆角
+        if (brushBarBg && barBgPath)
+            rt->FillGeometry(barBgPath, brushBarBg);
         rt->DrawLine(D2D1::Point2F(14.0f, top + 0.5f), D2D1::Point2F(wndW - 14.0f, top + 0.5f),
                      brushDivider, 1.0f);
         if (coverDirty) decodeCover();
@@ -477,11 +651,15 @@ struct OverlayHost::Impl {
         r(brushNormal);
         r(brushCurrent);
         r(brushShadow);
+        r(brushGradientOverlay);
+        r(brushGradient);
+        r(brushBarBg);
         r(brushDivider);
         r(brushBtn);
         r(rt);
         coverDirty = true;
         barTextDirty = true;
+        gradientDirty = true;
     }
 
     void releaseAll() {
@@ -490,6 +668,10 @@ struct OverlayHost::Impl {
         if (coverClip) {
             coverClip->Release();
             coverClip = nullptr;
+        }
+        if (barBgPath) {
+            barBgPath->Release();
+            barBgPath = nullptr;
         }
         if (icoPlay) {
             icoPlay->Release();
@@ -574,8 +756,18 @@ struct OverlayHost::Impl {
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
+        ensureGradientBrush();
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, wndW, wndH()), 14.0f, 14.0f};
-        rt->FillRoundedRectangle(bg, brushBg);
+        if (brushGradient) {
+            rt->FillRoundedRectangle(bg, brushGradient);
+            rt->FillRoundedRectangle(bg, brushGradientOverlay);
+        } else {
+            rt->FillRoundedRectangle(bg, brushBg);
+        }
+
+        // 歌词只画在歌词区，不进入底部控制条
+        D2D1_RECT_F lyricClip = D2D1::RectF(0.0f, 0.0f, wndW, lyricH());
+        rt->PushAxisAlignedClip(lyricClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         const float anchorY = lyricH() * kAnchorRatio;
         if (!lines.empty()) {
@@ -601,6 +793,8 @@ struct OverlayHost::Impl {
             D2D1_RECT_F rect = D2D1::RectF(0.0f, 0.0f, wndW, lyricH());
             drawText(fmtLine, statusText, rect, brushNormal);
         }
+
+        rt->PopAxisAlignedClip();
 
         if (brushDivider && brushBtn) drawBar();
 
@@ -639,6 +833,7 @@ struct OverlayHost::Impl {
         fontSize = std::clamp(fontSize + delta, kMinFont, kMaxFont);
         recreateFormats();
         layoutsDirty = true; // 字号变化需重新计算折行
+        invalidateGradient();
         resizeWindow();
         render();
     }
@@ -660,6 +855,7 @@ struct OverlayHost::Impl {
             fontSize = std::clamp((float)cf.iPointSize / 10.0f, kMinFont, kMaxFont);
         recreateFormats();
         layoutsDirty = true; // 字体变化需重新计算折行
+        invalidateGradient();
         resizeWindow();
         render();
     }
@@ -782,6 +978,7 @@ struct OverlayHost::Impl {
             SetWindowPos(hwnd, nullptr, sug->left, sug->top, sug->right - sug->left,
                          sug->bottom - sug->top, SWP_NOZORDER | SWP_NOACTIVATE);
             recreateFormats();
+            invalidateGradient();
             render();
             return 0;
         }
@@ -859,7 +1056,18 @@ void OverlayHost::setMediaInfo(const OverlayMediaInfo& info) {
     bool thumbChanged = info.thumbnail != impl_->media.thumbnail;
     bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
     impl_->media = info;
-    if (thumbChanged) impl_->coverDirty = true;
+    if (thumbChanged) {
+        impl_->coverDirty = true;
+        if (info.thumbnail && !info.thumbnail->empty()) {
+            auto colors = extractGradientColors(*info.thumbnail);
+            impl_->bgPrimary = colors.first;
+            impl_->bgSecondary = colors.second;
+        } else {
+            impl_->bgPrimary = D2D1::ColorF(0, 0, 0, 0);
+            impl_->bgSecondary = D2D1::ColorF(0, 0, 0, 0);
+        }
+        impl_->invalidateGradient();
+    }
     if (textChanged) impl_->barTextDirty = true;
     impl_->render();
 }
