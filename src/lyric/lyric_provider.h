@@ -11,6 +11,12 @@ struct LyricLine {
     std::wstring text;
 };
 
+// 搜索匹配到的歌曲信息（用于歌词下载，也用于封面兜底）
+struct SongInfo {
+    std::wstring songmid;
+    std::wstring albummid;
+};
+
 // 歌词获取：QQ 音乐公开接口 搜索 -> 三重匹配 -> 下载 -> base64 解码 -> 解析 LRC
 class LyricProvider {
 public:
@@ -28,6 +34,9 @@ public:
 
     // 最近一次应用的歌词（仅在 ReadyCallback(true) 之后于 UI 线程读取）
     const std::vector<LyricLine>& lines() const;
+
+    // 最近一次匹配到的歌曲信息（仅在 ReadyCallback(true) 之后于 UI 线程读取）
+    const SongInfo& songInfo() const;
 
     static std::wstring makeKey(const std::wstring& title, const std::wstring& artist);
     // 二分定位：最后一个 ms <= positionMs 的行号；无则 -1

@@ -1,3 +1,4 @@
+#include "lyric/cover_provider.h"
 #include "lyric/lyric_provider.h"
 #include "ui/lyric_window.h"
 #include "media/smtc_monitor.h"
@@ -8,12 +9,20 @@
 #include <cstdio>
 #include <fcntl.h>
 #include <io.h>
+#include <memory>
 #include <string>
+#include <vector>
 
 namespace {
 
     constexpr UINT kMsgSmtcChanged = WM_APP + 1;
     constexpr UINT kMsgLyricReady = WM_APP + 2;
+    constexpr UINT kMsgCoverReady = WM_APP + 3;
+
+    struct CoverPayload {
+        std::wstring key;
+        std::shared_ptr<const std::vector<uint8_t>> cover;
+    };
 
     const wchar_t* statusName(PlaybackStatus s) {
         switch (s) {
@@ -28,9 +37,11 @@ namespace {
         DWORD mainThread = GetCurrentThreadId();
         SmtcMonitor monitor;
         LyricProvider provider;
+        CoverProvider coverProvider;
         OverlayHost host;
         std::wstring currentKey;
         PlaybackStatus lastStatus = PlaybackStatus::Stopped;
+        std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
         // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
         void onSmtcChanged() {
@@ -41,11 +52,26 @@ namespace {
                 currentKey.clear();
                 lastStatus = PlaybackStatus::Stopped;
                 host.setLyrics({});
+                host.setMediaInfo({});
                 host.setStatusText(L"QQ 音乐未运行");
                 host.hide();
                 return;
             }
             host.show();
+            OverlayMediaInfo mi;
+            mi.title = snap.title;
+            mi.artist = snap.artist;
+            if (!snap.album.empty()) {
+                mi.artist += L" · ";
+                mi.artist += snap.album;
+            }
+            mi.thumbnail = snap.thumbnail;
+            mi.canPrev = snap.canPrev;
+            mi.canPlayPause = snap.canPlayPause;
+            mi.canNext = snap.canNext;
+            mi.playing = snap.status == PlaybackStatus::Playing;
+            host.setMediaInfo(mi);
+            lastSmtcThumbnail = snap.thumbnail;
             if (snap.status != lastStatus) {
                 std::wprintf(L"[smtc] status: %s\n", statusName(snap.status));
                 lastStatus = snap.status;
@@ -68,12 +94,49 @@ namespace {
                 host.setLyrics(provider.lines());
                 std::wprintf(L"[lyric] loaded %zu lines: %s\n", host.lyrics().size(),
                     currentKey.c_str());
+
+                // SMTC 没给封面时，用 QQ 音乐接口兜底
+                if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
+                    const std::wstring albummid = provider.songInfo().albummid;
+                    if (albummid.empty()) {
+                        std::wprintf(L"[cover] no albummid from search: %s\n", currentKey.c_str());
+                    } else {
+                        const std::wstring key = currentKey;
+                        coverProvider.requestAsync(albummid, [this, key](std::shared_ptr<const std::vector<uint8_t>> cover) {
+                            if (!cover || cover->empty()) return;
+                            auto* payload = new CoverPayload{key, std::move(cover)};
+                            PostThreadMessageW(mainThread, kMsgCoverReady, 1,
+                                               reinterpret_cast<LPARAM>(payload));
+                        });
+                    }
+                }
             }
             else {
                 host.setLyrics({});
                 host.setStatusText(L"暂无歌词");
                 std::wprintf(L"[lyric] not found: %s\n", currentKey.c_str());
             }
+        }
+
+        void onCoverReady(std::unique_ptr<CoverPayload> payload) {
+            if (!payload || !payload->cover) return;
+            if (payload->key != currentKey) return; // 已切歌，丢弃过期封面
+            if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
+            std::wprintf(L"[cover] loaded from API: %s\n", currentKey.c_str());
+            OverlayMediaInfo mi;
+            SmtcSnapshot snap = monitor.snapshot();
+            mi.title = snap.title;
+            mi.artist = snap.artist;
+            if (!snap.album.empty()) {
+                mi.artist += L" · ";
+                mi.artist += snap.album;
+            }
+            mi.thumbnail = payload->cover;
+            mi.canPrev = snap.canPrev;
+            mi.canPlayPause = snap.canPlayPause;
+            mi.canNext = snap.canNext;
+            mi.playing = snap.status == PlaybackStatus::Playing;
+            host.setMediaInfo(mi);
         }
 
         // 30fps：插值进度 -> 二分定位当前行
@@ -99,6 +162,13 @@ int main() {
         return 1;
     }
     app.host.setTickCallback([&app] { app.onFrame(); });
+    app.host.setControlCallback([&app](MediaControl c) {
+        switch (c) {
+        case MediaControl::Prev: app.monitor.skipPrevious(); break;
+        case MediaControl::PlayPause: app.monitor.playPause(); break;
+        case MediaControl::Next: app.monitor.skipNext(); break;
+        }
+    });
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
     std::wprintf(L"QQMusicLyric started, waiting for QQ Music...\n");
 
@@ -110,6 +180,10 @@ int main() {
             }
             else if (msg.message == kMsgLyricReady) {
                 app.onLyricReady(msg.wParam != 0);
+            }
+            else if (msg.message == kMsgCoverReady) {
+                app.onCoverReady(std::unique_ptr<CoverPayload>(
+                    reinterpret_cast<CoverPayload*>(msg.lParam)));
             }
             continue;
         }

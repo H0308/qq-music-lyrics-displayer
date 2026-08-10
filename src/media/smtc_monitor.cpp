@@ -3,6 +3,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
 
 #include <chrono>
 #include <mutex>
@@ -37,6 +38,25 @@ PlaybackStatus mapStatus(GlobalSystemMediaTransportControlsSessionPlaybackStatus
     }
 }
 
+// 读取封面缩略图为字节数组（失败/过大返回 nullptr）
+std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
+    const GlobalSystemMediaTransportControlsSessionMediaProperties& props) {
+    try {
+        auto ref = props.Thumbnail();
+        if (!ref) return nullptr;
+        auto stream = ref.OpenReadAsync().get();
+        uint64_t size = stream.Size();
+        if (size == 0 || size > 4 * 1024 * 1024) return nullptr;
+        auto buf = std::make_shared<std::vector<uint8_t>>((size_t)size);
+        Windows::Storage::Streams::DataReader reader(stream);
+        reader.LoadAsync((uint32_t)size).get();
+        reader.ReadBytes(winrt::array_view<uint8_t>(buf->data(), (uint32_t)buf->size()));
+        return buf;
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 } // namespace
 
 // 成员顺序有意为之：revoker 最后声明、析构时最先退订，避免回调访问已销毁成员
@@ -66,19 +86,25 @@ struct SmtcMonitor::Impl {
                 s.title = props.Title().c_str();
                 s.artist = props.Artist().c_str();
                 s.album = props.AlbumTitle().c_str();
-            } catch (...) {
-            }
-            try {
+                s.thumbnail = readThumbnail(props);
+        } catch (...) {
+        }
+        try {
                 auto tl = session.GetTimelineProperties();
                 s.durationMs = timeSpanMs(tl.EndTime());
                 s.positionMs = timeSpanMs(tl.Position());
                 s.anchorUtcMs = nowUtcMs();
-            } catch (...) {
-            }
-            try {
-                s.status = mapStatus(session.GetPlaybackInfo().PlaybackStatus());
-            } catch (...) {
-            }
+        } catch (...) {
+        }
+        try {
+                auto info = session.GetPlaybackInfo();
+                s.status = mapStatus(info.PlaybackStatus());
+                auto c = info.Controls();
+                s.canPrev = c.IsPreviousEnabled();
+                s.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
+                s.canNext = c.IsNextEnabled();
+        } catch (...) {
+        }
         }
         {
             std::lock_guard<std::mutex> lk(mtx);
@@ -111,7 +137,12 @@ struct SmtcMonitor::Impl {
                 auto tl = session.GetTimelineProperties();
                 snap.positionMs = timeSpanMs(tl.Position());
                 snap.anchorUtcMs = nowUtcMs();
-                snap.status = mapStatus(session.GetPlaybackInfo().PlaybackStatus());
+                auto info = session.GetPlaybackInfo();
+                snap.status = mapStatus(info.PlaybackStatus());
+                auto c = info.Controls();
+                snap.canPrev = c.IsPreviousEnabled();
+                snap.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
+                snap.canNext = c.IsNextEnabled();
             } catch (...) {
                 return;
             }
@@ -174,4 +205,47 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         }
     }
     return s;
+}
+
+void SmtcMonitor::playPause() {
+    GlobalSystemMediaTransportControlsSession s{ nullptr };
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        s = impl_->session;
+    }
+    if (!s) return;
+    try {
+        auto st = s.GetPlaybackInfo().PlaybackStatus();
+        if (st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
+            s.TryPauseAsync().get();
+        else
+            s.TryPlayAsync().get();
+    } catch (...) {
+    }
+}
+
+void SmtcMonitor::skipNext() {
+    GlobalSystemMediaTransportControlsSession s{ nullptr };
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        s = impl_->session;
+    }
+    if (!s) return;
+    try {
+        s.TrySkipNextAsync().get();
+    } catch (...) {
+    }
+}
+
+void SmtcMonitor::skipPrevious() {
+    GlobalSystemMediaTransportControlsSession s{ nullptr };
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        s = impl_->session;
+    }
+    if (!s) return;
+    try {
+        s.TrySkipPreviousAsync().get();
+    } catch (...) {
+    }
 }

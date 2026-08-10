@@ -1,8 +1,11 @@
 #include "lyric_window.h"
 
 #include <commdlg.h>
+#include <cstdio>
 #include <d2d1.h>
 #include <dwrite.h>
+#include <gdiplus.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <windowsx.h>
 
@@ -29,6 +32,24 @@ constexpr float kAnchorRatio = 0.42f; // 当前行垂直锚点
 constexpr float kScrollEase = 0.25f;  // 滚动 ease-out 系数
 constexpr float kMinFont = 14.0f;
 constexpr float kMaxFont = 48.0f;
+constexpr float kBarH = 60.0f;        // 底部控制条高度（DIP）
+
+// GDI+ 一次性初始化（用于 WIC 解不了的 JPEG 兜底）
+class GdiplusInit {
+public:
+    GdiplusInit() {
+        Gdiplus::GdiplusStartupInput input;
+        Gdiplus::GdiplusStartupOutput output;
+        ULONG_PTR token = 0;
+        Gdiplus::GdiplusStartup(&token, &input, &output);
+        token_ = token;
+    }
+    ~GdiplusInit() {
+        if (token_) Gdiplus::GdiplusShutdown(token_);
+    }
+private:
+    ULONG_PTR token_ = 0;
+};
 
 } // namespace
 
@@ -45,7 +66,8 @@ struct OverlayHost::Impl {
     UINT dpi = 96;
 
     float lineHeight() const { return fontSize * 2.2f; }
-    float wndH() const { return lineHeight() * 5.0f; }
+    float lyricH() const { return lineHeight() * 5.0f; } // 歌词区高度
+    float wndH() const { return lyricH() + kBarH; }      // 歌词区 + 底部控制条
 
     std::vector<LyricLine> lines;
     std::wstring statusText = L"等待播放…";
@@ -66,6 +88,24 @@ struct OverlayHost::Impl {
     bool layoutsDirty = true;
 
     std::function<void()> tick;
+
+    // 底部控制条
+    OverlayMediaInfo media;
+    std::function<void(MediaControl)> onControl;
+    ID2D1Bitmap* coverBmp = nullptr;
+    bool coverDirty = true;
+    bool barTextDirty = true;
+    bool barGeomDirty = true;
+    IDWriteTextFormat* fmtTitle = nullptr;
+    IDWriteTextFormat* fmtArtist = nullptr;
+    IDWriteTextLayout* titleLayout = nullptr;
+    IDWriteTextLayout* artistLayout = nullptr;
+    ID2D1SolidColorBrush* brushDivider = nullptr; // 分隔线/占位/置灰
+    ID2D1SolidColorBrush* brushBtn = nullptr;     // 按钮/标题文字
+    ID2D1RoundedRectangleGeometry* coverClip = nullptr; // 设备无关，跨重建存活
+    ID2D1Layer* coverLayer = nullptr;                 // 设备相关
+    ID2D1PathGeometry* icoPlay = nullptr;             // 右向三角（播放/下一首共用）
+    ID2D1PathGeometry* icoPrev = nullptr;             // 左向三角
 
     // D2D / GDI 资源
     HDC memdc = nullptr;
@@ -93,6 +133,7 @@ struct OverlayHost::Impl {
 
     void createDeviceResources() {
         if (rt) return;
+        static GdiplusInit gdiplusInit;
         if (!d2d) {
             D2D1_FACTORY_OPTIONS opts{};
             D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory), &opts,
@@ -115,12 +156,16 @@ struct OverlayHost::Impl {
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f), &brushNormal);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f), &brushCurrent); // QQ 绿
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &brushShadow);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f), &brushDivider);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.88f), &brushBtn);
+        rt->CreateLayer(&coverLayer);
         recreateFormats();
     }
 
     void recreateFormats() {
         if (!dwrite) return;
-        auto make = [&](float size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) {
+        auto make = [&](float size, DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT ta,
+                        DWRITE_PARAGRAPH_ALIGNMENT pa, IDWriteTextFormat** out) {
             if (*out) {
                 (*out)->Release();
                 *out = nullptr;
@@ -128,13 +173,21 @@ struct OverlayHost::Impl {
             dwrite->CreateTextFormat(fontFamily.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                      DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn", out);
             if (*out) {
-                (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                (*out)->SetTextAlignment(ta);
+                (*out)->SetParagraphAlignment(pa);
                 (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             }
         };
-        make(fontSize, DWRITE_FONT_WEIGHT_NORMAL, &fmtLine);
-        make(fontSize * 1.15f, DWRITE_FONT_WEIGHT_BOLD, &fmtCurrent);
+        make(fontSize, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER,
+             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, &fmtLine);
+        make(fontSize * 1.15f, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER,
+             DWRITE_PARAGRAPH_ALIGNMENT_CENTER, &fmtCurrent);
+        make(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING,
+             DWRITE_PARAGRAPH_ALIGNMENT_NEAR, &fmtTitle);
+        make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING,
+             DWRITE_PARAGRAPH_ALIGNMENT_NEAR, &fmtArtist);
+        barTextDirty = true;
+        barGeomDirty = true;
     }
 
     // ---------- 歌词排版（显示前预计算） ----------
@@ -212,26 +265,240 @@ struct OverlayHost::Impl {
         scrollTarget = prefix + blockHeight((size_t)currentLine, true) / 2.0f;
     }
 
+    // ---------- 底部控制条 ----------
+
+    D2D1_RECT_F coverRect() const {
+        float top = lyricH() + 9.0f;
+        return D2D1::RectF(14.0f, top, 56.0f, top + 42.0f);
+    }
+
+    D2D1_POINT_2F btnCenter(int idx) const { // 0=上一首 1=播放/暂停 2=下一首
+        float cy = lyricH() + kBarH / 2.0f;
+        float nextX = wndW - 14.0f - 15.0f;
+        return D2D1::Point2F(nextX - (2.0f - (float)idx) * 38.0f, cy);
+    }
+
+    float barTextWidth() const { return wndW - 66.0f - (14.0f + 30.0f * 3.0f + 16.0f) - 10.0f; }
+
+    // GDI+ 解码封面字节 -> D2D 位图（WIC 对某些 QQ 音乐 CDN 的 JPEG 会报 0x88982F72）
+    void decodeCover() {
+        coverDirty = false;
+        if (coverBmp) {
+            coverBmp->Release();
+            coverBmp = nullptr;
+        }
+        if (!rt || !media.thumbnail || media.thumbnail->empty()) return;
+
+        HGLOBAL hglobal = GlobalAlloc(GHND, media.thumbnail->size());
+        if (!hglobal) return;
+        void* ptr = GlobalLock(hglobal);
+        if (ptr) {
+            memcpy(ptr, media.thumbnail->data(), media.thumbnail->size());
+            GlobalUnlock(hglobal);
+        }
+        IStream* stream = nullptr;
+        HRESULT hr = CreateStreamOnHGlobal(hglobal, TRUE, &stream);
+        if (FAILED(hr) || !stream) {
+            GlobalFree(hglobal);
+            return;
+        }
+        Gdiplus::Bitmap bitmap(stream);
+        if (bitmap.GetLastStatus() != Gdiplus::Ok) {
+            std::wprintf(L"[cover] decode failed: GDI+ status=%d\n",
+                         (int)bitmap.GetLastStatus());
+            stream->Release();
+            return;
+        }
+        UINT w = bitmap.GetWidth();
+        UINT h = bitmap.GetHeight();
+        Gdiplus::BitmapData bitmapData{};
+        Gdiplus::Rect rect(0, 0, (INT)w, (INT)h);
+        if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB,
+                            &bitmapData) != Gdiplus::Ok) {
+            std::wprintf(L"[cover] decode failed: GDI+ LockBits\n");
+            stream->Release();
+            return;
+        }
+        D2D1_BITMAP_PROPERTIES props{};
+        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+        props.dpiX = (float)dpi;
+        props.dpiY = (float)dpi;
+        hr = rt->CreateBitmap(D2D1::SizeU(w, h), bitmapData.Scan0, bitmapData.Stride, &props,
+                              &coverBmp);
+        bitmap.UnlockBits(&bitmapData);
+        stream->Release();
+        if (FAILED(hr)) {
+            std::wprintf(L"[cover] decode failed: D2D CreateBitmap hr=0x%08X\n", hr);
+            return;
+        }
+        std::wprintf(L"[cover] decode ok: %ux%u, size=%zu\n", w, h, media.thumbnail->size());
+    }
+
+    void buildBarText() {
+        barTextDirty = false;
+        if (titleLayout) {
+            titleLayout->Release();
+            titleLayout = nullptr;
+        }
+        if (artistLayout) {
+            artistLayout->Release();
+            artistLayout = nullptr;
+        }
+        if (!dwrite || !fmtTitle || !fmtArtist) {
+            barTextDirty = true;
+            return;
+        }
+        auto mk = [&](IDWriteTextFormat* fmt, const std::wstring& s, IDWriteTextLayout** out) {
+            if (s.empty()) return;
+            if (FAILED(dwrite->CreateTextLayout(s.c_str(), (UINT32)s.size(), fmt, barTextWidth(),
+                                                20.0f, out)))
+                return;
+            (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            (*out)->SetTrimming(&trim, nullptr); // 超长省略号
+        };
+        mk(fmtTitle, media.title, &titleLayout);
+        mk(fmtArtist, media.artist, &artistLayout);
+    }
+
+    void ensureBarGeometry() {
+        if (!barGeomDirty || !d2d) return;
+        barGeomDirty = false;
+        if (coverClip) {
+            coverClip->Release();
+            coverClip = nullptr;
+        }
+        D2D1_ROUNDED_RECT rr{coverRect(), 7.0f, 7.0f};
+        d2d->CreateRoundedRectangleGeometry(rr, &coverClip);
+    }
+
+    // 单位三角形图标（设备无关）：dir=1 右向（播放/下一首），dir=-1 左向（上一首）
+    void ensureIcons() {
+        if (!d2d || icoPlay) return;
+        auto tri = [&](float dir, ID2D1PathGeometry** out) {
+            if (FAILED(d2d->CreatePathGeometry(out))) return;
+            ID2D1GeometrySink* sink = nullptr;
+            if (FAILED((*out)->Open(&sink))) return;
+            sink->BeginFigure(D2D1::Point2F(-0.38f * dir, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(0.5f * dir, 0.0f));
+            sink->AddLine(D2D1::Point2F(-0.38f * dir, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->Close();
+            sink->Release();
+        };
+        tri(1.0f, &icoPlay);
+        tri(-1.0f, &icoPrev);
+    }
+
+    void drawButton(int idx) {
+        D2D1_POINT_2F c = btnCenter(idx);
+        bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
+        ID2D1SolidColorBrush* brush = enabled ? brushBtn : brushDivider;
+        if (idx == 1) {
+            rt->DrawEllipse(D2D1::Ellipse(c, 13.5f, 13.5f), brushCurrent, 1.5f);
+            if (media.playing) { // 暂停图标：双竖条
+                rt->FillRectangle(D2D1::RectF(c.x - 4.5f, c.y - 5.5f, c.x - 1.8f, c.y + 5.5f),
+                                  brushCurrent);
+                rt->FillRectangle(D2D1::RectF(c.x + 1.8f, c.y - 5.5f, c.x + 4.5f, c.y + 5.5f),
+                                  brushCurrent);
+            } else if (icoPlay) {
+                rt->SetTransform(D2D1::Matrix3x2F::Scale(13.0f, 13.0f) *
+                                 D2D1::Matrix3x2F::Translation(c.x + 1.0f, c.y));
+                rt->FillGeometry(icoPlay, brushCurrent);
+                rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            }
+        } else {
+            ID2D1PathGeometry* g = idx == 0 ? icoPrev : icoPlay;
+            if (g) {
+                rt->SetTransform(D2D1::Matrix3x2F::Scale(11.0f, 11.0f) *
+                                 D2D1::Matrix3x2F::Translation(c.x, c.y));
+                rt->FillGeometry(g, brush);
+                rt->SetTransform(D2D1::Matrix3x2F::Identity());
+            }
+            float barX = idx == 0 ? c.x - 7.0f : c.x + 5.2f;
+            rt->FillRectangle(D2D1::RectF(barX, c.y - 6.0f, barX + 1.8f, c.y + 6.0f), brush);
+        }
+    }
+
+    void drawBar() {
+        float top = lyricH();
+        rt->DrawLine(D2D1::Point2F(14.0f, top + 0.5f), D2D1::Point2F(wndW - 14.0f, top + 0.5f),
+                     brushDivider, 1.0f);
+        if (coverDirty) decodeCover();
+        D2D1_RECT_F cr = coverRect();
+        ensureBarGeometry();
+        if (coverBmp && coverClip && coverLayer) {
+            rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), coverClip), coverLayer);
+            rt->DrawBitmap(coverBmp, cr, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            rt->PopLayer();
+        } else {
+            D2D1_ROUNDED_RECT rr{cr, 7.0f, 7.0f};
+            rt->FillRoundedRectangle(rr, brushDivider);
+        }
+        if (barTextDirty) buildBarText();
+        float tx = cr.right + 10.0f;
+        if (titleLayout)
+            rt->DrawTextLayout(D2D1::Point2F(tx, top + 10.0f), titleLayout, brushBtn);
+        if (artistLayout)
+            rt->DrawTextLayout(D2D1::Point2F(tx, top + 33.0f), artistLayout, brushNormal);
+        ensureIcons();
+        for (int i = 0; i < 3; ++i) drawButton(i);
+    }
+
+    // 命中检测：返回按钮序号（0/1/2），未命中或已置灰返回 -1
+    int hitButton(float x, float y) const {
+        if (y < lyricH()) return -1;
+        bool en[3] = {media.canPrev, media.canPlayPause, media.canNext};
+        for (int i = 0; i < 3; ++i) {
+            if (!en[i]) continue;
+            D2D1_POINT_2F c = btnCenter(i);
+            if (std::fabs(x - c.x) <= 15.0f && std::fabs(y - c.y) <= 15.0f) return i;
+        }
+        return -1;
+    }
+
     void discardDeviceResources() {
-        auto rel = [](IUnknown*& p) {
+        auto r = [](auto*& p) {
             if (p) {
                 p->Release();
                 p = nullptr;
             }
         };
-        auto r = [&](IUnknown* p) { if (p) p->Release(); };
-        r(fmtLine); fmtLine = nullptr;
-        r(fmtCurrent); fmtCurrent = nullptr;
-        r(brushBg); brushBg = nullptr;
-        r(brushNormal); brushNormal = nullptr;
-        r(brushCurrent); brushCurrent = nullptr;
-        r(brushShadow); brushShadow = nullptr;
-        r(rt); rt = nullptr;
+        r(fmtLine);
+        r(fmtCurrent);
+        r(fmtTitle);
+        r(fmtArtist);
+        r(titleLayout);
+        r(artistLayout);
+        r(coverBmp);
+        r(coverLayer);
+        r(brushBg);
+        r(brushNormal);
+        r(brushCurrent);
+        r(brushShadow);
+        r(brushDivider);
+        r(brushBtn);
+        r(rt);
+        coverDirty = true;
+        barTextDirty = true;
     }
 
     void releaseAll() {
         releaseLayouts();
         discardDeviceResources();
+        if (coverClip) {
+            coverClip->Release();
+            coverClip = nullptr;
+        }
+        if (icoPlay) {
+            icoPlay->Release();
+            icoPlay = nullptr;
+        }
+        if (icoPrev) {
+            icoPrev->Release();
+            icoPrev = nullptr;
+        }
         if (dwrite) {
             dwrite->Release();
             dwrite = nullptr;
@@ -310,7 +577,7 @@ struct OverlayHost::Impl {
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, wndW, wndH()), 14.0f, 14.0f};
         rt->FillRoundedRectangle(bg, brushBg);
 
-        const float anchorY = wndH() * kAnchorRatio;
+        const float anchorY = lyricH() * kAnchorRatio;
         if (!lines.empty()) {
             if (layoutsDirty || layouts.size() != lines.size()) rebuildLayouts();
             const float x = contentPad();
@@ -320,7 +587,7 @@ struct OverlayHost::Impl {
                 float bh = blockHeight(i, cur);
                 float yTop = anchorY + cum - scroll;
                 cum += bh;
-                if (yTop > wndH() || yTop + bh < 0.0f) continue;
+                if (yTop > lyricH() || yTop + bh < 0.0f) continue;
                 const LineLayout& ll = layouts[i];
                 IDWriteTextLayout* lay = cur ? ll.layoutCurrent : ll.layoutNormal;
                 if (!lay) continue;
@@ -331,9 +598,11 @@ struct OverlayHost::Impl {
                 rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brush);
             }
         } else if (!statusText.empty()) {
-            D2D1_RECT_F rect = D2D1::RectF(0.0f, 0.0f, wndW, wndH());
+            D2D1_RECT_F rect = D2D1::RectF(0.0f, 0.0f, wndW, lyricH());
             drawText(fmtLine, statusText, rect, brushNormal);
         }
+
+        if (brushDivider && brushBtn) drawBar();
 
         HRESULT hr = rt->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
@@ -476,6 +745,13 @@ struct OverlayHost::Impl {
             return 1;
         case WM_LBUTTONDOWN:
             if (!clickThrough) {
+                float mx = (float)GET_X_LPARAM(lp) / scale();
+                float my = (float)GET_Y_LPARAM(lp) / scale();
+                int btn = hitButton(mx, my);
+                if (btn >= 0) {
+                    if (onControl) onControl((MediaControl)btn);
+                    return 0;
+                }
                 dragging = true;
                 SetCapture(hwnd);
                 GetCursorPos(&dragCursor);
@@ -577,6 +853,19 @@ HWND OverlayHost::hwnd() const {
 
 void OverlayHost::setTickCallback(std::function<void()> cb) {
     impl_->tick = std::move(cb);
+}
+
+void OverlayHost::setMediaInfo(const OverlayMediaInfo& info) {
+    bool thumbChanged = info.thumbnail != impl_->media.thumbnail;
+    bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
+    impl_->media = info;
+    if (thumbChanged) impl_->coverDirty = true;
+    if (textChanged) impl_->barTextDirty = true;
+    impl_->render();
+}
+
+void OverlayHost::setControlCallback(std::function<void(MediaControl)> cb) {
+    impl_->onControl = std::move(cb);
 }
 
 const std::vector<LyricLine>& OverlayHost::lyrics() const {

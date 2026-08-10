@@ -12,6 +12,7 @@ add_executable(QQMusicLyric
     src/main.cpp
     src/media/smtc_monitor.cpp
     src/lyric/lyric_provider.cpp
+    src/lyric/cover_provider.cpp
     src/ui/lyric_window.cpp
     src/util/base64.cpp
 )
@@ -27,9 +28,11 @@ target_link_libraries(QQMusicLyric PRIVATE
     windowsapp
     d2d1
     dwrite
+    gdiplus
     user32
     gdi32
     shell32
     ole32
     comdlg32
+    windowscodecs
 )

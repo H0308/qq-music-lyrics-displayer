@@ -67,6 +67,7 @@ bool httpGet(CURL* curl, const std::string& url, const char* referer, std::strin
 
 struct Candidate {
     std::string songmid;
+    std::string albummid;
     std::wstring name;
     std::wstring singer;
     int64_t intervalMs = 0;
@@ -121,10 +122,16 @@ std::vector<LyricLine> parseLrc(const std::string& lrc) {
 
 } // namespace
 
+struct CacheEntry {
+    std::vector<LyricLine> lines;
+    SongInfo info;
+};
+
 struct LyricProvider::Impl {
     mutable std::mutex mtx;
     std::vector<LyricLine> current;
-    std::unordered_map<std::wstring, std::vector<LyricLine>> cache;
+    SongInfo currentSongInfo;
+    std::unordered_map<std::wstring, CacheEntry> cache;
     std::list<std::wstring> lru; // 前 = 最近使用
     std::unordered_map<std::wstring, std::list<std::wstring>::iterator> lruIt;
     std::atomic<uint64_t> generation{0};
@@ -135,7 +142,7 @@ struct LyricProvider::Impl {
             if (t.joinable()) t.join();
     }
 
-    bool cacheGet(const std::wstring& key, std::vector<LyricLine>& out) {
+    bool cacheGet(const std::wstring& key, CacheEntry& out) {
         auto it = cache.find(key);
         if (it == cache.end()) return false;
         lru.erase(lruIt[key]);
@@ -145,8 +152,8 @@ struct LyricProvider::Impl {
         return true;
     }
 
-    void cachePut(const std::wstring& key, std::vector<LyricLine> lines) {
-        cache[key] = std::move(lines);
+    void cachePut(const std::wstring& key, CacheEntry entry) {
+        cache[key] = std::move(entry);
         auto it = lruIt.find(key);
         if (it != lruIt.end()) lru.erase(it->second);
         lru.push_front(key);
@@ -159,9 +166,9 @@ struct LyricProvider::Impl {
         }
     }
 
-    // 搜索 -> 匹配 -> 下载 -> 解析；成功填充 out 返回 true
+    // 搜索 -> 匹配 -> 下载 -> 解析；成功填充 out 与 info 返回 true
     bool fetch(const std::wstring& title, const std::wstring& artist, int64_t durationMs,
-               std::vector<LyricLine>& out) {
+               std::vector<LyricLine>& out, SongInfo& info) {
         CURL* curl = curl_easy_init();
         if (!curl) return false;
 
@@ -169,7 +176,7 @@ struct LyricProvider::Impl {
         std::string keyword = toUtf8(title + L' ' + artist);
         char* esc = curl_easy_escape(curl, keyword.c_str(), (int)keyword.size());
         std::string url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" +
-                          std::string(esc ? esc : "") + "&n=10&p=1&format=json";
+                          std::string(esc ? esc : "") + "&n=10&p=1&format=json&new_json=1";
         if (esc) curl_free(esc);
 
         std::string body;
@@ -182,8 +189,11 @@ struct LyricProvider::Impl {
                 if (list.is_array()) {
                     for (auto& s : list) {
                         Candidate c;
-                        c.songmid = s.value("songmid", "");
-                        c.name = toWide(s.value("songname", ""));
+                        // new_json=1 格式优先，同时兼容旧格式
+                        c.songmid = s.value("mid", s.value("songmid", ""));
+                        c.albummid = s.value("album", nlohmann::json::object())
+                                         .value("mid", s.value("albummid", ""));
+                        c.name = toWide(s.value("name", s.value("songname", "")));
                         std::wstring singers;
                         if (s["singer"].is_array()) {
                             for (auto& sg : s["singer"]) {
@@ -217,6 +227,8 @@ struct LyricProvider::Impl {
             curl_easy_cleanup(curl);
             return false;
         }
+        info.songmid = toWide(picked->songmid);
+        info.albummid = toWide(picked->albummid);
 
         // 3) 下载歌词（不带 Referer 会返回 -1310）
         url = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" +
@@ -246,9 +258,10 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
     uint64_t gen = ++impl_->generation;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
-        std::vector<LyricLine> cached;
+        CacheEntry cached;
         if (impl_->cacheGet(key, cached)) {
-            impl_->current = std::move(cached);
+            impl_->current = std::move(cached.lines);
+            impl_->currentSongInfo = std::move(cached.info);
             if (cb) cb(true);
             return;
         }
@@ -256,12 +269,14 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
     Impl* impl = impl_.get();
     std::thread t([impl, gen, key, title, artist, durationMs, cb = std::move(cb)]() mutable {
         std::vector<LyricLine> result;
-        bool ok = impl->fetch(title, artist, durationMs, result);
+        SongInfo info;
+        bool ok = impl->fetch(title, artist, durationMs, result, info);
         if (ok) {
             std::lock_guard<std::mutex> lk(impl->mtx);
             if (impl->generation == gen) { // 防止过期请求覆盖新歌
                 impl->current = result;
-                impl->cachePut(key, std::move(result));
+                impl->currentSongInfo = info;
+                impl->cachePut(key, CacheEntry{std::move(result), std::move(info)});
                 if (cb) cb(true);
             }
         } else if (impl->generation == gen && cb) {
@@ -274,6 +289,10 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
 
 const std::vector<LyricLine>& LyricProvider::lines() const {
     return impl_->current;
+}
+
+const SongInfo& LyricProvider::songInfo() const {
+    return impl_->currentSongInfo;
 }
 
 std::wstring LyricProvider::makeKey(const std::wstring& title, const std::wstring& artist) {
