@@ -451,6 +451,7 @@ struct TaskbarHost::Impl {
         textDirty_ = true;
         geomDirty_ = true;
         layoutDirty_ = true;
+        coverDirty = true;
     }
 
     void releaseAll() {
