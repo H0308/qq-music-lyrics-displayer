@@ -117,7 +117,6 @@ struct App {
     void toggleOverlay() {
         if (overlayHost) {
             destroyOverlay();
-            if (!taskbarHost) PostQuitMessage(0);
         } else {
             createOverlay(GetModuleHandleW(nullptr));
         }
@@ -126,7 +125,6 @@ struct App {
     void toggleTaskbar() {
         if (taskbarHost) {
             destroyTaskbar();
-            if (!overlayHost) PostQuitMessage(0);
         } else {
             createTaskbar(GetModuleHandleW(nullptr));
         }
