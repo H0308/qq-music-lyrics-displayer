@@ -127,6 +127,20 @@ std::wstring normalizeTitle(const std::wstring& s) {
     return out;
 }
 
+// 判断歌名末尾是否已经包含 " - 歌手"、" / 歌手" 等歌手信息，避免搜索时重复附加歌手
+bool titleEndsWithArtist(const std::wstring& title, const std::wstring& artist) {
+    if (artist.empty())
+        return false;
+    const wchar_t* seps[] = {L" - ", L" – ", L" — ", L" / "};
+    for (const wchar_t* sep : seps) {
+        std::wstring suffix = sep + artist;
+        if (title.size() > suffix.size() &&
+            title.compare(title.size() - suffix.size(), suffix.size(), suffix) == 0)
+            return true;
+    }
+    return false;
+}
+
 // 0-100，100 表示完全匹配
 int titleSimilarity(const std::wstring& a, const std::wstring& b) {
     std::wstring na = normalizeTitle(a);
@@ -368,7 +382,12 @@ struct LyricProvider::Impl {
             return best;
         };
 
-        std::vector<Candidate> cands = doSearch(title + L' ' + artist);
+        std::wstring query = title;
+        if (!artist.empty() && !titleEndsWithArtist(title, artist)) {
+            query += L' ';
+            query += artist;
+        }
+        std::vector<Candidate> cands = doSearch(query);
         const Candidate* picked = pickCandidate(cands);
         if (!picked) {
             // 带歌手搜不到合适结果时，尝试只按歌名搜索（部分歌曲 SMTC 歌手名与平台不一致）
