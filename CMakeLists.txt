@@ -31,4 +31,5 @@ target_link_libraries(QQMusicLyric PRIVATE
     gdi32
     shell32
     ole32
+    comdlg32
 )

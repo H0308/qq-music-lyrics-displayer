@@ -1,5 +1,6 @@
 #include "lyric_window.h"
 
+#include <commdlg.h>
 #include <d2d1.h>
 #include <dwrite.h>
 #include <shellapi.h>
@@ -19,6 +20,7 @@ constexpr UINT kCmdToggleThrough = 1001;
 constexpr UINT kCmdFontUp = 1002;
 constexpr UINT kCmdFontDown = 1003;
 constexpr UINT kCmdExit = 1004;
+constexpr UINT kCmdPickFont = 1005;
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricOverlay";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
@@ -39,6 +41,7 @@ struct OverlayHost::Impl {
     // 布局（DIP，96dpi 基准）
     float wndW = 860.0f;
     float fontSize = 24.0f;
+    std::wstring fontFamily = kFontFamily;
     UINT dpi = 96;
 
     float lineHeight() const { return fontSize * 2.2f; }
@@ -122,7 +125,7 @@ struct OverlayHost::Impl {
                 (*out)->Release();
                 *out = nullptr;
             }
-            dwrite->CreateTextFormat(kFontFamily, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+            dwrite->CreateTextFormat(fontFamily.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                      DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn", out);
             if (*out) {
                 (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -371,6 +374,27 @@ struct OverlayHost::Impl {
         render();
     }
 
+    // 系统字体选择对话框：切换歌词字体（可选中同时调整字号）
+    void pickFont() {
+        LOGFONTW lf{};
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lstrcpynW(lf.lfFaceName, fontFamily.c_str(), LF_FACESIZE);
+        lf.lfHeight = -(int)std::lround(fontSize * scale());
+        CHOOSEFONTW cf{};
+        cf.lStructSize = sizeof(cf);
+        cf.hwndOwner = hwnd;
+        cf.lpLogFont = &lf;
+        cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS | CF_FORCEFONTEXIST;
+        if (!ChooseFontW(&cf)) return;
+        fontFamily = lf.lfFaceName;
+        if (cf.iPointSize > 0) // 单位 1/10 磅
+            fontSize = std::clamp((float)cf.iPointSize / 10.0f, kMinFont, kMaxFont);
+        recreateFormats();
+        layoutsDirty = true; // 字体变化需重新计算折行
+        resizeWindow();
+        render();
+    }
+
     void setClickThrough(bool on) {
         clickThrough = on;
         LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
@@ -409,6 +433,7 @@ struct OverlayHost::Impl {
                     L"鼠标穿透");
         AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
         AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
+        AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
         POINT pt;
@@ -426,6 +451,9 @@ struct OverlayHost::Impl {
             break;
         case kCmdFontDown:
             changeFont(-2.0f);
+            break;
+        case kCmdPickFont:
+            pickFont();
             break;
         case kCmdExit:
             DestroyWindow(hwnd);
