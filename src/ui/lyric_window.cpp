@@ -50,6 +50,18 @@ struct OverlayHost::Impl {
     float scroll = 0.0f;
     float scrollTarget = 0.0f;
 
+    // 每行预计算的排版：正常 / 高亮两种格式各自的单行最大宽度与折行结果
+    struct LineLayout {
+        IDWriteTextLayout* layoutNormal = nullptr;
+        IDWriteTextLayout* layoutCurrent = nullptr;
+        float naturalWNormal = 0.0f;  // 正常格式单行最大宽度
+        float naturalWCurrent = 0.0f; // 高亮格式单行最大宽度
+        float heightNormal = 0.0f;    // 按内容宽度折行后的高度
+        float heightCurrent = 0.0f;
+    };
+    std::vector<LineLayout> layouts;
+    bool layoutsDirty = true;
+
     std::function<void()> tick;
 
     // D2D / GDI 资源
@@ -122,6 +134,81 @@ struct OverlayHost::Impl {
         make(fontSize * 1.15f, DWRITE_FONT_WEIGHT_BOLD, &fmtCurrent);
     }
 
+    // ---------- 歌词排版（显示前预计算） ----------
+
+    float contentPad() const { return 24.0f; }
+    float contentWidth() const { return wndW - contentPad() * 2.0f; }
+    float lineGap() const { return fontSize * 0.8f; }
+
+    // 先用无限宽度测单行最大宽度，再限制到内容宽度得到折行高度
+    IDWriteTextLayout* buildLayout(IDWriteTextFormat* fmt, const std::wstring& text,
+                                   float& naturalW, float& height) {
+        IDWriteTextLayout* lay = nullptr;
+        if (FAILED(dwrite->CreateTextLayout(text.c_str(), (UINT32)text.size(), fmt, 100000.0f,
+                                            100000.0f, &lay)))
+            return nullptr;
+        lay->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        DWRITE_TEXT_METRICS m{};
+        lay->GetMetrics(&m);
+        naturalW = m.width;
+        lay->SetMaxWidth(contentWidth());
+        lay->GetMetrics(&m);
+        height = m.height;
+        // 布局框默认 100000 高，段落居中会把文字推到框中央；收紧到内容高度
+        lay->SetMaxHeight(height);
+        return lay;
+    }
+
+    void releaseLayouts() {
+        for (auto& ll : layouts) {
+            if (ll.layoutNormal) ll.layoutNormal->Release();
+            if (ll.layoutCurrent) ll.layoutCurrent->Release();
+        }
+        layouts.clear();
+    }
+
+    void rebuildLayouts() {
+        layoutsDirty = false;
+        releaseLayouts();
+        if (!dwrite || !fmtLine || !fmtCurrent) {
+            layoutsDirty = true; // 资源未就绪，渲染时重试
+            return;
+        }
+        layouts.resize(lines.size());
+        for (size_t i = 0; i < lines.size(); ++i) {
+            LineLayout& ll = layouts[i];
+            if (lines[i].text.empty()) {
+                ll.heightNormal = fontSize * 1.4f;
+                ll.heightCurrent = fontSize * 1.15f * 1.4f;
+                continue;
+            }
+            ll.layoutNormal =
+                buildLayout(fmtLine, lines[i].text, ll.naturalWNormal, ll.heightNormal);
+            ll.layoutCurrent =
+                buildLayout(fmtCurrent, lines[i].text, ll.naturalWCurrent, ll.heightCurrent);
+            if (ll.heightNormal <= 0.0f) ll.heightNormal = fontSize * 1.4f;
+            if (ll.heightCurrent <= 0.0f) ll.heightCurrent = fontSize * 1.15f * 1.4f;
+        }
+        updateScrollTarget();
+    }
+
+    float blockHeight(size_t i, bool cur) const {
+        const LineLayout& ll = layouts[i];
+        return (cur ? ll.heightCurrent : ll.heightNormal) + lineGap();
+    }
+
+    // 使当前行块垂直居中于锚点所需的滚动偏移（DIP）
+    void updateScrollTarget() {
+        if (currentLine < 0 || layouts.size() != lines.size() ||
+            (size_t)currentLine >= layouts.size()) {
+            scrollTarget = 0.0f;
+            return;
+        }
+        float prefix = 0.0f;
+        for (int i = 0; i < currentLine; ++i) prefix += blockHeight((size_t)i, false);
+        scrollTarget = prefix + blockHeight((size_t)currentLine, true) / 2.0f;
+    }
+
     void discardDeviceResources() {
         auto rel = [](IUnknown*& p) {
             if (p) {
@@ -140,6 +227,7 @@ struct OverlayHost::Impl {
     }
 
     void releaseAll() {
+        releaseLayouts();
         discardDeviceResources();
         if (dwrite) {
             dwrite->Release();
@@ -219,21 +307,25 @@ struct OverlayHost::Impl {
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, wndW, wndH()), 14.0f, 14.0f};
         rt->FillRoundedRectangle(bg, brushBg);
 
-        const float lh = lineHeight();
         const float anchorY = wndH() * kAnchorRatio;
         if (!lines.empty()) {
+            if (layoutsDirty || layouts.size() != lines.size()) rebuildLayouts();
+            const float x = contentPad();
+            float cum = 0.0f; // 第 i 行块顶相对窗口顶部的累计偏移（未减 scroll）
             for (size_t i = 0; i < lines.size(); ++i) {
-                float y = anchorY + ((float)i - scroll) * lh;
-                if (y < -lh || y > wndH() + lh) continue;
                 bool cur = ((int)i == currentLine);
-                IDWriteTextFormat* fmt = cur ? fmtCurrent : fmtLine;
+                float bh = blockHeight(i, cur);
+                float yTop = anchorY + cum - scroll;
+                cum += bh;
+                if (yTop > wndH() || yTop + bh < 0.0f) continue;
+                const LineLayout& ll = layouts[i];
+                IDWriteTextLayout* lay = cur ? ll.layoutCurrent : ll.layoutNormal;
+                if (!lay) continue;
+                float layH = cur ? ll.heightCurrent : ll.heightNormal;
+                float y = yTop + (bh - layH) * 0.5f;
                 ID2D1SolidColorBrush* brush = cur ? brushCurrent : brushNormal;
-                D2D1_RECT_F rect = D2D1::RectF(0.0f, y - lh / 2.0f, wndW, y + lh / 2.0f);
-                D2D1_RECT_F shadow =
-                    D2D1::RectF(rect.left + 1.0f, rect.top + 1.5f, rect.right + 1.0f,
-                                rect.bottom + 1.5f);
-                drawText(fmt, lines[i].text, shadow, brushShadow);
-                drawText(fmt, lines[i].text, rect, brush);
+                rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
+                rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brush);
             }
         } else if (!statusText.empty()) {
             D2D1_RECT_F rect = D2D1::RectF(0.0f, 0.0f, wndW, wndH());
@@ -274,6 +366,7 @@ struct OverlayHost::Impl {
     void changeFont(float delta) {
         fontSize = std::clamp(fontSize + delta, kMinFont, kMaxFont);
         recreateFormats();
+        layoutsDirty = true; // 字号变化需重新计算折行
         resizeWindow();
         render();
     }
@@ -482,6 +575,7 @@ void OverlayHost::setLyrics(const std::vector<LyricLine>& lines) {
     impl_->currentLine = -1;
     impl_->scroll = 0.0f;
     impl_->scrollTarget = 0.0f;
+    impl_->layoutsDirty = true;
     if (!lines.empty()) impl_->statusText.clear();
     impl_->render();
 }
@@ -489,7 +583,7 @@ void OverlayHost::setLyrics(const std::vector<LyricLine>& lines) {
 void OverlayHost::setCurrentLine(int index) {
     if (index != impl_->currentLine) {
         impl_->currentLine = index;
-        impl_->scrollTarget = index < 0 ? 0.0f : (float)index;
+        impl_->updateScrollTarget();
     }
 }
 
