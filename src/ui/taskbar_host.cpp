@@ -19,10 +19,6 @@ namespace {
 
 constexpr UINT_PTR kTimerId = 2;
 constexpr UINT kTimerMs = 100; // 任务栏位置跟踪 10fps
-constexpr UINT kTrayMsg = WM_APP + 101;
-constexpr UINT kTrayIconId = 2;
-constexpr UINT kCmdToggleDesktop = 2001;
-constexpr UINT kCmdExit = 2002;
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
 
@@ -34,6 +30,9 @@ constexpr float kTextPadding = 8.0f;
 constexpr float kCornerRadius = 8.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
+constexpr float kMinFont = 9.0f;
+constexpr float kMaxFont = 18.0f;
+constexpr float kBaseFontSize = 12.0f;
 
 // GDI+ 一次性初始化（封面解码）
 class GdiplusInit {
@@ -109,6 +108,10 @@ struct TaskbarHost::Impl {
     std::wstring statusText = L"等待播放…";
     int currentLine = -1;
 
+    // 字体
+    float fontSize_ = kBaseFontSize;
+    std::wstring fontFamily_ = kFontFamily;
+
     // 媒体信息
     OverlayMediaInfo media;
     ID2D1Bitmap* coverBmp = nullptr;
@@ -117,16 +120,12 @@ struct TaskbarHost::Impl {
     // 交互
     std::function<void()> tick;
     std::function<void(MediaControl)> onControl;
-    std::function<void()> onToggle;
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
     bool quitting = false;
 
     // Explorer 重启后重新附着
     UINT taskbarCreatedMsg_ = 0;
-
-    // 托盘图标
-    NOTIFYICONDATAW nid_ = {};
 
     // 滚动字幕（歌名、歌手、歌词独立滚动）
     float titleWidth_ = 0.0f;
@@ -189,44 +188,6 @@ struct TaskbarHost::Impl {
             GetWindowRect(notify_, &rcNotify_);
     }
 
-    void addTray() {
-        nid_.cbSize = sizeof(nid_);
-        nid_.hWnd = hwnd;
-        nid_.uID = kTrayIconId;
-        nid_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-        nid_.uCallbackMessage = kTrayMsg;
-        nid_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        lstrcpyW(nid_.szTip, L"QQ 音乐任务栏歌词");
-        Shell_NotifyIconW(NIM_ADD, &nid_);
-    }
-
-    void removeTray() {
-        Shell_NotifyIconW(NIM_DELETE, &nid_);
-    }
-
-    void showTrayMenu() {
-        HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING, kCmdToggleDesktop, L"切换桌面模式");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
-        SetForegroundWindow(hwnd);
-        POINT pt{};
-        GetCursorPos(&pt);
-        UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTALIGN,
-                                  pt.x, pt.y, 0, hwnd, nullptr);
-        DestroyMenu(menu);
-        switch (cmd) {
-        case kCmdToggleDesktop:
-            if (onToggle)
-                onToggle();
-            break;
-        case kCmdExit:
-            quitting = true;
-            DestroyWindow(hwnd);
-            break;
-        }
-    }
-
     bool createWindow(HINSTANCE inst) {
         this->inst = inst;
 
@@ -254,7 +215,6 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         adjustPosition();
-        addTray();
         taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
         return true;
     }
@@ -425,7 +385,7 @@ struct TaskbarHost::Impl {
                 (*out)->Release();
                 *out = nullptr;
             }
-            dwrite->CreateTextFormat(kFontFamily, nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
+            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
                                      DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn", out);
             if (*out) {
                 (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -434,7 +394,7 @@ struct TaskbarHost::Impl {
                 // 不裁剪，超长时由 drawScrollingText 滚动显示
             }
         };
-        float base = 12.0f;
+        float base = fontSize_;
         make(base * 1.05f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtTitle_);
         make(base * 0.92f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
@@ -442,6 +402,19 @@ struct TaskbarHost::Impl {
         make(base * 1.18f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtLyric_);
         textDirty_ = true;
+    }
+
+    void changeFont(float delta) {
+        setFont(fontFamily_, fontSize_ + delta);
+    }
+
+    void setFont(const std::wstring& family, float size) {
+        fontFamily_ = family;
+        fontSize_ = std::clamp(size, kMinFont, kMaxFont);
+        recreateFormats();
+        textDirty_ = true;
+        layoutDirty_ = true;
+        render();
     }
 
     void discardDeviceResources() {
@@ -952,13 +925,8 @@ struct TaskbarHost::Impl {
                 onControl(static_cast<MediaControl>(btn));
             return 0;
         }
-        case kTrayMsg:
-            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP)
-                showTrayMenu();
-            return 0;
         case WM_DESTROY:
             KillTimer(hwnd, kTimerId);
-            removeTray();
             releaseAll();
             if (quitting)
                 PostQuitMessage(0);
@@ -1078,6 +1046,19 @@ const std::wstring& TaskbarHost::statusText() const {
     return impl_->statusText;
 }
 
-void TaskbarHost::setHostToggleCallback(std::function<void()> cb) {
-    impl_->onToggle = std::move(cb);
+void TaskbarHost::changeFont(float delta) {
+    impl_->changeFont(delta);
+}
+
+void TaskbarHost::setFont(const std::wstring& family, float size) {
+    impl_->setFont(family, size);
+}
+
+void TaskbarHost::setClickThrough(bool on) {
+    // 任务栏歌词不需要鼠标穿透，忽略
+    (void)on;
+}
+
+bool TaskbarHost::clickThrough() const {
+    return false;
 }

@@ -7,10 +7,13 @@
 #include <windows.h>
 #include <winrt/Windows.Foundation.h>
 #include <shellapi.h>
+#include <commdlg.h>
 
 #include <cstdio>
 #include <fcntl.h>
 #include <io.h>
+#include <algorithm>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +23,15 @@ namespace {
 constexpr UINT kMsgSmtcChanged = WM_APP + 1;
 constexpr UINT kMsgLyricReady = WM_APP + 2;
 constexpr UINT kMsgCoverReady = WM_APP + 3;
+constexpr UINT kTrayMsg = WM_APP + 200;
+constexpr UINT kTrayIconId = 1;
+constexpr UINT kCmdToggleOverlay = 100;
+constexpr UINT kCmdToggleTaskbar = 101;
+constexpr UINT kCmdClickThrough = 102;
+constexpr UINT kCmdFontUp = 103;
+constexpr UINT kCmdFontDown = 104;
+constexpr UINT kCmdPickFont = 105;
+constexpr UINT kCmdExit = 106;
 
 struct CoverPayload {
     std::wstring key;
@@ -44,7 +56,14 @@ struct App {
     std::unique_ptr<ILyricHost> taskbarHost;
     std::wstring currentKey;
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
+    bool lyricLoading_ = false;
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
+
+    HWND trayHwnd = nullptr;
+
+    // 字体状态（作为字体选择器的记忆源）
+    std::wstring fontFamily_ = L"Microsoft YaHei UI";
+    float fontSize_ = 16.0f;
 
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
@@ -62,13 +81,16 @@ struct App {
         }
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
-        host->setHostToggleCallback([this] { toggleTaskbar(); });
         overlayHost = std::move(host);
+        syncHost(overlayHost.get());
+        overlayHost->setFont(fontFamily_, fontSize_);
+        updateTrayIcon();
         return true;
     }
 
     void destroyOverlay() {
         overlayHost.reset();
+        updateTrayIcon();
     }
 
     bool createTaskbar(HINSTANCE inst) {
@@ -80,13 +102,16 @@ struct App {
         }
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
-        host->setHostToggleCallback([this] { toggleOverlay(); });
         taskbarHost = std::move(host);
+        syncHost(taskbarHost.get());
+        taskbarHost->setFont(fontFamily_, fontSize_);
+        updateTrayIcon();
         return true;
     }
 
     void destroyTaskbar() {
         taskbarHost.reset();
+        updateTrayIcon();
     }
 
     void toggleOverlay() {
@@ -107,6 +132,45 @@ struct App {
         }
     }
 
+    // 把当前播放状态同步给某个宿主（新建宿主时避免显示“等待播放…”）
+    void syncHost(ILyricHost* host) {
+        if (!host)
+            return;
+        SmtcSnapshot snap = monitor.snapshot();
+        if (!snap.sessionAlive) {
+            host->setLyrics({});
+            host->setMediaInfo({});
+            host->setStatusText(L"QQ 音乐未运行");
+            host->hide();
+            return;
+        }
+        host->show();
+        OverlayMediaInfo mi;
+        mi.title = snap.title;
+        mi.artist = snap.artist;
+        if (!snap.album.empty()) {
+            mi.artist += L" · ";
+            mi.artist += snap.album;
+        }
+        mi.thumbnail = snap.thumbnail;
+        mi.canPrev = snap.canPrev;
+        mi.canPlayPause = snap.canPlayPause;
+        mi.canNext = snap.canNext;
+        mi.playing = snap.status == PlaybackStatus::Playing;
+        host->setMediaInfo(mi);
+        host->setLyrics(provider.lines());
+        if (provider.lines().empty()) {
+            if (lyricLoading_)
+                host->setStatusText(L"歌词加载中…");
+            else
+                host->setStatusText(currentKey.empty() ? L"等待播放…" : L"暂无歌词");
+        } else {
+            host->setStatusText(L"");
+        }
+        int idx = LyricProvider::findLine(host->lyrics(), snap.positionMs);
+        host->setCurrentLine(idx);
+    }
+
     void onControl(MediaControl c) {
         switch (c) {
         case MediaControl::Prev: monitor.skipPrevious(); break;
@@ -124,6 +188,7 @@ struct App {
                 std::wprintf(L"[smtc] QQ Music session closed\n");
             currentKey.clear();
             lastStatus = PlaybackStatus::Stopped;
+            lyricLoading_ = false;
             for (auto* h : hs) {
                 h->setLyrics({});
                 h->setMediaInfo({});
@@ -160,6 +225,7 @@ struct App {
                 h->setLyrics({});
                 h->setStatusText(L"歌词加载中…");
             }
+            lyricLoading_ = true;
             provider.requestAsync(snap.title, snap.artist, snap.durationMs, [this](bool ok) {
                 PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
             });
@@ -167,6 +233,7 @@ struct App {
     }
 
     void onLyricReady(bool ok) {
+        lyricLoading_ = false;
         auto hs = hosts();
         if (ok) {
             for (auto* h : hs) {
@@ -230,7 +297,158 @@ struct App {
             h->setCurrentLine(idx);
         }
     }
+
+    // 统一托盘图标
+    bool createTrayWindow(HINSTANCE inst);
+    void destroyTray();
+    void updateTrayIcon();
+    void showTrayMenu();
+    void pickFont();
+    static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
+
+bool App::createTrayWindow(HINSTANCE inst) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = App::trayWndProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"QQMusicLyricTray";
+    RegisterClassExW(&wc);
+
+    trayHwnd = CreateWindowExW(0, L"QQMusicLyricTray", L"QQMusicLyricTray", 0, 0, 0, 0, 0,
+                               HWND_MESSAGE, nullptr, inst, this);
+    if (!trayHwnd)
+        return false;
+    updateTrayIcon();
+    return true;
+}
+
+void App::destroyTray() {
+    if (trayHwnd) {
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = trayHwnd;
+        nid.uID = kTrayIconId;
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+        DestroyWindow(trayHwnd);
+        trayHwnd = nullptr;
+    }
+}
+
+void App::updateTrayIcon() {
+    if (!trayHwnd)
+        return;
+    NOTIFYICONDATAW nid{};
+    nid.cbSize = sizeof(nid);
+    nid.hWnd = trayHwnd;
+    nid.uID = kTrayIconId;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = kTrayMsg;
+    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    lstrcpyW(nid.szTip, L"QQ 音乐歌词");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
+    // 首次创建时 MODIFY 不会生效，用 ADD
+    Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+void App::showTrayMenu() {
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (overlayHost ? MF_CHECKED : 0), kCmdToggleOverlay, L"桌面歌词");
+    AppendMenuW(menu, MF_STRING | (taskbarHost ? MF_CHECKED : 0), kCmdToggleTaskbar, L"任务栏歌词");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (overlayHost) {
+        AppendMenuW(menu, MF_STRING | (overlayHost->clickThrough() ? MF_CHECKED : 0),
+                    kCmdClickThrough, L"鼠标穿透");
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+    AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
+    AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
+    AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
+
+    SetForegroundWindow(trayHwnd);
+    POINT pt{};
+    GetCursorPos(&pt);
+    UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0,
+                              trayHwnd, nullptr);
+    DestroyMenu(menu);
+
+    switch (cmd) {
+    case kCmdToggleOverlay:
+        toggleOverlay();
+        break;
+    case kCmdToggleTaskbar:
+        toggleTaskbar();
+        break;
+    case kCmdClickThrough:
+        if (overlayHost)
+            overlayHost->setClickThrough(!overlayHost->clickThrough());
+        break;
+    case kCmdFontUp:
+        fontSize_ = std::clamp(fontSize_ + 2.0f, 8.0f, 48.0f);
+        if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
+        if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
+        break;
+    case kCmdFontDown:
+        fontSize_ = std::clamp(fontSize_ - 2.0f, 8.0f, 48.0f);
+        if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
+        if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
+        break;
+    case kCmdPickFont:
+        pickFont();
+        break;
+    case kCmdExit:
+        PostQuitMessage(0);
+        break;
+    }
+}
+
+void App::pickFont() {
+    if (!overlayHost && !taskbarHost)
+        return;
+
+    LOGFONTW lf{};
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lstrcpynW(lf.lfFaceName, fontFamily_.c_str(), LF_FACESIZE);
+    lf.lfHeight = -(int)std::lround(fontSize_);
+    CHOOSEFONTW cf{};
+    cf.lStructSize = sizeof(cf);
+    cf.hwndOwner = trayHwnd;
+    cf.lpLogFont = &lf;
+    cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS | CF_FORCEFONTEXIST;
+    if (!ChooseFontW(&cf))
+        return;
+
+    fontFamily_ = lf.lfFaceName;
+    if (cf.iPointSize > 0)
+        fontSize_ = (float)cf.iPointSize / 10.0f;
+
+    if (overlayHost)
+        overlayHost->setFont(fontFamily_, fontSize_);
+    if (taskbarHost)
+        taskbarHost->setFont(fontFamily_, fontSize_);
+}
+
+LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_CREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+        return 0;
+    }
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+    if (!app)
+        return DefWindowProcW(h, msg, wp, lp);
+    if (msg == kTrayMsg && LOWORD(lp) == WM_RBUTTONUP) {
+        app->showTrayMenu();
+        return 0;
+    }
+    if (msg == WM_DESTROY) {
+        app->destroyTray();
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
 
 } // namespace
 
@@ -262,6 +480,10 @@ int main() {
 
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
+    if (!app.createTrayWindow(inst)) {
+        std::wprintf(L"failed to create tray window\n");
+        return 1;
+    }
     if (wantOverlay && !app.createOverlay(inst)) {
         std::wprintf(L"failed to create overlay window\n");
         return 1;
@@ -300,5 +522,6 @@ int main() {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    app.destroyTray();
     return 0;
 }

@@ -40,7 +40,11 @@ public:
     virtual bool isTaskbar() const = 0;
     virtual int currentLine() const = 0;
     virtual const std::wstring& statusText() const = 0;
-    virtual void setHostToggleCallback(std::function<void()> cb) = 0;
+
+    virtual void changeFont(float delta) = 0;
+    virtual void setFont(const std::wstring& family, float size) = 0;
+    virtual void setClickThrough(bool on) = 0;
+    virtual bool clickThrough() const = 0;
 
     virtual void show() = 0;
     virtual void hide() = 0;
@@ -68,7 +72,11 @@ public:
     bool isTaskbar() const override;
     int currentLine() const override;
     const std::wstring& statusText() const override;
-    void setHostToggleCallback(std::function<void()> cb) override;
+
+    void changeFont(float delta) override;
+    void setFont(const std::wstring& family, float size) override;
+    void setClickThrough(bool on) override;
+    bool clickThrough() const override;
 
     void show() override;
     void hide() override;

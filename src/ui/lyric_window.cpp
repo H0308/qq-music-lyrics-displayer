@@ -1,7 +1,6 @@
 #include "lyric_window.h"
 #include "lyric_renderer.h"
 
-#include <commdlg.h>
 #include <cstdio>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -17,15 +16,6 @@ namespace {
 
 constexpr UINT_PTR kTimerId = 1;
 constexpr UINT kTimerMs = 33; // ~30fps
-constexpr UINT kTrayMsg = WM_APP + 100;
-constexpr UINT kTrayIconId = 1;
-
-constexpr UINT kCmdToggleThrough = 1001;
-constexpr UINT kCmdFontUp = 1002;
-constexpr UINT kCmdFontDown = 1003;
-constexpr UINT kCmdExit = 1004;
-constexpr UINT kCmdPickFont = 1005;
-constexpr UINT kCmdToggleTaskbar = 1006;
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricOverlay";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
@@ -228,8 +218,6 @@ struct OverlayHost::Impl {
     bool quitting = false;
     POINT dragCursor{};
     RECT dragWnd{};
-
-    std::function<void()> onToggle;
 
     float scale() const { return (float)dpi / 96.0f; }
 
@@ -775,29 +763,12 @@ struct OverlayHost::Impl {
     }
 
     void changeFont(float delta) {
-        fontSize = std::clamp(fontSize + delta, kMinFont, kMaxFont);
-        recreateFormats();
-        layoutsDirty = true; // 字号变化需重新计算折行
-        invalidateGradient();
-        resizeWindow();
-        render();
+        setFont(fontFamily, fontSize + delta);
     }
 
-    // 系统字体选择对话框：切换歌词字体（可选中同时调整字号）
-    void pickFont() {
-        LOGFONTW lf{};
-        lf.lfCharSet = DEFAULT_CHARSET;
-        lstrcpynW(lf.lfFaceName, fontFamily.c_str(), LF_FACESIZE);
-        lf.lfHeight = -(int)std::lround(fontSize * scale());
-        CHOOSEFONTW cf{};
-        cf.lStructSize = sizeof(cf);
-        cf.hwndOwner = hwnd;
-        cf.lpLogFont = &lf;
-        cf.Flags = CF_SCREENFONTS | CF_INITTOLOGFONTSTRUCT | CF_NOVERTFONTS | CF_FORCEFONTEXIST;
-        if (!ChooseFontW(&cf)) return;
-        fontFamily = lf.lfFaceName;
-        if (cf.iPointSize > 0) // 单位 1/10 磅
-            fontSize = std::clamp((float)cf.iPointSize / 10.0f, kMinFont, kMaxFont);
+    void setFont(const std::wstring& family, float size) {
+        fontFamily = family;
+        fontSize = std::clamp(size, kMinFont, kMaxFont);
         recreateFormats();
         layoutsDirty = true; // 字体变化需重新计算折行
         invalidateGradient();
@@ -817,72 +788,9 @@ struct OverlayHost::Impl {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     }
 
-    void addTray() {
-        NOTIFYICONDATAW d{};
-        d.cbSize = sizeof(d);
-        d.hWnd = hwnd;
-        d.uID = kTrayIconId;
-        d.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-        d.uCallbackMessage = kTrayMsg;
-        d.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-        lstrcpyW(d.szTip, L"QQ 音乐歌词");
-        Shell_NotifyIconW(NIM_ADD, &d);
-    }
-
-    void removeTray() {
-        NOTIFYICONDATAW d{};
-        d.cbSize = sizeof(d);
-        d.hWnd = hwnd;
-        d.uID = kTrayIconId;
-        Shell_NotifyIconW(NIM_DELETE, &d);
-    }
-
-    void showTrayMenu() {
-        HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING | (clickThrough ? MF_CHECKED : 0), kCmdToggleThrough,
-                    L"鼠标穿透");
-        AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
-        AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
-        AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-        AppendMenuW(menu, MF_STRING, kCmdToggleTaskbar, L"任务栏歌词");
-        AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
-        POINT pt;
-        GetCursorPos(&pt);
-        SetForegroundWindow(hwnd);
-        UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y,
-                                  0, hwnd, nullptr);
-        DestroyMenu(menu);
-        switch (cmd) {
-        case kCmdToggleThrough:
-            setClickThrough(!clickThrough);
-            break;
-        case kCmdFontUp:
-            changeFont(2.0f);
-            break;
-        case kCmdFontDown:
-            changeFont(-2.0f);
-            break;
-        case kCmdPickFont:
-            pickFont();
-            break;
-        case kCmdToggleTaskbar:
-            if (onToggle)
-                onToggle();
-            break;
-        case kCmdExit:
-            quitting = true;
-            DestroyWindow(hwnd);
-            break;
-        default:
-            break;
-        }
-    }
-
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            addTray();
             SetTimer(hwnd, kTimerId, kTimerMs, nullptr);
             return 0;
         case WM_TIMER:
@@ -933,12 +841,8 @@ struct OverlayHost::Impl {
             render();
             return 0;
         }
-        case kTrayMsg:
-            if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) showTrayMenu();
-            return 0;
         case WM_DESTROY:
             KillTimer(hwnd, kTimerId);
-            removeTray();
             releaseAll();
             if (quitting)
                 PostQuitMessage(0);
@@ -1081,6 +985,18 @@ const std::wstring& OverlayHost::statusText() const {
     return impl_->statusText;
 }
 
-void OverlayHost::setHostToggleCallback(std::function<void()> cb) {
-    impl_->onToggle = std::move(cb);
+void OverlayHost::changeFont(float delta) {
+    impl_->changeFont(delta);
+}
+
+void OverlayHost::setFont(const std::wstring& family, float size) {
+    impl_->setFont(family, size);
+}
+
+void OverlayHost::setClickThrough(bool on) {
+    impl_->setClickThrough(on);
+}
+
+bool OverlayHost::clickThrough() const {
+    return impl_->clickThrough;
 }
