@@ -61,7 +61,8 @@ struct App {
 
     HWND trayHwnd = nullptr;
 
-    // 字体状态（作为字体选择器的记忆源）
+    // 字体状态（作为字体选择器的记忆源）。hasUserFont_ 为 false 时各宿主使用各自的默认字体。
+    bool hasUserFont_ = false;
     std::wstring fontFamily_ = L"Microsoft YaHei UI";
     float fontSize_ = 16.0f;
 
@@ -83,7 +84,8 @@ struct App {
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         overlayHost = std::move(host);
         syncHost(overlayHost.get());
-        overlayHost->setFont(fontFamily_, fontSize_);
+        if (hasUserFont_)
+            overlayHost->setFont(fontFamily_, fontSize_);
         updateTrayIcon();
         return true;
     }
@@ -104,7 +106,8 @@ struct App {
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
-        taskbarHost->setFont(fontFamily_, fontSize_);
+        if (hasUserFont_)
+            taskbarHost->setFont(fontFamily_, fontSize_);
         updateTrayIcon();
         return true;
     }
@@ -384,11 +387,13 @@ void App::showTrayMenu() {
             overlayHost->setClickThrough(!overlayHost->clickThrough());
         break;
     case kCmdFontUp:
+        hasUserFont_ = true;
         fontSize_ = std::clamp(fontSize_ + 2.0f, 8.0f, 48.0f);
         if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
         if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
         break;
     case kCmdFontDown:
+        hasUserFont_ = true;
         fontSize_ = std::clamp(fontSize_ - 2.0f, 8.0f, 48.0f);
         if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
         if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
@@ -422,6 +427,7 @@ void App::pickFont() {
     if (cf.iPointSize > 0)
         fontSize_ = (float)cf.iPointSize / 10.0f;
 
+    hasUserFont_ = true;
     if (overlayHost)
         overlayHost->setFont(fontFamily_, fontSize_);
     if (taskbarHost)
@@ -474,7 +480,7 @@ int main() {
         LocalFree(argv);
     }
     if (!hasModeFlag)
-        wantOverlay = true;
+        wantTaskbar = true;
 
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
