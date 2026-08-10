@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cctype>
 #include <cstdlib>
+#include <cwctype>
 #include <list>
 #include <mutex>
 #include <sstream>
@@ -24,7 +25,6 @@ constexpr char kUserAgent[] =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36";
 constexpr size_t kCacheCapacity = 32;
-constexpr int64_t kDurationToleranceMs = 2000;
 
 std::string toUtf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -72,6 +72,139 @@ struct Candidate {
     std::wstring singer;
     int64_t intervalMs = 0;
 };
+
+// ---------- 歌曲匹配辅助函数 ----------
+
+std::wstring trimW(const std::wstring& s) {
+    size_t first = s.find_first_not_of(L" \t\r\n");
+    if (first == std::wstring::npos)
+        return {};
+    size_t last = s.find_last_not_of(L" \t\r\n");
+    return s.substr(first, last - first + 1);
+}
+
+// 规范化：小写、合并连续空白、去首尾空白、去除尾部括号版本信息
+std::wstring normalizeTitle(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    bool prevSpace = true;
+    for (wchar_t ch : s) {
+        if (ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n') {
+            if (!prevSpace) {
+                out.push_back(L' ');
+                prevSpace = true;
+            }
+        } else {
+            out.push_back(static_cast<wchar_t>(std::towlower(ch)));
+            prevSpace = false;
+        }
+    }
+    while (!out.empty() && out.back() == L' ')
+        out.pop_back();
+
+    // 去除尾部 (...)/（...)/[...]/【...】版本标注，如 （剧情版）、(Live)
+    while (!out.empty()) {
+        wchar_t open = 0;
+        wchar_t close = out.back();
+        if (close == L')')
+            open = L'(';
+        else if (close == L'）')
+            open = L'（';
+        else if (close == L']')
+            open = L'[';
+        else if (close == L'】')
+            open = L'【';
+        else
+            break;
+        size_t pos = out.find_last_of(open);
+        if (pos == std::wstring::npos || pos == 0)
+            break;
+        size_t end = pos;
+        while (end > 0 && out[end - 1] == L' ')
+            --end;
+        out.resize(end);
+    }
+    return out;
+}
+
+// 0-100，100 表示完全匹配
+int titleSimilarity(const std::wstring& a, const std::wstring& b) {
+    std::wstring na = normalizeTitle(a);
+    std::wstring nb = normalizeTitle(b);
+    if (na.empty() || nb.empty())
+        return 0;
+    if (na == nb)
+        return 100;
+    if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos)
+        return 85;
+    size_t minLen = std::min(na.size(), nb.size());
+    size_t commonPrefix = 0;
+    while (commonPrefix < minLen && na[commonPrefix] == nb[commonPrefix])
+        ++commonPrefix;
+    if (commonPrefix >= minLen * 8 / 10)
+        return 70;
+    return 0;
+}
+
+std::vector<std::wstring> splitSingers(const std::wstring& s) {
+    std::vector<std::wstring> parts;
+    std::wstring current;
+    for (wchar_t ch : s) {
+        if (ch == L'/' || ch == L'、' || ch == L'&' || ch == L';' || ch == L'；') {
+            auto t = trimW(current);
+            if (!t.empty())
+                parts.push_back(t);
+            current.clear();
+        } else {
+            current.push_back(ch);
+        }
+    }
+    auto t = trimW(current);
+    if (!t.empty())
+        parts.push_back(t);
+    return parts;
+}
+
+int singerSimilarity(const std::wstring& a, const std::wstring& b) {
+    if (a.empty() || b.empty())
+        return 50; // 有一方未知，给中性分
+    std::wstring na = normalizeTitle(a);
+    std::wstring nb = normalizeTitle(b);
+    if (na == nb)
+        return 100;
+    if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos)
+        return 90;
+    auto pa = splitSingers(na);
+    auto pb = splitSingers(nb);
+    if (pa.empty() || pb.empty())
+        return 0;
+    int matches = 0;
+    for (auto& x : pa) {
+        for (auto& y : pb) {
+            if (x == y || (!x.empty() && !y.empty() &&
+                           (x.find(y) != std::wstring::npos || y.find(x) != std::wstring::npos))) {
+                ++matches;
+                break;
+            }
+        }
+    }
+    if (matches == 0)
+        return 0;
+    return std::min(100, matches * 100 / static_cast<int>(std::max(pa.size(), pb.size())));
+}
+
+int durationScore(int64_t queryMs, int64_t candMs) {
+    if (queryMs <= 0 || candMs <= 0)
+        return 50; // 未知时长给中性分
+    int64_t diff = std::llabs(static_cast<long long>(candMs - queryMs));
+    if (diff <= 2000)
+        return 100;
+    if (diff <= 5000)
+        return 70;
+    if (diff <= 10000)
+        return 40;
+    return 0;
+}
 
 // 解析 LRC 时间戳 "mm:ss.xx"；非纯数字（如 ti:/ar:）返回 false
 bool parseTimeStamp(const std::string& s, int64_t& msOut) {
@@ -173,67 +306,88 @@ struct LyricProvider::Impl {
         if (!curl) return false;
 
         // 1) 搜索
-        std::string keyword = toUtf8(title + L' ' + artist);
-        char* esc = curl_easy_escape(curl, keyword.c_str(), (int)keyword.size());
-        std::string url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" +
-                          std::string(esc ? esc : "") + "&n=10&p=1&format=json&new_json=1";
-        if (esc) curl_free(esc);
+        auto doSearch = [&](const std::wstring& query) {
+            std::vector<Candidate> result;
+            std::string keyword = toUtf8(query);
+            char* esc = curl_easy_escape(curl, keyword.c_str(), (int)keyword.size());
+            std::string url = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w=" +
+                              std::string(esc ? esc : "") + "&n=10&p=1&format=json&new_json=1";
+            if (esc)
+                curl_free(esc);
 
-        std::string body;
-        bool ok = httpGet(curl, url, "https://y.qq.com/", body);
-        std::vector<Candidate> cands;
-        if (ok) {
+            std::string body;
+            if (!httpGet(curl, url, "https://y.qq.com/", body))
+                return result;
             auto j = nlohmann::json::parse(body, nullptr, false);
-            if (!j.is_discarded()) {
-                auto& list = j["data"]["song"]["list"];
-                if (list.is_array()) {
-                    for (auto& s : list) {
-                        Candidate c;
-                        // new_json=1 格式优先，同时兼容旧格式
-                        c.songmid = s.value("mid", s.value("songmid", ""));
-                        c.albummid = s.value("album", nlohmann::json::object())
-                                         .value("mid", s.value("albummid", ""));
-                        c.name = toWide(s.value("name", s.value("songname", "")));
-                        std::wstring singers;
-                        if (s["singer"].is_array()) {
-                            for (auto& sg : s["singer"]) {
-                                if (!singers.empty()) singers += L'/';
-                                singers += toWide(sg.value("name", ""));
-                            }
-                        }
-                        c.singer = singers;
-                        c.intervalMs = (int64_t)s.value("interval", 0) * 1000;
-                        if (!c.songmid.empty()) cands.push_back(std::move(c));
+            if (j.is_discarded())
+                return result;
+            auto& list = j["data"]["song"]["list"];
+            if (!list.is_array())
+                return result;
+            for (auto& s : list) {
+                Candidate c;
+                c.songmid = s.value("mid", s.value("songmid", ""));
+                c.albummid = s.value("album", nlohmann::json::object())
+                                 .value("mid", s.value("albummid", ""));
+                c.name = toWide(s.value("name", s.value("songname", "")));
+                std::wstring singers;
+                if (s["singer"].is_array()) {
+                    for (auto& sg : s["singer"]) {
+                        if (!singers.empty())
+                            singers += L'/';
+                        singers += toWide(sg.value("name", ""));
                     }
                 }
+                c.singer = singers;
+                c.intervalMs = (int64_t)s.value("interval", 0) * 1000;
+                if (!c.songmid.empty())
+                    result.push_back(std::move(c));
             }
-        }
+            return result;
+        };
 
-        // 2) 三重匹配：标题完全匹配 + 歌手包含 + 时长差 <= 2s；失败取第一条
-        const Candidate* picked = nullptr;
-        for (auto& c : cands) {
-            bool titleEq = (c.name == title);
-            bool singerHit = c.singer.find(artist) != std::wstring::npos ||
-                             (!c.singer.empty() && artist.find(c.singer) != std::wstring::npos);
-            bool durOk = durationMs <= 0 ||
-                         std::llabs((long long)(c.intervalMs - durationMs)) <= kDurationToleranceMs;
-            if (titleEq && singerHit && durOk) {
-                picked = &c;
-                break;
+        auto pickCandidate = [&](const std::vector<Candidate>& cands) -> const Candidate* {
+            const Candidate* best = nullptr;
+            int bestScore = -1;
+            for (auto& c : cands) {
+                int t = titleSimilarity(title, c.name);
+                int s = singerSimilarity(artist, c.singer);
+                int d = durationScore(durationMs, c.intervalMs);
+                // 标题权重最高，歌手次之，时长再次
+                int score = t * 12 + s * 5 + d * 3;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = &c;
+                }
             }
+            if (!best)
+                return nullptr;
+            int titleSim = titleSimilarity(title, best->name);
+            if (titleSim == 0 || bestScore < 700)
+                return nullptr;
+            return best;
+        };
+
+        std::vector<Candidate> cands = doSearch(title + L' ' + artist);
+        const Candidate* picked = pickCandidate(cands);
+        if (!picked) {
+            // 带歌手搜不到合适结果时，尝试只按歌名搜索（部分歌曲 SMTC 歌手名与平台不一致）
+            cands = doSearch(title);
+            picked = pickCandidate(cands);
         }
-        if (!picked && !cands.empty()) picked = &cands.front();
         if (!picked) {
             curl_easy_cleanup(curl);
             return false;
         }
+
         info.songmid = toWide(picked->songmid);
         info.albummid = toWide(picked->albummid);
 
         // 3) 下载歌词（不带 Referer 会返回 -1310）
-        url = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" +
-              picked->songmid + "&g_tk=5381&format=json&nobase64=0";
-        ok = httpGet(curl, url, "https://y.qq.com/portal/player.html", body);
+        std::string url = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid=" +
+                          picked->songmid + "&g_tk=5381&format=json&nobase64=0";
+        std::string body;
+        bool ok = httpGet(curl, url, "https://y.qq.com/portal/player.html", body);
         curl_easy_cleanup(curl);
         if (!ok) return false;
 
