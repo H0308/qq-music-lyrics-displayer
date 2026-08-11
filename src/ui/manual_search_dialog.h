@@ -31,6 +31,9 @@ public:
     void onPreviewLyricReady(int idx, bool ok, const std::vector<LyricLine>& lines,
                              const SongInfo& info);
 
+    // 同步当前播放进度（用于预览面板高亮/滚动）
+    void setPlaybackPosition(int64_t positionMs);
+
     void setApplyCallback(ApplyCallback cb);
 
 private:

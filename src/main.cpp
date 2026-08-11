@@ -342,6 +342,9 @@ struct App {
             int idx = LyricProvider::findLine(h->lyrics(), snap.positionMs);
             h->setCurrentLine(idx);
         }
+        if (manualSearchDialog && manualSearchDialog->isOpen()) {
+            manualSearchDialog->setPlaybackPosition(snap.positionMs);
+        }
     }
 
     // 统一托盘图标

@@ -16,6 +16,7 @@ add_executable(QQMusicLyric
     src/ui/lyric_window.cpp
     src/ui/lyric_renderer.cpp
     src/ui/taskbar_host.cpp
+    src/ui/manual_search_dialog.cpp
     src/util/base64.cpp
 )
 

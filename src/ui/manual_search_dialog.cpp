@@ -25,7 +25,7 @@ constexpr int kIdPreviewPanel = 107;
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
-// 右侧桌面歌词风格预览面板（7 行，中间高亮，无时间戳）
+// 右侧桌面歌词风格预览面板（7 行，高亮当前播放行，支持鼠标滚轮手动滚动）
 class LyricPreviewPanel {
 public:
     bool create(HWND parent, HINSTANCE inst, int x, int y, int w, int h) {
@@ -43,8 +43,22 @@ public:
 
     void setLyrics(const std::vector<LyricLine>& lines) {
         lines_ = lines;
+        topLine_ = 0;
+        currentLine_ = -1;
+        manualScroll_ = false;
+        wheelAccum_ = 0;
+        syncToCurrentLine();
         if (hwnd_)
             InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void setPosition(int64_t positionMs) {
+        currentLine_ = LyricProvider::findLine(lines_, positionMs);
+        if (!manualScroll_) {
+            syncToCurrentLine();
+            if (hwnd_)
+                InvalidateRect(hwnd_, nullptr, FALSE);
+        }
     }
 
     void destroy() {
@@ -57,6 +71,12 @@ public:
     HWND hwnd() const { return hwnd_; }
 
 private:
+    static constexpr int kVisible = 7;
+    static constexpr int kMid = kVisible / 2;          // 3，当前行居中
+    static constexpr UINT kTimerResume = 1;
+    static constexpr DWORD kResumeDelayMs = 2000;      // 停止滚动后 2 秒恢复同步
+    static constexpr int kWheelLinesPerNotch = 3;
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LyricPreviewPanel* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -75,6 +95,7 @@ private:
         switch (msg) {
         case WM_CREATE:
             createDeviceResources();
+            SetTimer(hwnd_, kTimerResume, 100, nullptr);
             return 0;
         case WM_ERASEBKGND:
             return 1;
@@ -88,11 +109,62 @@ private:
         case WM_SIZE:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
+        case WM_TIMER:
+            onTimer();
+            return 0;
+        case WM_MOUSEWHEEL:
+            onMouseWheel(GET_WHEEL_DELTA_WPARAM(wp));
+            return 0;
         case WM_DESTROY:
+            KillTimer(hwnd_, kTimerResume);
             releaseResources();
             return 0;
         }
         return DefWindowProcW(hwnd_, msg, wp, lp);
+    }
+
+    void onTimer() {
+        if (manualScroll_) {
+            DWORD now = GetTickCount();
+            if (now - lastScrollTick_ >= kResumeDelayMs) {
+                manualScroll_ = false;
+                syncToCurrentLine();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+        }
+    }
+
+    void onMouseWheel(int delta) {
+        if (lines_.empty())
+            return;
+        wheelAccum_ += delta;
+        int notch = wheelAccum_ / WHEEL_DELTA;
+        if (notch == 0)
+            return;
+        wheelAccum_ -= notch * WHEEL_DELTA;
+        // 滚轮向上（delta > 0）内容向上走，topLine 减小；向下则增大
+        scrollBy(-notch * kWheelLinesPerNotch);
+    }
+
+    void scrollBy(int lines) {
+        int maxTop = std::max(0, static_cast<int>(lines_.size()) - kVisible);
+        topLine_ = std::clamp(topLine_ + lines, 0, maxTop);
+        manualScroll_ = true;
+        lastScrollTick_ = GetTickCount();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+
+    void syncToCurrentLine() {
+        int total = static_cast<int>(lines_.size());
+        if (total == 0) {
+            topLine_ = 0;
+            return;
+        }
+        int maxTop = std::max(0, total - kVisible);
+        if (currentLine_ < 0)
+            topLine_ = 0;
+        else
+            topLine_ = std::clamp(currentLine_ - kMid, 0, maxTop);
     }
 
     void createDeviceResources() {
@@ -184,22 +256,33 @@ private:
         rt->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
         rt->BeginDraw();
         rt->Clear(D2D1::ColorF(0.08f, 0.08f, 0.08f, 1.0f));
-        if (!lines_.empty() && fmtNormal_ && fmtCurrent_) {
-            constexpr int kVisible = 7;
-            int count = std::min(kVisible, static_cast<int>(lines_.size()));
-            constexpr int kMid = kVisible / 2; // 3
+        if (fmtNormal_ && brushNormal_) {
             float scale = static_cast<float>(dpi_) / 96.0f;
             float dipW = static_cast<float>(w) / scale;
             float dipH = static_cast<float>(h) / scale;
-            float slotH = dipH / kVisible;
             float pad = 12.0f;
-            for (int i = 0; i < count; ++i) {
-                bool cur = (i == kMid);
-                const std::wstring& text = lines_[i].text;
-                IDWriteTextFormat* fmt = cur ? fmtCurrent_ : fmtNormal_;
-                ID2D1SolidColorBrush* brush = cur ? brushCurrent_ : brushNormal_;
-                D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, dipW - pad, (i + 1) * slotH);
-                rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, brush);
+            // 细边框
+            rt->DrawRectangle(D2D1::RectF(0.5f, 0.5f, dipW - 0.5f, dipH - 0.5f), brushNormal_, 1.0f);
+            if (lines_.empty()) {
+                const std::wstring placeholder = L"选择左侧歌曲预览歌词";
+                D2D1_RECT_F rect = D2D1::RectF(pad, dipH * 0.4f, dipW - pad, dipH * 0.6f);
+                rt->DrawTextW(placeholder.c_str(), static_cast<UINT32>(placeholder.size()),
+                              fmtNormal_, rect, brushNormal_);
+            } else if (fmtCurrent_) {
+                int total = static_cast<int>(lines_.size());
+                int maxTop = std::max(0, total - kVisible);
+                int top = std::clamp(topLine_, 0, maxTop);
+                int count = std::min(kVisible, total - top);
+                float slotH = dipH / kVisible;
+                for (int i = 0; i < count; ++i) {
+                    int lineIdx = top + i;
+                    bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
+                    const std::wstring& text = lines_[lineIdx].text;
+                    IDWriteTextFormat* fmt = cur ? fmtCurrent_ : fmtNormal_;
+                    ID2D1SolidColorBrush* brush = cur ? brushCurrent_ : brushNormal_;
+                    D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, dipW - pad, (i + 1) * slotH);
+                    rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, brush);
+                }
             }
         }
         HRESULT hr = rt->EndDraw();
@@ -216,6 +299,11 @@ private:
     ID2D1SolidColorBrush* brushNormal_ = nullptr;
     ID2D1SolidColorBrush* brushCurrent_ = nullptr;
     std::vector<LyricLine> lines_;
+    int topLine_ = 0;
+    int currentLine_ = -1;
+    bool manualScroll_ = false;
+    DWORD lastScrollTick_ = 0;
+    int wheelAccum_ = 0;
     UINT dpi_ = 96;
 };
 
@@ -238,6 +326,7 @@ struct ManualSearchDialog::Impl {
     HWND hArtist = nullptr;
     HWND hSearch = nullptr;
     HWND hList = nullptr;
+    HWND hStatus = nullptr;
     HWND hOk = nullptr;
     HWND hCancel = nullptr;
     LyricPreviewPanel preview;
@@ -271,17 +360,25 @@ struct ManualSearchDialog::Impl {
         case WM_CREATE:
             createControls();
             layout();
+            SetWindowTextW(hStatus, L"请输入歌名和歌手，点击搜索。");
             return 0;
         case WM_SIZE:
             layout();
             return 0;
+        case WM_MOUSEWHEEL: {
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            if (ChildWindowFromPoint(hwnd, pt) == preview.hwnd())
+                SendMessageW(preview.hwnd(), WM_MOUSEWHEEL, wp, lp);
+            return 0;
+        }
         case WM_COMMAND:
             onCommand(LOWORD(wp), HIWORD(wp), reinterpret_cast<HWND>(lp));
             return 0;
         case kMsgCandidatesReady: {
             auto* payload = reinterpret_cast<std::vector<SearchCandidate>*>(lp);
             if (payload) {
-                onCandidatesReady(*payload);
+                this->onCandidatesReady(*payload);
                 delete payload;
             }
             return 0;
@@ -289,14 +386,14 @@ struct ManualSearchDialog::Impl {
         case kMsgPreviewLyricReady: {
             auto* payload = reinterpret_cast<std::tuple<int, bool, std::vector<LyricLine>, SongInfo>*>(lp);
             if (payload) {
-                onPreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
-                                    std::get<2>(*payload), std::get<3>(*payload));
+                this->onPreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
+                                          std::get<2>(*payload), std::get<3>(*payload));
                 delete payload;
             }
             return 0;
         }
         case WM_CLOSE:
-            destroy();
+            this->destroy();
             return 0;
         case WM_DESTROY:
             preview.destroy();
@@ -316,11 +413,15 @@ struct ManualSearchDialog::Impl {
         hSearch = CreateWindowExW(0, L"BUTTON", L"搜索", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
                                   0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)kIdSearchBtn, inst, nullptr);
 
+        hStatus = CreateWindowExW(0, L"STATIC", L"",
+                                  WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd,
+                                  (HMENU)(UINT_PTR)108, inst, nullptr);
+
         hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                                 WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 0, 0, 0, 0, hwnd,
                                 (HMENU)(UINT_PTR)kIdCandidateList, inst, nullptr);
 
-        hOk = CreateWindowExW(0, L"BUTTON", L"使用选中歌词",
+        hOk = CreateWindowExW(0, L"BUTTON", L"使用此歌词",
                               WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_DISABLED, 0, 0, 0, 0,
                               hwnd, (HMENU)(UINT_PTR)kIdOkBtn, inst, nullptr);
         hCancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0,
@@ -333,9 +434,14 @@ struct ManualSearchDialog::Impl {
         SendMessageW(hTitle, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hArtist, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hSearch, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageW(hStatus, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hList, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hOk, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hCancel, WM_SETFONT, (WPARAM)font, TRUE);
+
+        // 输入框提示文字
+        SendMessageW(hTitle, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"歌名"));
+        SendMessageW(hArtist, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"歌手"));
     }
 
     void layout() {
@@ -343,44 +449,52 @@ struct ManualSearchDialog::Impl {
         GetClientRect(hwnd, &rc);
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = 12;
-        int topH = 28;
+        int pad = 16;
+        int gap = 12;
+        int editH = 26;
         int btnW = 80;
-        int bottomH = 36;
+        int statusH = 22;
+        int bottomH = 40;
 
-        // 顶部输入区
-        int editW = (w - pad * 4 - btnW) / 2;
-        SetWindowPos(hTitle, nullptr, pad, pad, editW, topH, SWP_NOZORDER);
-        SetWindowPos(hArtist, nullptr, pad * 2 + editW, pad, editW, topH, SWP_NOZORDER);
-        SetWindowPos(hSearch, nullptr, w - pad - btnW, pad, btnW, topH, SWP_NOZORDER);
+        // 顶部输入区：歌名 [编辑框] 歌手 [编辑框] [搜索]
+        int topRowW = w - pad * 2;
+        int editW = (topRowW - gap * 2 - btnW) / 2;
+        SetWindowPos(hTitle, nullptr, pad, pad, editW, editH, SWP_NOZORDER);
+        SetWindowPos(hArtist, nullptr, pad + editW + gap, pad, editW, editH, SWP_NOZORDER);
+        SetWindowPos(hSearch, nullptr, w - pad - btnW, pad, btnW, editH, SWP_NOZORDER);
 
-        int yTop = pad * 2 + topH;
-        int contentH = h - yTop - bottomH - pad;
+        int statusY = pad + editH + 10;
+        SetWindowPos(hStatus, nullptr, pad, statusY, w - pad * 2, statusH, SWP_NOZORDER);
+
+        int contentTop = statusY + statusH + 12;
+        int contentH = h - contentTop - bottomH;
         int listW = w * 2 / 5;
-        int rightX = pad * 2 + listW;
+        int rightX = pad + listW + gap;
         int rightW = w - rightX - pad;
 
         // 左侧候选列表
-        SetWindowPos(hList, nullptr, pad, yTop, listW, contentH - pad - 32, SWP_NOZORDER);
+        SetWindowPos(hList, nullptr, pad, contentTop, listW, contentH, SWP_NOZORDER);
         // 右侧预览
-        SetWindowPos(preview.hwnd(), nullptr, rightX, yTop, rightW, contentH, SWP_NOZORDER);
+        SetWindowPos(preview.hwnd(), nullptr, rightX, contentTop, rightW, contentH, SWP_NOZORDER);
 
         // 底部按钮
-        int btnY = h - bottomH - pad / 2;
-        SetWindowPos(hOk, nullptr, w - pad - btnW * 2 - 8, btnY, btnW * 2, 28, SWP_NOZORDER);
-        SetWindowPos(hCancel, nullptr, w - pad - btnW, btnY, btnW, 28, SWP_NOZORDER);
+        int okW = 110;
+        int cancelW = 80;
+        int btnY = h - bottomH + 4;
+        SetWindowPos(hOk, nullptr, w - pad - okW - cancelW - gap, btnY, okW, 28, SWP_NOZORDER);
+        SetWindowPos(hCancel, nullptr, w - pad - cancelW, btnY, cancelW, 28, SWP_NOZORDER);
     }
 
     void onCommand(int id, int code, HWND h) {
         (void)h;
         if (id == kIdSearchBtn && code == BN_CLICKED) {
-            doSearch();
+            this->doSearch();
         } else if (id == kIdCancelBtn && code == BN_CLICKED) {
-            destroy();
+            this->destroy();
         } else if (id == kIdOkBtn && code == BN_CLICKED) {
-            applySelection();
+            this->applySelection();
         } else if (id == kIdCandidateList && code == LBN_SELCHANGE) {
-            onSelectionChanged();
+            this->onSelectionChanged();
         }
     }
 
@@ -393,6 +507,7 @@ struct ManualSearchDialog::Impl {
         selectedIdx = -1;
         candidates.clear();
         EnableWindow(hOk, FALSE);
+        SetWindowTextW(hStatus, L"搜索中，请稍候…");
 
         std::wstring title = getWindowTextW(hTitle);
         std::wstring artist = getWindowTextW(hArtist);
@@ -413,9 +528,15 @@ struct ManualSearchDialog::Impl {
             std::wstring item = c.name + L" - " + c.singer;
             SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
         }
-        if (!candidates.empty()) {
+        if (candidates.empty()) {
+            SetWindowTextW(hStatus, L"未找到相关歌曲，请尝试更换关键词。");
+        } else {
+            SetWindowTextW(hStatus,
+                           (L"找到 " + std::to_wstring(candidates.size()) +
+                            L" 首候选歌曲，点击选择以预览歌词。")
+                               .c_str());
             SendMessageW(hList, LB_SETCURSEL, 0, 0);
-            onSelectionChanged();
+            this->onSelectionChanged();
         }
     }
 
@@ -426,6 +547,8 @@ struct ManualSearchDialog::Impl {
         selectedIdx = idx;
         preview.setLyrics({});
         EnableWindow(hOk, FALSE);
+        SetWindowTextW(hStatus,
+                       (L"正在加载《" + candidates[idx].name + L"》的歌词预览…").c_str());
         HWND hwndCopy = hwnd;
         int idxCopy = idx;
         provider->fetchLyricAsync(candidates[idx],
@@ -441,12 +564,19 @@ struct ManualSearchDialog::Impl {
 
     void onPreviewLyricReady(int idx, bool ok, const std::vector<LyricLine>& lines,
                              const SongInfo& info) {
-        if (idx != selectedIdx || !ok)
+        if (idx != selectedIdx || !ok) {
+            if (idx == selectedIdx)
+                SetWindowTextW(hStatus, L"该候选没有可用歌词，请尝试其他歌曲。");
             return;
+        }
         previewLines = lines;
         previewInfo = info;
         preview.setLyrics(previewLines);
         EnableWindow(hOk, TRUE);
+        SetWindowTextW(hStatus,
+                       (L"已加载《" + candidates[idx].name +
+                        L"》的歌词预览，点击“使用此歌词”应用。")
+                           .c_str());
     }
 
     void applySelection() {
@@ -460,7 +590,7 @@ struct ManualSearchDialog::Impl {
         }
         if (onApply)
             onApply();
-        destroy();
+        this->destroy();
     }
 
     void destroy() {
@@ -543,4 +673,8 @@ void ManualSearchDialog::onPreviewLyricReady(int idx, bool ok,
 
 void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
     impl_->onApply = std::move(cb);
+}
+
+void ManualSearchDialog::setPlaybackPosition(int64_t positionMs) {
+    impl_->preview.setPosition(positionMs);
 }
