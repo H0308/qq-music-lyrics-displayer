@@ -153,13 +153,13 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushBg_ = nullptr;
     ID2D1SolidColorBrush* brushText_ = nullptr;
     ID2D1SolidColorBrush* brushDim_ = nullptr;
-    ID2D1SolidColorBrush* brushAccent_ = nullptr;
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
     ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
-    ID2D1PathGeometry* icoPlay_ = nullptr;
-    ID2D1PathGeometry* icoPrev_ = nullptr;
+    ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
+    ID2D1PathGeometry* icoPrev_ = nullptr;   // 上一首（左向三角 + 左侧竖条）
+    ID2D1PathGeometry* icoNext_ = nullptr;   // 下一首（右向三角 + 右侧竖条）
     bool textDirty_ = true;
     bool geomDirty_ = true;
     bool layoutDirty_ = true;
@@ -359,18 +359,17 @@ struct TaskbarHost::Impl {
         renderer.setDpi(dpi_);
 
         // 根据任务栏深浅主题选择配色，贴近 Windows 11 原生媒体控件
+        // 背景使用极低的 alpha，视觉上透明但保证分层窗口命中测试覆盖整个区域
         if (lightTheme_) {
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.92f), &brushBg_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.01f), &brushBg_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.08f, 0.08f, 0.95f), &brushText_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.30f, 0.30f, 0.75f), &brushDim_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.00f, 0.48f, 0.90f, 1.00f), &brushAccent_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.90f), &brushBtn_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.30f), &brushBtnDisabled_);
         } else {
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.88f), &brushBg_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.01f), &brushBg_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.95f), &brushText_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.65f), &brushDim_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.70f, 1.00f, 1.00f), &brushAccent_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f), &brushBtn_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.35f), &brushBtnDisabled_);
         }
@@ -436,13 +435,13 @@ struct TaskbarHost::Impl {
         r(brushBg_);
         r(brushText_);
         r(brushDim_);
-        r(brushAccent_);
         r(brushBtn_);
         r(brushBtnDisabled_);
         r(coverClip_);
         r(coverLayer_);
         r(icoPlay_);
         r(icoPrev_);
+        r(icoNext_);
         if (coverBmp) {
             coverBmp->Release();
             coverBmp = nullptr;
@@ -633,26 +632,52 @@ struct TaskbarHost::Impl {
             icoPrev_->Release();
             icoPrev_ = nullptr;
         }
+        if (icoNext_) {
+            icoNext_->Release();
+            icoNext_ = nullptr;
+        }
 
         float s = coverSize();
         D2D1_ROUNDED_RECT rr{D2D1::RectF(0, 0, s, s), 4.0f, 4.0f};
         d2d->CreateRoundedRectangleGeometry(rr, &coverClip_);
 
-        auto tri = [&](float dir, ID2D1PathGeometry** out) {
+        // 绘制带圆角的三角形：dir=1 向右，dir=-1 向左
+        auto makeRoundedTriangle = [&](int dir, ID2D1PathGeometry** out) {
+            float tipX = dir * 0.55f;
+            float baseX = -dir * 0.35f;
+            constexpr float rad = 0.10f;
+            float ux = dir * 0.8739f;
+            float uy = 0.4856f;
+            D2D1_POINT_2F tip = {tipX, 0.0f};
+            D2D1_POINT_2F baseTop = {baseX, -0.5f};
+            D2D1_POINT_2F baseBottom = {baseX, 0.5f};
             if (FAILED(d2d->CreatePathGeometry(out)))
                 return;
             ID2D1GeometrySink* sink = nullptr;
             if (FAILED((*out)->Open(&sink)))
                 return;
-            sink->BeginFigure(D2D1::Point2F(-0.38f * dir, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
-            sink->AddLine(D2D1::Point2F(0.5f * dir, 0.0f));
-            sink->AddLine(D2D1::Point2F(-0.38f * dir, 0.5f));
+            sink->BeginFigure({baseTop.x + rad * ux, baseTop.y + rad * uy},
+                              D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                baseTop, {baseTop.x, baseTop.y + rad}));
+            sink->AddLine({baseBottom.x, baseBottom.y - rad});
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                baseBottom, {baseBottom.x + rad * ux, baseBottom.y - rad * uy}));
+            sink->AddLine({tip.x - rad * ux, tip.y + rad * uy});
+            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                tip, {tip.x - rad * ux, tip.y - rad * uy}));
+            sink->AddLine({baseTop.x + rad * ux, baseTop.y + rad * uy});
             sink->EndFigure(D2D1_FIGURE_END_CLOSED);
             sink->Close();
             sink->Release();
         };
-        tri(1.0f, &icoPlay_);
-        tri(-1.0f, &icoPrev_);
+
+        // 播放 / 下一首：右向圆角三角
+        makeRoundedTriangle(1, &icoPlay_);
+        // 上一首：左向圆角三角
+        makeRoundedTriangle(-1, &icoPrev_);
+        // 下一首与播放同形，绘制时直接使用
+        makeRoundedTriangle(1, &icoNext_);
     }
 
     // ---------- 渲染 ----------
@@ -664,39 +689,47 @@ struct TaskbarHost::Impl {
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
         ID2D1SolidColorBrush* brush = enabled ? brushBtn_ : brushBtnDisabled_;
 
-        // 所有按钮都带稍浓的圆背景，保证在歌词上方也能看清
-        rt->FillEllipse(D2D1::Ellipse(c, r, r), brushBg_);
-
         if (idx == 1) {
-            // 播放/暂停：accent 色图标
+            // 播放/暂停：使用系统风格纯色图标
             if (media.playing) {
-                float w = r * 0.32f;
-                float gap = r * 0.18f;
-                rt->FillRectangle(D2D1::RectF(c.x - gap - w, c.y - r * 0.55f, c.x - gap,
-                                             c.y + r * 0.55f),
-                                  brushAccent_);
-                rt->FillRectangle(D2D1::RectF(c.x + gap, c.y - r * 0.55f, c.x + gap + w,
-                                             c.y + r * 0.55f),
-                                  brushAccent_);
+                // 暂停：两根圆角竖条
+                float w = r * 0.22f;
+                float gap = r * 0.20f;
+                float h = r * 0.55f;
+                float barR = w * 0.45f;
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(c.x - gap - w, c.y - h, c.x - gap, c.y + h), barR,
+                                      barR),
+                    brush);
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(c.x + gap, c.y - h, c.x + gap + w, c.y + h), barR,
+                                      barR),
+                    brush);
             } else if (icoPlay_) {
-                rt->SetTransform(D2D1::Matrix3x2F::Scale(r * 1.5f, r * 1.5f) *
-                                 D2D1::Matrix3x2F::Translation(c.x + r * 0.15f, c.y));
-                rt->FillGeometry(icoPlay_, brushAccent_);
+                rt->SetTransform(D2D1::Matrix3x2F::Scale(r * 1.4f, r * 1.4f) *
+                                 D2D1::Matrix3x2F::Translation(c.x + r * 0.05f, c.y));
+                rt->FillGeometry(icoPlay_, brush);
                 rt->SetTransform(D2D1::Matrix3x2F::Identity());
             }
         } else {
-            // 上一首/下一首：三角形 + 竖条
-            ID2D1PathGeometry* g = idx == 0 ? icoPrev_ : icoPlay_;
+            // 上一首/下一首：圆角三角 + 圆角竖条
+            ID2D1PathGeometry* g = idx == 0 ? icoPrev_ : icoNext_;
+            float sc = r * 1.4f;
+            float barW = 0.16f * sc;
+            float barH = 1.0f * sc;
+            float barR = barW * 0.45f;
+            float barX = idx == 0 ? c.x - 0.72f * sc : c.x + 0.56f * sc;
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(barX, c.y - barH * 0.5f, barX + barW,
+                                              c.y + barH * 0.5f),
+                                  barR, barR),
+                brush);
             if (g) {
-                rt->SetTransform(D2D1::Matrix3x2F::Scale(r * 1.3f, r * 1.3f) *
+                rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc) *
                                  D2D1::Matrix3x2F::Translation(c.x, c.y));
                 rt->FillGeometry(g, brush);
                 rt->SetTransform(D2D1::Matrix3x2F::Identity());
             }
-            float barW = r * 0.20f;
-            float barX = idx == 0 ? c.x - r * 0.78f : c.x + r * 0.58f;
-            rt->FillRectangle(D2D1::RectF(barX, c.y - r * 0.52f, barX + barW, c.y + r * 0.52f),
-                              brush);
         }
     }
 
@@ -790,7 +823,7 @@ struct TaskbarHost::Impl {
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
-        // 背景
+        // 背景：alpha 极低，视觉上透明但保证整个窗口可命中
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), kCornerRadius, kCornerRadius};
         rt->FillRoundedRectangle(bg, brushBg_);
 
@@ -924,6 +957,9 @@ struct TaskbarHost::Impl {
             return 0;
         case WM_ERASEBKGND:
             return 1;
+        case WM_NCHITTEST:
+            // 整个窗口区域都视为客户区，让透明背景也能接收鼠标消息
+            return HTCLIENT;
         case WM_MOUSEMOVE: {
             bool wasOver = mouseOver_;
             mouseOver_ = true;

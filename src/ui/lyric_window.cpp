@@ -140,6 +140,29 @@ std::pair<D2D1_COLOR_F, D2D1_COLOR_F> extractGradientColors(const std::vector<ui
     return {primary, secondary};
 }
 
+// 读取注册表 DWORD，失败返回默认值
+DWORD regDword(HKEY root, const wchar_t* path, const wchar_t* name, DWORD defaultValue) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(root, path, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return defaultValue;
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = REG_DWORD;
+    LONG err = RegQueryValueExW(key, name, nullptr, &type,
+                                reinterpret_cast<LPBYTE>(&value), &size);
+    RegCloseKey(key);
+    if (err != ERROR_SUCCESS || type != REG_DWORD)
+        return defaultValue;
+    return value;
+}
+
+bool isSystemLightTheme() {
+    // 1 = 浅色，0 = 深色（默认）
+    return regDword(HKEY_CURRENT_USER,
+                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                    L"SystemUsesLightTheme", 0) != 0;
+}
+
 } // namespace
 
 struct OverlayHost::Impl {
@@ -196,11 +219,14 @@ struct OverlayHost::Impl {
     IDWriteTextLayout* artistLayout = nullptr;
     ID2D1SolidColorBrush* brushDivider = nullptr; // 分隔线/占位/置灰
     ID2D1SolidColorBrush* brushBtn = nullptr;     // 按钮/标题文字
+    ID2D1SolidColorBrush* brushBarLight = nullptr;   // 封面渐变背景上的浅色文字/按钮
+    ID2D1SolidColorBrush* brushBarDividerLight = nullptr; // 封面渐变背景上的浅色分隔线
     ID2D1RoundedRectangleGeometry* coverClip = nullptr; // 设备无关，跨重建存活
     ID2D1PathGeometry* barBgPath = nullptr;             // 底部控制条背景（底部圆角）
     ID2D1Layer* coverLayer = nullptr;                   // 设备相关
-    ID2D1PathGeometry* icoPlay = nullptr;               // 右向三角（播放/下一首共用）
-    ID2D1PathGeometry* icoPrev = nullptr;               // 左向三角
+    ID2D1PathGeometry* icoPlay = nullptr;   // 播放（右向三角）
+    ID2D1PathGeometry* icoPrev = nullptr;   // 上一首（左向三角 + 左侧竖条）
+    ID2D1PathGeometry* icoNext = nullptr;   // 下一首（右向三角 + 右侧竖条）
 
     // D2D / GDI 资源
     LyricRenderer renderer;
@@ -214,6 +240,8 @@ struct OverlayHost::Impl {
     IDWriteTextFormat* fmtLine = nullptr;
     IDWriteTextFormat* fmtCurrent = nullptr;
 
+    bool lightTheme_ = false;
+
     bool dragging = false;
     bool quitting = false;
     POINT dragCursor{};
@@ -224,19 +252,29 @@ struct OverlayHost::Impl {
     // ---------- 资源 ----------
 
     void createDeviceResources() {
-        if (brushBg) return;
+        if (brushBg)
+            return;
+        lightTheme_ = isSystemLightTheme();
         renderer.initialize();
         auto* rt = renderer.renderTarget();
-        if (!rt) return;
+        if (!rt)
+            return;
         rt->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.30f), &brushBg);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f), &brushNormal);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f), &brushCurrent); // QQ 绿
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f),&brushCurrent); // QQ 绿
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &brushShadow);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushGradientOverlay);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &brushBarBg);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f), &brushDivider);
-        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.88f), &brushBtn);
+        if (lightTheme_) {
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.15f), &brushDivider);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.90f), &brushBtn);
+        } else {
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f), &brushDivider);
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.88f), &brushBtn);
+        }
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f), &brushBarLight);
+        rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.25f), &brushBarDividerLight);
         rt->CreateLayer(&coverLayer);
         recreateFormats();
     }
@@ -523,54 +561,87 @@ struct OverlayHost::Impl {
         sink->Release();
     }
 
-    // 单位三角形图标（设备无关）：dir=1 右向（播放/下一首），dir=-1 左向（上一首）
+    // 系统风格媒体控制图标（设备无关）
     void ensureIcons() {
         ID2D1Factory* d2d = renderer.d2d();
-        if (!d2d || icoPlay) return;
-        auto tri = [&](float dir, ID2D1PathGeometry** out) {
-            if (FAILED(d2d->CreatePathGeometry(out))) return;
+        if (!d2d || icoPlay)
+            return;
+
+        auto makePath = [&](auto&& build, ID2D1PathGeometry** out) {
+            if (FAILED(d2d->CreatePathGeometry(out)))
+                return;
             ID2D1GeometrySink* sink = nullptr;
-            if (FAILED((*out)->Open(&sink))) return;
-            sink->BeginFigure(D2D1::Point2F(-0.38f * dir, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
-            sink->AddLine(D2D1::Point2F(0.5f * dir, 0.0f));
-            sink->AddLine(D2D1::Point2F(-0.38f * dir, 0.5f));
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (FAILED((*out)->Open(&sink)))
+                return;
+            build(sink);
             sink->Close();
             sink->Release();
         };
-        tri(1.0f, &icoPlay);
-        tri(-1.0f, &icoPrev);
+
+        // 播放：右向实心三角
+        makePath([](ID2D1GeometrySink* sink) {
+            sink->BeginFigure(D2D1::Point2F(-0.35f, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(0.55f, 0.0f));
+            sink->AddLine(D2D1::Point2F(-0.35f, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }, &icoPlay);
+
+        // 上一首：左向三角 + 左侧竖条
+        makePath([](ID2D1GeometrySink* sink) {
+            sink->BeginFigure(D2D1::Point2F(0.35f, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(-0.55f, 0.0f));
+            sink->AddLine(D2D1::Point2F(0.35f, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->BeginFigure(D2D1::Point2F(-0.72f, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(-0.56f, -0.5f));
+            sink->AddLine(D2D1::Point2F(-0.56f, 0.5f));
+            sink->AddLine(D2D1::Point2F(-0.72f, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }, &icoPrev);
+
+        // 下一首：右向三角 + 右侧竖条
+        makePath([](ID2D1GeometrySink* sink) {
+            sink->BeginFigure(D2D1::Point2F(-0.35f, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(0.55f, 0.0f));
+            sink->AddLine(D2D1::Point2F(-0.35f, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            sink->BeginFigure(D2D1::Point2F(0.56f, -0.5f), D2D1_FIGURE_BEGIN_FILLED);
+            sink->AddLine(D2D1::Point2F(0.72f, -0.5f));
+            sink->AddLine(D2D1::Point2F(0.72f, 0.5f));
+            sink->AddLine(D2D1::Point2F(0.56f, 0.5f));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+        }, &icoNext);
     }
 
     void drawButton(int idx) {
         auto* rt = renderer.renderTarget();
-        if (!rt) return;
+        if (!rt)
+            return;
         D2D1_POINT_2F c = btnCenter(idx);
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
-        ID2D1SolidColorBrush* brush = enabled ? brushBtn : brushDivider;
+        // 有封面渐变时背景必为深色，按钮强制用浅色
+        ID2D1SolidColorBrush* fg = brushGradient ? brushBarLight : brushBtn;
+        ID2D1SolidColorBrush* brush = enabled ? fg : brushDivider;
         if (idx == 1) {
-            rt->DrawEllipse(D2D1::Ellipse(c, 13.5f, 13.5f), brushCurrent, 1.5f);
+            // 播放/暂停：系统风格纯色图标，无圆环
             if (media.playing) { // 暂停图标：双竖条
-                rt->FillRectangle(D2D1::RectF(c.x - 4.5f, c.y - 5.5f, c.x - 1.8f, c.y + 5.5f),
-                                  brushCurrent);
-                rt->FillRectangle(D2D1::RectF(c.x + 1.8f, c.y - 5.5f, c.x + 4.5f, c.y + 5.5f),
-                                  brushCurrent);
+                rt->FillRectangle(D2D1::RectF(c.x - 4.5f, c.y - 5.5f, c.x - 1.8f, c.y + 5.5f), brush);
+                rt->FillRectangle(D2D1::RectF(c.x + 1.8f, c.y - 5.5f, c.x + 4.5f, c.y + 5.5f), brush);
             } else if (icoPlay) {
                 rt->SetTransform(D2D1::Matrix3x2F::Scale(13.0f, 13.0f) *
-                                 D2D1::Matrix3x2F::Translation(c.x + 1.0f, c.y));
-                rt->FillGeometry(icoPlay, brushCurrent);
+                                 D2D1::Matrix3x2F::Translation(c.x + 0.8f, c.y));
+                rt->FillGeometry(icoPlay, brush);
                 rt->SetTransform(D2D1::Matrix3x2F::Identity());
             }
         } else {
-            ID2D1PathGeometry* g = idx == 0 ? icoPrev : icoPlay;
+            // 上一首/下一首
+            ID2D1PathGeometry* g = idx == 0 ? icoPrev : icoNext;
             if (g) {
                 rt->SetTransform(D2D1::Matrix3x2F::Scale(11.0f, 11.0f) *
                                  D2D1::Matrix3x2F::Translation(c.x, c.y));
                 rt->FillGeometry(g, brush);
                 rt->SetTransform(D2D1::Matrix3x2F::Identity());
             }
-            float barX = idx == 0 ? c.x - 7.0f : c.x + 5.2f;
-            rt->FillRectangle(D2D1::RectF(barX, c.y - 6.0f, barX + 1.8f, c.y + 6.0f), brush);
         }
     }
 
@@ -578,11 +649,16 @@ struct OverlayHost::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt) return;
         float top = lyricH();
+        // 有封面渐变时背景必为深色，控制条前景强制浅色；无封面时按系统主题
+        bool onGradient = brushGradient != nullptr;
+        ID2D1SolidColorBrush* fg = onGradient ? brushBarLight : brushBtn;
+        ID2D1SolidColorBrush* dim = onGradient ? brushNormal : brushBtn;
+        ID2D1SolidColorBrush* div = onGradient ? brushBarDividerLight : brushDivider;
         // 控制条独立背景，和歌词区明确分区；底部与窗口同圆角
         if (brushBarBg && barBgPath)
             rt->FillGeometry(barBgPath, brushBarBg);
         rt->DrawLine(D2D1::Point2F(14.0f, top + 0.5f), D2D1::Point2F(wndW - 14.0f, top + 0.5f),
-                     brushDivider, 1.0f);
+                     div, 1.0f);
         if (coverDirty) decodeCover();
         D2D1_RECT_F cr = coverRect();
         ensureBarGeometry();
@@ -592,14 +668,14 @@ struct OverlayHost::Impl {
             rt->PopLayer();
         } else {
             D2D1_ROUNDED_RECT rr{cr, 7.0f, 7.0f};
-            rt->FillRoundedRectangle(rr, brushDivider);
+            rt->FillRoundedRectangle(rr, div);
         }
         if (barTextDirty) buildBarText();
         float tx = cr.right + 10.0f;
         if (titleLayout)
-            rt->DrawTextLayout(D2D1::Point2F(tx, top + 10.0f), titleLayout, brushBtn);
+            rt->DrawTextLayout(D2D1::Point2F(tx, top + 10.0f), titleLayout, fg);
         if (artistLayout)
-            rt->DrawTextLayout(D2D1::Point2F(tx, top + 33.0f), artistLayout, brushNormal);
+            rt->DrawTextLayout(D2D1::Point2F(tx, top + 33.0f), artistLayout, dim);
         ensureIcons();
         for (int i = 0; i < 3; ++i) drawButton(i);
     }
@@ -640,6 +716,8 @@ struct OverlayHost::Impl {
         r(brushBarBg);
         r(brushDivider);
         r(brushBtn);
+        r(brushBarLight);
+        r(brushBarDividerLight);
         renderer.discard();
         coverDirty = true;
         barTextDirty = true;
@@ -664,6 +742,10 @@ struct OverlayHost::Impl {
         if (icoPrev) {
             icoPrev->Release();
             icoPrev = nullptr;
+        }
+        if (icoNext) {
+            icoNext->Release();
+            icoNext = nullptr;
         }
         renderer.releaseAll();
     }
@@ -747,8 +829,18 @@ struct OverlayHost::Impl {
 
     // ---------- 事件 ----------
 
+    void detectThemeChange() {
+        bool light = isSystemLightTheme();
+        if (light != lightTheme_) {
+            lightTheme_ = light;
+            discardDeviceResources();
+        }
+    }
+
     void onTimer() {
-        if (tick) tick();
+        if (tick)
+            tick();
+        detectThemeChange();
         float diff = scrollTarget - scroll;
         if (std::fabs(diff) > 0.002f)
             scroll += diff * kScrollEase;
@@ -843,6 +935,10 @@ struct OverlayHost::Impl {
             render();
             return 0;
         }
+        case WM_SETTINGCHANGE:
+            detectThemeChange();
+            render();
+            return 0;
         case WM_DESTROY:
             KillTimer(hwnd, kTimerId);
             releaseAll();
