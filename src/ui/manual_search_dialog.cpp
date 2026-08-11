@@ -34,7 +34,7 @@ public:
         wc.lpfnWndProc = wndProc;
         wc.hInstance = inst;
         wc.lpszClassName = L"QQMusicLyricPreviewPanel";
-        wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
         RegisterClassExW(&wc);
         hwnd_ = CreateWindowExW(0, L"QQMusicLyricPreviewPanel", L"", WS_CHILD | WS_VISIBLE,
                                 x, y, w, h, parent, (HMENU)(UINT_PTR)kIdPreviewPanel, inst, this);
@@ -193,8 +193,8 @@ private:
         }
         auto* rt = renderer_.renderTarget();
         if (rt) {
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.55f), &brushNormal_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f), &brushCurrent_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.25f, 0.25f, 0.25f, 0.85f), &brushNormal_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.55f, 0.25f, 1.0f), &brushCurrent_);
         }
     }
 
@@ -255,7 +255,7 @@ private:
             return;
         rt->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
         rt->BeginDraw();
-        rt->Clear(D2D1::ColorF(0.08f, 0.08f, 0.08f, 1.0f));
+        rt->Clear(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
         if (fmtNormal_ && brushNormal_) {
             float scale = static_cast<float>(dpi_) / 96.0f;
             float dipW = static_cast<float>(w) / scale;
