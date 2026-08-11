@@ -2,6 +2,7 @@
 #include "lyric/lyric_provider.h"
 #include "ui/lyric_window.h"
 #include "ui/taskbar_host.h"
+#include "ui/manual_search_dialog.h"
 #include "media/smtc_monitor.h"
 
 #include <windows.h>
@@ -32,6 +33,7 @@ constexpr UINT kCmdFontUp = 103;
 constexpr UINT kCmdFontDown = 104;
 constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
+constexpr UINT kCmdManualSearch = 107;
 
 struct CoverPayload {
     std::wstring key;
@@ -54,7 +56,10 @@ struct App {
     CoverProvider coverProvider;
     std::unique_ptr<ILyricHost> overlayHost;
     std::unique_ptr<ILyricHost> taskbarHost;
+    std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::wstring currentKey;
+    std::wstring currentTitle;
+    std::wstring currentArtist;
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
     bool lyricLoading_ = false;
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
@@ -131,6 +136,44 @@ struct App {
         } else {
             createTaskbar(GetModuleHandleW(nullptr));
         }
+    }
+
+    void showManualSearch(HINSTANCE inst) {
+        if (manualSearchDialog && !manualSearchDialog->isOpen()) {
+            manualSearchDialog.reset();
+        }
+        if (manualSearchDialog) {
+            manualSearchDialog->show();
+            return;
+        }
+        manualSearchDialog = std::make_unique<ManualSearchDialog>();
+        if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist)) {
+            manualSearchDialog.reset();
+            return;
+        }
+        manualSearchDialog->setApplyCallback([this] {
+            auto hs = hosts();
+            for (auto* h : hs) {
+                h->setLyrics(provider.lines());
+                h->setStatusText(L"");
+            }
+            std::wprintf(L"[lyric] manual override applied: %s\n", currentKey.c_str());
+            // 手动选择后同样兜底封面
+            if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
+                const std::wstring albummid = provider.songInfo().albummid;
+                if (!albummid.empty()) {
+                    const std::wstring key = currentKey;
+                    coverProvider.requestAsync(albummid,
+                        [this, key](std::shared_ptr<const std::vector<uint8_t>> cover) {
+                            if (!cover || cover->empty()) return;
+                            auto* payload = new CoverPayload{key, std::move(cover)};
+                            PostThreadMessageW(mainThread, kMsgCoverReady, 1,
+                                               reinterpret_cast<LPARAM>(payload));
+                        });
+                }
+            }
+        });
+        manualSearchDialog->show();
     }
 
     // 把当前播放状态同步给某个宿主（新建宿主时避免显示“等待播放…”）
@@ -220,6 +263,8 @@ struct App {
         std::wstring key = LyricProvider::makeKey(snap.title, snap.artist);
         if (key != currentKey && !snap.title.empty()) {
             currentKey = key;
+            currentTitle = snap.title;
+            currentArtist = snap.artist;
             std::wprintf(L"[smtc] track: %s - %s (%lld ms)\n", snap.title.c_str(),
                 snap.artist.c_str(), snap.durationMs);
             for (auto* h : hs) {
@@ -365,6 +410,7 @@ void App::showTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
     AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
     AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
+    AppendMenuW(menu, MF_STRING, kCmdManualSearch, L"手动搜索歌词");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
 
@@ -400,6 +446,9 @@ void App::showTrayMenu() {
         break;
     case kCmdPickFont:
         pickFont();
+        break;
+    case kCmdManualSearch:
+        showManualSearch(GetModuleHandleW(nullptr));
         break;
     case kCmdExit:
         PostQuitMessage(0);
@@ -523,6 +572,9 @@ int main() {
             }
             continue;
         }
+        if (app.manualSearchDialog && app.manualSearchDialog->isOpen() &&
+            IsDialogMessageW(app.manualSearchDialog->hwnd(), &msg))
+            continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

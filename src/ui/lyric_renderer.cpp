@@ -128,6 +128,12 @@ bool LyricRenderer::present(HWND hwnd) {
                                  ULW_ALPHA);
 }
 
+bool LyricRenderer::copyToDC(HDC hdc, int width, int height) {
+    if (!memdc_ || width <= 0 || height <= 0)
+        return false;
+    return !!BitBlt(hdc, 0, 0, width, height, memdc_, 0, 0, SRCCOPY);
+}
+
 void LyricRenderer::discard() {
     rtBound_ = false;
     if (rt_) {

@@ -24,6 +24,9 @@ public:
     // 将当前 MemoryDC 内容提交到分层窗口。
     bool present(HWND hwnd);
 
+    // 将当前 MemoryDC 内容用 BitBlt 提交到普通窗口 DC（用于对话框预览等非分层窗口）
+    bool copyToDC(HDC hdc, int width, int height);
+
     // 丢弃 RenderTarget（设备丢失时），保留工厂与 MemoryDC。
     void discard();
 
