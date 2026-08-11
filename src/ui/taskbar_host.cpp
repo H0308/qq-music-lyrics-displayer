@@ -137,6 +137,7 @@ struct TaskbarHost::Impl {
     float lyricWidth_ = 0.0f;
     float lyricHeight_ = 0.0f;
     float lyricScrollOffset_ = 0.0f;
+    float lyricScrollSpeed_ = kLyricScrollSpeed; // 动态速度：随当前行时长变化，最慢 kLyricScrollSpeed
     std::wstring lastTitle_;
     std::wstring lastArtist_;
     std::wstring lastLyric_;
@@ -631,6 +632,18 @@ struct TaskbarHost::Impl {
                 lyricHeight_ = m.height;
             }
         }
+        // 动态滚动速度：让歌词在当前行时长内滚动完一圈。两句间隔越小速度越快，
+        // 间隔大到算出的速度低于 kLyricScrollSpeed 时保持最慢速度不变
+        lyricScrollSpeed_ = kLyricScrollSpeed;
+        if (currentLine >= 0 && (size_t)currentLine + 1 < lines.size() && lyricWidth_ > 0.0f) {
+            int64_t durMs =
+                lines[(size_t)currentLine + 1].ms - lines[(size_t)currentLine].ms;
+            if (durMs > 0) {
+                float loopW = lyricWidth_ + kTextPadding * 2.0f;
+                lyricScrollSpeed_ =
+                    std::max(kLyricScrollSpeed, loopW / (static_cast<float>(durMs) / 1000.0f));
+            }
+        }
         bool titleChanged = media.title != lastTitle_;
         bool artistChanged = media.artist != lastArtist_;
         bool lyricChanged = lyric != lastLyric_;
@@ -996,7 +1009,7 @@ struct TaskbarHost::Impl {
         marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
         marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
         if (!mouseOver_)
-            marquee(lyricWidth_, lyricAreaW, kLyricScrollSpeed, lyricScrollOffset_);
+            marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
     }
 
     // ---------- 事件 ----------
