@@ -488,10 +488,16 @@ void App::pickFont() {
     if (!overlayHost && !taskbarHost)
         return;
 
+    // CHOOSEFONT 的 lfHeight 单位是像素，fontSize_ 是磅，需要按屏幕 DPI 换算
+    HDC screen = GetDC(nullptr);
+    int dpiY = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
+    if (screen)
+        ReleaseDC(nullptr, screen);
+
     LOGFONTW lf{};
     lf.lfCharSet = DEFAULT_CHARSET;
     lstrcpynW(lf.lfFaceName, fontFamily_.c_str(), LF_FACESIZE);
-    lf.lfHeight = -(int)std::lround(fontSize_);
+    lf.lfHeight = -MulDiv((int)std::lround(fontSize_), dpiY, 72);
     CHOOSEFONTW cf{};
     cf.lStructSize = sizeof(cf);
     cf.hwndOwner = trayHwnd;

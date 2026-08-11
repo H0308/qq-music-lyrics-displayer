@@ -443,12 +443,12 @@ struct TaskbarHost::Impl {
                 // 不裁剪，超长时由 drawScrollingText 滚动显示
             }
         };
-        float base = fontSize_;
-        make(base * 1.05f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        // 歌名/歌手固定字号，不随歌词字号调整；只有歌词跟随 fontSize_
+        make(kBaseFontSize * 1.05f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtTitle_);
-        make(base * 0.92f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        make(kBaseFontSize * 0.92f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtArtist_);
-        make(base * 1.18f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        make(fontSize_ * 1.18f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtLyric_);
         textDirty_ = true;
     }
