@@ -10,6 +10,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <shellapi.h>
 #include <commdlg.h>
+#include <timeapi.h>
 
 #include <cstdio>
 #include <fcntl.h>
@@ -559,6 +560,8 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT); // 否则 wprintf 中文输出为 '?'
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // 提高计时器粒度，否则 SetTimer 的实际触发间隔可能远大于设定值，滚动动画卡顿
+    timeBeginPeriod(1);
     winrt::init_apartment();
 
     bool wantOverlay = false;
@@ -629,5 +632,6 @@ int main() {
         DispatchMessageW(&msg);
     }
     app.destroyTray();
+    timeEndPeriod(1);
     return 0;
 }

@@ -15,13 +15,13 @@
 namespace {
 
 constexpr UINT_PTR kTimerId = 1;
-constexpr UINT kTimerMs = 33; // ~30fps
+constexpr UINT kTimerMs = 16; // ~60fps（配合 timeBeginPeriod(1) 保证触发精度）
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricOverlay";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
 
 constexpr float kAnchorRatio = 0.42f; // 当前行垂直锚点
-constexpr float kScrollEase = 0.25f;  // 滚动 ease-out 系数
+constexpr float kScrollEase = 0.134f; // 滚动 ease-out 系数（60fps 下与原来 30fps/0.25 的时长一致）
 constexpr float kMinFont = 14.0f;
 constexpr float kMaxFont = 48.0f;
 constexpr float kBarH = 60.0f;        // 底部控制条高度（DIP）
@@ -241,6 +241,7 @@ struct OverlayHost::Impl {
     IDWriteTextFormat* fmtCurrent = nullptr;
 
     bool lightTheme_ = false;
+    int themeTick_ = 0; // 主题轮询计数器（注册表读取不跟 60fps 走）
 
     bool dragging = false;
     bool quitting = false;
@@ -840,7 +841,11 @@ struct OverlayHost::Impl {
     void onTimer() {
         if (tick)
             tick();
-        detectThemeChange();
+        // 主题轮询要读注册表，降到约 1s 一次；WM_SETTINGCHANGE 会立即触发，不影响响应
+        if (++themeTick_ >= 60) {
+            themeTick_ = 0;
+            detectThemeChange();
+        }
         float diff = scrollTarget - scroll;
         if (std::fabs(diff) > 0.002f)
             scroll += diff * kScrollEase;

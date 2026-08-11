@@ -18,7 +18,8 @@
 namespace {
 
 constexpr UINT_PTR kTimerId = 2;
-constexpr UINT kTimerMs = 100; // 任务栏位置跟踪 10fps
+constexpr UINT kTimerMs = 16;         // ~60fps 滚动渲染（配合 timeBeginPeriod(1) 保证触发精度）
+constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
 
@@ -142,6 +143,7 @@ struct TaskbarHost::Impl {
     std::wstring lastArtist_;
     std::wstring lastLyric_;
     ULONGLONG lastTickMs_ = 0;
+    int slowTick_ = 0; // 慢速分支计数器
 
     // 渲染
     LyricRenderer renderer;
@@ -1017,8 +1019,12 @@ struct TaskbarHost::Impl {
     void onTimer() {
         if (tick)
             tick();
-        if (detectChanges())
-            adjustPosition();
+        // 任务栏位置/DPI/主题跟踪是耗时操作，放到慢速分支，不跟 60fps 走
+        if (++slowTick_ >= kSlowTickInterval) {
+            slowTick_ = 0;
+            if (detectChanges())
+                adjustPosition();
+        }
         updateScroll();
         render();
     }
