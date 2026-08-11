@@ -25,6 +25,14 @@ int64_t nowUtcMs() {
 
 int64_t timeSpanMs(TimeSpan ts) { return ts.count() / 10000; }
 
+// SMTC LastUpdatedTime 是 DateTime（1601 年起 100ns），换算为 Unix 毫秒；
+// 部分应用不上报（为 0），返回 0 由调用方回退
+int64_t lastUpdatedMs(DateTime dt) {
+    constexpr int64_t kFileTimeEpochOffsetMs = 11644473600000LL;
+    int64_t ms = dt.time_since_epoch().count() / 10000 - kFileTimeEpochOffsetMs;
+    return ms > 0 ? ms : 0;
+}
+
 PlaybackStatus mapStatus(GlobalSystemMediaTransportControlsSessionPlaybackStatus s) {
     switch (s) {
     case GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing:
@@ -93,7 +101,10 @@ struct SmtcMonitor::Impl {
                 auto tl = session.GetTimelineProperties();
                 s.durationMs = timeSpanMs(tl.EndTime());
                 s.positionMs = timeSpanMs(tl.Position());
-                s.anchorUtcMs = nowUtcMs();
+                // 锚点用 QQ 采样位置的时刻（而不是我们读取的时刻），补偿事件送达延迟
+                s.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
+                if (s.anchorUtcMs == 0)
+                    s.anchorUtcMs = nowUtcMs();
         } catch (...) {
         }
         try {
@@ -121,7 +132,9 @@ struct SmtcMonitor::Impl {
                 auto tl = session.GetTimelineProperties();
                 snap.durationMs = timeSpanMs(tl.EndTime());
                 snap.positionMs = timeSpanMs(tl.Position());
-                snap.anchorUtcMs = nowUtcMs();
+                snap.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
+                if (snap.anchorUtcMs == 0)
+                    snap.anchorUtcMs = nowUtcMs();
             } catch (...) {
                 return;
             }
@@ -136,7 +149,9 @@ struct SmtcMonitor::Impl {
             try {
                 auto tl = session.GetTimelineProperties();
                 snap.positionMs = timeSpanMs(tl.Position());
-                snap.anchorUtcMs = nowUtcMs();
+                snap.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
+                if (snap.anchorUtcMs == 0)
+                    snap.anchorUtcMs = nowUtcMs();
                 auto info = session.GetPlaybackInfo();
                 snap.status = mapStatus(info.PlaybackStatus());
                 auto c = info.Controls();
