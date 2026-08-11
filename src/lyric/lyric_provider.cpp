@@ -141,6 +141,35 @@ bool titleEndsWithArtist(const std::wstring& title, const std::wstring& artist) 
     return false;
 }
 
+// 去除歌名尾部的 (...)/（...)/[...]/【...】版本标注（不改变大小写），用于净化搜索词。
+// SMTC 歌名常带 (DJ版)、（剧情版）等后缀，带着它们搜索命中率很低。
+std::wstring stripVersionSuffix(std::wstring s) {
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+        s.pop_back();
+    while (!s.empty()) {
+        wchar_t open = 0;
+        wchar_t close = s.back();
+        if (close == L')')
+            open = L'(';
+        else if (close == L'）')
+            open = L'（';
+        else if (close == L']')
+            open = L'[';
+        else if (close == L'】')
+            open = L'【';
+        else
+            break;
+        size_t pos = s.find_last_of(open);
+        if (pos == std::wstring::npos || pos == 0)
+            break;
+        size_t end = pos;
+        while (end > 0 && s[end - 1] == L' ')
+            --end;
+        s.resize(end);
+    }
+    return s;
+}
+
 // 0-100，100 表示完全匹配
 int titleSimilarity(const std::wstring& a, const std::wstring& b) {
     std::wstring na = normalizeTitle(a);
@@ -377,30 +406,46 @@ struct LyricProvider::Impl {
         CURL* curl = curl_easy_init();
         if (!curl) return false;
 
-        // 1) 搜索
-        auto pickCandidate = [&](const std::vector<Candidate>& cands) -> const Candidate* {
-            const Candidate* best = nullptr;
-            int bestScore = -1;
+        // 打分合格（歌名相似度非 0 且总分 >= 700）的候选按分数降序排列
+        auto rankCandidates = [&](const std::vector<Candidate>& cands) {
+            std::vector<std::pair<int, const Candidate*>> scored;
             for (auto& c : cands) {
                 int t = titleSimilarity(title, c.name);
+                if (t == 0)
+                    continue;
                 int s = singerSimilarity(artist, c.singer);
                 int d = durationScore(durationMs, c.intervalMs);
                 // 标题权重最高，歌手次之，时长再次
                 int score = t * 12 + s * 5 + d * 3;
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = &c;
-                }
+                if (score < 700)
+                    continue;
+                scored.push_back({score, &c});
             }
-            if (!best)
-                return nullptr;
-            int titleSim = titleSimilarity(title, best->name);
-            if (titleSim == 0 || bestScore < 700)
-                return nullptr;
-            return best;
+            std::stable_sort(scored.begin(), scored.end(),
+                             [](const auto& a, const auto& b) { return a.first > b.first; });
+            return scored;
         };
 
-        std::wstring query = title;
+        // 依次尝试候选：第一名没有歌词（伴奏版/剧情版等）时自动试次优候选
+        constexpr int kMaxDownloadTries = 5;
+        auto tryDownload = [&](const std::vector<Candidate>& cands) -> bool {
+            int tries = 0;
+            for (const auto& [score, c] : rankCandidates(cands)) {
+                if (++tries > kMaxDownloadTries)
+                    break;
+                // 不带 Referer 会返回 -1310
+                if (downloadLyric(curl, c->songmid, out)) {
+                    info.songmid = toWide(c->songmid);
+                    info.albummid = toWide(c->albummid);
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // 净化搜索词：剥掉歌名尾部版本标注，避免过长精确词搜不到
+        std::wstring queryTitle = stripVersionSuffix(title);
+        std::wstring query = queryTitle;
         if (!artist.empty() && !titleEndsWithArtist(title, artist)) {
             query += L' ';
             query += artist;
@@ -410,27 +455,15 @@ struct LyricProvider::Impl {
             curl_easy_cleanup(curl);
             return false;
         }
-        const Candidate* picked = pickCandidate(cands);
-        if (!picked) {
-            // 带歌手搜不到合适结果时，尝试只按歌名搜索（部分歌曲 SMTC 歌手名与平台不一致）
-            if (!searchSongs(curl, title, cands)) {
+        if (!tryDownload(cands)) {
+            // 带歌手搜不到合适歌词时，尝试只按歌名搜索（部分歌曲 SMTC 歌手名与平台不一致）
+            if (!searchSongs(curl, queryTitle, cands) || !tryDownload(cands)) {
                 curl_easy_cleanup(curl);
                 return false;
             }
-            picked = pickCandidate(cands);
         }
-        if (!picked) {
-            curl_easy_cleanup(curl);
-            return false;
-        }
-
-        info.songmid = toWide(picked->songmid);
-        info.albummid = toWide(picked->albummid);
-
-        // 3) 下载歌词（不带 Referer 会返回 -1310）
-        bool ok = downloadLyric(curl, picked->songmid, out);
         curl_easy_cleanup(curl);
-        return ok;
+        return true;
     }
 };
 
