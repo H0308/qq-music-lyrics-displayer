@@ -108,6 +108,7 @@ struct TaskbarHost::Impl {
     std::vector<LyricLine> lines;
     std::wstring statusText = L"等待播放…";
     int currentLine = -1;
+    int64_t positionMs_ = 0; // 播放进度（每帧更新），驱动逐字高亮
 
     // 字体
     float fontSize_ = kBaseFontSize;
@@ -127,6 +128,14 @@ struct TaskbarHost::Impl {
 
     // Explorer 重启后重新附着
     UINT taskbarCreatedMsg_ = 0;
+
+    // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
+    // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；字时长越短像素速度越快，
+    // 阶跃映射到填充边界的跳动越大（闪烁）。按当前字的像素速度限制每帧步进来消除
+    float karaokeProgX_ = 0.0f;      // 本帧实际使用的填充进度（平滑后）
+    float karaokeSmoothX_ = 0.0f;    // 平滑状态
+    int karaokeSmoothLine_ = -1;     // 平滑状态所属行号
+    ULONGLONG karaokeTick_ = 0;      // 上次平滑步进的时刻
 
     // 滚动字幕（歌名、歌手、歌词独立滚动）
     float titleWidth_ = 0.0f;
@@ -159,6 +168,7 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
     ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
     ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 歌词主色（用户可配）
+    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（主色降透明度）
     ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
     ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
     COLORREF lyricColor_ = RGB(49, 194, 124);           // 默认 QQ 绿
@@ -396,6 +406,10 @@ struct TaskbarHost::Impl {
             brushLyric_->Release();
             brushLyric_ = nullptr;
         }
+        if (brushLyricDim_) {
+            brushLyricDim_->Release();
+            brushLyricDim_ = nullptr;
+        }
         if (brushLyricGlow_) {
             brushLyricGlow_->Release();
             brushLyricGlow_ = nullptr;
@@ -408,6 +422,7 @@ struct TaskbarHost::Impl {
         float g = GetGValue(lyricColor_) / 255.0f;
         float b = GetBValue(lyricColor_) / 255.0f;
         rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 1.00f), &brushLyric_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 0.45f), &brushLyricDim_);
         rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 0.28f), &brushLyricGlow_);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushLyricOutline_);
     }
@@ -488,6 +503,7 @@ struct TaskbarHost::Impl {
         r(brushBtn_);
         r(brushBtnDisabled_);
         r(brushLyric_);
+        r(brushLyricDim_);
         r(brushLyricGlow_);
         r(brushLyricOutline_);
         r(coverClip_);
@@ -675,6 +691,67 @@ struct TaskbarHost::Impl {
         return h - kCoverPadding * 2.0f;
     }
 
+    // 当前行有逐字时间轴且歌词布局对应该行时返回该行，否则 nullptr
+    const LyricLine* karaokeLine() const {
+        if (currentLine < 0 || (size_t)currentLine >= lines.size())
+            return nullptr;
+        const LyricLine* line = &lines[(size_t)currentLine];
+        if (line->chars.empty() || !lyricLayout_ || line->text != lastLyric_)
+            return nullptr;
+        return line;
+    }
+
+    // 逐字填充目标进度 x（布局像素坐标）：已唱边界 + 当前字按字时长比例推进；
+    // speedOut 输出当前字的像素速度（px/ms），供平滑限速使用
+    float karaokeTargetX(const LyricLine& line, float& speedOut) const {
+        speedOut = 0.0f;
+        UINT32 sungLen = 0;
+        const LyricChar* curChar = nullptr;
+        for (const auto& c : line.chars) {
+            if (c.startMs > positionMs_)
+                break;
+            curChar = &c;
+            sungLen += (UINT32)c.text.size();
+        }
+        if (!curChar)
+            return 0.0f;
+        UINT32 charOff = sungLen - (UINT32)curChar->text.size();
+        DWRITE_HIT_TEST_METRICS hm{};
+        float startX = 0.0f, hy = 0.0f;
+        if (FAILED(lyricLayout_->HitTestTextPosition(charOff, FALSE, &startX, &hy, &hm)))
+            return 0.0f;
+        float endX = startX;
+        if (FAILED(lyricLayout_->HitTestTextPosition(sungLen, TRUE, &endX, &hy, &hm)))
+            endX = startX;
+        int64_t dur = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
+        float frac =
+            (float)std::clamp((double)(positionMs_ - curChar->startMs) / (double)dur, 0.0, 1.0);
+        speedOut = (endX - startX) / (float)dur;
+        return startX + (endX - startX) * frac;
+    }
+
+    // 平滑步进：目标前进时每帧最多按当前字速度 * dt 推进；小幅度回退视为
+    // 锚点抖动保持不动，大幅度回退视为 seek 立即对齐。行切换时直接对齐
+    float karaokeSmoothStep(const LyricLine& line) {
+        float speed = 0.0f;
+        float target = karaokeTargetX(line, speed);
+        ULONGLONG now = GetTickCount64();
+        float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
+        karaokeTick_ = now;
+        if (karaokeSmoothLine_ != currentLine || target <= 0.0f) {
+            karaokeSmoothLine_ = currentLine;
+            karaokeSmoothX_ = target;
+        } else if (target < karaokeSmoothX_) {
+            if (karaokeSmoothX_ - target > 32.0f)
+                karaokeSmoothX_ = target;
+        } else {
+            float maxStep = speed * dt * 1.5f + 0.3f;
+            karaokeSmoothX_ += std::min(target - karaokeSmoothX_, maxStep);
+        }
+        karaokeProgX_ = karaokeSmoothX_;
+        return karaokeProgX_;
+    }
+
     // ---------- 图标几何 ----------
 
     void ensureGeometry() {
@@ -824,9 +901,13 @@ struct TaskbarHost::Impl {
 
     // 绘制可滚动文本：容得下则居中，容不下则向左无缝滚动。
     // outline/glow 非空时先画 8 方向光晕层和深色描边层，再画主文字。
+    // karaokeBrush 非空时启用逐字高亮：整行先用 brush（暗色）画一遍，
+    // 再按像素裁剪出 [文本起点, karaokeX] 区域用 karaokeBrush 画第二遍，
+    // 实现字内平滑填充（裁剪基于像素，不受滚动偏移影响）
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
                            float x, float y, float offset, ID2D1Brush* brush,
-                           ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr) {
+                           ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
+                           ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
@@ -840,26 +921,40 @@ struct TaskbarHost::Impl {
                                               {-0.7071f, -0.7071f},
                                               {0.0f, -1.0f},
                                               {0.7071f, -0.7071f}};
-        auto drawOne = [&](float dx, float dy) {
-            if (glow) {
-                for (auto& d : kDirs)
-                    rt->DrawTextLayout(D2D1::Point2F(dx + d[0] * 2.4f, dy + d[1] * 2.4f), layout,
-                                       glow);
-            }
-            if (outline) {
-                for (auto& d : kDirs)
-                    rt->DrawTextLayout(D2D1::Point2F(dx + d[0] * 1.2f, dy + d[1] * 1.2f), layout,
-                                       outline);
-            }
-            rt->DrawTextLayout(D2D1::Point2F(dx, dy), layout, brush);
-        };
-        if (textW <= areaW) {
-            drawOne(x + (areaW - textW) * 0.5f, y);
+        // 绘制起点：居中一个，或跑马灯首尾相接两个；逐字跟随滚动时只有一份、不循环
+        float bases[2];
+        int n = 0;
+        if (karaokeBrush) {
+            bases[n++] = (textW <= areaW) ? x + (areaW - textW) * 0.5f : x - offset;
+        } else if (textW <= areaW) {
+            bases[n++] = x + (areaW - textW) * 0.5f;
         } else {
             float loopW = textW + kTextPadding * 2.0f;
-            float baseX = x - offset;
-            drawOne(baseX, y);
-            drawOne(baseX + loopW, y);
+            bases[n++] = x - offset;
+            bases[n++] = x - offset + loopW;
+        }
+        if (glow || outline) {
+            for (int i = 0; i < n; ++i) {
+                if (glow) {
+                    for (auto& d : kDirs)
+                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f),
+                                           layout, glow);
+                }
+                if (outline) {
+                    for (auto& d : kDirs)
+                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f),
+                                           layout, outline);
+                }
+            }
+        }
+        for (int i = 0; i < n; ++i)
+            rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
+        // 逐字高亮层：裁剪到填充进度
+        if (karaokeBrush && karaokeX > 0.0f) {
+            rt->PushAxisAlignedClip(D2D1::RectF(bases[0], y, bases[0] + karaokeX, y + textH),
+                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->DrawTextLayout(D2D1::Point2F(bases[0], y), layout, karaokeBrush);
+            rt->PopAxisAlignedClip();
         }
         rt->PopAxisAlignedClip();
     }
@@ -957,11 +1052,18 @@ struct TaskbarHost::Impl {
             for (int i = 0; i < 3; ++i)
                 drawButton(i, D2D1::Point2F(cx + (i - 1) * spacing, cy), r);
         } else {
+            // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
+            // 整行先画暗色，再按像素进度裁剪出已唱区域画歌词主色
+            const LyricLine* curLine = karaokeLine();
+            bool karaoke = curLine && brushLyric_ && brushLyricDim_;
+            float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
             drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
                               lyricY, lyricScrollOffset_,
-                              brushLyric_ ? brushLyric_ : brushText_,
+                              karaoke ? brushLyricDim_
+                                      : (brushLyric_ ? brushLyric_ : brushText_),
                               lyricGlow_ ? brushLyricOutline_ : nullptr,
-                              lyricGlow_ ? brushLyricGlow_ : nullptr);
+                              lyricGlow_ ? brushLyricGlow_ : nullptr,
+                              karaoke ? brushLyric_ : nullptr, progX);
         }
 
         HRESULT hr = rt->EndDraw();
@@ -1010,8 +1112,26 @@ struct TaskbarHost::Impl {
 
         marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
         marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
-        if (!mouseOver_)
+        if (mouseOver_)
+            return;
+        // 逐字歌词：滚动位置跟随逐字填充进度，把当前唱到的位置保持在区域 30% 处，
+        // 行尾为止不再循环；非逐字歌词保持原有无缝循环滚动
+        if (karaokeLine()) {
+            if (lyricWidth_ > lyricAreaW) {
+                // karaokeProgX_ 由 render 每帧更新；行刚切换时还没对应进度，从头开始
+                float sungX = (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
+                float target =
+                    std::clamp(sungX - lyricAreaW * 0.3f, 0.0f, lyricWidth_ - lyricAreaW);
+                float diff = target - lyricScrollOffset_;
+                // ease-out 平滑跟随，避免跳动生硬
+                lyricScrollOffset_ =
+                    std::fabs(diff) < 0.5f ? target : lyricScrollOffset_ + diff * 0.15f;
+            } else {
+                lyricScrollOffset_ = 0.0f;
+            }
+        } else {
             marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
+        }
     }
 
     // ---------- 事件 ----------
@@ -1176,6 +1296,10 @@ void TaskbarHost::setCurrentLine(int index) {
         impl_->currentLine = index;
         impl_->textDirty_ = true;
     }
+}
+
+void TaskbarHost::setPosition(int64_t positionMs) {
+    impl_->positionMs_ = positionMs;
 }
 
 void TaskbarHost::setStatusText(const std::wstring& text) {

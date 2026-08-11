@@ -394,6 +394,7 @@ struct App {
         for (auto* h : hosts()) {
             int idx = LyricProvider::findLine(h->lyrics(), snap.positionMs);
             h->setCurrentLine(idx);
+            h->setPosition(snap.positionMs);
         }
         if (manualSearchDialog && manualSearchDialog->isOpen()) {
             manualSearchDialog->setPlaybackPosition(snap.positionMs);

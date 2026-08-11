@@ -6,9 +6,17 @@
 #include <string>
 #include <vector>
 
+// 逐字时间轴（KRC 解析结果）；text 为 KRC token，英文常为整词
+struct LyricChar {
+    int64_t startMs = 0;
+    int64_t endMs = 0;
+    std::wstring text;
+};
+
 struct LyricLine {
     int64_t ms = 0;
     std::wstring text;
+    std::vector<LyricChar> chars; // 非空表示有逐字时间轴；text 为 chars 拼接
 };
 
 // 搜索匹配到的歌曲信息（用于歌词下载，也用于封面兜底）
@@ -19,14 +27,17 @@ struct SongInfo {
 
 // 手动搜索返回的候选歌曲
 struct SearchCandidate {
-    std::wstring songmid;
+    std::wstring songmid;   // QQ 歌曲 mid（LRC 候选使用）
     std::wstring albummid;
+    std::wstring kugouHash; // 酷狗歌曲 hash（KRC 候选使用）
     std::wstring name;
     std::wstring singer;
     int64_t durationMs = 0;
+    bool krc = false; // true = 酷狗 KRC 逐字歌词候选，false = QQ LRC 整行歌词候选
 };
 
-// 歌词获取：QQ 音乐公开接口 搜索 -> 三重匹配 -> 下载 -> base64 解码 -> 解析 LRC
+// 歌词获取：优先酷狗 KRC 逐字歌词（搜歌拿 hash -> 搜词 -> 下载解码），
+// 失败回退 QQ 音乐公开接口（搜索 -> 三重匹配 -> 下载 -> base64 解码 -> 解析 LRC）
 class LyricProvider {
 public:
     using ReadyCallback = std::function<void(bool ok)>; // 在工作线程触发（缓存命中时同步触发）
@@ -45,7 +56,7 @@ public:
     void requestAsync(const std::wstring& title, const std::wstring& artist, int64_t durationMs,
                       ReadyCallback cb);
 
-    // 手动搜索候选（最多 5 条），结果在 UI 线程回调
+    // 手动搜索候选（KRC 逐字与 LRC 整行各最多 5 条，KRC 在前），结果在 UI 线程回调
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                SearchCallback cb);
 

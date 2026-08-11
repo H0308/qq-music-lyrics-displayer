@@ -36,6 +36,7 @@ public:
     void hide() override;
     void setLyrics(const std::vector<LyricLine>& lines) override;
     void setCurrentLine(int index) override;
+    void setPosition(int64_t positionMs) override;
     void setStatusText(const std::wstring& text) override;
 
 private:

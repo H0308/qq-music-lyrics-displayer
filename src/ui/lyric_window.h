@@ -50,6 +50,7 @@ public:
     virtual void hide() = 0;
     virtual void setLyrics(const std::vector<LyricLine>& lines) = 0;
     virtual void setCurrentLine(int index) = 0;
+    virtual void setPosition(int64_t positionMs) = 0; // 每帧下发播放进度，驱动逐字高亮
     virtual void setStatusText(const std::wstring& text) = 0;
 };
 
@@ -82,6 +83,7 @@ public:
     void hide() override;
     void setLyrics(const std::vector<LyricLine>& lines) override;
     void setCurrentLine(int index) override;
+    void setPosition(int64_t positionMs) override;
     void setStatusText(const std::wstring& text) override;
 
 private:

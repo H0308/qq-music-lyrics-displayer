@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(ZLIB REQUIRED)
 
 # 生成资源脚本（嵌入应用图标）
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
@@ -33,6 +34,7 @@ target_compile_options(QQMusicLyric PRIVATE /utf-8 /EHsc)
 target_link_libraries(QQMusicLyric PRIVATE
     CURL::libcurl
     nlohmann_json::nlohmann_json
+    ZLIB::ZLIB
     windowsapp
     d2d1
     dwrite

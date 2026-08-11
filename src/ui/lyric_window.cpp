@@ -184,8 +184,16 @@ struct OverlayHost::Impl {
     std::vector<LyricLine> lines;
     std::wstring statusText = L"等待播放…";
     int currentLine = -1;
+    int64_t positionMs = 0; // 播放进度（每帧更新），驱动逐字高亮
     float scroll = 0.0f;
     float scrollTarget = 0.0f;
+
+    // 逐字填充进度平滑状态。SMTC 进度是锚点插值的，锚点校正时阶跃一次；
+    // 字时长越短像素速度越快，阶跃映射到填充边界的跳动越大（闪烁）。
+    // 按当前字的像素速度限制每帧步进来消除
+    float karaokeSmoothX_ = 0.0f;
+    int karaokeSmoothLine_ = -1;
+    ULONGLONG karaokeTick_ = 0;
 
     // 歌词背板渐变
     D2D1_COLOR_F bgPrimary = D2D1::ColorF(0, 0, 0, 0);
@@ -799,14 +807,77 @@ struct OverlayHost::Impl {
                 float yTop = anchorY + cum - scroll;
                 cum += bh;
                 if (yTop > lyricH() || yTop + bh < 0.0f) continue;
-                const LineLayout& ll = layouts[i];
+                LineLayout& ll = layouts[i];
+                const LyricLine& line = lines[i];
                 IDWriteTextLayout* lay = cur ? ll.layoutCurrent : ll.layoutNormal;
                 if (!lay) continue;
                 float layH = cur ? ll.heightCurrent : ll.heightNormal;
                 float y = yTop + (bh - layH) * 0.5f;
-                ID2D1SolidColorBrush* brush = cur ? brushCurrent : brushNormal;
-                rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
-                rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brush);
+                if (cur && !line.chars.empty()) {
+                    // 逐字高亮：整行先画暗色，再按像素裁剪出已唱区域画高亮色。
+                    // 当前字内按字时长比例推进填充，折行时按行高分行裁剪
+                    UINT32 sungLen = 0;
+                    const LyricChar* curChar = nullptr;
+                    for (const auto& c : line.chars) {
+                        if (c.startMs > positionMs) break;
+                        curChar = &c;
+                        sungLen += (UINT32)c.text.size();
+                    }
+                    rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
+                    rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushNormal);
+                    if (curChar) {
+                        // 当前字的文本偏移与像素起止位置
+                        UINT32 charOff = sungLen - (UINT32)curChar->text.size();
+                        DWRITE_HIT_TEST_METRICS hm{};
+                        float startX = 0.0f, hy = 0.0f;
+                        lay->HitTestTextPosition(charOff, FALSE, &startX, &hy, &hm);
+                        float endX = startX;
+                        DWRITE_HIT_TEST_METRICS hm2{};
+                        float hy2 = 0.0f;
+                        // 当前字尾部的 trailing edge：与当前字同一视觉行，折行也不会串行
+                        lay->HitTestTextPosition(sungLen, TRUE, &endX, &hy2, &hm2);
+                        int64_t dur = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
+                        float frac = (float)std::clamp(
+                            (double)(positionMs - curChar->startMs) / (double)dur, 0.0, 1.0);
+                        float targetX = startX + (endX - startX) * frac;
+                        // 平滑步进：目标前进时每帧最多按当前字像素速度 * dt 推进，
+                        // 消除 SMTC 锚点校正的阶跃抖动；小回退保持，大回退视为 seek 对齐
+                        float speed = (endX - startX) / (float)dur;
+                        ULONGLONG now = GetTickCount64();
+                        float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
+                        karaokeTick_ = now;
+                        if (karaokeSmoothLine_ != currentLine) {
+                            karaokeSmoothLine_ = currentLine;
+                            karaokeSmoothX_ = targetX;
+                        } else if (targetX < karaokeSmoothX_) {
+                            if (karaokeSmoothX_ - targetX > 32.0f)
+                                karaokeSmoothX_ = targetX;
+                        } else {
+                            float maxStep = speed * dt * 1.5f + 0.3f;
+                            karaokeSmoothX_ += std::min(targetX - karaokeSmoothX_, maxStep);
+                        }
+                        float progX = karaokeSmoothX_;
+                        float rowTop = hm.top;
+                        float rowBottom = hm.top + hm.height;
+                        // 当前视觉行以上的整行部分全部高亮
+                        if (rowTop > 0.5f) {
+                            rt->PushAxisAlignedClip(D2D1::RectF(0.0f, y, wndW, y + rowTop),
+                                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                            rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushCurrent);
+                            rt->PopAxisAlignedClip();
+                        }
+                        // 当前视觉行：高亮到字内进度 x
+                        rt->PushAxisAlignedClip(
+                            D2D1::RectF(0.0f, y + rowTop, x + progX, y + rowBottom),
+                            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                        rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushCurrent);
+                        rt->PopAxisAlignedClip();
+                    }
+                } else {
+                    ID2D1SolidColorBrush* brush = cur ? brushCurrent : brushNormal;
+                    rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
+                    rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brush);
+                }
             }
         } else if (!statusText.empty()) {
             D2D1_RECT_F rect = D2D1::RectF(0.0f, 0.0f, wndW, lyricH());
@@ -1069,6 +1140,10 @@ void OverlayHost::setCurrentLine(int index) {
         impl_->currentLine = index;
         impl_->updateScrollTarget();
     }
+}
+
+void OverlayHost::setPosition(int64_t positionMs) {
+    impl_->positionMs = positionMs;
 }
 
 void OverlayHost::setStatusText(const std::wstring& text) {

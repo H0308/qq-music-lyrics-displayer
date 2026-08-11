@@ -22,6 +22,7 @@ constexpr int kIdCandidateList = 104;
 constexpr int kIdOkBtn = 105;
 constexpr int kIdCancelBtn = 106;
 constexpr int kIdPreviewPanel = 107;
+constexpr int kIdHint = 109;
 
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
@@ -328,6 +329,7 @@ struct ManualSearchDialog::Impl {
     HWND hSearch = nullptr;
     HWND hList = nullptr;
     HWND hStatus = nullptr;
+    HWND hHint = nullptr;
     HWND hOk = nullptr;
     HWND hCancel = nullptr;
     LyricPreviewPanel preview;
@@ -336,6 +338,7 @@ struct ManualSearchDialog::Impl {
     std::wstring targetTitle;
     std::wstring targetArtist;
     std::vector<SearchCandidate> candidates;
+    std::vector<int> itemToCand; // 列表行号 -> candidates 下标（-1 为分组标题行）
     int selectedIdx = -1;
     std::vector<LyricLine> previewLines;
     SongInfo previewInfo;
@@ -418,6 +421,11 @@ struct ManualSearchDialog::Impl {
                                   WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd,
                                   (HMENU)(UINT_PTR)108, inst, nullptr);
 
+        hHint = CreateWindowExW(0, L"STATIC",
+                                L"KRC 为逐字歌词（逐字填充高亮，来自酷狗）；LRC 为普通歌词（整行高亮，来自 QQ 音乐）",
+                                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd,
+                                (HMENU)(UINT_PTR)kIdHint, inst, nullptr);
+
         hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
                                 WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 0, 0, 0, 0, hwnd,
                                 (HMENU)(UINT_PTR)kIdCandidateList, inst, nullptr);
@@ -436,6 +444,7 @@ struct ManualSearchDialog::Impl {
         SendMessageW(hArtist, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hSearch, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hStatus, WM_SETFONT, (WPARAM)font, TRUE);
+        SendMessageW(hHint, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hList, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hOk, WM_SETFONT, (WPARAM)font, TRUE);
         SendMessageW(hCancel, WM_SETFONT, (WPARAM)font, TRUE);
@@ -467,7 +476,10 @@ struct ManualSearchDialog::Impl {
         int statusY = pad + editH + 10;
         SetWindowPos(hStatus, nullptr, pad, statusY, w - pad * 2, statusH, SWP_NOZORDER);
 
-        int contentTop = statusY + statusH + 12;
+        int hintY = statusY + statusH + 2;
+        SetWindowPos(hHint, nullptr, pad, hintY, w - pad * 2, statusH, SWP_NOZORDER);
+
+        int contentTop = hintY + statusH + 12;
         int contentH = h - contentTop - bottomH;
         int listW = w * 2 / 5;
         int rightX = pad + listW + gap;
@@ -507,6 +519,7 @@ struct ManualSearchDialog::Impl {
         preview.setLyrics({});
         selectedIdx = -1;
         candidates.clear();
+        itemToCand.clear();
         EnableWindow(hOk, FALSE);
         SetWindowTextW(hStatus, L"搜索中，请稍候…");
 
@@ -524,27 +537,69 @@ struct ManualSearchDialog::Impl {
 
     void onCandidatesReady(const std::vector<SearchCandidate>& cands) {
         candidates = cands;
+        itemToCand.clear();
         EnableWindow(hSearch, TRUE);
-        for (const auto& c : candidates) {
-            std::wstring item = c.name + L" - " + c.singer;
+
+        // 分组展示：KRC 逐字在前，LRC 整行在后，各带一行分组标题
+        int krcCount = 0;
+        for (const auto& c : candidates)
+            if (c.krc)
+                ++krcCount;
+        int lrcCount = (int)candidates.size() - krcCount;
+        auto addHeader = [&](const wchar_t* text) {
+            SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
+            itemToCand.push_back(-1);
+        };
+        auto addItem = [&](int idx) {
+            const auto& c = candidates[idx];
+            std::wstring item = L"　" + c.name + L" - " + c.singer;
             SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+            itemToCand.push_back(idx);
+        };
+        if (krcCount > 0) {
+            addHeader(L"── 逐字歌词（KRC）──");
+            for (int i = 0; i < (int)candidates.size(); ++i)
+                if (candidates[i].krc)
+                    addItem(i);
         }
+        if (lrcCount > 0) {
+            addHeader(L"── 整行歌词（LRC）──");
+            for (int i = 0; i < (int)candidates.size(); ++i)
+                if (!candidates[i].krc)
+                    addItem(i);
+        }
+
         if (candidates.empty()) {
             SetWindowTextW(hStatus, L"未找到相关歌曲，请尝试更换关键词。");
         } else {
             SetWindowTextW(hStatus,
-                           (L"找到 " + std::to_wstring(candidates.size()) +
-                            L" 首候选歌曲，点击选择以预览歌词。")
+                           (L"找到 " + std::to_wstring(krcCount) + L" 条逐字（KRC）、 " +
+                            std::to_wstring(lrcCount) + L" 条整行（LRC）候选，点击选择以预览歌词。")
                                .c_str());
-            SendMessageW(hList, LB_SETCURSEL, 0, 0);
+            // 默认选中第一条非分组标题的候选
+            for (int i = 0; i < (int)itemToCand.size(); ++i) {
+                if (itemToCand[i] >= 0) {
+                    SendMessageW(hList, LB_SETCURSEL, i, 0);
+                    break;
+                }
+            }
             this->onSelectionChanged();
         }
     }
 
     void onSelectionChanged() {
-        int idx = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
-        if (idx < 0 || idx >= (int)candidates.size())
+        int listIdx = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
+        if (listIdx < 0 || listIdx >= (int)itemToCand.size())
             return;
+        int idx = itemToCand[listIdx];
+        if (idx < 0) {
+            // 分组标题行：不可选，清空预览
+            selectedIdx = -1;
+            preview.setLyrics({});
+            EnableWindow(hOk, FALSE);
+            SetWindowTextW(hStatus, L"请选择分组下的候选歌曲以预览歌词。");
+            return;
+        }
         selectedIdx = idx;
         preview.setLyrics({});
         EnableWindow(hOk, FALSE);
@@ -574,9 +629,18 @@ struct ManualSearchDialog::Impl {
         previewInfo = info;
         preview.setLyrics(previewLines);
         EnableWindow(hOk, TRUE);
+        // 实际拿到的歌词是否带逐字时间轴（KRC 候选失败或 LRC 候选时为整行）
+        bool wordByWord = false;
+        for (const auto& l : lines) {
+            if (!l.chars.empty()) {
+                wordByWord = true;
+                break;
+            }
+        }
         SetWindowTextW(hStatus,
                        (L"已加载《" + candidates[idx].name +
-                        L"》的歌词预览，点击“使用此歌词”应用。")
+                        (wordByWord ? L"》的逐字歌词预览，点击“使用此歌词”应用。"
+                                    : L"》的整行歌词预览，点击“使用此歌词”应用。"))
                            .c_str());
     }
 
