@@ -155,6 +155,11 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushDim_ = nullptr;
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
     ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
+    ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 歌词主色（用户可配）
+    ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
+    ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
+    COLORREF lyricColor_ = RGB(49, 194, 124);           // 默认 QQ 绿
+    bool lyricGlow_ = false;                            // 描边+光晕开关
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
     ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
@@ -373,8 +378,50 @@ struct TaskbarHost::Impl {
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f), &brushBtn_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.35f), &brushBtnDisabled_);
         }
+        // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这三个）
+        createLyricBrushes();
         rt->CreateLayer(&coverLayer_);
         recreateFormats();
+    }
+
+    // 歌词主色/光晕/描边画刷：随用户颜色重建，与主题画刷解耦
+    void createLyricBrushes() {
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        if (brushLyric_) {
+            brushLyric_->Release();
+            brushLyric_ = nullptr;
+        }
+        if (brushLyricGlow_) {
+            brushLyricGlow_->Release();
+            brushLyricGlow_ = nullptr;
+        }
+        if (brushLyricOutline_) {
+            brushLyricOutline_->Release();
+            brushLyricOutline_ = nullptr;
+        }
+        float r = GetRValue(lyricColor_) / 255.0f;
+        float g = GetGValue(lyricColor_) / 255.0f;
+        float b = GetBValue(lyricColor_) / 255.0f;
+        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 1.00f), &brushLyric_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 0.28f), &brushLyricGlow_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushLyricOutline_);
+    }
+
+    void setFontColor(COLORREF rgb) {
+        if (lyricColor_ == rgb)
+            return;
+        lyricColor_ = rgb;
+        createLyricBrushes();
+        render();
+    }
+
+    void setFontGlow(bool on) {
+        if (lyricGlow_ == on)
+            return;
+        lyricGlow_ = on;
+        render();
     }
 
     void recreateFormats() {
@@ -437,6 +484,9 @@ struct TaskbarHost::Impl {
         r(brushDim_);
         r(brushBtn_);
         r(brushBtnDisabled_);
+        r(brushLyric_);
+        r(brushLyricGlow_);
+        r(brushLyricOutline_);
         r(coverClip_);
         r(coverLayer_);
         r(icoPlay_);
@@ -757,22 +807,44 @@ struct TaskbarHost::Impl {
         return -1;
     }
 
-    // 绘制可滚动文本：容得下则居中，容不下则向左无缝滚动
+    // 绘制可滚动文本：容得下则居中，容不下则向左无缝滚动。
+    // outline/glow 非空时先画 8 方向光晕层和深色描边层，再画主文字。
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
-                           float x, float y, float offset, ID2D1Brush* brush) {
+                           float x, float y, float offset, ID2D1Brush* brush,
+                           ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
         D2D1_RECT_F clip{x, y, x + areaW, y + textH};
         rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
+                                              {0.7071f, 0.7071f},
+                                              {0.0f, 1.0f},
+                                              {-0.7071f, 0.7071f},
+                                              {-1.0f, 0.0f},
+                                              {-0.7071f, -0.7071f},
+                                              {0.0f, -1.0f},
+                                              {0.7071f, -0.7071f}};
+        auto drawOne = [&](float dx, float dy) {
+            if (glow) {
+                for (auto& d : kDirs)
+                    rt->DrawTextLayout(D2D1::Point2F(dx + d[0] * 2.4f, dy + d[1] * 2.4f), layout,
+                                       glow);
+            }
+            if (outline) {
+                for (auto& d : kDirs)
+                    rt->DrawTextLayout(D2D1::Point2F(dx + d[0] * 1.2f, dy + d[1] * 1.2f), layout,
+                                       outline);
+            }
+            rt->DrawTextLayout(D2D1::Point2F(dx, dy), layout, brush);
+        };
         if (textW <= areaW) {
-            float drawX = x + (areaW - textW) * 0.5f;
-            rt->DrawTextLayout(D2D1::Point2F(drawX, y), layout, brush);
+            drawOne(x + (areaW - textW) * 0.5f, y);
         } else {
             float loopW = textW + kTextPadding * 2.0f;
             float baseX = x - offset;
-            rt->DrawTextLayout(D2D1::Point2F(baseX, y), layout, brush);
-            rt->DrawTextLayout(D2D1::Point2F(baseX + loopW, y), layout, brush);
+            drawOne(baseX, y);
+            drawOne(baseX + loopW, y);
         }
         rt->PopAxisAlignedClip();
     }
@@ -871,7 +943,10 @@ struct TaskbarHost::Impl {
                 drawButton(i, D2D1::Point2F(cx + (i - 1) * spacing, cy), r);
         } else {
             drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
-                              lyricY, lyricScrollOffset_, brushText_);
+                              lyricY, lyricScrollOffset_,
+                              brushLyric_ ? brushLyric_ : brushText_,
+                              lyricGlow_ ? brushLyricOutline_ : nullptr,
+                              lyricGlow_ ? brushLyricGlow_ : nullptr);
         }
 
         HRESULT hr = rt->EndDraw();
@@ -1108,6 +1183,14 @@ void TaskbarHost::changeFont(float delta) {
 
 void TaskbarHost::setFont(const std::wstring& family, float size) {
     impl_->setFont(family, size);
+}
+
+void TaskbarHost::setFontColor(COLORREF rgb) {
+    impl_->setFontColor(rgb);
+}
+
+void TaskbarHost::setFontGlow(bool on) {
+    impl_->setFontGlow(on);
 }
 
 void TaskbarHost::setClickThrough(bool on) {

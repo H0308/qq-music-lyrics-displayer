@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
+# 生成资源脚本（嵌入应用图标）
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
+               ${CMAKE_CURRENT_BINARY_DIR}/resource.rc @ONLY)
+
 add_executable(QQMusicLyric
     src/main.cpp
     src/media/smtc_monitor.cpp
@@ -18,6 +22,7 @@ add_executable(QQMusicLyric
     src/ui/taskbar_host.cpp
     src/ui/manual_search_dialog.cpp
     src/util/base64.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 )
 
 target_include_directories(QQMusicLyric PRIVATE src)

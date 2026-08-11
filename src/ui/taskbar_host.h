@@ -28,6 +28,10 @@ public:
     void setClickThrough(bool on) override;
     bool clickThrough() const override;
 
+    // 歌词外观：字体颜色 / 深色描边+光晕（任务栏独有，桌面歌词有自己的配色）
+    void setFontColor(COLORREF rgb);
+    void setFontGlow(bool on);
+
     void show() override;
     void hide() override;
     void setLyrics(const std::vector<LyricLine>& lines) override;

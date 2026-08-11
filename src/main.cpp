@@ -4,6 +4,7 @@
 #include "ui/taskbar_host.h"
 #include "ui/manual_search_dialog.h"
 #include "media/smtc_monitor.h"
+#include "resource.h"
 
 #include <windows.h>
 #include <winrt/Windows.Foundation.h>
@@ -34,6 +35,8 @@ constexpr UINT kCmdFontDown = 104;
 constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
 constexpr UINT kCmdManualSearch = 107;
+constexpr UINT kCmdFontColor = 108;
+constexpr UINT kCmdToggleGlow = 109;
 
 struct CoverPayload {
     std::wstring key;
@@ -55,7 +58,7 @@ struct App {
     LyricProvider provider;
     CoverProvider coverProvider;
     std::unique_ptr<ILyricHost> overlayHost;
-    std::unique_ptr<ILyricHost> taskbarHost;
+    std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词颜色/光晕是任务栏独有接口
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::wstring currentKey;
     std::wstring currentTitle;
@@ -70,6 +73,10 @@ struct App {
     bool hasUserFont_ = false;
     std::wstring fontFamily_ = L"Microsoft YaHei UI";
     float fontSize_ = 16.0f;
+
+    // 任务栏歌词外观（任务栏独有效能，新建任务栏宿主时应用）
+    COLORREF lyricColor_ = RGB(49, 194, 124); // 默认 QQ 绿
+    bool lyricGlow_ = false;                  // 深色描边+光晕
 
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
@@ -113,6 +120,8 @@ struct App {
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_);
+        taskbarHost->setFontColor(lyricColor_);
+        taskbarHost->setFontGlow(lyricGlow_);
         updateTrayIcon();
         return true;
     }
@@ -353,6 +362,7 @@ struct App {
     void updateTrayIcon();
     void showTrayMenu();
     void pickFont();
+    void pickLyricColor();
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
 
@@ -393,7 +403,9 @@ void App::updateTrayIcon() {
     nid.uID = kTrayIconId;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = kTrayMsg;
-    nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    nid.hIcon = static_cast<HICON>(
+        LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 0, 0,
+                   LR_DEFAULTSIZE | LR_SHARED));
     lstrcpyW(nid.szTip, L"QQ 音乐歌词");
     Shell_NotifyIconW(NIM_MODIFY, &nid);
     // 首次创建时 MODIFY 不会生效，用 ADD
@@ -413,6 +425,11 @@ void App::showTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
     AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
     AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
+    if (taskbarHost) {
+        AppendMenuW(menu, MF_STRING, kCmdFontColor, L"歌词颜色…");
+        AppendMenuW(menu, MF_STRING | (lyricGlow_ ? MF_CHECKED : 0), kCmdToggleGlow,
+                    L"歌词描边光晕");
+    }
     AppendMenuW(menu, MF_STRING, kCmdManualSearch, L"手动搜索歌词");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kCmdExit, L"退出");
@@ -450,6 +467,14 @@ void App::showTrayMenu() {
     case kCmdPickFont:
         pickFont();
         break;
+    case kCmdFontColor:
+        pickLyricColor();
+        break;
+    case kCmdToggleGlow:
+        lyricGlow_ = !lyricGlow_;
+        if (taskbarHost)
+            taskbarHost->setFontGlow(lyricGlow_);
+        break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
         break;
@@ -484,6 +509,22 @@ void App::pickFont() {
         overlayHost->setFont(fontFamily_, fontSize_);
     if (taskbarHost)
         taskbarHost->setFont(fontFamily_, fontSize_);
+}
+
+void App::pickLyricColor() {
+    if (!taskbarHost)
+        return;
+    static COLORREF custom[16] = {}; // 记住用户自定义颜色
+    CHOOSECOLORW cc{};
+    cc.lStructSize = sizeof(cc);
+    cc.hwndOwner = trayHwnd;
+    cc.rgbResult = lyricColor_;
+    cc.lpCustColors = custom;
+    cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+    if (!ChooseColorW(&cc))
+        return;
+    lyricColor_ = cc.rgbResult;
+    taskbarHost->setFontColor(lyricColor_);
 }
 
 LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {

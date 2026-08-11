@@ -1,6 +1,7 @@
 #include "ui/manual_search_dialog.h"
 
 #include "ui/lyric_renderer.h"
+#include "resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -622,7 +623,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     wc.lpszClassName = L"QQMusicLyricManualSearch";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
     RegisterClassExW(&wc);
 
     RECT work{};
