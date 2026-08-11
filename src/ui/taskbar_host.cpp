@@ -846,8 +846,10 @@ struct TaskbarHost::Impl {
             discardDeviceResources();
             return;
         }
-
-        renderer.present(hwnd);
+        if (SUCCEEDED(hr))
+            renderer.present(hwnd);
+        else
+            std::wprintf(L"[taskbar] EndDraw failed: 0x%08X\n", hr);
     }
 
     // ---------- 滚动字幕 ----------

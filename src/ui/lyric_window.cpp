@@ -739,8 +739,10 @@ struct OverlayHost::Impl {
             discardDeviceResources();
             return;
         }
-
-        renderer.present(hwnd);
+        if (SUCCEEDED(hr))
+            renderer.present(hwnd);
+        else
+            std::wprintf(L"[overlay] EndDraw failed: 0x%08X\n", hr);
     }
 
     // ---------- 事件 ----------
