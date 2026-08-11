@@ -9,11 +9,16 @@
 #include <windows.h>
 #include <winrt/Windows.Foundation.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <commdlg.h>
 #include <timeapi.h>
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #include <fcntl.h>
+#include <filesystem>
+#include <fstream>
 #include <io.h>
 #include <algorithm>
 #include <cmath>
@@ -43,6 +48,35 @@ struct CoverPayload {
     std::wstring key;
     std::shared_ptr<const std::vector<uint8_t>> cover;
 };
+
+std::string utf8Of(const std::wstring& w) {
+    if (w.empty()) return {};
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+std::wstring wideOf(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+// %APPDATA%\QQMusicLyric（不存在则创建）
+std::wstring configDir() {
+    PWSTR p = nullptr;
+    std::wstring dir;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p)) && p) {
+        dir = p;
+        CoTaskMemFree(p);
+        dir += L"\\QQMusicLyric";
+        CreateDirectoryW(dir.c_str(), nullptr);
+    }
+    return dir;
+}
 
 const wchar_t* statusName(PlaybackStatus s) {
     switch (s) {
@@ -79,6 +113,13 @@ struct App {
     COLORREF lyricColor_ = RGB(49, 194, 124); // 默认 QQ 绿
     bool lyricGlow_ = false;                  // 深色描边+光晕
 
+    // 窗口状态（持久化；无命令行参数时按此启动）
+    bool cfgOverlay_ = false;
+    bool cfgTaskbar_ = true;
+    bool cfgClickThrough_ = false;
+
+    std::wstring settingsPath_;
+
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
         if (overlayHost) v.push_back(overlayHost.get());
@@ -99,6 +140,8 @@ struct App {
         syncHost(overlayHost.get());
         if (hasUserFont_)
             overlayHost->setFont(fontFamily_, fontSize_);
+        if (cfgClickThrough_)
+            overlayHost->setClickThrough(true);
         updateTrayIcon();
         return true;
     }
@@ -364,8 +407,56 @@ struct App {
     void showTrayMenu();
     void pickFont();
     void pickLyricColor();
+    void loadSettings();
+    void saveSettings();
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
+
+void App::loadSettings() {
+    std::wstring dir = configDir();
+    if (dir.empty())
+        return;
+    settingsPath_ = dir + L"\\settings.json";
+    provider.setManualOverridePath(dir + L"\\manual_lyrics.json");
+    try {
+        std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
+        if (!f)
+            return;
+        auto j = nlohmann::json::parse(f, nullptr, false);
+        if (j.is_discarded())
+            return;
+        hasUserFont_ = j.value("hasUserFont", false);
+        std::wstring fam = wideOf(j.value("fontFamily", std::string()));
+        if (!fam.empty())
+            fontFamily_ = fam;
+        fontSize_ = (float)j.value("fontSize", 16.0);
+        lyricColor_ = (COLORREF)j.value("lyricColor", (unsigned)RGB(49, 194, 124));
+        lyricGlow_ = j.value("lyricGlow", false);
+        cfgOverlay_ = j.value("overlay", false);
+        cfgTaskbar_ = j.value("taskbar", true);
+        cfgClickThrough_ = j.value("clickThrough", false);
+    } catch (...) {
+    }
+}
+
+void App::saveSettings() {
+    if (settingsPath_.empty())
+        return;
+    try {
+        nlohmann::json j;
+        j["hasUserFont"] = hasUserFont_;
+        j["fontFamily"] = utf8Of(fontFamily_);
+        j["fontSize"] = fontSize_;
+        j["lyricColor"] = (unsigned)lyricColor_;
+        j["lyricGlow"] = lyricGlow_;
+        j["overlay"] = overlayHost != nullptr;
+        j["taskbar"] = taskbarHost != nullptr;
+        j["clickThrough"] = overlayHost && overlayHost->clickThrough();
+        std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
+        f << j.dump();
+    } catch (...) {
+    }
+}
 
 bool App::createTrayWindow(HINSTANCE inst) {
     WNDCLASSEXW wc{};
@@ -445,25 +536,30 @@ void App::showTrayMenu() {
     switch (cmd) {
     case kCmdToggleOverlay:
         toggleOverlay();
+        saveSettings();
         break;
     case kCmdToggleTaskbar:
         toggleTaskbar();
+        saveSettings();
         break;
     case kCmdClickThrough:
         if (overlayHost)
             overlayHost->setClickThrough(!overlayHost->clickThrough());
+        saveSettings();
         break;
     case kCmdFontUp:
         hasUserFont_ = true;
         fontSize_ = std::clamp(fontSize_ + 2.0f, 8.0f, 48.0f);
         if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
         if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
+        saveSettings();
         break;
     case kCmdFontDown:
         hasUserFont_ = true;
         fontSize_ = std::clamp(fontSize_ - 2.0f, 8.0f, 48.0f);
         if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
         if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
+        saveSettings();
         break;
     case kCmdPickFont:
         pickFont();
@@ -475,6 +571,7 @@ void App::showTrayMenu() {
         lyricGlow_ = !lyricGlow_;
         if (taskbarHost)
             taskbarHost->setFontGlow(lyricGlow_);
+        saveSettings();
         break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
@@ -516,6 +613,7 @@ void App::pickFont() {
         overlayHost->setFont(fontFamily_, fontSize_);
     if (taskbarHost)
         taskbarHost->setFont(fontFamily_, fontSize_);
+    saveSettings();
 }
 
 void App::pickLyricColor() {
@@ -532,6 +630,7 @@ void App::pickLyricColor() {
         return;
     lyricColor_ = cc.rgbResult;
     taskbarHost->setFontColor(lyricColor_);
+    saveSettings();
 }
 
 LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -581,11 +680,17 @@ int main() {
         }
         LocalFree(argv);
     }
-    if (!hasModeFlag)
-        wantTaskbar = true;
 
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
+    app.loadSettings();
+    // 无命令行参数时按上次保存的窗口状态启动；两个都关了则强制任务栏，否则无法找回设置入口
+    if (!hasModeFlag) {
+        wantOverlay = app.cfgOverlay_;
+        wantTaskbar = app.cfgTaskbar_;
+        if (!wantOverlay && !wantTaskbar)
+            wantTaskbar = true;
+    }
     if (!app.createTrayWindow(inst)) {
         std::wprintf(L"failed to create tray window\n");
         return 1;

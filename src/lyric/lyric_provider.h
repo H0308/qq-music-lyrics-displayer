@@ -56,6 +56,9 @@ public:
     void setManualOverride(const std::wstring& title, const std::wstring& artist,
                            std::vector<LyricLine> lines, SongInfo info);
 
+    // 设置手动歌词的持久化文件路径；设置时立即从该文件加载已有覆盖
+    void setManualOverridePath(const std::wstring& path);
+
     // 最近一次应用的歌词（仅在 ReadyCallback(true) 之后于 UI 线程读取）
     const std::vector<LyricLine>& lines() const;
 

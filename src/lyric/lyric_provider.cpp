@@ -10,6 +10,8 @@
 #include <cctype>
 #include <cstdlib>
 #include <cwctype>
+#include <filesystem>
+#include <fstream>
 #include <list>
 #include <mutex>
 #include <sstream>
@@ -366,6 +368,7 @@ struct LyricProvider::Impl {
     SongInfo currentSongInfo;
     std::unordered_map<std::wstring, CacheEntry> cache;
     std::unordered_map<std::wstring, CacheEntry> manualOverrides; // 用户手动选择，优先于自动匹配
+    std::wstring overridePath; // 手动歌词持久化文件（JSON），空表示不持久化
     std::list<std::wstring> lru; // 前 = 最近使用
     std::unordered_map<std::wstring, std::list<std::wstring>::iterator> lruIt;
     std::atomic<uint64_t> generation{0};
@@ -397,6 +400,61 @@ struct LyricProvider::Impl {
             cache.erase(victim);
             lruIt.erase(victim);
             lru.pop_back();
+        }
+    }
+
+    // ---------- 手动歌词持久化（JSON，UTF-8） ----------
+
+    // 调用方需已持有 mtx
+    void saveOverridesLocked() {
+        if (overridePath.empty())
+            return;
+        try {
+            nlohmann::json j = nlohmann::json::object();
+            for (const auto& [key, entry] : manualOverrides) {
+                nlohmann::json e;
+                e["songmid"] = toUtf8(entry.info.songmid);
+                e["albummid"] = toUtf8(entry.info.albummid);
+                nlohmann::json arr = nlohmann::json::array();
+                for (const auto& l : entry.lines)
+                    arr.push_back({l.ms, toUtf8(l.text)});
+                e["lines"] = std::move(arr);
+                j[toUtf8(key)] = std::move(e);
+            }
+            std::ofstream f(std::filesystem::path(overridePath),
+                            std::ios::binary | std::ios::trunc);
+            f << j.dump();
+        } catch (...) {
+        }
+    }
+
+    // 调用方需已持有 mtx
+    void loadOverridesLocked() {
+        if (overridePath.empty())
+            return;
+        try {
+            std::ifstream f(std::filesystem::path(overridePath), std::ios::binary);
+            if (!f)
+                return;
+            auto j = nlohmann::json::parse(f, nullptr, false);
+            if (j.is_discarded() || !j.is_object())
+                return;
+            for (const auto& [k, e] : j.items()) {
+                CacheEntry entry;
+                entry.info.songmid = toWide(e.value("songmid", std::string()));
+                entry.info.albummid = toWide(e.value("albummid", std::string()));
+                if (e["lines"].is_array()) {
+                    for (const auto& l : e["lines"]) {
+                        if (!l.is_array() || l.size() < 2)
+                            continue;
+                        entry.lines.push_back(
+                            {l[0].get<int64_t>(), toWide(l[1].get<std::string>())});
+                    }
+                }
+                if (!entry.lines.empty())
+                    manualOverrides[toWide(k)] = std::move(entry);
+            }
+        } catch (...) {
         }
     }
 
@@ -599,4 +657,11 @@ void LyricProvider::setManualOverride(const std::wstring& title, const std::wstr
                   .first;
     impl_->current = it->second.lines;
     impl_->currentSongInfo = it->second.info;
+    impl_->saveOverridesLocked();
+}
+
+void LyricProvider::setManualOverridePath(const std::wstring& path) {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    impl_->overridePath = path;
+    impl_->loadOverridesLocked();
 }

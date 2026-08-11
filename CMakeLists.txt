@@ -44,4 +44,5 @@ target_link_libraries(QQMusicLyric PRIVATE
     comdlg32
     windowscodecs
     advapi32
+    winmm
 )
