@@ -10,10 +10,12 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <functional>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -89,6 +91,76 @@ bool isSystemLightTheme() {
                     L"SystemUsesLightTheme", 0) != 0;
 }
 
+// 以下两个函数都是【阻塞型跨进程调用】（GetWindowText = 同步 SendMessage，UIA = 阻塞 COM），
+// 只允许在探测工作线程上调用。若放在 UI 线程，explorer 同时向我们的任务栏子窗口
+// 发消息时会形成双向死等（WER: AppHangXProcB1，explorer 挂起、对方是本进程）
+
+HWND findTrafficMonitorWnd(HWND taskbar) {
+    if (!taskbar)
+        return nullptr;
+    HWND child = nullptr;
+    while ((child = FindWindowExW(taskbar, child, nullptr, nullptr)) != nullptr) {
+        wchar_t text[256] = {};
+        GetWindowTextW(child, text, 256);
+        if (wcscmp(text, L"TrafficMonitorTaskbarWindow") == 0)
+            return child;
+    }
+    return nullptr;
+}
+
+// 通过 UI Automation 取任务栏 XAML 部件（开始/搜索/任务视图/小组件/固定与运行中的
+// 应用图标）的屏幕包围矩形。这些按钮是 XAML 元素而非窗口，HWND 枚举看不到，
+// 但 UIA 的 TaskbarFrame 子树完整暴露；小组件等后续新增的按钮同样作为其子元素出现。
+// uia 实例由探测工作线程创建与持有
+void queryTaskbarButtonsUia(IUIAutomation* uia, HWND taskbar, std::vector<RECT>& out) {
+    out.clear();
+    if (!taskbar || !uia)
+        return;
+    IUIAutomationElement* tb = nullptr;
+    if (FAILED(uia->ElementFromHandle(taskbar, &tb)) || !tb)
+        return;
+    VARIANT aid{};
+    aid.vt = VT_BSTR;
+    aid.bstrVal = SysAllocString(L"TaskbarFrame");
+    IUIAutomationCondition* cond = nullptr;
+    uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, aid, &cond);
+    VariantClear(&aid);
+    IUIAutomationElement* frame = nullptr;
+    if (cond) {
+        tb->FindFirst(TreeScope_Descendants, cond, &frame);
+        cond->Release();
+    }
+    tb->Release();
+    if (!frame)
+        return;
+    IUIAutomationCondition* trueCond = nullptr;
+    uia->CreateTrueCondition(&trueCond);
+    IUIAutomationElementArray* arr = nullptr;
+    if (trueCond) {
+        frame->FindAll(TreeScope_Children, trueCond, &arr);
+        trueCond->Release();
+    }
+    frame->Release();
+    if (!arr)
+        return;
+    int n = 0;
+    arr->get_Length(&n);
+    for (int i = 0; i < n; ++i) {
+        IUIAutomationElement* el = nullptr;
+        arr->GetElement(i, &el);
+        if (!el)
+            continue;
+        BOOL offscreen = FALSE;
+        RECT rc{};
+        el->get_CurrentIsOffscreen(&offscreen);
+        el->get_CurrentBoundingRectangle(&rc);
+        el->Release();
+        if (!offscreen && rc.right > rc.left)
+            out.push_back(rc);
+    }
+    arr->Release();
+}
+
 } // namespace
 
 struct TaskbarHost::Impl {
@@ -104,13 +176,24 @@ struct TaskbarHost::Impl {
     RECT rcNotify_{};    // 通知区屏幕坐标（缓存）
     RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
-    IUIAutomation* uia_ = nullptr; // UI Automation 客户端（惰性创建）
-    // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）
+    // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）。
+    // 以上两项由探测工作线程产出、UI 线程拾取（见 probeOut_）
     std::vector<RECT> uiaButtons_;
     UINT dpi_ = 96;
     bool centerAlign_ = true;
     bool lightTheme_ = false;
     int positionMode_ = 0; // 0 = 通知区域左侧；1 = 任务栏最左侧
+
+    // 避让探测工作线程：UIA / GetWindowText 等阻塞型跨进程调用全部在这里执行，
+    // UI 线程永不阻塞，从根上避免与 explorer 互相死等。结果经原子指针交付
+    struct ProbeResult {
+        RECT rcTm{};
+        std::vector<RECT> buttons;
+    };
+    std::thread probeThread_;
+    std::atomic<bool> probeStop_{false};
+    std::atomic<ProbeResult*> probeOut_{nullptr};
+    std::atomic<HWND> taskbarAtomic_{nullptr}; // taskbar_ 的线程安全副本（探测线程读）
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -205,6 +288,7 @@ struct TaskbarHost::Impl {
 
     bool findTaskbar() {
         taskbar_ = FindWindowW(L"Shell_TrayWnd", nullptr);
+        taskbarAtomic_ = taskbar_; // 同步给探测工作线程
         if (!taskbar_)
             return false;
         notify_ = FindWindowExW(taskbar_, nullptr, L"TrayNotifyWnd", nullptr);
@@ -213,10 +297,6 @@ struct TaskbarHost::Impl {
         centerAlign_ = isTaskbarCenterAlign();
         lightTheme_ = isSystemLightTheme();
         updateRects();
-        // TrafficMonitor 矩形原本只在 detectChanges 里刷新，首次定位前要先初始化
-        if (HWND tm = findTrafficMonitor())
-            GetWindowRect(tm, &rcTrafficMonitor_);
-        queryTaskbarButtons(uiaButtons_);
         return true;
     }
 
@@ -256,82 +336,8 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         adjustPosition();
+        startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         return true;
-    }
-
-    HWND findTrafficMonitor() const {
-        if (!taskbar_)
-            return nullptr;
-        HWND child = nullptr;
-        while ((child = FindWindowExW(taskbar_, child, nullptr, nullptr)) != nullptr) {
-            wchar_t text[256] = {};
-            GetWindowTextW(child, text, 256);
-            if (wcscmp(text, L"TrafficMonitorTaskbarWindow") == 0)
-                return child;
-        }
-        return nullptr;
-    }
-
-    bool ensureUia() {
-        if (uia_)
-            return true;
-        // 本线程可能未初始化 COM（SMTC 用的是 WinRT 单元）；已初始化时返回
-        // RPC_E_CHANGED_MODE，不影响后续使用，故不检查返回值，也不在退出时 Uninitialize
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        return SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                          IID_PPV_ARGS(&uia_)));
-    }
-
-    // 通过 UI Automation 取任务栏 XAML 部件（开始/搜索/任务视图/小组件/固定与运行中的
-    // 应用图标）的屏幕包围矩形。这些按钮是 XAML 元素而非窗口，HWND 枚举看不到，
-    // 但 UIA 的 TaskbarFrame 子树完整暴露；小组件等后续新增的按钮同样作为其子元素出现
-    void queryTaskbarButtons(std::vector<RECT>& out) {
-        out.clear();
-        if (!taskbar_ || !ensureUia())
-            return;
-        IUIAutomationElement* tb = nullptr;
-        if (FAILED(uia_->ElementFromHandle(taskbar_, &tb)) || !tb)
-            return;
-        VARIANT aid{};
-        aid.vt = VT_BSTR;
-        aid.bstrVal = SysAllocString(L"TaskbarFrame");
-        IUIAutomationCondition* cond = nullptr;
-        uia_->CreatePropertyCondition(UIA_AutomationIdPropertyId, aid, &cond);
-        VariantClear(&aid);
-        IUIAutomationElement* frame = nullptr;
-        if (cond) {
-            tb->FindFirst(TreeScope_Descendants, cond, &frame);
-            cond->Release();
-        }
-        tb->Release();
-        if (!frame)
-            return;
-        IUIAutomationCondition* trueCond = nullptr;
-        uia_->CreateTrueCondition(&trueCond);
-        IUIAutomationElementArray* arr = nullptr;
-        if (trueCond) {
-            frame->FindAll(TreeScope_Children, trueCond, &arr);
-            trueCond->Release();
-        }
-        frame->Release();
-        if (!arr)
-            return;
-        int n = 0;
-        arr->get_Length(&n);
-        for (int i = 0; i < n; ++i) {
-            IUIAutomationElement* el = nullptr;
-            arr->GetElement(i, &el);
-            if (!el)
-                continue;
-            BOOL offscreen = FALSE;
-            RECT rc{};
-            el->get_CurrentIsOffscreen(&offscreen);
-            el->get_CurrentBoundingRectangle(&rc);
-            el->Release();
-            if (!offscreen && rc.right > rc.left)
-                out.push_back(rc);
-        }
-        arr->Release();
     }
 
     // 任务栏上的占用区间 [left, right)（屏幕坐标，已合并）：UIA 按钮 + 通知区 +
@@ -453,42 +459,22 @@ struct TaskbarHost::Impl {
         bool light = isSystemLightTheme();
         bool themeChanged = light != lightTheme_;
 
-        RECT rcTm{};
-        HWND tm = findTrafficMonitor();
-        if (tm)
-            GetWindowRect(tm, &rcTm);
-
         RECT rcStart{};
         if (start_)
             GetWindowRect(start_, &rcStart);
 
-        // 任务栏 XAML 按钮（应用图标随窗口开关增减、居中任务栏随图标数移动）
-        std::vector<RECT> btns;
-        queryTaskbarButtons(btns);
-        bool buttonsChanged = btns.size() != uiaButtons_.size();
-        if (!buttonsChanged) {
-            for (size_t i = 0; i < btns.size(); ++i) {
-                if (!EqualRect(&btns[i], &uiaButtons_[i])) {
-                    buttonsChanged = true;
-                    break;
-                }
-            }
-        }
-
+        // TrafficMonitor / UIA 按钮矩形由探测工作线程提供（pickProbeResult），
+        // 这里只做非阻塞检查，UI 线程不允许出现阻塞型跨进程调用
         bool changed = dpi != dpi_ || center != centerAlign_ || themeChanged ||
-                       buttonsChanged ||
                        !EqualRect(&rcTaskbar, &rcTaskbar_) ||
                        !EqualRect(&rcNotify, &rcNotify_) ||
-                       !EqualRect(&rcStart, &rcStart_) ||
-                       !EqualRect(&rcTm, &rcTrafficMonitor_);
+                       !EqualRect(&rcStart, &rcStart_);
         if (changed) {
             dpi_ = dpi;
             centerAlign_ = center;
             rcTaskbar_ = rcTaskbar;
             rcNotify_ = rcNotify;
             rcStart_ = rcStart;
-            rcTrafficMonitor_ = rcTm;
-            uiaButtons_ = std::move(btns);
             renderer.setDpi(dpi_);
             layoutDirty_ = true;
             if (themeChanged) {
@@ -763,10 +749,70 @@ struct TaskbarHost::Impl {
     void releaseAll() {
         discardDeviceResources();
         renderer.releaseAll();
-        if (uia_) {
-            uia_->Release();
-            uia_ = nullptr;
+    }
+
+    // ---------- 避让探测工作线程 ----------
+
+    // 每秒探测一次：TrafficMonitor 窗口矩形 + UIA 任务栏按钮矩形。
+    // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
+    void probeMain() {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        IUIAutomation* uia = nullptr;
+        CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_PPV_ARGS(&uia));
+        while (!probeStop_.load()) {
+            if (HWND tb = taskbarAtomic_.load()) {
+                auto* p = new ProbeResult;
+                if (HWND tm = findTrafficMonitorWnd(tb))
+                    GetWindowRect(tm, &p->rcTm);
+                queryTaskbarButtonsUia(uia, tb, p->buttons);
+                delete probeOut_.exchange(p); // 上一份未被拾取则丢弃
+            }
+            for (int t = 0; t < 10 && !probeStop_.load(); ++t)
+                Sleep(100);
         }
+        if (uia)
+            uia->Release();
+        CoUninitialize();
+    }
+
+    void startProbe() {
+        if (probeThread_.joinable())
+            return;
+        probeStop_ = false;
+        probeThread_ = std::thread([this] { probeMain(); });
+    }
+
+    void stopProbe() {
+        probeStop_ = true;
+        if (probeThread_.joinable())
+            probeThread_.join();
+        delete probeOut_.exchange(nullptr);
+    }
+
+    // UI 线程慢速分支：拾取探测结果，与缓存比较有变化才更新。返回是否有变化
+    bool pickProbeResult() {
+        std::unique_ptr<ProbeResult> p(probeOut_.exchange(nullptr));
+        if (!p)
+            return false;
+        bool changed = !EqualRect(&p->rcTm, &rcTrafficMonitor_);
+        if (!changed) {
+            if (p->buttons.size() != uiaButtons_.size()) {
+                changed = true;
+            } else {
+                for (size_t i = 0; i < p->buttons.size(); ++i) {
+                    if (!EqualRect(&p->buttons[i], &uiaButtons_[i])) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (changed) {
+            rcTrafficMonitor_ = p->rcTm;
+            uiaButtons_ = std::move(p->buttons);
+        }
+        return changed;
     }
 
     // ---------- 封面解码 ----------
@@ -1395,10 +1441,13 @@ struct TaskbarHost::Impl {
     void onTimer() {
         if (tick)
             tick();
-        // 任务栏位置/DPI/主题跟踪是耗时操作，放到慢速分支，不跟 60fps 走
+        // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
-            if (detectChanges())
+            bool changed = detectChanges();
+            if (pickProbeResult())
+                changed = true;
+            if (changed)
                 adjustPosition();
         }
         updateScroll();
@@ -1453,6 +1502,7 @@ struct TaskbarHost::Impl {
         }
         case WM_DESTROY:
             KillTimer(hwnd, kTimerId);
+            stopProbe();
             releaseAll();
             if (quitting)
                 PostQuitMessage(0);
