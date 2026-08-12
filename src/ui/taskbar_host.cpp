@@ -132,9 +132,6 @@ struct TaskbarHost::Impl {
     bool trackingLeave_ = false;
     bool quitting = false;
 
-    // Explorer 重启后重新附着
-    UINT taskbarCreatedMsg_ = 0;
-
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
     // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；平滑值按当前字时长
     // 决定的时间常数指数趋近目标，消除阶跃闪烁且同步误差有界
@@ -253,7 +250,6 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         adjustPosition();
-        taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
         return true;
     }
 
@@ -595,6 +591,28 @@ struct TaskbarHost::Impl {
         positionMode_ = mode;
         adjustPosition();
         render();
+    }
+
+    // Explorer 重启后由托盘主窗口调用（TaskbarCreated 广播只发给顶层窗口）。
+    // 作为 Shell_TrayWnd 的子窗口，歌词窗在 explorer 退出时会随任务栏一起被销毁，
+    // 此时只剩野句柄，必须整体重建；若幸存（崩溃非正常退出）则重新附着即可。
+    // 歌词/媒体/字体等状态都保存在 Impl 成员里，重建窗口后原样恢复
+    void onTaskbarCreated() {
+        if (hwnd && IsWindow(hwnd)) {
+            if (findTaskbar()) {
+                SetParent(hwnd, taskbar_);
+                adjustPosition();
+                if (visible)
+                    ShowWindow(hwnd, SW_SHOWNA);
+                render();
+            }
+            return;
+        }
+        hwnd = nullptr;
+        if (createWindow(inst) && visible) {
+            ShowWindow(hwnd, SW_SHOWNA);
+            render();
+        }
     }
 
     void recreateFormats() {
@@ -1363,13 +1381,6 @@ struct TaskbarHost::Impl {
                 PostQuitMessage(0);
             return 0;
         default:
-            if (taskbarCreatedMsg_ && msg == taskbarCreatedMsg_) {
-                if (findTaskbar()) {
-                    SetParent(hwnd, taskbar_);
-                    adjustPosition();
-                }
-                return 0;
-            }
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
     }
@@ -1507,6 +1518,10 @@ void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
 
 void TaskbarHost::setPositionMode(int mode) {
     impl_->setPositionMode(mode);
+}
+
+void TaskbarHost::onTaskbarCreated() {
+    impl_->onTaskbarCreated();
 }
 
 void TaskbarHost::setClickThrough(bool on) {

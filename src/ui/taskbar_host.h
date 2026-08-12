@@ -42,6 +42,9 @@ public:
     // 两种模式都会自动避开小组件/搜索/任务视图/应用图标/TrafficMonitor：
     // 原位优先收缩，压到最小宽度仍放不下时换到容得下的最大空闲区
     void setPositionMode(int mode);
+    // Explorer 重启后重建/重附着（托盘主窗口收到 TaskbarCreated 广播后调用）；
+    // 广播只投递给顶层窗口，作为任务栏子窗口的歌词窗自己收不到
+    void onTaskbarCreated();
     void setLyrics(const std::vector<LyricLine>& lines) override;
     void setCurrentLine(int index) override;
     void setPosition(int64_t positionMs) override;

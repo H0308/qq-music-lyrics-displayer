@@ -108,6 +108,7 @@ struct App {
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
     HWND trayHwnd = nullptr;
+    UINT taskbarCreatedMsg_ = 0; // Explorer 重启广播（只有顶层窗口收得到，托盘窗口不能用 HWND_MESSAGE）
 
     // 字体状态（作为字体选择器的记忆源）。hasUserFont_ 为 false 时各宿主使用各自的默认字体。
     bool hasUserFont_ = false;
@@ -501,10 +502,13 @@ bool App::createTrayWindow(HINSTANCE inst) {
     wc.lpszClassName = L"QQMusicLyricTray";
     RegisterClassExW(&wc);
 
+    // 必须是不可见的顶层窗口（不能用 HWND_MESSAGE）：系统广播（如 Explorer 重启时的
+    // TaskbarCreated）只投递给顶层窗口，message-only 窗口收不到，任务栏歌词将无法恢复
     trayHwnd = CreateWindowExW(0, L"QQMusicLyricTray", L"QQMusicLyricTray", 0, 0, 0, 0, 0,
-                               HWND_MESSAGE, nullptr, inst, this);
+                               nullptr, nullptr, inst, this);
     if (!trayHwnd)
         return false;
+    taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
     updateTrayIcon();
     return true;
 }
@@ -716,6 +720,14 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     if (msg == WM_DESTROY) {
         app->destroyTray();
+        return 0;
+    }
+    if (app->taskbarCreatedMsg_ && msg == app->taskbarCreatedMsg_) {
+        // Explorer 重启：通知区域被清空，托盘图标必须重新添加；
+        // 任务栏歌词窗口可能已随 Shell_TrayWnd 一起被销毁，交给宿主重建/重附着
+        app->updateTrayIcon();
+        if (app->taskbarHost)
+            app->taskbarHost->onTaskbarCreated();
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
