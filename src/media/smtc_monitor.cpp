@@ -5,7 +5,9 @@
 #include <winrt/Windows.Media.Control.h>
 #include <winrt/Windows.Storage.Streams.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <utility>
 
@@ -81,6 +83,29 @@ struct SmtcMonitor::Impl {
     GlobalSystemMediaTransportControlsSession::TimelinePropertiesChanged_revoker timelineRevoker;
     GlobalSystemMediaTransportControlsSession::PlaybackInfoChanged_revoker playbackRevoker;
 
+    // 进度平滑状态（snapshot() 内使用）。
+    // QQ 的 TimelineProperties 播放中会频繁阶跃更新（Position 可能是量化值），
+    // 逐字歌词对进度抖动极其敏感：本地时钟按播放速率自走，
+    // 原始位置仅作慢速校正（τ=2s 低通），大偏差（seek/切歌）立即对齐
+    mutable double smoothPos_ = 0.0;
+    mutable std::chrono::steady_clock::time_point posTick_{};
+    mutable bool posInit_ = false;
+    mutable std::wstring posTrackKey_;
+
+    // 播放中 QQ 可能推送过期/量化的 Timeline（Position 与 LastUpdatedTime 不成对，
+    // 或 LastUpdatedTime 缺失回退为当前时刻），换算到当前时刻后若比现有锚点
+    // 落后 250ms~2s，视为噪声丢弃本次更新、保留旧锚点；
+    // 落后超过 2s 才认为是真实 seek 回退，予以接受
+    bool isStaleTimelineUpdate(int64_t newPosMs, int64_t newAnchorMs) const {
+        if (snap.status != PlaybackStatus::Playing || snap.durationMs <= 0)
+            return false;
+        int64_t now = nowUtcMs();
+        int64_t cur = snap.positionMs + std::max<int64_t>(0, now - snap.anchorUtcMs);
+        int64_t nxt = newPosMs + std::max<int64_t>(0, now - newAnchorMs);
+        int64_t back = cur - nxt;
+        return back > 250 && back < 2000;
+    }
+
     void notify() {
         if (onChange) onChange();
     }
@@ -131,10 +156,14 @@ struct SmtcMonitor::Impl {
             try {
                 auto tl = session.GetTimelineProperties();
                 snap.durationMs = timeSpanMs(tl.EndTime());
-                snap.positionMs = timeSpanMs(tl.Position());
-                snap.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
-                if (snap.anchorUtcMs == 0)
-                    snap.anchorUtcMs = nowUtcMs();
+                int64_t newPos = timeSpanMs(tl.Position());
+                int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+                if (newAnchor == 0)
+                    newAnchor = nowUtcMs();
+                if (!isStaleTimelineUpdate(newPos, newAnchor)) {
+                    snap.positionMs = newPos;
+                    snap.anchorUtcMs = newAnchor;
+                }
             } catch (...) {
                 return;
             }
@@ -148,10 +177,14 @@ struct SmtcMonitor::Impl {
             std::lock_guard<std::mutex> lk(mtx);
             try {
                 auto tl = session.GetTimelineProperties();
-                snap.positionMs = timeSpanMs(tl.Position());
-                snap.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
-                if (snap.anchorUtcMs == 0)
-                    snap.anchorUtcMs = nowUtcMs();
+                int64_t newPos = timeSpanMs(tl.Position());
+                int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+                if (newAnchor == 0)
+                    newAnchor = nowUtcMs();
+                if (!isStaleTimelineUpdate(newPos, newAnchor)) {
+                    snap.positionMs = newPos;
+                    snap.anchorUtcMs = newAnchor;
+                }
                 auto info = session.GetPlaybackInfo();
                 snap.status = mapStatus(info.PlaybackStatus());
                 auto c = info.Controls();
@@ -219,6 +252,48 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
                 s.positionMs = s.durationMs;
         }
     }
+    if (!s.sessionAlive) {
+        impl_->posInit_ = false;
+        return s;
+    }
+    // 进度平滑：本地时钟自走 + 慢速校正，滤掉锚点阶跃
+    std::wstring key = s.title + L'|' + s.artist;
+    auto now = std::chrono::steady_clock::now();
+    float dt = 16.7f;
+    if (impl_->posTick_ != std::chrono::steady_clock::time_point{})
+        dt = std::chrono::duration<float, std::milli>(now - impl_->posTick_).count();
+    impl_->posTick_ = now;
+    if (s.status != PlaybackStatus::Playing) {
+        // 暂停中直接跟随原始值（拖动进度条需实时响应）
+        impl_->smoothPos_ = (double)s.positionMs;
+        impl_->posTrackKey_ = key;
+        impl_->posInit_ = true;
+        return s;
+    }
+    if (!impl_->posInit_ || impl_->posTrackKey_ != key) {
+        impl_->smoothPos_ = (double)s.positionMs;
+        impl_->posTrackKey_ = key;
+        impl_->posInit_ = true;
+    } else {
+        double err = (double)s.positionMs - impl_->smoothPos_;
+        if (std::fabs(err) > 800.0) {
+            impl_->smoothPos_ = (double)s.positionMs; // seek/跳变立即对齐（允许倒退）
+        } else {
+            double prev = impl_->smoothPos_;
+            impl_->smoothPos_ += dt;                              // 按播放速率自走
+            impl_->smoothPos_ += err * (1.0 - std::exp(-dt / 2000.0)); // 慢速校正
+            // 播放中不倒退：原始位置小幅落后只是 SMTC 上报滞后/量化，
+            // 原地等待它追上来，避免逐字填充退回重放
+            if (impl_->smoothPos_ < prev)
+                impl_->smoothPos_ = prev;
+        }
+    }
+    int64_t smoothed = (int64_t)(impl_->smoothPos_ + 0.5);
+    if (s.durationMs > 0 && smoothed > s.durationMs)
+        smoothed = s.durationMs;
+    if (smoothed < 0)
+        smoothed = 0;
+    s.positionMs = smoothed;
     return s;
 }
 

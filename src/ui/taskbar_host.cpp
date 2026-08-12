@@ -130,8 +130,8 @@ struct TaskbarHost::Impl {
     UINT taskbarCreatedMsg_ = 0;
 
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
-    // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；字时长越短像素速度越快，
-    // 阶跃映射到填充边界的跳动越大（闪烁）。按当前字的像素速度限制每帧步进来消除
+    // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；平滑值按当前字时长
+    // 决定的时间常数指数趋近目标，消除阶跃闪烁且同步误差有界
     float karaokeProgX_ = 0.0f;      // 本帧实际使用的填充进度（平滑后）
     float karaokeSmoothX_ = 0.0f;    // 平滑状态
     int karaokeSmoothLine_ = -1;     // 平滑状态所属行号
@@ -702,9 +702,9 @@ struct TaskbarHost::Impl {
     }
 
     // 逐字填充目标进度 x（布局像素坐标）：已唱边界 + 当前字按字时长比例推进；
-    // speedOut 输出当前字的像素速度（px/ms），供平滑限速使用
-    float karaokeTargetX(const LyricLine& line, float& speedOut) const {
-        speedOut = 0.0f;
+    // durOut 输出当前字时长（ms），供平滑时间常数使用
+    float karaokeTargetX(const LyricLine& line, int64_t& durOut) const {
+        durOut = 0;
         UINT32 sungLen = 0;
         const LyricChar* curChar = nullptr;
         for (const auto& c : line.chars) {
@@ -721,32 +721,34 @@ struct TaskbarHost::Impl {
         if (FAILED(lyricLayout_->HitTestTextPosition(charOff, FALSE, &startX, &hy, &hm)))
             return 0.0f;
         float endX = startX;
-        if (FAILED(lyricLayout_->HitTestTextPosition(sungLen, TRUE, &endX, &hy, &hm)))
+        // 当前字结束位置 = 当前字最后一个字形的右边缘（sungLen-1 的 trailing edge）。
+        // 注意不能传 sungLen：那取到的是下一个字的右边缘，会多算一个字宽，
+        // 导致进入下一字时目标回跳、填充倒退
+        if (FAILED(lyricLayout_->HitTestTextPosition(sungLen - 1, TRUE, &endX, &hy, &hm)))
             endX = startX;
-        int64_t dur = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
+        durOut = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
         float frac =
-            (float)std::clamp((double)(positionMs_ - curChar->startMs) / (double)dur, 0.0, 1.0);
-        speedOut = (endX - startX) / (float)dur;
+            (float)std::clamp((double)(positionMs_ - curChar->startMs) / (double)durOut, 0.0, 1.0);
         return startX + (endX - startX) * frac;
     }
 
-    // 平滑步进：目标前进时每帧最多按当前字速度 * dt 推进；小幅度回退视为
-    // 锚点抖动保持不动，大幅度回退视为 seek 立即对齐。行切换时直接对齐
+    // 平滑步进：过渡时间常数取当前字时长的 1/4（40~200ms），指数趋近目标，
+    // 每个字的过渡快慢随其时长自然变化，且同步误差有界（约 τ）。
+    // SMTC 锚点校正造成的目标抖动经低通后不再闪烁；行切换或大幅 seek 时直接对齐
     float karaokeSmoothStep(const LyricLine& line) {
-        float speed = 0.0f;
-        float target = karaokeTargetX(line, speed);
+        int64_t charDur = 0;
+        float target = karaokeTargetX(line, charDur);
         ULONGLONG now = GetTickCount64();
         float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
         karaokeTick_ = now;
-        if (karaokeSmoothLine_ != currentLine || target <= 0.0f) {
+        float gap = target - karaokeSmoothX_;
+        if (karaokeSmoothLine_ != currentLine || std::fabs(gap) > 100.0f) {
             karaokeSmoothLine_ = currentLine;
             karaokeSmoothX_ = target;
-        } else if (target < karaokeSmoothX_) {
-            if (karaokeSmoothX_ - target > 32.0f)
-                karaokeSmoothX_ = target;
         } else {
-            float maxStep = speed * dt * 1.5f + 0.3f;
-            karaokeSmoothX_ += std::min(target - karaokeSmoothX_, maxStep);
+            float tau = std::clamp((float)charDur * 0.25f, 40.0f, 200.0f);
+            float alpha = 1.0f - std::exp(-dt / tau);
+            karaokeSmoothX_ += gap * alpha;
         }
         karaokeProgX_ = karaokeSmoothX_;
         return karaokeProgX_;

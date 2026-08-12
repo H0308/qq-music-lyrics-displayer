@@ -189,8 +189,7 @@ struct OverlayHost::Impl {
     float scrollTarget = 0.0f;
 
     // 逐字填充进度平滑状态。SMTC 进度是锚点插值的，锚点校正时阶跃一次；
-    // 字时长越短像素速度越快，阶跃映射到填充边界的跳动越大（闪烁）。
-    // 按当前字的像素速度限制每帧步进来消除
+    // 平滑值按当前字时长决定的时间常数指数趋近目标，消除阶跃闪烁且同步误差有界
     float karaokeSmoothX_ = 0.0f;
     int karaokeSmoothLine_ = -1;
     ULONGLONG karaokeTick_ = 0;
@@ -834,27 +833,29 @@ struct OverlayHost::Impl {
                         float endX = startX;
                         DWRITE_HIT_TEST_METRICS hm2{};
                         float hy2 = 0.0f;
-                        // 当前字尾部的 trailing edge：与当前字同一视觉行，折行也不会串行
-                        lay->HitTestTextPosition(sungLen, TRUE, &endX, &hy2, &hm2);
+                        // 当前字结束位置 = 当前字最后一个字形的右边缘（sungLen-1 的
+                        // trailing edge）：与当前字同一视觉行，折行也不会串行。
+                        // 不能传 sungLen：那取到的是下一个字的右边缘，多算一个字宽，
+                        // 进入下一字时目标会回跳、填充倒退
+                        lay->HitTestTextPosition(sungLen - 1, TRUE, &endX, &hy2, &hm2);
                         int64_t dur = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
                         float frac = (float)std::clamp(
                             (double)(positionMs - curChar->startMs) / (double)dur, 0.0, 1.0);
                         float targetX = startX + (endX - startX) * frac;
-                        // 平滑步进：目标前进时每帧最多按当前字像素速度 * dt 推进，
-                        // 消除 SMTC 锚点校正的阶跃抖动；小回退保持，大回退视为 seek 对齐
-                        float speed = (endX - startX) / (float)dur;
+                        // 平滑步进：过渡时间常数取当前字时长的 1/4（40~200ms），
+                        // 指数趋近目标，每个字的过渡快慢随其时长自然变化，同步误差有界。
+                        // SMTC 锚点校正的目标抖动经低通后不再闪烁；行切换或大幅 seek 直接对齐
                         ULONGLONG now = GetTickCount64();
                         float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
                         karaokeTick_ = now;
-                        if (karaokeSmoothLine_ != currentLine) {
+                        float gap = targetX - karaokeSmoothX_;
+                        if (karaokeSmoothLine_ != currentLine || std::fabs(gap) > 100.0f) {
                             karaokeSmoothLine_ = currentLine;
                             karaokeSmoothX_ = targetX;
-                        } else if (targetX < karaokeSmoothX_) {
-                            if (karaokeSmoothX_ - targetX > 32.0f)
-                                karaokeSmoothX_ = targetX;
                         } else {
-                            float maxStep = speed * dt * 1.5f + 0.3f;
-                            karaokeSmoothX_ += std::min(targetX - karaokeSmoothX_, maxStep);
+                            float tau = std::clamp((float)dur * 0.25f, 40.0f, 200.0f);
+                            float alpha = 1.0f - std::exp(-dt / tau);
+                            karaokeSmoothX_ += gap * alpha;
                         }
                         float progX = karaokeSmoothX_;
                         float rowTop = hm.top;
