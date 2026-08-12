@@ -43,6 +43,8 @@ constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
 constexpr UINT kCmdManualSearch = 107;
 constexpr UINT kCmdFontColorEffect = 108;
+constexpr UINT kCmdTaskbarPosNotify = 109;
+constexpr UINT kCmdTaskbarPosLeft = 110;
 
 struct CoverPayload {
     std::wstring key;
@@ -125,6 +127,7 @@ struct App {
     bool cfgOverlay_ = false;
     bool cfgTaskbar_ = true;
     bool cfgClickThrough_ = false;
+    int taskbarPosition_ = 0; // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
 
     std::wstring settingsPath_;
 
@@ -177,6 +180,7 @@ struct App {
         taskbarHost->setFontGlow(lyricGlow_);
         taskbarHost->setFontOutline(lyricOutline_);
         taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
+        taskbarHost->setPositionMode(taskbarPosition_);
         updateTrayIcon();
         return true;
     }
@@ -459,6 +463,7 @@ void App::loadSettings() {
         cfgOverlay_ = j.value("overlay", false);
         cfgTaskbar_ = j.value("taskbar", true);
         cfgClickThrough_ = j.value("clickThrough", false);
+        taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
     } catch (...) {
     }
 }
@@ -481,6 +486,7 @@ void App::saveSettings() {
         j["overlay"] = overlayHost != nullptr;
         j["taskbar"] = taskbarHost != nullptr;
         j["clickThrough"] = overlayHost && overlayHost->clickThrough();
+        j["taskbarPosition"] = taskbarPosition_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -552,6 +558,20 @@ void App::showTrayMenu() {
 
     addItem(kCmdToggleOverlay, L"桌面歌词", overlayHost != nullptr);
     addItem(kCmdToggleTaskbar, L"任务栏歌词", taskbarHost != nullptr);
+    if (taskbarHost) {
+        fluent::FluentMenuItem pos;
+        pos.text = L"任务栏位置";
+        fluent::FluentMenuItem sub;
+        sub.id = kCmdTaskbarPosNotify;
+        sub.text = L"通知区域左侧";
+        sub.checked = taskbarPosition_ == 0;
+        pos.submenu.push_back(sub);
+        sub.id = kCmdTaskbarPosLeft;
+        sub.text = L"任务栏最左侧";
+        sub.checked = taskbarPosition_ == 1;
+        pos.submenu.push_back(sub);
+        items.push_back(std::move(pos));
+    }
     addSeparator();
     if (overlayHost) {
         addItem(kCmdClickThrough, L"鼠标穿透", overlayHost->clickThrough());
@@ -584,6 +604,13 @@ void App::onMenuCommand(int cmd) {
     case kCmdClickThrough:
         if (overlayHost)
             overlayHost->setClickThrough(!overlayHost->clickThrough());
+        saveSettings();
+        break;
+    case kCmdTaskbarPosNotify:
+    case kCmdTaskbarPosLeft:
+        taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
+        if (taskbarHost)
+            taskbarHost->setPositionMode(taskbarPosition_);
         saveSettings();
         break;
     case kCmdPickFont:

@@ -99,10 +99,12 @@ struct TaskbarHost::Impl {
     HWND start_ = nullptr;
     RECT rcTaskbar_{};   // 任务栏屏幕坐标（缓存）
     RECT rcNotify_{};    // 通知区屏幕坐标（缓存）
+    RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
     UINT dpi_ = 96;
     bool centerAlign_ = true;
     bool lightTheme_ = false;
+    int positionMode_ = 0; // 0 = 通知区域左侧；1 = 任务栏最左侧
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -212,6 +214,8 @@ struct TaskbarHost::Impl {
             GetWindowRect(taskbar_, &rcTaskbar_);
         if (notify_)
             GetWindowRect(notify_, &rcNotify_);
+        if (start_)
+            GetWindowRect(start_, &rcStart_);
     }
 
     bool createWindow(HINSTANCE inst) {
@@ -279,34 +283,48 @@ struct TaskbarHost::Impl {
         int pxW = 0;
         int x = 0;
 
-        HWND tm = findTrafficMonitor();
-        if (tm) {
-            RECT rcTm{};
-            GetWindowRect(tm, &rcTm);
-
-            // 强制与 TrafficMonitor 互斥：优先放它右边（箭头位置），放不下就放它左边
-            int availableRight = rightBoundary - rcTm.right - gap * 2;
-            int availableLeft = rcTm.left - leftBoundary - gap * 2;
-
-            if (availableRight >= minW && availableRight >= availableLeft) {
-                pxW = std::clamp(availableRight, minW, maxW);
-                x = rcTm.right + gap;
-            } else if (availableLeft >= minW) {
-                pxW = std::clamp(availableLeft, minW, maxW);
-                x = rcTm.left - pxW - gap;
+        if (positionMode_ == 1) {
+            // 任务栏最左侧：锚定任务栏左缘，右缘不超过开始按钮；
+            // 开始按钮本身就在最左（任务栏左对齐）时，放到开始按钮右侧
+            int startLeft = start_ ? rcStart_.left : rcTaskbar_.right;
+            int avail = startLeft - leftBoundary - gap * 2;
+            if (avail >= minW) {
+                pxW = std::clamp(avail, minW, maxW);
+                x = leftBoundary + gap;
+            } else {
+                pxW = maxW;
+                x = start_ ? rcStart_.right + gap : leftBoundary + gap;
             }
-        }
+        } else {
+            HWND tm = findTrafficMonitor();
+            if (tm) {
+                RECT rcTm{};
+                GetWindowRect(tm, &rcTm);
 
-        // 没有 TrafficMonitor 或两边都放不下：锚定到通知区左侧
-        if (pxW == 0) {
-            int available = rightBoundary - leftBoundary - gap;
-            if (!notify_) {
-                available = (rcTaskbar_.right - rcTaskbar_.left) / 3;
+                // 强制与 TrafficMonitor 互斥：优先放它右边（箭头位置），放不下就放它左边
+                int availableRight = rightBoundary - rcTm.right - gap * 2;
+                int availableLeft = rcTm.left - leftBoundary - gap * 2;
+
+                if (availableRight >= minW && availableRight >= availableLeft) {
+                    pxW = std::clamp(availableRight, minW, maxW);
+                    x = rcTm.right + gap;
+                } else if (availableLeft >= minW) {
+                    pxW = std::clamp(availableLeft, minW, maxW);
+                    x = rcTm.left - pxW - gap;
+                }
             }
-            pxW = std::clamp(available, minW, maxW);
-            x = rightBoundary - pxW - gap;
-            if (!notify_) {
-                x = rcTaskbar_.right - pxW - gap;
+
+            // 没有 TrafficMonitor 或两边都放不下：锚定到通知区左侧
+            if (pxW == 0) {
+                int available = rightBoundary - leftBoundary - gap;
+                if (!notify_) {
+                    available = (rcTaskbar_.right - rcTaskbar_.left) / 3;
+                }
+                pxW = std::clamp(available, minW, maxW);
+                x = rightBoundary - pxW - gap;
+                if (!notify_) {
+                    x = rcTaskbar_.right - pxW - gap;
+                }
             }
         }
 
@@ -350,15 +368,21 @@ struct TaskbarHost::Impl {
         if (tm)
             GetWindowRect(tm, &rcTm);
 
+        RECT rcStart{};
+        if (start_)
+            GetWindowRect(start_, &rcStart);
+
         bool changed = dpi != dpi_ || center != centerAlign_ || themeChanged ||
                        !EqualRect(&rcTaskbar, &rcTaskbar_) ||
                        !EqualRect(&rcNotify, &rcNotify_) ||
+                       !EqualRect(&rcStart, &rcStart_) ||
                        !EqualRect(&rcTm, &rcTrafficMonitor_);
         if (changed) {
             dpi_ = dpi;
             centerAlign_ = center;
             rcTaskbar_ = rcTaskbar;
             rcNotify_ = rcNotify;
+            rcStart_ = rcStart;
             rcTrafficMonitor_ = rcTm;
             renderer.setDpi(dpi_);
             layoutDirty_ = true;
@@ -465,6 +489,14 @@ struct TaskbarHost::Impl {
         if (lyricOutline_ == on)
             return;
         lyricOutline_ = on;
+        render();
+    }
+
+    void setPositionMode(int mode) {
+        if (positionMode_ == mode)
+            return;
+        positionMode_ = mode;
+        adjustPosition();
         render();
     }
 
@@ -1370,6 +1402,10 @@ void TaskbarHost::setFontOutline(bool on) {
 
 void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
     impl_->setFontGlowColors(glow, outline);
+}
+
+void TaskbarHost::setPositionMode(int mode) {
+    impl_->setPositionMode(mode);
 }
 
 void TaskbarHost::setClickThrough(bool on) {

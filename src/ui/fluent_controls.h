@@ -34,6 +34,8 @@ protected:
     ID2D1SolidColorBrush* brush(ID2D1DCRenderTarget* rt);
     // 取/建文本格式
     IDWriteTextFormat* textFormat(float dipSize, int weight = 400, bool center = false);
+    // DirectWrite 工厂（用于创建带省略号裁剪的 TextLayout）
+    IDWriteFactory* dwrite();
     void renderNow(); // 立即重绘一帧（子类在 render() 中绘制）
 
     virtual void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) = 0;
@@ -127,6 +129,10 @@ private:
     void ensureVisible(int row);
     void notifySelChange();
     int nextSelectable(int from, int dir) const;
+    // 截断行的悬浮 tooltip（原生 tracking tooltip，仅文本被截断时弹出）
+    bool rowTextTruncated(int row);
+    void showTip(int row);
+    void hideTip();
 
     int id_ = 0;
     std::vector<FluentListItem> items_;
@@ -137,6 +143,9 @@ private:
     float scrollDragGrabDy_ = 0;
     int wheelAccum_ = 0;
     RowDrawFn rowDraw_;
+    HWND tooltip_ = nullptr;
+    int tipRow_ = -1;     // tooltip 正显示的行
+    bool tipArmed_ = false; // 悬浮计时中（尚未弹出）
 };
 
 // 透明文本标签，直接绘制在 Mica 背景上

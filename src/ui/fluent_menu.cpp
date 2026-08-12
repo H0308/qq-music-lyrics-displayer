@@ -21,6 +21,8 @@ constexpr float kRightPad = 26.0f;
 constexpr float kMinWidth = 180.0f;
 constexpr UINT kTimerSubmenu = 1;
 constexpr UINT kSubmenuDelayMs = 350;
+// 链外点击关闭菜单（由 WH_MOUSE_LL 钩子投递）
+constexpr UINT kMsgOutsideClick = WM_APP + 30;
 
 struct MenuWnd {
     HWND hwnd = nullptr;
@@ -207,6 +209,44 @@ struct MenuWnd {
 
 MenuWnd* g_root = nullptr;
 constexpr wchar_t kMenuClass[] = L"QQMusicLyricFluentMenu";
+
+// 菜单存活期间的低级鼠标钩子：消隐不能依赖 WM_ACTIVATE（点任务栏空白、托盘区、
+// WS_EX_NOACTIVATE 窗口等不会切换前台窗口，WA_INACTIVE 永远不触发），
+// 必须直接检测“点击发生在菜单链之外”这个事件本身
+HHOOK g_mouseHook = nullptr;
+
+LRESULT CALLBACK lowLevelMouseProc(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION && g_root) {
+        switch (wp) {
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_NCLBUTTONDOWN:
+        case WM_NCRBUTTONDOWN:
+        case WM_NCMBUTTONDOWN: {
+            auto* mhs = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
+            bool inside = false;
+            for (MenuWnd* m = g_root; m; m = m->child) {
+                if (!m->hwnd)
+                    continue;
+                RECT rc;
+                GetWindowRect(m->hwnd, &rc);
+                if (PtInRect(&rc, mhs->pt)) {
+                    inside = true;
+                    break;
+                }
+            }
+            // 不在任何一级菜单窗口内：投递消息异步关闭，避免在钩子里同步销毁窗口
+            if (!inside)
+                PostMessageW(g_root->hwnd, kMsgOutsideClick, 0, 0);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wp, lp);
+}
 
 void MenuWnd::closeChildren() {
     if (child) {
@@ -417,8 +457,16 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
                 closeChain();
         }
         return 0;
+    case kMsgOutsideClick:
+        closeChain();
+        return 0;
     case WM_DESTROY: {
         KillTimer(hwnd, kTimerSubmenu);
+        // 只有根菜单持有鼠标钩子
+        if (!parent && g_mouseHook) {
+            UnhookWindowsHookEx(g_mouseHook);
+            g_mouseHook = nullptr;
+        }
         if (brush) {
             brush->Release();
             brush = nullptr;
@@ -470,8 +518,12 @@ void MenuWnd::openSubmenu() {
 void FluentMenu::show(HWND owner, POINT screenPt, std::vector<FluentMenuItem> items, Callback cb) {
     dismiss();
     g_root = createMenuLevel(owner, nullptr, std::move(items), &cb, screenPt);
-    if (g_root)
+    if (g_root) {
         SetForegroundWindow(g_root->hwnd);
+        // 菜单存活期间全局监听链外点击；低级钩子回调在本线程消息循环中执行
+        g_mouseHook = SetWindowsHookExW(WH_MOUSE_LL, lowLevelMouseProc,
+                                        GetModuleHandleW(nullptr), 0);
+    }
 }
 
 void FluentMenu::dismiss() {

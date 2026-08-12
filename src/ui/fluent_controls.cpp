@@ -139,6 +139,10 @@ ID2D1SolidColorBrush* LayeredChild::brush(ID2D1DCRenderTarget* rt) {
     return brush_;
 }
 
+IDWriteFactory* LayeredChild::dwrite() {
+    return renderer_.dwrite();
+}
+
 IDWriteTextFormat* LayeredChild::textFormat(float dipSize, int weight, bool center) {
     if (fmt_ && fmtSize_ == dipSize && fmtWeight_ == weight && fmtCenter_ == center)
         return fmt_;
@@ -452,6 +456,25 @@ constexpr float kRowH = 32.0f;
 constexpr float kHeaderH = 28.0f;
 constexpr float kScrollBarW = 3.0f;
 constexpr float kScrollBarHitW = 12.0f;
+constexpr UINT_PTR kTipTimerId = 1;
+constexpr UINT kTipDelayMs = 400; // 悬浮多久后弹出 tooltip
+
+// 单行绘制文本，超宽时按字符裁剪并加省略号（不换行，避免溢出到相邻行）
+void drawTrimmedText(IDWriteFactory* dw, ID2D1DCRenderTarget* rt, const std::wstring& text,
+                     IDWriteTextFormat* fmt, const D2D1_RECT_F& rect, ID2D1Brush* br) {
+    if (!dw || !fmt)
+        return;
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(dw->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                    rect.right - rect.left, rect.bottom - rect.top, &layout)) ||
+        !layout)
+        return;
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+    layout->SetTrimming(&trimming, nullptr); // nullptr = 默认省略号
+    rt->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, br);
+    layout->Release();
+}
 } // namespace
 
 bool FluentList::create(HWND parent, int id) {
@@ -461,6 +484,7 @@ bool FluentList::create(HWND parent, int id) {
 }
 
 void FluentList::setItems(std::vector<FluentListItem> items) {
+    hideTip();
     items_ = std::move(items);
     selected_ = -1;
     hover_ = -1;
@@ -540,6 +564,77 @@ int FluentList::nextSelectable(int from, int dir) const {
     }
 }
 
+bool FluentList::rowTextTruncated(int row) {
+    IDWriteFactory* dw = dwrite();
+    auto* fmt = items_[row].header ? textFormat(12.0f, 600) : textFormat(13.0f);
+    if (!dw || !fmt)
+        return false;
+    const std::wstring& text = items_[row].text;
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(dw->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), fmt,
+                                    100000.0f, 100.0f, &layout)) ||
+        !layout)
+        return false;
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TEXT_METRICS m{};
+    layout->GetMetrics(&m);
+    layout->Release();
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    float wDip = (rc.right - rc.left) / dipScale(GetDpiForWindow(hwnd_));
+    float avail = wDip - (items_[row].header ? 24.0f : 28.0f); // 与 render 的行内边距一致
+    return m.width > avail;
+}
+
+void FluentList::showTip(int row) {
+    if (!tooltip_) {
+        tooltip_ = CreateWindowExW(0, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+                                   hwnd_, nullptr, nullptr, nullptr);
+        if (!tooltip_)
+            return;
+        TOOLINFOW ti{sizeof(ti)};
+        ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+        ti.hwnd = hwnd_;
+        ti.uId = 1;
+        SendMessageW(tooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+    }
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    float s = dipScale(GetDpiForWindow(hwnd_));
+    // 宽度上限取列表自身宽度，超长文本在 tooltip 内折行而不是横贯整个屏幕
+    SendMessageW(tooltip_, TTM_SETMAXTIPWIDTH, 0, rc.right - rc.left);
+
+    TOOLINFOW ti{sizeof(ti)};
+    ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+    ti.hwnd = hwnd_;
+    ti.uId = 1;
+    ti.lpszText = const_cast<wchar_t*>(items_[row].text.c_str());
+    SendMessageW(tooltip_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SendMessageW(tooltip_, TTM_TRACKPOSITION, 0,
+                 static_cast<LPARAM>(MAKELPARAM(pt.x + static_cast<int>(12 * s),
+                                                pt.y + static_cast<int>(18 * s))));
+    SendMessageW(tooltip_, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+    tipRow_ = row;
+}
+
+void FluentList::hideTip() {
+    if (tipArmed_) {
+        KillTimer(hwnd_, kTipTimerId);
+        tipArmed_ = false;
+    }
+    if (tipRow_ >= 0 && tooltip_) {
+        TOOLINFOW ti{sizeof(ti)};
+        ti.hwnd = hwnd_;
+        ti.uId = 1;
+        SendMessageW(tooltip_, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+    }
+    tipRow_ = -1;
+}
+
 LRESULT CALLBACK FluentList::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     FluentList* self = selfFromMsg<FluentList>(h, msg, lp);
     if (msg == WM_NCCREATE)
@@ -576,6 +671,7 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         return 1;
     case WM_MOUSEWHEEL: {
+        hideTip();
         wheelAccum_ += GET_WHEEL_DELTA_WPARAM(wp);
         int notch = wheelAccum_ / WHEEL_DELTA;
         if (notch == 0)
@@ -608,18 +704,35 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
             TrackMouseEvent(&tme);
         }
         if (row != hover_) {
+            // 悬浮行变化：收起 tooltip，非标题行重新武装弹出计时
+            hideTip();
             hover_ = row;
             renderNow();
+            if (row >= 0 && !items_[row].header) {
+                SetTimer(hwnd_, kTipTimerId, kTipDelayMs, nullptr);
+                tipArmed_ = true;
+            }
         }
         return 0;
     }
+    case WM_TIMER:
+        if (wp == kTipTimerId) {
+            KillTimer(hwnd_, kTipTimerId);
+            tipArmed_ = false;
+            if (hover_ >= 0 && hover_ < itemCount() && !items_[hover_].header &&
+                rowTextTruncated(hover_))
+                showTip(hover_);
+        }
+        return 0;
     case WM_MOUSELEAVE:
+        hideTip();
         if (!scrollDrag_) {
             hover_ = -1;
             renderNow();
         }
         return 0;
     case WM_LBUTTONDOWN: {
+        hideTip();
         SetFocus(hwnd_);
         float x, y;
         dipPoint(lp, x, y);
@@ -694,6 +807,11 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_DESTROY:
+        hideTip();
+        if (tooltip_) {
+            DestroyWindow(tooltip_);
+            tooltip_ = nullptr;
+        }
         hwnd_ = nullptr;
         return 0;
     }
@@ -734,15 +852,13 @@ void FluentList::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
                 // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
                 if (auto* hfmt = textFormat(12.0f, 600)) {
                     br->SetColor(p.textSecondary);
-                    rt->DrawTextW(items_[i].text.c_str(),
-                                  static_cast<UINT32>(items_[i].text.size()), hfmt,
-                                  D2D1::RectF(12.0f, y, wDip - 12.0f, y + rh), br);
+                    drawTrimmedText(dwrite(), rt, items_[i].text, hfmt,
+                                    D2D1::RectF(12.0f, y, wDip - 12.0f, y + rh), br);
                 }
             } else if (auto* fmt = textFormat(13.0f)) {
                 br->SetColor(p.text);
-                rt->DrawTextW(items_[i].text.c_str(),
-                              static_cast<UINT32>(items_[i].text.size()), fmt,
-                              D2D1::RectF(16.0f, y, wDip - 12.0f, y + rh), br);
+                drawTrimmedText(dwrite(), rt, items_[i].text, fmt,
+                                D2D1::RectF(16.0f, y, wDip - 12.0f, y + rh), br);
             }
         }
         y += rh;
