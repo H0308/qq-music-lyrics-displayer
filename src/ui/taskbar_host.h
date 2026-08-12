@@ -37,8 +37,10 @@ public:
     void show() override;
     void hide() override;
 
-    // 任务栏上的锚定位置：0 = 通知区域左侧（默认，避让 TrafficMonitor）；
-    // 1 = 任务栏最左侧（开始按钮左侧，适配居中任务栏；左对齐时放到开始按钮右侧）
+    // 任务栏上的锚定位置：0 = 最右空闲区（通知区域左侧，默认）；
+    // 1 = 最左空闲区（居中任务栏时在开始按钮左侧，左对齐时在应用图标右侧）。
+    // 两种模式都会自动避开小组件/搜索/任务视图/应用图标/TrafficMonitor：
+    // 原位优先收缩，压到最小宽度仍放不下时换到容得下的最大空闲区
     void setPositionMode(int mode);
     void setLyrics(const std::vector<LyricLine>& lines) override;
     void setCurrentLine(int index) override;

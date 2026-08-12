@@ -6,6 +6,7 @@
 #include <gdiplus.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <uiautomation.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -101,6 +102,9 @@ struct TaskbarHost::Impl {
     RECT rcNotify_{};    // 通知区屏幕坐标（缓存）
     RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
+    IUIAutomation* uia_ = nullptr; // UI Automation 客户端（惰性创建）
+    // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）
+    std::vector<RECT> uiaButtons_;
     UINT dpi_ = 96;
     bool centerAlign_ = true;
     bool lightTheme_ = false;
@@ -206,6 +210,10 @@ struct TaskbarHost::Impl {
         centerAlign_ = isTaskbarCenterAlign();
         lightTheme_ = isSystemLightTheme();
         updateRects();
+        // TrafficMonitor 矩形原本只在 detectChanges 里刷新，首次定位前要先初始化
+        if (HWND tm = findTrafficMonitor())
+            GetWindowRect(tm, &rcTrafficMonitor_);
+        queryTaskbarButtons(uiaButtons_);
         return true;
     }
 
@@ -262,6 +270,95 @@ struct TaskbarHost::Impl {
         return nullptr;
     }
 
+    bool ensureUia() {
+        if (uia_)
+            return true;
+        // 本线程可能未初始化 COM（SMTC 用的是 WinRT 单元）；已初始化时返回
+        // RPC_E_CHANGED_MODE，不影响后续使用，故不检查返回值，也不在退出时 Uninitialize
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        return SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                          IID_PPV_ARGS(&uia_)));
+    }
+
+    // 通过 UI Automation 取任务栏 XAML 部件（开始/搜索/任务视图/小组件/固定与运行中的
+    // 应用图标）的屏幕包围矩形。这些按钮是 XAML 元素而非窗口，HWND 枚举看不到，
+    // 但 UIA 的 TaskbarFrame 子树完整暴露；小组件等后续新增的按钮同样作为其子元素出现
+    void queryTaskbarButtons(std::vector<RECT>& out) {
+        out.clear();
+        if (!taskbar_ || !ensureUia())
+            return;
+        IUIAutomationElement* tb = nullptr;
+        if (FAILED(uia_->ElementFromHandle(taskbar_, &tb)) || !tb)
+            return;
+        VARIANT aid{};
+        aid.vt = VT_BSTR;
+        aid.bstrVal = SysAllocString(L"TaskbarFrame");
+        IUIAutomationCondition* cond = nullptr;
+        uia_->CreatePropertyCondition(UIA_AutomationIdPropertyId, aid, &cond);
+        VariantClear(&aid);
+        IUIAutomationElement* frame = nullptr;
+        if (cond) {
+            tb->FindFirst(TreeScope_Descendants, cond, &frame);
+            cond->Release();
+        }
+        tb->Release();
+        if (!frame)
+            return;
+        IUIAutomationCondition* trueCond = nullptr;
+        uia_->CreateTrueCondition(&trueCond);
+        IUIAutomationElementArray* arr = nullptr;
+        if (trueCond) {
+            frame->FindAll(TreeScope_Children, trueCond, &arr);
+            trueCond->Release();
+        }
+        frame->Release();
+        if (!arr)
+            return;
+        int n = 0;
+        arr->get_Length(&n);
+        for (int i = 0; i < n; ++i) {
+            IUIAutomationElement* el = nullptr;
+            arr->GetElement(i, &el);
+            if (!el)
+                continue;
+            BOOL offscreen = FALSE;
+            RECT rc{};
+            el->get_CurrentIsOffscreen(&offscreen);
+            el->get_CurrentBoundingRectangle(&rc);
+            el->Release();
+            if (!offscreen && rc.right > rc.left)
+                out.push_back(rc);
+        }
+        arr->Release();
+    }
+
+    // 任务栏上的占用区间 [left, right)（屏幕坐标，已合并）：UIA 按钮 + 通知区 +
+    // TrafficMonitor。开始按钮的 HWND 矩形与 UIA StartButton 重复，合并后无害，
+    // 留着可在 UIA 不可用时兜底
+    std::vector<std::pair<int, int>> occupiedIntervals() const {
+        std::vector<std::pair<int, int>> v;
+        auto add = [&v](const RECT& r) {
+            if (r.right > r.left)
+                v.emplace_back(r.left, r.right);
+        };
+        for (const RECT& r : uiaButtons_)
+            add(r);
+        if (notify_)
+            add(rcNotify_);
+        if (start_)
+            add(rcStart_);
+        add(rcTrafficMonitor_);
+        std::sort(v.begin(), v.end());
+        std::vector<std::pair<int, int>> merged;
+        for (const auto& p : v) {
+            if (!merged.empty() && p.first <= merged.back().second)
+                merged.back().second = std::max(merged.back().second, p.second);
+            else
+                merged.push_back(p);
+        }
+        return merged;
+    }
+
     void adjustPosition() {
         if (!hwnd || !taskbar_)
             return;
@@ -278,66 +375,51 @@ struct TaskbarHost::Impl {
         int minW = (int)std::lround(kMinWidthDip * scale());
         int maxW = (int)std::lround(kMaxWidthDip * scale());
 
-        int rightBoundary = notify_ ? rcNotify_.left : rcTaskbar_.right;
-        int leftBoundary = rcTaskbar_.left;
+        // 空闲区间 = 任务栏减去占用区间
+        struct Span {
+            int l, r;
+        };
+        std::vector<Span> spans;
+        int cursor = rcTaskbar_.left;
+        for (const auto& o : occupiedIntervals()) {
+            if (o.first > cursor)
+                spans.push_back({cursor, o.first});
+            cursor = std::max(cursor, o.second);
+        }
+        if (cursor < rcTaskbar_.right)
+            spans.push_back({cursor, rcTaskbar_.right});
+        if (spans.empty())
+            spans.push_back({rcTaskbar_.left, rcTaskbar_.right});
+
+        auto usableW = [gap](const Span& s) { return s.r - s.l - gap * 2; };
+        // 原位优先：模式 0 锚定最右空闲区（通知区/TrafficMonitor 左侧），
+        // 模式 1 锚定最左空闲区（居中任务栏时在开始按钮左侧，左对齐时在应用图标右侧）
+        const Span& pref = positionMode_ == 1 ? spans.front() : spans.back();
+
         int pxW = 0;
         int x = 0;
-
-        if (positionMode_ == 1) {
-            // 任务栏最左侧：锚定任务栏左缘，右缘不超过开始按钮；
-            // 开始按钮本身就在最左（任务栏左对齐）时，放到开始按钮右侧
-            int startLeft = start_ ? rcStart_.left : rcTaskbar_.right;
-            int avail = startLeft - leftBoundary - gap * 2;
-            if (avail >= minW) {
-                pxW = std::clamp(avail, minW, maxW);
-                x = leftBoundary + gap;
-            } else {
-                pxW = maxW;
-                x = start_ ? rcStart_.right + gap : leftBoundary + gap;
-            }
+        auto place = [&](const Span& s, int w) {
+            pxW = w;
+            x = positionMode_ == 1 ? s.l + gap : s.r - gap - w;
+        };
+        if (usableW(pref) >= minW) {
+            place(pref, std::min(usableW(pref), maxW)); // 原位优先：被挤压先收缩宽度
         } else {
-            HWND tm = findTrafficMonitor();
-            if (tm) {
-                RECT rcTm{};
-                GetWindowRect(tm, &rcTm);
-
-                // 强制与 TrafficMonitor 互斥：优先放它右边（箭头位置），放不下就放它左边
-                int availableRight = rightBoundary - rcTm.right - gap * 2;
-                int availableLeft = rcTm.left - leftBoundary - gap * 2;
-
-                if (availableRight >= minW && availableRight >= availableLeft) {
-                    pxW = std::clamp(availableRight, minW, maxW);
-                    x = rcTm.right + gap;
-                } else if (availableLeft >= minW) {
-                    pxW = std::clamp(availableLeft, minW, maxW);
-                    x = rcTm.left - pxW - gap;
-                }
+            // 压到最小宽度仍放不下：换到容得下的最大空闲区
+            const Span* best = nullptr;
+            for (const auto& s : spans) {
+                if (usableW(s) >= minW && (!best || s.r - s.l > best->r - best->l))
+                    best = &s;
             }
-
-            // 没有 TrafficMonitor 或两边都放不下：锚定到通知区左侧
-            if (pxW == 0) {
-                int available = rightBoundary - leftBoundary - gap;
-                if (!notify_) {
-                    available = (rcTaskbar_.right - rcTaskbar_.left) / 3;
-                }
-                pxW = std::clamp(available, minW, maxW);
-                x = rightBoundary - pxW - gap;
-                if (!notify_) {
-                    x = rcTaskbar_.right - pxW - gap;
-                }
+            if (best) {
+                place(*best, std::min(usableW(*best), maxW));
+            } else {
+                // 全任务栏都放不下：维持最小宽度锚在原位（与旧行为一致，允许重叠）
+                place(pref, minW);
             }
         }
-
-        // 保证不超出任务栏范围
-        if (x < leftBoundary + gap)
-            x = leftBoundary + gap;
-        if (x + pxW > rightBoundary - gap && notify_) {
-            pxW = rightBoundary - x - gap;
-            if (pxW < minW) {
-                pxW = minW;
-                x = rightBoundary - pxW - gap;
-            }
-        }
+        if (x < rcTaskbar_.left)
+            x = rcTaskbar_.left;
 
         int y = rcTaskbar_.top + marginY;
 
@@ -372,7 +454,21 @@ struct TaskbarHost::Impl {
         if (start_)
             GetWindowRect(start_, &rcStart);
 
+        // 任务栏 XAML 按钮（应用图标随窗口开关增减、居中任务栏随图标数移动）
+        std::vector<RECT> btns;
+        queryTaskbarButtons(btns);
+        bool buttonsChanged = btns.size() != uiaButtons_.size();
+        if (!buttonsChanged) {
+            for (size_t i = 0; i < btns.size(); ++i) {
+                if (!EqualRect(&btns[i], &uiaButtons_[i])) {
+                    buttonsChanged = true;
+                    break;
+                }
+            }
+        }
+
         bool changed = dpi != dpi_ || center != centerAlign_ || themeChanged ||
+                       buttonsChanged ||
                        !EqualRect(&rcTaskbar, &rcTaskbar_) ||
                        !EqualRect(&rcNotify, &rcNotify_) ||
                        !EqualRect(&rcStart, &rcStart_) ||
@@ -384,6 +480,7 @@ struct TaskbarHost::Impl {
             rcNotify_ = rcNotify;
             rcStart_ = rcStart;
             rcTrafficMonitor_ = rcTm;
+            uiaButtons_ = std::move(btns);
             renderer.setDpi(dpi_);
             layoutDirty_ = true;
             if (themeChanged) {
@@ -583,6 +680,10 @@ struct TaskbarHost::Impl {
     void releaseAll() {
         discardDeviceResources();
         renderer.releaseAll();
+        if (uia_) {
+            uia_->Release();
+            uia_ = nullptr;
+        }
     }
 
     // ---------- 封面解码 ----------
