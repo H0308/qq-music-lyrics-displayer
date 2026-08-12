@@ -701,6 +701,17 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 int main() {
+    // 单实例限制：命名互斥体（Local\ 会话级）。进程退出（含崩溃）时内核自动销毁，
+    // 无需手动释放；句柄保持到进程结束即可
+    HANDLE singleInstance = CreateMutexW(nullptr, TRUE,
+        L"Local\\QQMusicLyric.SingleInstance.{7E3A9C41-2B5D-4F1E-9A6C-0D8B3E5F2A74}");
+    if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
+        MessageBoxW(nullptr, L"QQ 音乐任务栏歌词已在运行中，请勿重复启动。",
+            L"QQ 音乐任务栏歌词", MB_OK | MB_ICONINFORMATION);
+        CloseHandle(singleInstance);
+        return 0;
+    }
+
     SetConsoleOutputCP(CP_UTF8);
     _setmode(_fileno(stdout), _O_U8TEXT); // 否则 wprintf 中文输出为 '?'
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
