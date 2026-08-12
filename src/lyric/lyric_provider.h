@@ -63,12 +63,12 @@ public:
     // 按 songmid 异步取歌词（不修改当前播放歌词），结果在 UI 线程回调
     void fetchLyricAsync(const SearchCandidate& cand, FetchCallback cb);
 
-    // 设置手动选择：写入缓存并作为当前歌词，以后同一首歌优先使用
+    // 设置手动选择：写入缓存并作为当前歌词，以后同一首歌（同标题/歌手/时长）优先使用
     void setManualOverride(const std::wstring& title, const std::wstring& artist,
-                           std::vector<LyricLine> lines, SongInfo info);
+                           int64_t durationMs, std::vector<LyricLine> lines, SongInfo info);
 
-    // 设置手动歌词的持久化文件路径；设置时立即从该文件加载已有覆盖
-    void setManualOverridePath(const std::wstring& path);
+    // 设置手动歌词的持久化目录；每首歌保存为独立文件，请求歌词时按 key 查找对应文件
+    void setManualOverrideDir(const std::wstring& dir);
 
     // 最近一次应用的歌词（仅在 ReadyCallback(true) 之后于 UI 线程读取）
     const std::vector<LyricLine>& lines() const;
@@ -76,7 +76,9 @@ public:
     // 最近一次匹配到的歌曲信息（仅在 ReadyCallback(true) 之后于 UI 线程读取）
     const SongInfo& songInfo() const;
 
-    static std::wstring makeKey(const std::wstring& title, const std::wstring& artist);
+    // 缓存/覆盖键：标题 + 歌手 + 时长（5 秒分桶），区分同名不同版本
+    static std::wstring makeKey(const std::wstring& title, const std::wstring& artist,
+                                int64_t durationMs);
     // 二分定位：最后一个 ms <= positionMs 的行号；无则 -1
     static int findLine(const std::vector<LyricLine>& lines, int64_t positionMs);
 

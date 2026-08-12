@@ -11,6 +11,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cwctype>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <list>
@@ -86,6 +87,52 @@ std::wstring trimW(const std::wstring& s) {
     return s.substr(first, last - first + 1);
 }
 
+// 配对查找尾部括号组的开括号位置：从末尾向前计数配对，兼容嵌套；无配对返回 npos
+size_t matchTrailingOpen(const std::wstring& s, wchar_t open, wchar_t close) {
+    int depth = 0;
+    for (size_t i = s.size(); i-- > 0;) {
+        if (s[i] == close) {
+            ++depth;
+        } else if (s[i] == open) {
+            if (--depth == 0)
+                return i;
+        }
+    }
+    return std::wstring::npos;
+}
+
+// 剥掉尾部 (...)/（...)/[...]/【...】版本标注；tagsOut 非空时输出各括号内容（原始大小写）
+void stripTrailingBrackets(std::wstring& s, std::vector<std::wstring>* tagsOut) {
+    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
+        s.pop_back();
+    while (!s.empty()) {
+        wchar_t open = 0;
+        wchar_t close = s.back();
+        if (close == L')')
+            open = L'(';
+        else if (close == L'）')
+            open = L'（';
+        else if (close == L']')
+            open = L'[';
+        else if (close == L'】')
+            open = L'【';
+        else
+            break;
+        size_t pos = matchTrailingOpen(s, open, close);
+        if (pos == std::wstring::npos || pos == 0)
+            break;
+        if (tagsOut) {
+            std::wstring tag = trimW(s.substr(pos + 1, s.size() - pos - 2));
+            if (!tag.empty())
+                tagsOut->push_back(tag);
+        }
+        size_t end = pos;
+        while (end > 0 && s[end - 1] == L' ')
+            --end;
+        s.resize(end);
+    }
+}
+
 // 规范化：小写、合并连续空白、去首尾空白、去除尾部括号版本信息
 std::wstring normalizeTitle(const std::wstring& s) {
     std::wstring out;
@@ -105,40 +152,37 @@ std::wstring normalizeTitle(const std::wstring& s) {
     while (!out.empty() && out.back() == L' ')
         out.pop_back();
 
-    // 去除尾部 (...)/（...)/[...]/【...】版本标注，如 （剧情版）、(Live)
-    while (!out.empty()) {
-        wchar_t open = 0;
-        wchar_t close = out.back();
-        if (close == L')')
-            open = L'(';
-        else if (close == L'）')
-            open = L'（';
-        else if (close == L']')
-            open = L'[';
-        else if (close == L'】')
-            open = L'【';
-        else
-            break;
-        size_t pos = out.find_last_of(open);
-        if (pos == std::wstring::npos || pos == 0)
-            break;
-        size_t end = pos;
-        while (end > 0 && out[end - 1] == L' ')
-            --end;
-        out.resize(end);
-    }
+    stripTrailingBrackets(out, nullptr);
     return out;
+}
+
+// 提取歌名尾部的版本标注（小写，自尾向首收集），如 "平凡之路 (Live)（现场）" -> {"现场", "live"}；无标注返回空
+std::vector<std::wstring> extractVersionTags(const std::wstring& s) {
+    std::wstring rest = s;
+    std::vector<std::wstring> tags;
+    stripTrailingBrackets(rest, &tags);
+    for (auto& tag : tags)
+        for (auto& ch : tag)
+            ch = static_cast<wchar_t>(std::towlower(ch));
+    return tags;
 }
 
 // 判断歌名末尾是否已经包含 " - 歌手"、" / 歌手" 等歌手信息，避免搜索时重复附加歌手
 bool titleEndsWithArtist(const std::wstring& title, const std::wstring& artist) {
     if (artist.empty())
         return false;
-    const wchar_t* seps[] = {L" - ", L" – ", L" — ", L" / "};
+    // 大小写不敏感比较
+    std::wstring t = title;
+    std::wstring a = artist;
+    for (auto& ch : t)
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    for (auto& ch : a)
+        ch = static_cast<wchar_t>(std::towlower(ch));
+    const wchar_t* seps[] = {L" - ", L"-", L" – ", L"–", L" — ", L"—", L" / ", L"/"};
     for (const wchar_t* sep : seps) {
-        std::wstring suffix = sep + artist;
-        if (title.size() > suffix.size() &&
-            title.compare(title.size() - suffix.size(), suffix.size(), suffix) == 0)
+        std::wstring suffix = sep + a;
+        if (t.size() > suffix.size() &&
+            t.compare(t.size() - suffix.size(), suffix.size(), suffix) == 0)
             return true;
     }
     return false;
@@ -147,29 +191,7 @@ bool titleEndsWithArtist(const std::wstring& title, const std::wstring& artist) 
 // 去除歌名尾部的 (...)/（...)/[...]/【...】版本标注（不改变大小写），用于净化搜索词。
 // SMTC 歌名常带 (DJ版)、（剧情版）等后缀，带着它们搜索命中率很低。
 std::wstring stripVersionSuffix(std::wstring s) {
-    while (!s.empty() && (s.back() == L' ' || s.back() == L'\t'))
-        s.pop_back();
-    while (!s.empty()) {
-        wchar_t open = 0;
-        wchar_t close = s.back();
-        if (close == L')')
-            open = L'(';
-        else if (close == L'）')
-            open = L'（';
-        else if (close == L']')
-            open = L'[';
-        else if (close == L'】')
-            open = L'【';
-        else
-            break;
-        size_t pos = s.find_last_of(open);
-        if (pos == std::wstring::npos || pos == 0)
-            break;
-        size_t end = pos;
-        while (end > 0 && s[end - 1] == L' ')
-            --end;
-        s.resize(end);
-    }
+    stripTrailingBrackets(s, nullptr);
     return s;
 }
 
@@ -181,8 +203,12 @@ int titleSimilarity(const std::wstring& a, const std::wstring& b) {
         return 0;
     if (na == nb)
         return 100;
-    if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos)
-        return 85;
+    if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos) {
+        // 互为子串：按长度比例给分，惩罚候选比原标题多出大段内容（如拼盘/串烧/主题曲）
+        size_t lo = std::min(na.size(), nb.size());
+        size_t hi = std::max(na.size(), nb.size());
+        return 60 + static_cast<int>(40 * lo / hi);
+    }
     size_t minLen = std::min(na.size(), nb.size());
     size_t commonPrefix = 0;
     while (commonPrefix < minLen && na[commonPrefix] == nb[commonPrefix])
@@ -192,11 +218,13 @@ int titleSimilarity(const std::wstring& a, const std::wstring& b) {
     return 0;
 }
 
+// 歌手分隔符：/ 、 & ; ；, ，× 以及 feat./ft./with/vs 等合作标注
 std::vector<std::wstring> splitSingers(const std::wstring& s) {
     std::vector<std::wstring> parts;
     std::wstring current;
     for (wchar_t ch : s) {
-        if (ch == L'/' || ch == L'、' || ch == L'&' || ch == L';' || ch == L'；') {
+        if (ch == L'/' || ch == L'、' || ch == L'&' || ch == L';' || ch == L'；' ||
+            ch == L',' || ch == L'，' || ch == L'×') {
             auto t = trimW(current);
             if (!t.empty())
                 parts.push_back(t);
@@ -211,11 +239,29 @@ std::vector<std::wstring> splitSingers(const std::wstring& s) {
     return parts;
 }
 
+void replaceAllW(std::wstring& s, const std::wstring& from, const std::wstring& to) {
+    size_t pos = 0;
+    while ((pos = s.find(from, pos)) != std::wstring::npos) {
+        s.replace(pos, from.size(), to);
+        pos += to.size();
+    }
+}
+
 int singerSimilarity(const std::wstring& a, const std::wstring& b) {
     if (a.empty() || b.empty())
         return 50; // 有一方未知，给中性分
     std::wstring na = normalizeTitle(a);
     std::wstring nb = normalizeTitle(b);
+    if (na == nb)
+        return 100;
+    // 合作标注统一为分隔符（na/nb 已小写）；首尾补空格避免误匹配单词内部
+    for (std::wstring* n : {&na, &nb}) {
+        *n = L' ' + *n + L' ';
+        for (const wchar_t* kw : {L" feat. ", L" feat ", L" ft. ", L" ft ", L" featuring ",
+                                  L" with ", L" vs ", L" vs. "})
+            replaceAllW(*n, kw, L" / ");
+        *n = trimW(*n);
+    }
     if (na == nb)
         return 100;
     if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos)
@@ -227,8 +273,7 @@ int singerSimilarity(const std::wstring& a, const std::wstring& b) {
     int matches = 0;
     for (auto& x : pa) {
         for (auto& y : pb) {
-            if (x == y || (!x.empty() && !y.empty() &&
-                           (x.find(y) != std::wstring::npos || y.find(x) != std::wstring::npos))) {
+            if (x == y) { // 拆分后只认完全相等，避免 "张韶涵" 与 "张韶涵xx" 误配
                 ++matches;
                 break;
             }
@@ -250,6 +295,62 @@ int durationScore(int64_t queryMs, int64_t candMs) {
     if (diff <= 10000)
         return 40;
     return 0;
+}
+
+// ---------- 统一候选打分 ----------
+
+// 版本标注匹配：返回 -1 表示硬冲突（本地带版本标注而候选没有任何相同标注）；
+// 否则 0-100：100 = 版本一致（双方都无标注或标注有交集），本地无标注而候选带标注给 60
+int versionScore(const std::vector<std::wstring>& localTags, const std::wstring& candName) {
+    std::vector<std::wstring> candTags = extractVersionTags(candName);
+    if (localTags.empty())
+        return candTags.empty() ? 100 : 60;
+    for (const auto& lt : localTags) {
+        for (const auto& ct : candTags) {
+            if (lt == ct || lt.find(ct) != std::wstring::npos ||
+                ct.find(lt) != std::wstring::npos)
+                return 100;
+        }
+    }
+    return -1;
+}
+
+// 一次匹配请求的本地歌曲信息
+struct MatchQuery {
+    std::wstring title;
+    std::wstring artist;
+    int64_t durationMs = 0;
+    std::vector<std::wstring> versionTags; // 从原始（未净化）标题提取
+};
+
+// 总分阈值（满分 2200 = 标题 1000 + 歌手 500 + 时长 500 + 版本 200）
+constexpr int kScoreThreshold = 1300;
+
+// 对候选打分，低于阈值或触及单维度下限返回 -1：
+// - 标题相似度为 0；
+// - 双方歌手都已知但完全不匹配；
+// - 双方时长都已知且差超过 15 秒；
+// - enforceVersion 时版本标注硬冲突（本地有标注而候选无相同标注）
+int scoreCandidate(const MatchQuery& q, const std::wstring& name, const std::wstring& singer,
+                   int64_t candDurationMs, bool enforceVersion) {
+    int t = titleSimilarity(q.title, name);
+    if (t == 0)
+        return -1;
+    int s = singerSimilarity(q.artist, singer);
+    if (!q.artist.empty() && !singer.empty() && s == 0)
+        return -1;
+    if (q.durationMs > 0 && candDurationMs > 0 &&
+        std::llabs(static_cast<long long>(candDurationMs - q.durationMs)) > 15000)
+        return -1;
+    int v = versionScore(q.versionTags, name);
+    if (v < 0) {
+        if (enforceVersion)
+            return -1;
+        v = 0; // 回退轮：版本冲突仅作扣分，不淘汰
+    }
+    int d = durationScore(q.durationMs, candDurationMs);
+    // 标题权重最高，歌手与时长次之，版本再次
+    return t * 10 + s * 5 + d * 5 + v * 2;
 }
 
 // 解析 LRC 时间戳 "mm:ss.xx"；非纯数字（如 ti:/ar:）返回 false
@@ -548,30 +649,30 @@ bool kugouSearchSongs(CURL* curl, const std::wstring& title, const std::wstring&
     return true;
 }
 
-// 酷狗搜歌打分选最佳：标题分非 0 且总分 >= 700 的候选中分数最高者
-bool kugouSearchSong(CURL* curl, const std::wstring& title, const std::wstring& artist,
-                     int64_t durationMs, std::string& hashOut, int64_t& kugouDurMsOut) {
+// 酷狗搜歌打分选最佳：先按版本标注严格匹配（本地有标注则候选必须有相同标注），
+// 无合适结果时回退到仅扣分的模糊匹配
+bool kugouSearchSong(CURL* curl, const MatchQuery& q, std::string& hashOut,
+                     int64_t& kugouDurMsOut) {
     std::vector<KugouSong> songs;
-    if (!kugouSearchSongs(curl, title, artist, 5, songs))
+    if (!kugouSearchSongs(curl, stripVersionSuffix(q.title), q.artist, 5, songs))
         return false;
-    const KugouSong* best = nullptr;
-    int bestScore = 0;
-    for (auto& song : songs) {
-        int t = titleSimilarity(title, song.name);
-        if (t == 0)
-            continue;
-        int score = t * 12 + singerSimilarity(artist, song.singer) * 5 +
-                    durationScore(durationMs, song.durationMs) * 3;
-        if (score < 700 || score <= bestScore)
-            continue;
-        bestScore = score;
-        best = &song;
+    for (bool enforce : {true, false}) {
+        const KugouSong* best = nullptr;
+        int bestScore = 0;
+        for (auto& song : songs) {
+            int score = scoreCandidate(q, song.name, song.singer, song.durationMs, enforce);
+            if (score < kScoreThreshold || score <= bestScore)
+                continue;
+            bestScore = score;
+            best = &song;
+        }
+        if (best) {
+            hashOut = best->hash;
+            kugouDurMsOut = best->durationMs;
+            return true;
+        }
     }
-    if (!best)
-        return false;
-    hashOut = best->hash;
-    kugouDurMsOut = best->durationMs;
-    return true;
+    return false;
 }
 
 // 酷狗搜词：按 hash 取前 3 个歌词候选（官方推荐优先）的 id + accesskey
@@ -633,12 +734,13 @@ bool fetchKrcByHash(CURL* curl, const std::string& hash, int64_t durationMs,
 // 酷狗 KRC 完整链路：搜歌 -> 搜词 -> 下载解码解析；任一步失败返回 false
 bool fetchKrc(CURL* curl, const std::wstring& title, const std::wstring& artist,
               int64_t durationMs, std::vector<LyricLine>& out) {
-    std::wstring queryTitle = stripVersionSuffix(title);
+    MatchQuery q{title, artist, durationMs, extractVersionTags(title)};
     std::string hash;
     int64_t kugouDurMs = durationMs;
-    if (!kugouSearchSong(curl, queryTitle, artist, durationMs, hash, kugouDurMs))
+    if (!kugouSearchSong(curl, q, hash, kugouDurMs))
         return false;
-    return fetchKrcByHash(curl, hash, kugouDurMs > 0 ? kugouDurMs : durationMs, out);
+    // 搜词优先用本地播放时长（与正在播放的版本对齐），本地未知时才用酷狗返回的时长
+    return fetchKrcByHash(curl, hash, durationMs > 0 ? durationMs : kugouDurMs, out);
 }
 
 } // namespace
@@ -648,13 +750,54 @@ struct CacheEntry {
     SongInfo info;
 };
 
+// ---------- 手动歌词按歌分文件持久化 ----------
+
+// 文件名可读部分：替换 Windows 非法字符，截断防超长
+std::wstring sanitizeFileName(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (wchar_t ch : s) {
+        if (ch == L'\\' || ch == L'/' || ch == L':' || ch == L'*' || ch == L'?' ||
+            ch == L'"' || ch == L'<' || ch == L'>' || ch == L'|' || ch < 0x20)
+            out.push_back(L'_');
+        else
+            out.push_back(ch);
+    }
+    while (!out.empty() && (out.back() == L' ' || out.back() == L'.'))
+        out.pop_back();
+    if (out.size() > 50)
+        out.resize(50);
+    return out.empty() ? L"lyric" : out;
+}
+
+// FNV-1a 64 位哈希（对 key 的 UTF-8 字节），避免可读部分截断后重名
+uint64_t fnv1a64(const std::string& s) {
+    uint64_t h = 14695981039346656037ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+// 手动歌词文件名：可读部分 + key 哈希，如 "歌名 - 歌手-a1b2c3d4e5f60708.json"
+std::wstring manualFileName(const std::wstring& title, const std::wstring& artist,
+                            int64_t durationMs) {
+    std::wstring readable = sanitizeFileName(title + L" - " + artist);
+    wchar_t hex[17];
+    std::swprintf(hex, 17, L"%016llx",
+                  (unsigned long long)fnv1a64(toUtf8(LyricProvider::makeKey(title, artist,
+                                                                          durationMs))));
+    return readable + L"-" + hex + L".json";
+}
+
 struct LyricProvider::Impl {
     mutable std::mutex mtx;
     std::vector<LyricLine> current;
     SongInfo currentSongInfo;
     std::unordered_map<std::wstring, CacheEntry> cache;
-    std::unordered_map<std::wstring, CacheEntry> manualOverrides; // 用户手动选择，优先于自动匹配
-    std::wstring overridePath; // 手动歌词持久化文件（JSON），空表示不持久化
+    std::unordered_map<std::wstring, CacheEntry> manualOverrides; // 已加载的手动歌词（懒加载缓存）
+    std::wstring overrideDir; // 手动歌词持久化目录（每首歌一个 JSON 文件），空表示不持久化
     std::list<std::wstring> lru; // 前 = 最近使用
     std::unordered_map<std::wstring, std::list<std::wstring>::iterator> lruIt;
     std::atomic<uint64_t> generation{0};
@@ -689,99 +832,121 @@ struct LyricProvider::Impl {
         }
     }
 
-    // ---------- 手动歌词持久化（JSON，UTF-8） ----------
+    // ---------- 手动歌词持久化（每首歌一个 JSON 文件，UTF-8） ----------
 
-    // 调用方需已持有 mtx
-    void saveOverridesLocked() {
-        if (overridePath.empty())
-            return;
+    // 某首歌对应的手动歌词文件路径；overrideDir 为空时返回空
+    std::wstring overrideFilePath(const std::wstring& title, const std::wstring& artist,
+                                  int64_t durationMs) const {
+        if (overrideDir.empty())
+            return {};
+        return overrideDir + L"\\" + manualFileName(title, artist, durationMs);
+    }
+
+    // 从单个文件解析手动歌词；文件不存在或解析失败返回 false
+    bool loadOverrideFile(const std::wstring& path, CacheEntry& entry) {
         try {
-            nlohmann::json j = nlohmann::json::object();
-            for (const auto& [key, entry] : manualOverrides) {
-                nlohmann::json e;
-                e["songmid"] = toUtf8(entry.info.songmid);
-                e["albummid"] = toUtf8(entry.info.albummid);
-                nlohmann::json arr = nlohmann::json::array();
-                for (const auto& l : entry.lines) {
-                    nlohmann::json chars = nlohmann::json::array();
-                    for (const auto& c : l.chars)
-                        chars.push_back({c.startMs, c.endMs, toUtf8(c.text)});
-                    arr.push_back({l.ms, toUtf8(l.text), std::move(chars)});
+            std::ifstream f(std::filesystem::path(path), std::ios::binary);
+            if (!f)
+                return false;
+            auto e = nlohmann::json::parse(f, nullptr, false);
+            if (e.is_discarded() || !e.is_object())
+                return false;
+            entry.info.songmid = toWide(e.value("songmid", std::string()));
+            entry.info.albummid = toWide(e.value("albummid", std::string()));
+            if (e["lines"].is_array()) {
+                for (const auto& l : e["lines"]) {
+                    if (!l.is_array() || l.size() < 2)
+                        continue;
+                    LyricLine line{l[0].get<int64_t>(), toWide(l[1].get<std::string>()), {}};
+                    // 第三项为逐字时间轴（旧格式没有则留空，兼容旧文件）
+                    if (l.size() >= 3 && l[2].is_array()) {
+                        for (const auto& c : l[2]) {
+                            if (!c.is_array() || c.size() < 3)
+                                continue;
+                            line.chars.push_back({c[0].get<int64_t>(), c[1].get<int64_t>(),
+                                                  toWide(c[2].get<std::string>())});
+                        }
+                    }
+                    entry.lines.push_back(std::move(line));
                 }
-                e["lines"] = std::move(arr);
-                j[toUtf8(key)] = std::move(e);
             }
-            std::ofstream f(std::filesystem::path(overridePath),
-                            std::ios::binary | std::ios::trunc);
-            f << j.dump();
+            return !entry.lines.empty();
+        } catch (...) {
+            return false;
+        }
+    }
+
+    // 把一首手动歌词写入它自己的文件
+    void saveOverrideFile(const std::wstring& path, const std::wstring& title,
+                          const std::wstring& artist, int64_t durationMs,
+                          const CacheEntry& entry) {
+        try {
+            std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+            nlohmann::json e;
+            e["title"] = toUtf8(title);
+            e["artist"] = toUtf8(artist);
+            e["durationMs"] = durationMs;
+            e["songmid"] = toUtf8(entry.info.songmid);
+            e["albummid"] = toUtf8(entry.info.albummid);
+            nlohmann::json arr = nlohmann::json::array();
+            for (const auto& l : entry.lines) {
+                nlohmann::json chars = nlohmann::json::array();
+                for (const auto& c : l.chars)
+                    chars.push_back({c.startMs, c.endMs, toUtf8(c.text)});
+                arr.push_back({l.ms, toUtf8(l.text), std::move(chars)});
+            }
+            e["lines"] = std::move(arr);
+            std::ofstream f(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
+            f << e.dump(2);
         } catch (...) {
         }
     }
 
+    // 查找一首歌的手动歌词：先查内存，未命中再查对应文件（找到则载入内存）
     // 调用方需已持有 mtx
-    void loadOverridesLocked() {
-        if (overridePath.empty())
-            return;
-        try {
-            std::ifstream f(std::filesystem::path(overridePath), std::ios::binary);
-            if (!f)
-                return;
-            auto j = nlohmann::json::parse(f, nullptr, false);
-            if (j.is_discarded() || !j.is_object())
-                return;
-            for (const auto& [k, e] : j.items()) {
-                CacheEntry entry;
-                entry.info.songmid = toWide(e.value("songmid", std::string()));
-                entry.info.albummid = toWide(e.value("albummid", std::string()));
-                if (e["lines"].is_array()) {
-                    for (const auto& l : e["lines"]) {
-                        if (!l.is_array() || l.size() < 2)
-                            continue;
-                        LyricLine line{l[0].get<int64_t>(), toWide(l[1].get<std::string>()), {}};
-                        // 第三项为逐字时间轴（旧格式没有则留空，兼容旧文件）
-                        if (l.size() >= 3 && l[2].is_array()) {
-                            for (const auto& c : l[2]) {
-                                if (!c.is_array() || c.size() < 3)
-                                    continue;
-                                line.chars.push_back({c[0].get<int64_t>(), c[1].get<int64_t>(),
-                                                      toWide(c[2].get<std::string>())});
-                            }
-                        }
-                        entry.lines.push_back(std::move(line));
-                    }
-                }
-                if (!entry.lines.empty())
-                    manualOverrides[toWide(k)] = std::move(entry);
-            }
-        } catch (...) {
+    bool manualOverrideGet(const std::wstring& key, const std::wstring& title,
+                           const std::wstring& artist, int64_t durationMs, CacheEntry& out) {
+        auto it = manualOverrides.find(key);
+        if (it != manualOverrides.end()) {
+            out = it->second;
+            return true;
         }
+        std::wstring path = overrideFilePath(title, artist, durationMs);
+        if (path.empty())
+            return false;
+        CacheEntry entry;
+        if (!loadOverrideFile(path, entry))
+            return false;
+        manualOverrides[key] = entry;
+        out = std::move(entry);
+        return true;
     }
 
     // 用 QQ 搜索补全 songmid/albummid（KRC 命中后调用，供封面兜底）；失败静默忽略
     void fillSongInfo(CURL* curl, const std::wstring& title, const std::wstring& artist,
                       int64_t durationMs, SongInfo& info) {
+        MatchQuery q{title, artist, durationMs, extractVersionTags(title)};
         std::wstring query = stripVersionSuffix(title);
         if (!artist.empty() && !titleEndsWithArtist(title, artist))
             query += L' ' + artist;
         std::vector<Candidate> cands;
         if (!searchSongs(curl, query, cands))
             return;
-        const Candidate* best = nullptr;
-        int bestScore = 0;
-        for (auto& c : cands) {
-            int t = titleSimilarity(title, c.name);
-            if (t == 0)
-                continue;
-            int score = t * 12 + singerSimilarity(artist, c.singer) * 5 +
-                        durationScore(durationMs, c.intervalMs) * 3;
-            if (score < 700 || score <= bestScore)
-                continue;
-            bestScore = score;
-            best = &c;
-        }
-        if (best) {
-            info.songmid = toWide(best->songmid);
-            info.albummid = toWide(best->albummid);
+        for (bool enforce : {true, false}) {
+            const Candidate* best = nullptr;
+            int bestScore = 0;
+            for (auto& c : cands) {
+                int score = scoreCandidate(q, c.name, c.singer, c.intervalMs, enforce);
+                if (score < kScoreThreshold || score <= bestScore)
+                    continue;
+                bestScore = score;
+                best = &c;
+            }
+            if (best) {
+                info.songmid = toWide(best->songmid);
+                info.albummid = toWide(best->albummid);
+                return;
+            }
         }
     }
 
@@ -799,28 +964,28 @@ struct LyricProvider::Impl {
         }
 
         // 回退 QQ 音乐 LRC
+        MatchQuery q{title, artist, durationMs, extractVersionTags(title)};
 
-        // 打分合格（歌名相似度非 0 且总分 >= 700）的候选按分数降序排列
+        // 打分合格（总分 >= 阈值且各维度不触及下限）的候选按分数降序排列；
+        // 优先按版本标注严格匹配，无合适结果时回退到仅扣分的模糊匹配
         auto rankCandidates = [&](const std::vector<Candidate>& cands) {
             std::vector<std::pair<int, const Candidate*>> scored;
-            for (auto& c : cands) {
-                int t = titleSimilarity(title, c.name);
-                if (t == 0)
-                    continue;
-                int s = singerSimilarity(artist, c.singer);
-                int d = durationScore(durationMs, c.intervalMs);
-                // 标题权重最高，歌手次之，时长再次
-                int score = t * 12 + s * 5 + d * 3;
-                if (score < 700)
-                    continue;
-                scored.push_back({score, &c});
+            for (bool enforce : {true, false}) {
+                for (auto& c : cands) {
+                    int score = scoreCandidate(q, c.name, c.singer, c.intervalMs, enforce);
+                    if (score >= kScoreThreshold)
+                        scored.push_back({score, &c});
+                }
+                if (!scored.empty())
+                    break;
             }
             std::stable_sort(scored.begin(), scored.end(),
                              [](const auto& a, const auto& b) { return a.first > b.first; });
             return scored;
         };
 
-        // 依次尝试候选：第一名没有歌词（伴奏版/剧情版等）时自动试次优候选
+        // 依次尝试候选：第一名没有歌词（伴奏版/剧情版等）时自动试次优候选；
+        // 行数过少视为无效歌词（纯音乐占位词等），继续试下一个
         constexpr int kMaxDownloadTries = 5;
         auto tryDownload = [&](const std::vector<Candidate>& cands) -> bool {
             int tries = 0;
@@ -828,7 +993,7 @@ struct LyricProvider::Impl {
                 if (++tries > kMaxDownloadTries)
                     break;
                 // 不带 Referer 会返回 -1310
-                if (downloadLyric(curl, c->songmid, out)) {
+                if (downloadLyric(curl, c->songmid, out) && out.size() >= 3) {
                     info.songmid = toWide(c->songmid);
                     info.albummid = toWide(c->albummid);
                     return true;
@@ -869,15 +1034,15 @@ LyricProvider::~LyricProvider() = default;
 
 void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& artist,
                                  int64_t durationMs, ReadyCallback cb) {
-    const std::wstring key = makeKey(title, artist);
+    const std::wstring key = makeKey(title, artist, durationMs);
     uint64_t gen = ++impl_->generation;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
-        // 1) 用户手动选择的歌词优先级最高
-        auto manualIt = impl_->manualOverrides.find(key);
-        if (manualIt != impl_->manualOverrides.end()) {
-            impl_->current = manualIt->second.lines;
-            impl_->currentSongInfo = manualIt->second.info;
+        // 1) 用户手动选择的歌词优先级最高（内存未命中时按 key 找对应文件）
+        CacheEntry manual;
+        if (impl_->manualOverrideGet(key, title, artist, durationMs, manual)) {
+            impl_->current = std::move(manual.lines);
+            impl_->currentSongInfo = std::move(manual.info);
             if (cb) cb(true);
             return;
         }
@@ -919,8 +1084,11 @@ const SongInfo& LyricProvider::songInfo() const {
     return impl_->currentSongInfo;
 }
 
-std::wstring LyricProvider::makeKey(const std::wstring& title, const std::wstring& artist) {
-    return title + L'|' + artist;
+std::wstring LyricProvider::makeKey(const std::wstring& title, const std::wstring& artist,
+                                    int64_t durationMs) {
+    // 时长按 5 秒分桶：区分同名不同版本（专辑版/Live 版等），同时容忍轻微的上报差异；
+    // 时长未知固定为 -1
+    return title + L'|' + artist + L'|' + std::to_wstring(durationMs > 0 ? durationMs / 5000 : -1);
 }
 
 int LyricProvider::findLine(const std::vector<LyricLine>& lines, int64_t positionMs) {
@@ -952,14 +1120,15 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
                                       true});
                 }
             }
-            // QQ LRC 整行候选（最多 5 条）
-            std::wstring query = title;
+            // QQ LRC 整行候选（最多 5 条）；与自动链路一致使用净化后的标题
+            std::wstring queryTitle = stripVersionSuffix(title);
+            std::wstring query = queryTitle;
             if (!artist.empty() && !titleEndsWithArtist(title, artist))
                 query += L' ' + artist;
             std::vector<Candidate> cands;
             searchSongs(curl, query, cands);
             if (cands.empty())
-                searchSongs(curl, title, cands);
+                searchSongs(curl, queryTitle, cands);
             curl_easy_cleanup(curl);
             for (size_t i = 0; i < cands.size() && i < 5; ++i) {
                 const auto& c = cands[i];
@@ -997,19 +1166,21 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
 }
 
 void LyricProvider::setManualOverride(const std::wstring& title, const std::wstring& artist,
-                                      std::vector<LyricLine> lines, SongInfo info) {
+                                      int64_t durationMs, std::vector<LyricLine> lines,
+                                      SongInfo info) {
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    const std::wstring key = makeKey(title, artist);
-    auto it = impl_->manualOverrides
-                  .emplace(key, CacheEntry{std::move(lines), std::move(info)})
-                  .first;
-    impl_->current = it->second.lines;
-    impl_->currentSongInfo = it->second.info;
-    impl_->saveOverridesLocked();
+    const std::wstring key = makeKey(title, artist, durationMs);
+    auto& stored = impl_->manualOverrides[key]; // 同一首歌重复手动选择时覆盖旧记录
+    stored = CacheEntry{std::move(lines), std::move(info)};
+    impl_->current = stored.lines;
+    impl_->currentSongInfo = stored.info;
+    // 写入这首歌自己的文件
+    std::wstring path = impl_->overrideFilePath(title, artist, durationMs);
+    if (!path.empty())
+        impl_->saveOverrideFile(path, title, artist, durationMs, stored);
 }
 
-void LyricProvider::setManualOverridePath(const std::wstring& path) {
+void LyricProvider::setManualOverrideDir(const std::wstring& dir) {
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->overridePath = path;
-    impl_->loadOverridesLocked();
+    impl_->overrideDir = dir;
 }

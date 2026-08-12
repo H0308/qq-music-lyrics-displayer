@@ -223,6 +223,7 @@ struct ManualSearchDialog::Impl {
     LyricProvider* provider = nullptr;
     std::wstring targetTitle;
     std::wstring targetArtist;
+    int64_t targetDurationMs = 0;
     std::vector<SearchCandidate> candidates;
     std::vector<int> itemToCand; // 列表行号 -> candidates 下标（-1 为分组标题行）
     int selectedIdx = -1;
@@ -518,7 +519,7 @@ struct ManualSearchDialog::Impl {
         if (previewLines.empty())
             return;
         if (provider) {
-            provider->setManualOverride(targetTitle, targetArtist,
+            provider->setManualOverride(targetTitle, targetArtist, targetDurationMs,
                                           std::vector<LyricLine>(previewLines), previewInfo);
         }
         if (onApply)
@@ -542,11 +543,13 @@ ManualSearchDialog::~ManualSearchDialog() {
 
 bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* provider,
                                 const std::wstring& targetTitle,
-                                const std::wstring& targetArtist) {
+                                const std::wstring& targetArtist,
+                                int64_t targetDurationMs) {
     impl_->inst = inst;
     impl_->provider = provider;
     impl_->targetTitle = targetTitle;
     impl_->targetArtist = targetArtist;
+    impl_->targetDurationMs = targetDurationMs;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

@@ -100,6 +100,7 @@ struct App {
     std::wstring currentKey;
     std::wstring currentTitle;
     std::wstring currentArtist;
+    int64_t currentDurationMs = 0;
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
     bool lyricLoading_ = false;
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
@@ -210,7 +211,8 @@ struct App {
             return;
         }
         manualSearchDialog = std::make_unique<ManualSearchDialog>();
-        if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist)) {
+        if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist,
+                                        currentDurationMs)) {
             manualSearchDialog.reset();
             return;
         }
@@ -323,11 +325,12 @@ struct App {
             std::wprintf(L"[smtc] status: %s\n", statusName(snap.status));
             lastStatus = snap.status;
         }
-        std::wstring key = LyricProvider::makeKey(snap.title, snap.artist);
+        std::wstring key = LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
         if (key != currentKey && !snap.title.empty()) {
             currentKey = key;
             currentTitle = snap.title;
             currentArtist = snap.artist;
+            currentDurationMs = snap.durationMs;
             std::wprintf(L"[smtc] track: %s - %s (%lld ms)\n", snap.title.c_str(),
                 snap.artist.c_str(), snap.durationMs);
             for (auto* h : hs) {
@@ -430,7 +433,7 @@ void App::loadSettings() {
     if (dir.empty())
         return;
     settingsPath_ = dir + L"\\settings.json";
-    provider.setManualOverridePath(dir + L"\\manual_lyrics.json");
+    provider.setManualOverrideDir(dir + L"\\manual_lyrics");
     try {
         std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
         if (!f)
