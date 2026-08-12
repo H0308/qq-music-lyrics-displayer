@@ -28,8 +28,6 @@ public:
     void changeFont(float delta) override;
     void setFont(const std::wstring& family, float size) override;
     void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) override;
-    void setClickThrough(bool on) override;
-    bool clickThrough() const override;
 
     // 歌词外观：光晕 / 描边（任务栏独有，桌面歌词有自己的配色），开关和颜色分别独立
     void setFontGlow(bool on);

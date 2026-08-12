@@ -37,9 +37,7 @@ constexpr UINT kMsgLyricReady = WM_APP + 2;
 constexpr UINT kMsgCoverReady = WM_APP + 3;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
-constexpr UINT kCmdToggleOverlay = 100;
 constexpr UINT kCmdToggleTaskbar = 101;
-constexpr UINT kCmdClickThrough = 102;
 constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
 constexpr UINT kCmdManualSearch = 107;
@@ -96,7 +94,6 @@ struct App {
     SmtcMonitor monitor;
     LyricProvider provider;
     CoverProvider coverProvider;
-    std::unique_ptr<ILyricHost> overlayHost;
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
@@ -126,11 +123,8 @@ struct App {
     COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色
     COLORREF lyricOutlineColor_ = RGB(0, 0, 0);       // 描边颜色
 
-    // 窗口状态（持久化；无命令行参数时按此启动）
-    bool cfgOverlay_ = false;
-    bool cfgTaskbar_ = true;
-    bool cfgClickThrough_ = false;
-    int taskbarPosition_ = 0; // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
+    // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
+    int taskbarPosition_ = 0;
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
@@ -140,34 +134,8 @@ struct App {
 
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
-        if (overlayHost) v.push_back(overlayHost.get());
         if (taskbarHost) v.push_back(taskbarHost.get());
         return v;
-    }
-
-    bool createOverlay(HINSTANCE inst) {
-        if (overlayHost) return true;
-        auto host = std::make_unique<OverlayHost>();
-        if (!host->create(inst)) {
-            std::wprintf(L"failed to create overlay host\n");
-            return false;
-        }
-        host->setTickCallback([this] { onFrame(); });
-        host->setControlCallback([this](MediaControl c) { onControl(c); });
-        overlayHost = std::move(host);
-        syncHost(overlayHost.get());
-        if (hasUserFont_)
-            overlayHost->setFont(fontFamily_, fontSize_);
-        if (cfgClickThrough_)
-            overlayHost->setClickThrough(true);
-        overlayHost->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
-        updateTrayIcon();
-        return true;
-    }
-
-    void destroyOverlay() {
-        overlayHost.reset();
-        updateTrayIcon();
     }
 
     bool createTaskbar(HINSTANCE inst) {
@@ -199,14 +167,6 @@ struct App {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
         taskbarHost.reset();
         updateTrayIcon();
-    }
-
-    void toggleOverlay() {
-        if (overlayHost) {
-            destroyOverlay();
-        } else {
-            createOverlay(GetModuleHandleW(nullptr));
-        }
     }
 
     void toggleTaskbar() {
@@ -473,9 +433,6 @@ void App::loadSettings() {
         lyricGlow_ = j.value("lyricGlow", false);
         // 老配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它，视觉不变
         lyricOutline_ = j.value("lyricOutline", lyricGlow_);
-        cfgOverlay_ = j.value("overlay", false);
-        cfgTaskbar_ = j.value("taskbar", true);
-        cfgClickThrough_ = j.value("clickThrough", false);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         spectrumOn_ = j.value("spectrum", false);
     } catch (...) {
@@ -497,9 +454,6 @@ void App::saveSettings() {
         j["lyricOutlineColor"] = (unsigned)lyricOutlineColor_;
         j["lyricGlow"] = lyricGlow_;
         j["lyricOutline"] = lyricOutline_;
-        j["overlay"] = overlayHost != nullptr;
-        j["taskbar"] = taskbarHost != nullptr;
-        j["clickThrough"] = overlayHost && overlayHost->clickThrough();
         j["taskbarPosition"] = taskbarPosition_;
         j["spectrum"] = spectrumOn_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
@@ -574,8 +528,7 @@ void App::showTrayMenu() {
         items.push_back(std::move(it));
     };
 
-    addItem(kCmdToggleOverlay, L"桌面歌词", overlayHost != nullptr);
-    addItem(kCmdToggleTaskbar, L"任务栏歌词", taskbarHost != nullptr);
+    addItem(kCmdToggleTaskbar, taskbarHost ? L"关闭任务栏歌词" : L"开启任务栏歌词");
     if (taskbarHost) {
         fluent::FluentMenuItem pos;
         pos.text = L"任务栏位置";
@@ -592,12 +545,8 @@ void App::showTrayMenu() {
         addItem(kCmdSpectrum, L"频谱", spectrumOn_);
     }
     addSeparator();
-    if (overlayHost) {
-        addItem(kCmdClickThrough, L"鼠标穿透", overlayHost->clickThrough());
-        addSeparator();
-    }
     addItem(kCmdPickFont, L"字体…");
-    if (taskbarHost || overlayHost) {
+    if (taskbarHost) {
         addItem(kCmdFontColorEffect, L"字体颜色与效果…");
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
@@ -612,17 +561,8 @@ void App::showTrayMenu() {
 
 void App::onMenuCommand(int cmd) {
     switch (cmd) {
-    case kCmdToggleOverlay:
-        toggleOverlay();
-        saveSettings();
-        break;
     case kCmdToggleTaskbar:
         toggleTaskbar();
-        saveSettings();
-        break;
-    case kCmdClickThrough:
-        if (overlayHost)
-            overlayHost->setClickThrough(!overlayHost->clickThrough());
         saveSettings();
         break;
     case kCmdTaskbarPosNotify:
@@ -660,7 +600,7 @@ void App::onMenuCommand(int cmd) {
 }
 
 void App::pickFont() {
-    if (!overlayHost && !taskbarHost)
+    if (!taskbarHost)
         return;
     if (fontPickerDialog && fontPickerDialog->isOpen()) {
         SetForegroundWindow(fontPickerDialog->hwnd());
@@ -675,8 +615,6 @@ void App::pickFont() {
         fontFamily_ = family;
         fontSize_ = std::clamp(size, 4.0f, 96.0f);
         hasUserFont_ = true;
-        if (overlayHost)
-            overlayHost->setFont(fontFamily_, fontSize_);
         if (taskbarHost)
             taskbarHost->setFont(fontFamily_, fontSize_);
         saveSettings();
@@ -690,7 +628,7 @@ void App::applyFontColors() {
 }
 
 void App::showFontColorDialog() {
-    if (!overlayHost && !taskbarHost)
+    if (!taskbarHost)
         return;
     if (fontColorDialog && fontColorDialog->isOpen()) {
         SetForegroundWindow(fontColorDialog->hwnd());
@@ -770,7 +708,6 @@ int main() {
     timeBeginPeriod(1);
     winrt::init_apartment();
 
-    bool wantOverlay = false;
     bool wantTaskbar = false;
     bool hasModeFlag = false;
     int argc = 0;
@@ -780,9 +717,6 @@ int main() {
             if (wcscmp(argv[i], L"--taskbar") == 0) {
                 wantTaskbar = true;
                 hasModeFlag = true;
-            } else if (wcscmp(argv[i], L"--overlay") == 0) {
-                wantOverlay = true;
-                hasModeFlag = true;
             }
         }
         LocalFree(argv);
@@ -791,36 +725,26 @@ int main() {
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
     app.loadSettings();
-    // 无命令行参数时按上次保存的窗口状态启动；两个都关了则强制任务栏，否则无法找回设置入口
-    if (!hasModeFlag) {
-        wantOverlay = app.cfgOverlay_;
-        wantTaskbar = app.cfgTaskbar_;
-        if (!wantOverlay && !wantTaskbar)
-            wantTaskbar = true;
-    }
+    // 无命令行参数时始终开启任务栏歌词（沿用原"所有宿主都关闭则强制任务栏"的行为，
+    // 避免用户关闭后找不到显示入口；运行中仍可通过托盘菜单随时关闭）
+    if (!hasModeFlag)
+        wantTaskbar = true;
     if (!app.createTrayWindow(inst)) {
         std::wprintf(L"failed to create tray window\n");
-        return 1;
-    }
-    if (wantOverlay && !app.createOverlay(inst)) {
-        std::wprintf(L"failed to create overlay window\n");
         return 1;
     }
     if (wantTaskbar && !app.createTaskbar(inst)) {
         std::wprintf(L"failed to create taskbar window\n");
         return 1;
     }
-    if (!app.overlayHost && !app.taskbarHost) {
+    if (!app.taskbarHost) {
         std::wprintf(L"no host enabled\n");
         return 1;
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
 
-    const wchar_t* modeDesc = app.overlayHost && app.taskbarHost ? L"overlay + taskbar"
-                              : app.overlayHost                ? L"overlay"
-                                                               : L"taskbar";
-    std::wprintf(L"QQMusicLyric started (%s mode), waiting for QQ Music...\n", modeDesc);
+    std::wprintf(L"QQMusicLyric started, waiting for QQ Music...\n");
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

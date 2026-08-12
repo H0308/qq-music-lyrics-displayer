@@ -4,7 +4,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 
-// OverlayHost 与 TaskbarHost 共用的 D2D/DWrite 基础设施：
+// TaskbarHost 使用的 D2D/DWrite 基础设施：
 // 工厂创建、DIB/MemoryDC 管理、DCRenderTarget 绑定、UpdateLayeredWindow 提交。
 class LyricRenderer {
 public:

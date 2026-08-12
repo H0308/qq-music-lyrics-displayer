@@ -1608,12 +1608,3 @@ void TaskbarHost::setPositionMode(int mode) {
 void TaskbarHost::onTaskbarCreated() {
     impl_->onTaskbarCreated();
 }
-
-void TaskbarHost::setClickThrough(bool on) {
-    // 任务栏歌词不需要鼠标穿透，忽略
-    (void)on;
-}
-
-bool TaskbarHost::clickThrough() const {
-    return false;
-}
