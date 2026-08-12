@@ -16,6 +16,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
 add_executable(QQMusicLyric
     src/main.cpp
     src/media/smtc_monitor.cpp
+    src/media/audio_spectrum.cpp
     src/lyric/lyric_provider.cpp
     src/lyric/cover_provider.cpp
     src/ui/lyric_window.cpp

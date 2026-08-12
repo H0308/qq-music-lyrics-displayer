@@ -7,6 +7,7 @@
 #include "ui/font_color_dialog.h"
 #include "ui/fluent_menu.h"
 #include "media/smtc_monitor.h"
+#include "media/audio_spectrum.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -45,6 +46,7 @@ constexpr UINT kCmdManualSearch = 107;
 constexpr UINT kCmdFontColorEffect = 108;
 constexpr UINT kCmdTaskbarPosNotify = 109;
 constexpr UINT kCmdTaskbarPosLeft = 110;
+constexpr UINT kCmdSpectrum = 111;
 
 struct CoverPayload {
     std::wstring key;
@@ -130,6 +132,10 @@ struct App {
     bool cfgClickThrough_ = false;
     int taskbarPosition_ = 0; // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
 
+    // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
+    AudioSpectrum spectrum_;
+    bool spectrumOn_ = false;
+
     std::wstring settingsPath_;
 
     std::vector<ILyricHost*> hosts() {
@@ -182,11 +188,15 @@ struct App {
         taskbarHost->setFontOutline(lyricOutline_);
         taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
         taskbarHost->setPositionMode(taskbarPosition_);
+        taskbarHost->setSpectrumVisible(spectrumOn_);
+        if (spectrumOn_)
+            spectrum_.start();
         updateTrayIcon();
         return true;
     }
 
     void destroyTaskbar() {
+        spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
         taskbarHost.reset();
         updateTrayIcon();
     }
@@ -414,6 +424,8 @@ struct App {
             h->setCurrentLine(idx);
             h->setPosition(snap.positionMs);
         }
+        if (spectrumOn_ && taskbarHost)
+            taskbarHost->setSpectrumBands(spectrum_.bands());
         if (manualSearchDialog && manualSearchDialog->isOpen()) {
             manualSearchDialog->setPlaybackPosition(snap.positionMs);
         }
@@ -465,6 +477,7 @@ void App::loadSettings() {
         cfgTaskbar_ = j.value("taskbar", true);
         cfgClickThrough_ = j.value("clickThrough", false);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
+        spectrumOn_ = j.value("spectrum", false);
     } catch (...) {
     }
 }
@@ -488,6 +501,7 @@ void App::saveSettings() {
         j["taskbar"] = taskbarHost != nullptr;
         j["clickThrough"] = overlayHost && overlayHost->clickThrough();
         j["taskbarPosition"] = taskbarPosition_;
+        j["spectrum"] = spectrumOn_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -575,6 +589,7 @@ void App::showTrayMenu() {
         sub.checked = taskbarPosition_ == 1;
         pos.submenu.push_back(sub);
         items.push_back(std::move(pos));
+        addItem(kCmdSpectrum, L"频谱", spectrumOn_);
     }
     addSeparator();
     if (overlayHost) {
@@ -615,6 +630,18 @@ void App::onMenuCommand(int cmd) {
         taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
         if (taskbarHost)
             taskbarHost->setPositionMode(taskbarPosition_);
+        saveSettings();
+        break;
+    case kCmdSpectrum:
+        spectrumOn_ = !spectrumOn_;
+        if (spectrumOn_ && taskbarHost) {
+            spectrum_.start();
+            taskbarHost->setSpectrumVisible(true);
+        } else {
+            spectrum_.stop();
+            if (taskbarHost)
+                taskbarHost->setSpectrumVisible(false);
+        }
         saveSettings();
         break;
     case kCmdPickFont:

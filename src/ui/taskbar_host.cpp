@@ -35,6 +35,8 @@ constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kMinFont = 9.0f;
 constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
+constexpr float kSpectrumBarW = 7.0f;  // 频谱柱宽
+constexpr float kSpectrumGap = 6.0f;   // 频谱柱间隙
 
 // GDI+ 一次性初始化（封面解码）
 class GdiplusInit {
@@ -181,6 +183,10 @@ struct TaskbarHost::Impl {
     COLORREF lyricOutlineColor_ = RGB(0, 0, 0);         // 描边颜色
     bool lyricGlow_ = false;                            // 光晕开关
     bool lyricOutline_ = false;                         // 描边开关
+    // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
+    ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
+    bool spectrumVisible_ = false;
+    std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
     ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
@@ -370,6 +376,12 @@ struct TaskbarHost::Impl {
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
         int minW = (int)std::lround(kMinWidthDip * scale());
         int maxW = (int)std::lround(kMaxWidthDip * scale());
+        // 频谱开启时整体加宽（频谱簇 + 与歌词的间距），不压缩歌词原有宽度；关闭即恢复
+        if (spectrumVisible_) {
+            int extra = (int)std::lround((spectrumClusterW() + kTextPadding) * scale());
+            minW += extra;
+            maxW += extra;
+        }
 
         // 空闲区间 = 任务栏减去占用区间
         struct Span {
@@ -540,6 +552,10 @@ struct TaskbarHost::Impl {
             brushLyricOutline_->Release();
             brushLyricOutline_ = nullptr;
         }
+        if (brushSpectrum_) {
+            brushSpectrum_->Release();
+            brushSpectrum_ = nullptr;
+        }
         auto rgb = [](COLORREF c, float a) {
             return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
                                 GetBValue(c) / 255.0f, a);
@@ -549,6 +565,8 @@ struct TaskbarHost::Impl {
                                   &brushLyricDim_);
         rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f), &brushLyricGlow_);
         rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
+        // 频谱柱：跟随已播放色，略降透明度与歌词文字区分层次
+        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.60f), &brushSpectrum_);
     }
 
     void setFontGlowColors(COLORREF glow, COLORREF outline) {
@@ -583,6 +601,52 @@ struct TaskbarHost::Impl {
             return;
         lyricOutline_ = on;
         render();
+    }
+
+    void setSpectrumVisible(bool on) {
+        if (spectrumVisible_ == on)
+            return;
+        spectrumVisible_ = on;
+        if (!on)
+            spectrumBands_.fill(0.0f);
+        // 先改窗口宽度再渲染：若在 render 内经 layoutDirty_ 改大小，
+        // render 结尾的 present 会用旧尺寸位图把窗口尺寸拽回去（与 setPositionMode 同序）
+        adjustPosition();
+        render();
+    }
+
+    void setSpectrumBands(const std::array<float, TaskbarHost::kSpectrumBands>& bands) {
+        spectrumBands_ = bands; // 无需立即 render：60fps 定时器每帧都会渲染
+    }
+
+    // 频谱簇总宽（含柱间间隙）
+    float spectrumClusterW() const {
+        return TaskbarHost::kSpectrumBands * kSpectrumBarW +
+               (TaskbarHost::kSpectrumBands - 1) * kSpectrumGap;
+    }
+
+    // 频谱开启时窗口整体加宽的宽度：频谱簇 + 与歌词区间的间距
+    float spectrumExtraW() const {
+        return spectrumVisible_ ? spectrumClusterW() + kTextPadding : 0.0f;
+    }
+
+    // 频谱柱：x 起的一簇圆角柱，垂直方向以中线对称伸缩（位于歌词右侧，与左侧封面/歌曲信息对称）
+    void drawSpectrum(float x, float h) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !brushSpectrum_)
+            return;
+        constexpr int n = TaskbarHost::kSpectrumBands;
+        float cy = h * 0.5f;
+        float maxH = h * 0.74f;
+        float minH = 4.0f; // 静音时也保留小圆角柱，不消失
+        for (int i = 0; i < n; ++i) {
+            float bh = minH + spectrumBands_[i] * (maxH - minH);
+            D2D1_ROUNDED_RECT rr{
+                D2D1::RectF(x, cy - bh * 0.5f, x + kSpectrumBarW, cy + bh * 0.5f),
+                kSpectrumBarW * 0.5f, kSpectrumBarW * 0.5f};
+            rt->FillRoundedRectangle(rr, brushSpectrum_);
+            x += kSpectrumBarW + kSpectrumGap;
+        }
     }
 
     void setPositionMode(int mode) {
@@ -679,6 +743,7 @@ struct TaskbarHost::Impl {
         r(brushLyricDim_);
         r(brushLyricGlow_);
         r(brushLyricOutline_);
+        r(brushSpectrum_);
         r(coverClip_);
         r(coverLayer_);
         r(icoPlay_);
@@ -1059,7 +1124,9 @@ struct TaskbarHost::Impl {
         GetClientRect(hwnd, &rc);
         float w = static_cast<float>(rc.right - rc.left);
         float h = static_cast<float>(rc.bottom - rc.top);
-        float leftW = w * kLeftRatio;
+        // 与 render 同口径：频谱加宽的额外宽度不参与按钮中心计算，
+        // 否则绘制位置与命中位置错位（点"下一首"落到"暂停"上）
+        float leftW = (w - spectrumExtraW() * scale()) * kLeftRatio;
         if (x < leftW || x > w)
             return -1;
 
@@ -1174,7 +1241,9 @@ struct TaskbarHost::Impl {
 
         float w = dip(pxW);
         float h = dip(pxH);
-        float leftW = w * kLeftRatio;
+        // 频谱加宽的额外宽度不参与左右分区：左侧信息区与歌词区保持原宽，额外宽度全给频谱
+        float effW = w - spectrumExtraW();
+        float leftW = effW * kLeftRatio;
         float rightW = w - leftW;
 
         if (textDirty_)
@@ -1220,8 +1289,12 @@ struct TaskbarHost::Impl {
 
         // 右侧歌词区：未悬浮时滚动显示歌词，悬浮时显示控制按钮
         float lyricAreaX = leftW + kTextPadding;
-        float lyricAreaW = std::max(1.0f, rightW - kTextPadding * 2.0f);
+        float lyricAreaW =
+            std::max(1.0f, rightW - kTextPadding * 2.0f - spectrumExtraW());
         float lyricY = h * 0.5f - lyricHeight_ * 0.5f;
+
+        // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
+        bool showSpectrum = spectrumVisible_ && !mouseOver_;
 
         if (mouseOver_) {
             float cx = leftW + rightW * 0.5f;
@@ -1231,6 +1304,8 @@ struct TaskbarHost::Impl {
             for (int i = 0; i < 3; ++i)
                 drawButton(i, D2D1::Point2F(cx + (i - 1) * spacing, cy), r);
         } else {
+            if (showSpectrum)
+                drawSpectrum(lyricAreaX + lyricAreaW + kTextPadding, h);
             // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
             // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
             const LyricLine* curLine = karaokeLine();
@@ -1283,11 +1358,13 @@ struct TaskbarHost::Impl {
         if (h <= 0.0f || w <= 0.0f)
             return;
 
-        float leftW = w * kLeftRatio;
+        float leftW = (w - spectrumExtraW()) * kLeftRatio;
         float rightW = w - leftW;
         float infoX = kCoverPadding + coverSize() + kCoverPadding;
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
-        float lyricAreaW = std::max(1.0f, rightW - kTextPadding * 2.0f);
+        // 与 render 一致：滚动/跟随范围不含频谱独占区
+        float lyricAreaW =
+            std::max(1.0f, rightW - kTextPadding * 2.0f - spectrumExtraW());
 
         marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
         marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
@@ -1514,6 +1591,14 @@ void TaskbarHost::setFontOutline(bool on) {
 
 void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
     impl_->setFontGlowColors(glow, outline);
+}
+
+void TaskbarHost::setSpectrumVisible(bool on) {
+    impl_->setSpectrumVisible(on);
+}
+
+void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {
+    impl_->setSpectrumBands(bands);
 }
 
 void TaskbarHost::setPositionMode(int mode) {
