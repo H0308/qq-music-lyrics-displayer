@@ -1,0 +1,519 @@
+#include "font_picker_dialog.h"
+
+#include "ui/fluent_controls.h"
+#include "ui/fluent_theme.h"
+#include "resource.h"
+
+#include <windowsx.h>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cwctype>
+#include <map>
+
+namespace {
+
+constexpr int kIdFilterEdit = 201;
+constexpr int kIdFamilyList = 202;
+constexpr int kIdSizeEdit = 203;
+constexpr int kIdSizeList = 204;
+constexpr int kIdPreview = 205;
+constexpr int kIdOk = 206;
+constexpr int kIdCancel = 207;
+
+constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40, 48};
+
+std::wstring lowerOf(const std::wstring& s) {
+    std::wstring r = s;
+    for (auto& c : r)
+        c = static_cast<wchar_t>(std::towlower(c));
+    return r;
+}
+
+// 示例文字预览面板
+class FontPreviewPanel : public fluent::LayeredChild {
+public:
+    bool create(HWND parent, int id) {
+        return createLayered(parent, L"QQMusicLyricFontPreview", wndProc, id);
+    }
+
+    void setFont(const std::wstring& family, float sizePt) {
+        if (family == family_ && sizePt == size_)
+            return;
+        family_ = family;
+        size_ = sizePt;
+        if (fmt_) {
+            fmt_->Release();
+            fmt_ = nullptr;
+        }
+        renderNow();
+    }
+
+private:
+    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
+        const fluent::Palette& p = fluent::palette();
+        auto* br = brush(rt);
+        if (!br)
+            return;
+        D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
+        br->SetColor(p.cardFill);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br);
+        br->SetColor(p.cardStroke);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br, 1.0f);
+
+        if (family_.empty() || size_ <= 0)
+            return;
+        if (!fmt_) {
+            IDWriteFactory* dw = nullptr;
+            if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                           reinterpret_cast<IUnknown**>(&dw))) ||
+                !dw)
+                return;
+            dw->CreateTextFormat(family_.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size_,
+                                 L"zh-cn", &fmt_);
+            dw->Release();
+            if (fmt_) {
+                fmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                fmt_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
+        }
+        if (fmt_) {
+            const wchar_t* sample = L"AaBb 永字八法 0123";
+            br->SetColor(p.text);
+            rt->DrawTextW(sample, static_cast<UINT32>(wcslen(sample)), fmt_,
+                          D2D1::RectF(8.0f, 0.0f, wDip - 8.0f, hDip), br);
+        }
+    }
+
+    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+        FontPreviewPanel* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            self = static_cast<FontPreviewPanel*>(
+                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            self->hwnd_ = h;
+            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<FontPreviewPanel*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+        }
+        if (!self)
+            return DefWindowProcW(h, msg, wp, lp);
+        switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            BeginPaint(h, &ps);
+            self->renderNow();
+            EndPaint(h, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_DESTROY:
+            if (self->fmt_) {
+                self->fmt_->Release();
+                self->fmt_ = nullptr;
+            }
+            self->hwnd_ = nullptr;
+            return 0;
+        }
+        return DefWindowProcW(h, msg, wp, lp);
+    }
+
+    std::wstring family_;
+    float size_ = 0;
+    IDWriteTextFormat* fmt_ = nullptr;
+};
+
+} // namespace
+
+struct FontPickerDialog::Impl {
+    HINSTANCE inst = nullptr;
+    HWND hwnd = nullptr;
+    bool backdrop = false;
+
+    fluent::FluentEdit filterEdit;
+    fluent::FluentList familyList;
+    fluent::FluentEdit sizeEdit;
+    fluent::FluentList sizeList;
+    FontPreviewPanel preview;
+    fluent::FluentButton okBtn;
+    fluent::FluentButton cancelBtn;
+
+    std::wstring initFamily;
+    float initSize = 16.0f;
+
+    std::vector<std::wstring> families;         // 全部字体族
+    std::vector<int> filtered;                  // 当前列表行 -> families 下标
+    std::map<int, IDWriteTextFormat*> fmtCache; // 字体族 -> 行绘制格式
+
+    ApplyCallback onApply;
+
+    ~Impl() {
+        for (auto& [_, f] : fmtCache)
+            if (f)
+                f->Release();
+    }
+
+    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+        Impl* self = nullptr;
+        if (msg == WM_NCCREATE) {
+            self = static_cast<Impl*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            self->hwnd = h;
+            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<Impl*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+        }
+        if (self)
+            return self->handle(msg, wp, lp);
+        return DefWindowProcW(h, msg, wp, lp);
+    }
+
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+        case WM_CREATE:
+            enumerateFonts();
+            createControls();
+            layout();
+            return 0;
+        case WM_SIZE:
+            layout();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            // 滚轮消息默认发往焦点窗口，这里按光标位置转发给两个列表
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            HWND child = ChildWindowFromPoint(hwnd, pt);
+            if (child == familyList.hwnd())
+                SendMessageW(familyList.hwnd(), WM_MOUSEWHEEL, wp, lp);
+            else if (child == sizeList.hwnd())
+                SendMessageW(sizeList.hwnd(), WM_MOUSEWHEEL, wp, lp);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            if (!backdrop) {
+                // 亚克力材质不可用时的实心回退背景
+                HDC hdc = reinterpret_cast<HDC>(wp);
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HBRUSH br = CreateSolidBrush(fluent::fallbackBgColor());
+                FillRect(hdc, &rc, br);
+                DeleteObject(br);
+            }
+            return 1;
+        case WM_COMMAND:
+            onCommand(LOWORD(wp), HIWORD(wp));
+            return 0;
+        case WM_CLOSE:
+            destroy();
+            return 0;
+        case WM_DESTROY:
+            hwnd = nullptr;
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    void enumerateFonts() {
+        IDWriteFactory* dw = nullptr;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                       reinterpret_cast<IUnknown**>(&dw))) ||
+            !dw)
+            return;
+        IDWriteFontCollection* coll = nullptr;
+        if (SUCCEEDED(dw->GetSystemFontCollection(&coll, FALSE)) && coll) {
+            UINT32 count = coll->GetFontFamilyCount();
+            for (UINT32 i = 0; i < count; ++i) {
+                IDWriteFontFamily* fam = nullptr;
+                if (FAILED(coll->GetFontFamily(i, &fam)) || !fam)
+                    continue;
+                IDWriteLocalizedStrings* names = nullptr;
+                if (SUCCEEDED(fam->GetFamilyNames(&names)) && names) {
+                    UINT32 idx = 0;
+                    BOOL exists = FALSE;
+                    if (FAILED(names->FindLocaleName(L"zh-cn", &idx, &exists)) || !exists) {
+                        if (FAILED(names->FindLocaleName(L"en-us", &idx, &exists)) || !exists)
+                            idx = 0;
+                    }
+                    UINT32 len = 0;
+                    names->GetStringLength(idx, &len);
+                    std::wstring name(len + 1, L'\0');
+                    names->GetString(idx, name.data(), len + 1);
+                    name.resize(len);
+                    if (!name.empty())
+                        families.push_back(name);
+                    names->Release();
+                }
+                fam->Release();
+            }
+            coll->Release();
+        }
+        dw->Release();
+        std::sort(families.begin(), families.end());
+        families.erase(std::unique(families.begin(), families.end()), families.end());
+    }
+
+    void createControls() {
+        filterEdit.create(hwnd, kIdFilterEdit, L"输入以筛选字体");
+        familyList.create(hwnd, kIdFamilyList);
+        familyList.setRowDraw([this](ID2D1DCRenderTarget* rt, const D2D1_RECT_F& rect, int row,
+                                     bool, bool) { drawFamilyRow(rt, rect, row); });
+        sizeEdit.create(hwnd, kIdSizeEdit, L"字号");
+        sizeList.create(hwnd, kIdSizeList);
+        preview.create(hwnd, kIdPreview);
+        okBtn.create(hwnd, kIdOk, L"确定", true);
+        cancelBtn.create(hwnd, kIdCancel, L"取消", false);
+
+        // 字号预设
+        std::vector<fluent::FluentListItem> sizeItems;
+        for (int s : kSizePresets)
+            sizeItems.push_back({std::to_wstring(s), false});
+        sizeList.setItems(std::move(sizeItems));
+
+        rebuildFamilyList(L"");
+
+        // 初始选中
+        wchar_t buf[32];
+        swprintf_s(buf, L"%g", static_cast<double>(initSize));
+        sizeEdit.setText(buf);
+        syncSizeListSelection();
+        updatePreview();
+    }
+
+    void rebuildFamilyList(const std::wstring& filter) {
+        std::wstring f = lowerOf(filter);
+        filtered.clear();
+        std::vector<fluent::FluentListItem> items;
+        for (int i = 0; i < static_cast<int>(families.size()); ++i) {
+            if (f.empty() || lowerOf(families[i]).find(f) != std::wstring::npos) {
+                filtered.push_back(i);
+                items.push_back({families[i], false});
+            }
+        }
+        familyList.setItems(std::move(items));
+
+        // 尽量保持当前字体选中
+        int sel = -1;
+        std::wstring cur = lowerOf(currentFamily());
+        for (int i = 0; i < static_cast<int>(filtered.size()); ++i) {
+            if (lowerOf(families[filtered[i]]) == cur) {
+                sel = i;
+                break;
+            }
+        }
+        if (sel < 0 && !filtered.empty())
+            sel = 0;
+        familyList.setSelectedIndex(sel);
+    }
+
+    std::wstring currentFamily() const {
+        int row = familyList.selectedIndex();
+        if (row >= 0 && row < static_cast<int>(filtered.size()))
+            return families[filtered[row]];
+        return initFamily;
+    }
+
+    float currentSize() const {
+        std::wstring t = sizeEdit.text();
+        try {
+            float v = std::stof(t);
+            return std::clamp(v, 4.0f, 96.0f);
+        } catch (...) {
+            return initSize;
+        }
+    }
+
+    void updatePreview() {
+        preview.setFont(currentFamily(), currentSize());
+    }
+
+    void syncSizeListSelection() {
+        int size = static_cast<int>(currentSize() + 0.5f);
+        for (int i = 0; i < sizeList.itemCount(); ++i) {
+            if (std::stoi(sizeListText(i)) == size) {
+                sizeList.setSelectedIndex(i);
+                return;
+            }
+        }
+    }
+
+    // FluentList 未提供取行文本接口，这里直接用预设表
+    std::wstring sizeListText(int row) const {
+        return std::to_wstring(kSizePresets[row]);
+    }
+
+    void drawFamilyRow(ID2D1DCRenderTarget* rt, const D2D1_RECT_F& rect, int row) {
+        if (row < 0 || row >= static_cast<int>(filtered.size()))
+            return;
+        int famIdx = filtered[row];
+        IDWriteTextFormat* fmt = nullptr;
+        auto it = fmtCache.find(famIdx);
+        if (it != fmtCache.end()) {
+            fmt = it->second;
+        } else {
+            IDWriteFactory* dw = nullptr;
+            if (SUCCEEDED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
+                                              __uuidof(IDWriteFactory),
+                                              reinterpret_cast<IUnknown**>(&dw))) &&
+                dw) {
+                if (SUCCEEDED(dw->CreateTextFormat(families[famIdx].c_str(), nullptr,
+                                                   DWRITE_FONT_WEIGHT_NORMAL,
+                                                   DWRITE_FONT_STYLE_NORMAL,
+                                                   DWRITE_FONT_STRETCH_NORMAL, 15.0f, L"zh-cn",
+                                                   &fmt)) &&
+                    fmt) {
+                    fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    fmtCache[famIdx] = fmt;
+                }
+                dw->Release();
+            }
+        }
+        if (!fmt)
+            return;
+        ID2D1SolidColorBrush* br = nullptr;
+        rt->CreateSolidColorBrush(fluent::palette().text, &br);
+        if (!br)
+            return;
+        const std::wstring& name = families[famIdx];
+        rt->DrawTextW(name.c_str(), static_cast<UINT32>(name.size()), fmt,
+                      D2D1::RectF(rect.left + 16.0f, rect.top, rect.right - 12.0f, rect.bottom),
+                      br);
+        br->Release();
+    }
+
+    void layout() {
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        float s = fluent::dipScale(GetDpiForWindow(hwnd));
+        auto px = [&](float dip) { return static_cast<int>(dip * s); };
+        int w = rc.right - rc.left;
+        int h = rc.bottom - rc.top;
+        int pad = px(16), gap = px(12);
+
+        int filterH = px(32);
+        filterEdit.move(pad, pad, w - pad * 2, filterH);
+
+        int btnH = px(32);
+        int okW = px(96), cancelW = px(88);
+        int btnY = h - pad - btnH;
+        okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
+        cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
+
+        int previewH = px(88);
+        int previewY = btnY - gap - previewH;
+        preview.move(pad, previewY, w - pad * 2, previewH);
+
+        int listTop = pad + filterH + gap;
+        int listH = previewY - gap - listTop;
+        int familyW = static_cast<int>((w - pad * 2 - gap) * 0.58f);
+        familyList.move(pad, listTop, familyW, listH);
+
+        int rightX = pad + familyW + gap;
+        int rightW = w - pad - rightX;
+        int sizeEditH = px(32);
+        sizeEdit.move(rightX, listTop, rightW, sizeEditH);
+        sizeList.move(rightX, listTop + sizeEditH + px(8), rightW, listH - sizeEditH - px(8));
+    }
+
+    void onCommand(int id, int code) {
+        if (id == kIdCancel && code == BN_CLICKED) {
+            destroy();
+        } else if (id == kIdOk && code == BN_CLICKED) {
+            applyAndClose();
+        } else if (id == kIdFamilyList && code == LBN_SELCHANGE) {
+            updatePreview();
+        } else if (id == kIdFamilyList && code == LBN_DBLCLK) {
+            applyAndClose();
+        } else if (id == kIdSizeList && code == LBN_SELCHANGE) {
+            int row = sizeList.selectedIndex();
+            if (row >= 0)
+                sizeEdit.setText(sizeListText(row));
+            updatePreview();
+        } else if (id == kIdSizeEdit && code == EN_CHANGE) {
+            updatePreview();
+        } else if (id == kIdFilterEdit && code == EN_CHANGE) {
+            rebuildFamilyList(filterEdit.text());
+            updatePreview();
+        }
+    }
+
+    void applyAndClose() {
+        if (onApply)
+            onApply(currentFamily(), currentSize());
+        destroy();
+    }
+
+    void destroy() {
+        if (hwnd) {
+            DestroyWindow(hwnd);
+            hwnd = nullptr;
+        }
+    }
+};
+
+FontPickerDialog::FontPickerDialog() : impl_(std::make_unique<Impl>()) {}
+
+FontPickerDialog::~FontPickerDialog() {
+    destroy();
+}
+
+bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& family,
+                              float sizePt) {
+    (void)parent; // 托盘窗口是消息窗口，不能作为所有者；与搜索对话框一致使用无所有者窗口
+    impl_->inst = inst;
+    impl_->initFamily = family;
+    impl_->initSize = sizePt;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = Impl::wndProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"QQMusicLyricFontPicker";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    RegisterClassExW(&wc);
+
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    UINT dpi = GetDpiForSystem();
+    float s = fluent::dipScale(dpi);
+    // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
+    RECT rc{0, 0, static_cast<LONG>(std::lround(560 * s)),
+            static_cast<LONG>(std::lround(480 * s))};
+    AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
+                             WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    int x = work.left + ((work.right - work.left) - w) / 2;
+    int y = work.top + ((work.bottom - work.top) - h) / 2;
+
+    impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+                                  L"QQMusicLyricFontPicker", L"选择字体",
+                                  WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, x, y, w, h, nullptr,
+                                  nullptr, inst, impl_.get());
+    if (!impl_->hwnd)
+        return false;
+    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
+    return true;
+}
+
+void FontPickerDialog::show() {
+    if (impl_->hwnd)
+        ShowWindow(impl_->hwnd, SW_SHOW);
+}
+
+void FontPickerDialog::destroy() {
+    impl_->destroy();
+}
+
+bool FontPickerDialog::isOpen() const {
+    return impl_->hwnd != nullptr && IsWindow(impl_->hwnd);
+}
+
+HWND FontPickerDialog::hwnd() const {
+    return impl_->hwnd;
+}
+
+void FontPickerDialog::setApplyCallback(ApplyCallback cb) {
+    impl_->onApply = std::move(cb);
+}

@@ -1,15 +1,17 @@
 #include "ui/manual_search_dialog.h"
 
 #include "ui/lyric_renderer.h"
+#include "ui/fluent_controls.h"
+#include "ui/fluent_theme.h"
 #include "resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
 #include <d2d1.h>
 #include <dwrite.h>
-#include <commctrl.h>
 
 #include <algorithm>
+#include <cmath>
 #include <string>
 #include <tuple>
 
@@ -22,25 +24,17 @@ constexpr int kIdCandidateList = 104;
 constexpr int kIdOkBtn = 105;
 constexpr int kIdCancelBtn = 106;
 constexpr int kIdPreviewPanel = 107;
+constexpr int kIdStatus = 108;
 constexpr int kIdHint = 109;
 
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
 // 右侧桌面歌词风格预览面板（7 行，高亮当前播放行，支持鼠标滚轮手动滚动）
-class LyricPreviewPanel {
+class LyricPreviewPanel : public fluent::LayeredChild {
 public:
-    bool create(HWND parent, HINSTANCE inst, int x, int y, int w, int h) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = wndProc;
-        wc.hInstance = inst;
-        wc.lpszClassName = L"QQMusicLyricPreviewPanel";
-        wc.hbrBackground = (HBRUSH)GetStockObject(WHITE_BRUSH);
-        RegisterClassExW(&wc);
-        hwnd_ = CreateWindowExW(0, L"QQMusicLyricPreviewPanel", L"", WS_CHILD | WS_VISIBLE,
-                                x, y, w, h, parent, (HMENU)(UINT_PTR)kIdPreviewPanel, inst, this);
-        return hwnd_ != nullptr;
+    bool create(HWND parent, HINSTANCE, int, int, int, int) {
+        return createLayered(parent, L"QQMusicLyricPreviewPanel", wndProc, kIdPreviewPanel);
     }
 
     void setLyrics(const std::vector<LyricLine>& lines) {
@@ -51,7 +45,7 @@ public:
         wheelAccum_ = 0;
         syncToCurrentLine();
         if (hwnd_)
-            InvalidateRect(hwnd_, nullptr, FALSE);
+            renderNow();
     }
 
     void setPosition(int64_t positionMs) {
@@ -59,18 +53,9 @@ public:
         if (!manualScroll_) {
             syncToCurrentLine();
             if (hwnd_)
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                renderNow();
         }
     }
-
-    void destroy() {
-        if (hwnd_) {
-            DestroyWindow(hwnd_);
-            hwnd_ = nullptr;
-        }
-    }
-
-    HWND hwnd() const { return hwnd_; }
 
 private:
     static constexpr int kVisible = 7;
@@ -82,7 +67,8 @@ private:
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LyricPreviewPanel* self = nullptr;
         if (msg == WM_NCCREATE) {
-            self = static_cast<LyricPreviewPanel*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            self = static_cast<LyricPreviewPanel*>(
+                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
             self->hwnd_ = h;
             SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         } else {
@@ -96,21 +82,17 @@ private:
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            createDeviceResources();
             SetTimer(hwnd_, kTimerResume, 100, nullptr);
             return 0;
         case WM_ERASEBKGND:
             return 1;
         case WM_PAINT: {
             PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd_, &ps);
-            render(hdc);
+            BeginPaint(hwnd_, &ps);
+            renderNow();
             EndPaint(hwnd_, &ps);
             return 0;
         }
-        case WM_SIZE:
-            InvalidateRect(hwnd_, nullptr, FALSE);
-            return 0;
         case WM_TIMER:
             onTimer();
             return 0;
@@ -119,7 +101,7 @@ private:
             return 0;
         case WM_DESTROY:
             KillTimer(hwnd_, kTimerResume);
-            releaseResources();
+            hwnd_ = nullptr;
             return 0;
         }
         return DefWindowProcW(hwnd_, msg, wp, lp);
@@ -131,7 +113,7 @@ private:
             if (now - lastScrollTick_ >= kResumeDelayMs) {
                 manualScroll_ = false;
                 syncToCurrentLine();
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                renderNow();
             }
         }
     }
@@ -153,7 +135,7 @@ private:
         topLine_ = std::clamp(topLine_ + lines, 0, maxTop);
         manualScroll_ = true;
         lastScrollTick_ = GetTickCount();
-        InvalidateRect(hwnd_, nullptr, FALSE);
+        renderNow();
     }
 
     void syncToCurrentLine() {
@@ -169,169 +151,73 @@ private:
             topLine_ = std::clamp(currentLine_ - kMid, 0, maxTop);
     }
 
-    void createDeviceResources() {
-        renderer_.initialize();
-        dpi_ = GetDpiForWindow(hwnd_);
-        renderer_.setDpi(dpi_);
-        IDWriteFactory* dw = renderer_.dwrite();
-        if (!dw)
+    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
+        const fluent::Palette& p = fluent::palette();
+        auto* br = brush(rt);
+        if (!br)
             return;
-        float size = 18.0f;
-        dw->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn",
-                             &fmtNormal_);
-        dw->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_BOLD,
-                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size * 1.15f,
-                             L"zh-cn", &fmtCurrent_);
-        if (fmtNormal_) {
-            fmtNormal_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            fmtNormal_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            fmtNormal_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-        }
-        if (fmtCurrent_) {
-            fmtCurrent_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            fmtCurrent_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            fmtCurrent_->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-        }
-        auto* rt = renderer_.renderTarget();
-        if (rt) {
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.25f, 0.25f, 0.25f, 0.85f), &brushNormal_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.55f, 0.25f, 1.0f), &brushCurrent_);
-        }
-    }
+        // 半透明圆角卡片，叠在亚克力背景上
+        D2D1_RECT_F card = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
+        br->SetColor(p.cardFill);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(card, 4.0f, 4.0f), br);
+        br->SetColor(p.cardStroke);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(card, 4.0f, 4.0f), br, 1.0f);
 
-    void releaseResources() {
-        if (fmtNormal_) {
-            fmtNormal_->Release();
-            fmtNormal_ = nullptr;
-        }
-        if (fmtCurrent_) {
-            fmtCurrent_->Release();
-            fmtCurrent_ = nullptr;
-        }
-        if (brushNormal_) {
-            brushNormal_->Release();
-            brushNormal_ = nullptr;
-        }
-        if (brushCurrent_) {
-            brushCurrent_->Release();
-            brushCurrent_ = nullptr;
-        }
-        renderer_.releaseAll();
-    }
-
-    void discard() {
-        if (fmtNormal_) {
-            fmtNormal_->Release();
-            fmtNormal_ = nullptr;
-        }
-        if (fmtCurrent_) {
-            fmtCurrent_->Release();
-            fmtCurrent_ = nullptr;
-        }
-        if (brushNormal_) {
-            brushNormal_->Release();
-            brushNormal_ = nullptr;
-        }
-        if (brushCurrent_) {
-            brushCurrent_->Release();
-            brushCurrent_ = nullptr;
-        }
-        renderer_.discard();
-    }
-
-    void render(HDC hdc) {
-        if (!hwnd_)
-            return;
-        createDeviceResources();
-        RECT rc;
-        GetClientRect(hwnd_, &rc);
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-        if (w <= 0 || h <= 0)
-            return;
-        if (!renderer_.bindDC(w, h))
-            return;
-        auto* rt = renderer_.renderTarget();
-        if (!rt)
-            return;
-        rt->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
-        rt->BeginDraw();
-        rt->Clear(D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
-        if (fmtNormal_ && brushNormal_) {
-            float scale = static_cast<float>(dpi_) / 96.0f;
-            float dipW = static_cast<float>(w) / scale;
-            float dipH = static_cast<float>(h) / scale;
-            float pad = 12.0f;
-            // 细边框
-            rt->DrawRectangle(D2D1::RectF(0.5f, 0.5f, dipW - 0.5f, dipH - 0.5f), brushNormal_, 1.0f);
-            if (lines_.empty()) {
+        float pad = 12.0f;
+        if (lines_.empty()) {
+            if (auto* fmt = textFormat(15.0f, 400, true)) {
                 const std::wstring placeholder = L"选择左侧歌曲预览歌词";
-                D2D1_RECT_F rect = D2D1::RectF(pad, dipH * 0.4f, dipW - pad, dipH * 0.6f);
-                rt->DrawTextW(placeholder.c_str(), static_cast<UINT32>(placeholder.size()),
-                              fmtNormal_, rect, brushNormal_);
-            } else if (fmtCurrent_) {
-                int total = static_cast<int>(lines_.size());
-                int maxTop = std::max(0, total - kVisible);
-                int top = std::clamp(topLine_, 0, maxTop);
-                int count = std::min(kVisible, total - top);
-                float slotH = dipH / kVisible;
-                for (int i = 0; i < count; ++i) {
-                    int lineIdx = top + i;
-                    bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
-                    const std::wstring& text = lines_[lineIdx].text;
-                    IDWriteTextFormat* fmt = cur ? fmtCurrent_ : fmtNormal_;
-                    ID2D1SolidColorBrush* brush = cur ? brushCurrent_ : brushNormal_;
-                    D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, dipW - pad, (i + 1) * slotH);
-                    rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, brush);
-                }
+                br->SetColor(p.textSecondary);
+                rt->DrawTextW(placeholder.c_str(), static_cast<UINT32>(placeholder.size()), fmt,
+                              D2D1::RectF(pad, hDip * 0.4f, wDip - pad, hDip * 0.6f), br);
+            }
+            return;
+        }
+        int total = static_cast<int>(lines_.size());
+        int maxTop = std::max(0, total - kVisible);
+        int top = std::clamp(topLine_, 0, maxTop);
+        int count = std::min(kVisible, total - top);
+        float slotH = hDip / kVisible;
+        for (int i = 0; i < count; ++i) {
+            int lineIdx = top + i;
+            bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
+            const std::wstring& text = lines_[lineIdx].text;
+            D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, wDip - pad, (i + 1) * slotH);
+            // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
+            if (cur) {
+                br->SetColor(fluent::toD2D(RGB(49, 194, 124))); // QQ 绿，与桌面歌词一致
+                if (auto* fmt = textFormat(15.0f, 700, true))
+                    rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, br);
+            } else if (auto* fmt = textFormat(14.0f, 400, true)) {
+                br->SetColor(p.text);
+                rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, br);
             }
         }
-        HRESULT hr = rt->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET)
-            discard();
-        else
-            renderer_.copyToDC(hdc, w, h);
     }
 
-    HWND hwnd_ = nullptr;
-    LyricRenderer renderer_;
-    IDWriteTextFormat* fmtNormal_ = nullptr;
-    IDWriteTextFormat* fmtCurrent_ = nullptr;
-    ID2D1SolidColorBrush* brushNormal_ = nullptr;
-    ID2D1SolidColorBrush* brushCurrent_ = nullptr;
     std::vector<LyricLine> lines_;
     int topLine_ = 0;
     int currentLine_ = -1;
     bool manualScroll_ = false;
     DWORD lastScrollTick_ = 0;
     int wheelAccum_ = 0;
-    UINT dpi_ = 96;
 };
-
-std::wstring getWindowTextW(HWND h) {
-    int len = GetWindowTextLengthW(h);
-    if (len <= 0)
-        return {};
-    std::wstring s(len, L'\0');
-    GetWindowTextW(h, s.data(), len + 1);
-    s.resize(len);
-    return s;
-}
 
 } // namespace
 
 struct ManualSearchDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    HWND hTitle = nullptr;
-    HWND hArtist = nullptr;
-    HWND hSearch = nullptr;
-    HWND hList = nullptr;
-    HWND hStatus = nullptr;
-    HWND hHint = nullptr;
-    HWND hOk = nullptr;
-    HWND hCancel = nullptr;
+    bool backdrop = false;
+
+    fluent::FluentEdit titleEdit;
+    fluent::FluentEdit artistEdit;
+    fluent::FluentButton searchBtn;
+    fluent::FluentList list;
+    fluent::FluentLabel statusLabel;
+    fluent::FluentLabel hintLabel;
+    fluent::FluentButton okBtn;
+    fluent::FluentButton cancelBtn;
     LyricPreviewPanel preview;
 
     LyricProvider* provider = nullptr;
@@ -364,20 +250,34 @@ struct ManualSearchDialog::Impl {
         case WM_CREATE:
             createControls();
             layout();
-            SetWindowTextW(hStatus, L"请输入歌名和歌手，点击搜索。");
+            statusLabel.setText(L"请输入歌名和歌手，点击搜索。");
             return 0;
         case WM_SIZE:
             layout();
             return 0;
+        case WM_ERASEBKGND:
+            if (!backdrop) {
+                HDC hdc = reinterpret_cast<HDC>(wp);
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                HBRUSH br = CreateSolidBrush(fluent::fallbackBgColor());
+                FillRect(hdc, &rc, br);
+                DeleteObject(br);
+            }
+            return 1;
         case WM_MOUSEWHEEL: {
+            // 滚轮消息默认发往焦点窗口，这里按光标位置转发给列表或预览面板
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            if (ChildWindowFromPoint(hwnd, pt) == preview.hwnd())
+            HWND child = ChildWindowFromPoint(hwnd, pt);
+            if (child == preview.hwnd())
                 SendMessageW(preview.hwnd(), WM_MOUSEWHEEL, wp, lp);
+            else if (child == list.hwnd())
+                SendMessageW(list.hwnd(), WM_MOUSEWHEEL, wp, lp);
             return 0;
         }
         case WM_COMMAND:
-            onCommand(LOWORD(wp), HIWORD(wp), reinterpret_cast<HWND>(lp));
+            onCommand(LOWORD(wp), HIWORD(wp));
             return 0;
         case kMsgCandidatesReady: {
             auto* payload = reinterpret_cast<std::vector<SearchCandidate>*>(lp);
@@ -400,7 +300,6 @@ struct ManualSearchDialog::Impl {
             this->destroy();
             return 0;
         case WM_DESTROY:
-            preview.destroy();
             hwnd = nullptr;
             return 0;
         }
@@ -408,98 +307,74 @@ struct ManualSearchDialog::Impl {
     }
 
     void createControls() {
-        hTitle = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", targetTitle.c_str(),
-                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd,
-                                 (HMENU)(UINT_PTR)kIdTitleEdit, inst, nullptr);
-        hArtist = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", targetArtist.c_str(),
-                                  WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd,
-                                  (HMENU)(UINT_PTR)kIdArtistEdit, inst, nullptr);
-        hSearch = CreateWindowExW(0, L"BUTTON", L"搜索", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                  0, 0, 0, 0, hwnd, (HMENU)(UINT_PTR)kIdSearchBtn, inst, nullptr);
+        titleEdit.create(hwnd, kIdTitleEdit, L"歌名");
+        titleEdit.setText(targetTitle);
+        artistEdit.create(hwnd, kIdArtistEdit, L"歌手");
+        artistEdit.setText(targetArtist);
+        searchBtn.create(hwnd, kIdSearchBtn, L"搜索", true);
 
-        hStatus = CreateWindowExW(0, L"STATIC", L"",
-                                  WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd,
-                                  (HMENU)(UINT_PTR)108, inst, nullptr);
+        statusLabel.create(hwnd, kIdStatus, L"", false);
+        hintLabel.create(hwnd, kIdHint,
+                         L"KRC 为逐字歌词（逐字填充高亮，来自酷狗）；LRC 为普通歌词（整行高亮，来自 QQ 音乐）",
+                         true);
 
-        hHint = CreateWindowExW(0, L"STATIC",
-                                L"KRC 为逐字歌词（逐字填充高亮，来自酷狗）；LRC 为普通歌词（整行高亮，来自 QQ 音乐）",
-                                WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0, 0, hwnd,
-                                (HMENU)(UINT_PTR)kIdHint, inst, nullptr);
+        list.create(hwnd, kIdCandidateList);
 
-        hList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-                                WS_CHILD | WS_VISIBLE | LBS_NOTIFY | WS_VSCROLL, 0, 0, 0, 0, hwnd,
-                                (HMENU)(UINT_PTR)kIdCandidateList, inst, nullptr);
-
-        hOk = CreateWindowExW(0, L"BUTTON", L"使用此歌词",
-                              WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_DISABLED, 0, 0, 0, 0,
-                              hwnd, (HMENU)(UINT_PTR)kIdOkBtn, inst, nullptr);
-        hCancel = CreateWindowExW(0, L"BUTTON", L"取消", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0,
-                                  0, 0, 0, hwnd, (HMENU)(UINT_PTR)kIdCancelBtn, inst, nullptr);
+        okBtn.create(hwnd, kIdOkBtn, L"使用此歌词", true);
+        okBtn.setEnabled(false);
+        cancelBtn.create(hwnd, kIdCancelBtn, L"取消", false);
 
         preview.create(hwnd, inst, 0, 0, 0, 0);
-
-        // 默认字体
-        HFONT font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
-        SendMessageW(hTitle, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hArtist, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hSearch, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hStatus, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hHint, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hList, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hOk, WM_SETFONT, (WPARAM)font, TRUE);
-        SendMessageW(hCancel, WM_SETFONT, (WPARAM)font, TRUE);
-
-        // 输入框提示文字
-        SendMessageW(hTitle, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"歌名"));
-        SendMessageW(hArtist, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"歌手"));
     }
 
     void layout() {
         RECT rc;
         GetClientRect(hwnd, &rc);
+        float s = fluent::dipScale(GetDpiForWindow(hwnd));
+        auto px = [&](float dip) { return static_cast<int>(dip * s); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = 16;
-        int gap = 12;
-        int editH = 26;
-        int btnW = 80;
-        int statusH = 22;
-        int bottomH = 40;
+        int pad = px(16);
+        int gap = px(12);
+        int editH = px(32);
+        int btnW = px(88);
+        int statusH = px(22);
 
         // 顶部输入区：歌名 [编辑框] 歌手 [编辑框] [搜索]
         int topRowW = w - pad * 2;
         int editW = (topRowW - gap * 2 - btnW) / 2;
-        SetWindowPos(hTitle, nullptr, pad, pad, editW, editH, SWP_NOZORDER);
-        SetWindowPos(hArtist, nullptr, pad + editW + gap, pad, editW, editH, SWP_NOZORDER);
-        SetWindowPos(hSearch, nullptr, w - pad - btnW, pad, btnW, editH, SWP_NOZORDER);
+        titleEdit.move(pad, pad, editW, editH);
+        artistEdit.move(pad + editW + gap, pad, editW, editH);
+        searchBtn.move(w - pad - btnW, pad, btnW, editH);
 
-        int statusY = pad + editH + 10;
-        SetWindowPos(hStatus, nullptr, pad, statusY, w - pad * 2, statusH, SWP_NOZORDER);
+        int statusY = pad + editH + px(10);
+        statusLabel.move(pad, statusY, w - pad * 2, statusH);
 
-        int hintY = statusY + statusH + 2;
-        SetWindowPos(hHint, nullptr, pad, hintY, w - pad * 2, statusH, SWP_NOZORDER);
+        int hintY = statusY + statusH + px(2);
+        hintLabel.move(pad, hintY, w - pad * 2, statusH);
 
-        int contentTop = hintY + statusH + 12;
+        int contentTop = hintY + statusH + px(12);
+        int bottomH = px(60); // 内容区与底部按钮之间留出 12 间隙
         int contentH = h - contentTop - bottomH;
         int listW = w * 2 / 5;
         int rightX = pad + listW + gap;
         int rightW = w - rightX - pad;
 
         // 左侧候选列表
-        SetWindowPos(hList, nullptr, pad, contentTop, listW, contentH, SWP_NOZORDER);
+        list.move(pad, contentTop, listW, contentH);
         // 右侧预览
-        SetWindowPos(preview.hwnd(), nullptr, rightX, contentTop, rightW, contentH, SWP_NOZORDER);
+        preview.move(rightX, contentTop, rightW, contentH);
 
         // 底部按钮
-        int okW = 110;
-        int cancelW = 80;
-        int btnY = h - bottomH + 4;
-        SetWindowPos(hOk, nullptr, w - pad - okW - cancelW - gap, btnY, okW, 28, SWP_NOZORDER);
-        SetWindowPos(hCancel, nullptr, w - pad - cancelW, btnY, cancelW, 28, SWP_NOZORDER);
+        int okW = px(120);
+        int cancelW = px(88);
+        int btnH = px(32);
+        int btnY = h - pad - btnH;
+        okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
+        cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
     }
 
-    void onCommand(int id, int code, HWND h) {
-        (void)h;
+    void onCommand(int id, int code) {
         if (id == kIdSearchBtn && code == BN_CLICKED) {
             this->doSearch();
         } else if (id == kIdCancelBtn && code == BN_CLICKED) {
@@ -508,23 +383,25 @@ struct ManualSearchDialog::Impl {
             this->applySelection();
         } else if (id == kIdCandidateList && code == LBN_SELCHANGE) {
             this->onSelectionChanged();
+        } else if ((id == kIdTitleEdit || id == kIdArtistEdit) && code == EN_KILLFOCUS) {
+            // 无需处理，仅避免未命中分支告警
         }
     }
 
     void doSearch() {
         if (!provider)
             return;
-        EnableWindow(hSearch, FALSE);
-        SendMessageW(hList, LB_RESETCONTENT, 0, 0);
+        searchBtn.setEnabled(false);
+        list.clear();
         preview.setLyrics({});
         selectedIdx = -1;
         candidates.clear();
         itemToCand.clear();
-        EnableWindow(hOk, FALSE);
-        SetWindowTextW(hStatus, L"搜索中，请稍候…");
+        okBtn.setEnabled(false);
+        statusLabel.setText(L"搜索中，请稍候…");
 
-        std::wstring title = getWindowTextW(hTitle);
-        std::wstring artist = getWindowTextW(hArtist);
+        std::wstring title = titleEdit.text();
+        std::wstring artist = artistEdit.text();
         HWND hwndCopy = hwnd;
         provider->searchCandidatesAsync(title, artist,
             [hwndCopy](const std::vector<SearchCandidate>& result) {
@@ -538,7 +415,7 @@ struct ManualSearchDialog::Impl {
     void onCandidatesReady(const std::vector<SearchCandidate>& cands) {
         candidates = cands;
         itemToCand.clear();
-        EnableWindow(hSearch, TRUE);
+        searchBtn.setEnabled(true);
 
         // 分组展示：KRC 逐字在前，LRC 整行在后，各带一行分组标题
         int krcCount = 0;
@@ -546,40 +423,40 @@ struct ManualSearchDialog::Impl {
             if (c.krc)
                 ++krcCount;
         int lrcCount = (int)candidates.size() - krcCount;
+
+        std::vector<fluent::FluentListItem> items;
         auto addHeader = [&](const wchar_t* text) {
-            SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
+            items.push_back({text, true});
             itemToCand.push_back(-1);
         };
         auto addItem = [&](int idx) {
             const auto& c = candidates[idx];
-            std::wstring item = L"　" + c.name + L" - " + c.singer;
-            SendMessageW(hList, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(item.c_str()));
+            items.push_back({c.name + L" - " + c.singer, false});
             itemToCand.push_back(idx);
         };
         if (krcCount > 0) {
-            addHeader(L"── 逐字歌词（KRC）──");
+            addHeader(L"逐字歌词（KRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
                 if (candidates[i].krc)
                     addItem(i);
         }
         if (lrcCount > 0) {
-            addHeader(L"── 整行歌词（LRC）──");
+            addHeader(L"整行歌词（LRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
                 if (!candidates[i].krc)
                     addItem(i);
         }
+        list.setItems(std::move(items));
 
         if (candidates.empty()) {
-            SetWindowTextW(hStatus, L"未找到相关歌曲，请尝试更换关键词。");
+            statusLabel.setText(L"未找到相关歌曲，请尝试更换关键词。");
         } else {
-            SetWindowTextW(hStatus,
-                           (L"找到 " + std::to_wstring(krcCount) + L" 条逐字（KRC）、 " +
-                            std::to_wstring(lrcCount) + L" 条整行（LRC）候选，点击选择以预览歌词。")
-                               .c_str());
+            statusLabel.setText(L"找到 " + std::to_wstring(krcCount) + L" 条逐字（KRC）、 " +
+                                std::to_wstring(lrcCount) + L" 条整行（LRC）候选，点击选择以预览歌词。");
             // 默认选中第一条非分组标题的候选
             for (int i = 0; i < (int)itemToCand.size(); ++i) {
                 if (itemToCand[i] >= 0) {
-                    SendMessageW(hList, LB_SETCURSEL, i, 0);
+                    list.setSelectedIndex(i);
                     break;
                 }
             }
@@ -588,23 +465,16 @@ struct ManualSearchDialog::Impl {
     }
 
     void onSelectionChanged() {
-        int listIdx = (int)SendMessageW(hList, LB_GETCURSEL, 0, 0);
+        int listIdx = list.selectedIndex();
         if (listIdx < 0 || listIdx >= (int)itemToCand.size())
             return;
         int idx = itemToCand[listIdx];
-        if (idx < 0) {
-            // 分组标题行：不可选，清空预览
-            selectedIdx = -1;
-            preview.setLyrics({});
-            EnableWindow(hOk, FALSE);
-            SetWindowTextW(hStatus, L"请选择分组下的候选歌曲以预览歌词。");
-            return;
-        }
+        if (idx < 0)
+            return; // 分组标题不可选（FluentList 已保证不会选中标题行）
         selectedIdx = idx;
         preview.setLyrics({});
-        EnableWindow(hOk, FALSE);
-        SetWindowTextW(hStatus,
-                       (L"正在加载《" + candidates[idx].name + L"》的歌词预览…").c_str());
+        okBtn.setEnabled(false);
+        statusLabel.setText(L"正在加载《" + candidates[idx].name + L"》的歌词预览…");
         HWND hwndCopy = hwnd;
         int idxCopy = idx;
         provider->fetchLyricAsync(candidates[idx],
@@ -622,13 +492,13 @@ struct ManualSearchDialog::Impl {
                              const SongInfo& info) {
         if (idx != selectedIdx || !ok) {
             if (idx == selectedIdx)
-                SetWindowTextW(hStatus, L"该候选没有可用歌词，请尝试其他歌曲。");
+                statusLabel.setText(L"该候选没有可用歌词，请尝试其他歌曲。");
             return;
         }
         previewLines = lines;
         previewInfo = info;
         preview.setLyrics(previewLines);
-        EnableWindow(hOk, TRUE);
+        okBtn.setEnabled(true);
         // 实际拿到的歌词是否带逐字时间轴（KRC 候选失败或 LRC 候选时为整行）
         bool wordByWord = false;
         for (const auto& l : lines) {
@@ -637,11 +507,9 @@ struct ManualSearchDialog::Impl {
                 break;
             }
         }
-        SetWindowTextW(hStatus,
-                       (L"已加载《" + candidates[idx].name +
-                        (wordByWord ? L"》的逐字歌词预览，点击“使用此歌词”应用。"
-                                    : L"》的整行歌词预览，点击“使用此歌词”应用。"))
-                           .c_str());
+        statusLabel.setText(L"已加载《" + candidates[idx].name +
+                            (wordByWord ? L"》的逐字歌词预览，点击“使用此歌词”应用。"
+                                        : L"》的整行歌词预览，点击“使用此歌词”应用。"));
     }
 
     void applySelection() {
@@ -686,22 +554,31 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricManualSearch";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
     RegisterClassExW(&wc);
 
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    int w = 900;
-    int h = 560;
+    UINT dpi = GetDpiForSystem();
+    float s = fluent::dipScale(dpi);
+    // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
+    RECT rc{0, 0, static_cast<LONG>(std::lround(900 * s)),
+            static_cast<LONG>(std::lround(560 * s))};
+    AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
+                             WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
     int x = work.left + ((work.right - work.left) - w) / 2;
     int y = work.top + ((work.bottom - work.top) - h) / 2;
 
     impl_->hwnd =
         CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, L"QQMusicLyricManualSearch",
-                        L"手动搜索歌词", WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_VISIBLE, x, y,
+                        L"手动搜索歌词", WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, x, y,
                         w, h, nullptr, nullptr, inst, impl_.get());
-    return impl_->hwnd != nullptr;
+    if (!impl_->hwnd)
+        return false;
+    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
+    return true;
 }
 
 void ManualSearchDialog::show() {

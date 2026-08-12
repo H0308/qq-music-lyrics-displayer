@@ -22,11 +22,19 @@ add_executable(QQMusicLyric
     src/ui/lyric_renderer.cpp
     src/ui/taskbar_host.cpp
     src/ui/manual_search_dialog.cpp
+    src/ui/fluent_theme.cpp
+    src/ui/fluent_controls.cpp
+    src/ui/fluent_menu.cpp
+    src/ui/font_picker_dialog.cpp
+    src/ui/color_picker_dialog.cpp
     src/util/base64.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 )
 
 target_include_directories(QQMusicLyric PRIVATE src)
+
+# 清单文件已通过 resource.rc 嵌入（app.manifest），关闭链接器的默认清单生成，避免重复
+set_target_properties(QQMusicLyric PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 
 target_compile_definitions(QQMusicLyric PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(QQMusicLyric PRIVATE /utf-8 /EHsc)
@@ -43,7 +51,9 @@ target_link_libraries(QQMusicLyric PRIVATE
     gdi32
     shell32
     ole32
-    comdlg32
+    dwmapi
+    uxtheme
+    comctl32
     windowscodecs
     advapi32
     winmm
