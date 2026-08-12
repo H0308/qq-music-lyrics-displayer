@@ -45,6 +45,7 @@ constexpr UINT kCmdFontColorEffect = 108;
 constexpr UINT kCmdTaskbarPosNotify = 109;
 constexpr UINT kCmdTaskbarPosLeft = 110;
 constexpr UINT kCmdSpectrum = 111;
+constexpr UINT kCmdAutoStart = 112;
 
 struct CoverPayload {
     std::wstring key;
@@ -78,6 +79,41 @@ std::wstring configDir() {
         CreateDirectoryW(dir.c_str(), nullptr);
     }
     return dir;
+}
+
+// 开机自启动：HKCU\...\Run（仅当前用户，无需管理员权限；注册表即真源，菜单勾选态实时读取）
+constexpr const wchar_t* kRunKeyPath = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr const wchar_t* kAutoStartValueName = L"QQMusicLyric";
+
+bool autoStartEnabled() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+    DWORD type = 0, size = 0;
+    LONG ret = RegQueryValueExW(key, kAutoStartValueName, nullptr, &type, nullptr, &size);
+    RegCloseKey(key);
+    return ret == ERROR_SUCCESS && type == REG_SZ;
+}
+
+bool setAutoStart(bool enable) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_SET_VALUE, &key) != ERROR_SUCCESS)
+        return false;
+    LONG ret;
+    if (enable) {
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        std::wstring cmd = L"\""; // 引号包裹，防止含空格路径解析失败
+        cmd += path;
+        cmd += L"\"";
+        ret = RegSetValueExW(key, kAutoStartValueName, 0, REG_SZ,
+                             reinterpret_cast<const BYTE*>(cmd.c_str()),
+                             static_cast<DWORD>((cmd.size() + 1) * sizeof(wchar_t)));
+    } else {
+        ret = RegDeleteValueW(key, kAutoStartValueName);
+    }
+    RegCloseKey(key);
+    return ret == ERROR_SUCCESS;
 }
 
 const wchar_t* statusName(PlaybackStatus s) {
@@ -551,6 +587,8 @@ void App::showTrayMenu() {
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
     addSeparator();
+    addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
+    addSeparator();
     addItem(kCmdExit, L"退出");
 
     POINT pt{};
@@ -593,6 +631,14 @@ void App::onMenuCommand(int cmd) {
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
         break;
+    case kCmdAutoStart: {
+        bool enable = !autoStartEnabled();
+        if (setAutoStart(enable))
+            std::wprintf(L"[autostart] %s\n", enable ? L"enabled" : L"disabled");
+        else
+            std::wprintf(L"[autostart] failed to %s\n", enable ? L"enable" : L"disable");
+        break;
+    }
     case kCmdExit:
         PostQuitMessage(0);
         break;
