@@ -25,12 +25,14 @@ public:
 
     void changeFont(float delta) override;
     void setFont(const std::wstring& family, float size) override;
+    void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) override;
     void setClickThrough(bool on) override;
     bool clickThrough() const override;
 
-    // 歌词外观：字体颜色 / 深色描边+光晕（任务栏独有，桌面歌词有自己的配色）
-    void setFontColor(COLORREF rgb);
+    // 歌词外观：光晕 / 描边（任务栏独有，桌面歌词有自己的配色），开关和颜色分别独立
     void setFontGlow(bool on);
+    void setFontOutline(bool on);
+    void setFontGlowColors(COLORREF glow, COLORREF outline);
 
     void show() override;
     void hide() override;

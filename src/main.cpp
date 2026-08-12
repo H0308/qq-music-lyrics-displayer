@@ -41,8 +41,16 @@ constexpr UINT kCmdFontDown = 104;
 constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
 constexpr UINT kCmdManualSearch = 107;
-constexpr UINT kCmdFontColor = 108;
+constexpr UINT kCmdPlayedColor = 108;
 constexpr UINT kCmdToggleGlow = 109;
+constexpr UINT kCmdUnplayedColor = 110;
+// 111..115：未播放透明度预设（kUnplayedAlphaPresets 下标偏移）
+constexpr UINT kCmdUnplayedAlphaBase = 111;
+constexpr int kUnplayedAlphaPresets[] = {25, 45, 65, 85, 100};
+constexpr int kUnplayedAlphaPresetCount = 5;
+constexpr UINT kCmdGlowColor = 116;
+constexpr UINT kCmdOutlineColor = 117;
+constexpr UINT kCmdToggleOutline = 118;
 
 struct CoverPayload {
     std::wstring key;
@@ -93,7 +101,7 @@ struct App {
     LyricProvider provider;
     CoverProvider coverProvider;
     std::unique_ptr<ILyricHost> overlayHost;
-    std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词颜色/光晕是任务栏独有接口
+    std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::wstring currentKey;
     std::wstring currentTitle;
@@ -109,9 +117,14 @@ struct App {
     std::wstring fontFamily_ = L"Microsoft YaHei UI";
     float fontSize_ = 16.0f;
 
-    // 任务栏歌词外观（任务栏独有效能，新建任务栏宿主时应用）
-    COLORREF lyricColor_ = RGB(49, 194, 124); // 默认 QQ 绿
-    bool lyricGlow_ = false;                  // 深色描边+光晕
+    // 歌词外观（两宿主通用，新建宿主时应用）
+    COLORREF lyricColor_ = RGB(49, 194, 124);        // 已播放颜色，默认 QQ 绿
+    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124); // 逐字未播放颜色
+    int lyricUnplayedAlphaPct_ = 45;                  // 逐字未播放透明度（%）
+    bool lyricGlow_ = false;                          // 光晕开关（任务栏独有）
+    bool lyricOutline_ = false;                       // 描边开关（任务栏独有）
+    COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色
+    COLORREF lyricOutlineColor_ = RGB(0, 0, 0);       // 描边颜色
 
     // 窗口状态（持久化；无命令行参数时按此启动）
     bool cfgOverlay_ = false;
@@ -142,6 +155,7 @@ struct App {
             overlayHost->setFont(fontFamily_, fontSize_);
         if (cfgClickThrough_)
             overlayHost->setClickThrough(true);
+        overlayHost->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
         updateTrayIcon();
         return true;
     }
@@ -164,8 +178,10 @@ struct App {
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_);
-        taskbarHost->setFontColor(lyricColor_);
+        taskbarHost->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
         taskbarHost->setFontGlow(lyricGlow_);
+        taskbarHost->setFontOutline(lyricOutline_);
+        taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
         updateTrayIcon();
         return true;
     }
@@ -407,7 +423,12 @@ struct App {
     void updateTrayIcon();
     void showTrayMenu();
     void pickFont();
-    void pickLyricColor();
+    bool pickColor(COLORREF& target);
+    void pickPlayedColor();
+    void pickUnplayedColor();
+    void pickGlowColor();
+    void pickOutlineColor();
+    void applyFontColors();
     void loadSettings();
     void saveSettings();
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
@@ -432,7 +453,15 @@ void App::loadSettings() {
             fontFamily_ = fam;
         fontSize_ = (float)j.value("fontSize", 16.0);
         lyricColor_ = (COLORREF)j.value("lyricColor", (unsigned)RGB(49, 194, 124));
+        // 未播放色默认跟随已播放色：老配置升级后视觉与之前完全一致
+        lyricUnplayedColor_ = (COLORREF)j.value("lyricUnplayedColor", (unsigned)lyricColor_);
+        lyricUnplayedAlphaPct_ = std::clamp(j.value("lyricUnplayedAlpha", 45), 5, 100);
+        // 光晕色默认跟随已播放色、描边色默认纯黑：老配置升级后视觉与之前完全一致
+        lyricGlowColor_ = (COLORREF)j.value("lyricGlowColor", (unsigned)lyricColor_);
+        lyricOutlineColor_ = (COLORREF)j.value("lyricOutlineColor", (unsigned)RGB(0, 0, 0));
         lyricGlow_ = j.value("lyricGlow", false);
+        // 老配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它，视觉不变
+        lyricOutline_ = j.value("lyricOutline", lyricGlow_);
         cfgOverlay_ = j.value("overlay", false);
         cfgTaskbar_ = j.value("taskbar", true);
         cfgClickThrough_ = j.value("clickThrough", false);
@@ -449,7 +478,12 @@ void App::saveSettings() {
         j["fontFamily"] = utf8Of(fontFamily_);
         j["fontSize"] = fontSize_;
         j["lyricColor"] = (unsigned)lyricColor_;
+        j["lyricUnplayedColor"] = (unsigned)lyricUnplayedColor_;
+        j["lyricUnplayedAlpha"] = lyricUnplayedAlphaPct_;
+        j["lyricGlowColor"] = (unsigned)lyricGlowColor_;
+        j["lyricOutlineColor"] = (unsigned)lyricOutlineColor_;
         j["lyricGlow"] = lyricGlow_;
+        j["lyricOutline"] = lyricOutline_;
         j["overlay"] = overlayHost != nullptr;
         j["taskbar"] = taskbarHost != nullptr;
         j["clickThrough"] = overlayHost && overlayHost->clickThrough();
@@ -518,10 +552,27 @@ void App::showTrayMenu() {
     AppendMenuW(menu, MF_STRING, kCmdFontUp, L"增大字号");
     AppendMenuW(menu, MF_STRING, kCmdFontDown, L"减小字号");
     AppendMenuW(menu, MF_STRING, kCmdPickFont, L"字体…");
+    if (taskbarHost || overlayHost) {
+        AppendMenuW(menu, MF_STRING, kCmdPlayedColor, L"已播放颜色…");
+        AppendMenuW(menu, MF_STRING, kCmdUnplayedColor, L"未播放颜色…");
+        HMENU alphaMenu = CreatePopupMenu();
+        for (int i = 0; i < kUnplayedAlphaPresetCount; ++i) {
+            wchar_t label[16];
+            swprintf_s(label, L"%d%%", kUnplayedAlphaPresets[i]);
+            AppendMenuW(alphaMenu,
+                        MF_STRING |
+                            (lyricUnplayedAlphaPct_ == kUnplayedAlphaPresets[i] ? MF_CHECKED : 0),
+                        kCmdUnplayedAlphaBase + i, label);
+        }
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(alphaMenu), L"未播放透明度");
+    }
     if (taskbarHost) {
-        AppendMenuW(menu, MF_STRING, kCmdFontColor, L"歌词颜色…");
         AppendMenuW(menu, MF_STRING | (lyricGlow_ ? MF_CHECKED : 0), kCmdToggleGlow,
-                    L"歌词描边光晕");
+                    L"歌词光晕");
+        AppendMenuW(menu, MF_STRING | (lyricOutline_ ? MF_CHECKED : 0), kCmdToggleOutline,
+                    L"歌词描边");
+        AppendMenuW(menu, MF_STRING, kCmdGlowColor, L"光晕颜色…");
+        AppendMenuW(menu, MF_STRING, kCmdOutlineColor, L"描边颜色…");
     }
     AppendMenuW(menu, MF_STRING, kCmdManualSearch, L"手动搜索歌词");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -533,6 +584,15 @@ void App::showTrayMenu() {
     UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON, pt.x, pt.y, 0,
                               trayHwnd, nullptr);
     DestroyMenu(menu);
+
+    // 未播放透明度子菜单：命令 ID = 基数 + 预设下标
+    if (cmd >= kCmdUnplayedAlphaBase &&
+        cmd < kCmdUnplayedAlphaBase + kUnplayedAlphaPresetCount) {
+        lyricUnplayedAlphaPct_ = kUnplayedAlphaPresets[cmd - kCmdUnplayedAlphaBase];
+        applyFontColors();
+        saveSettings();
+        return;
+    }
 
     switch (cmd) {
     case kCmdToggleOverlay:
@@ -565,14 +625,29 @@ void App::showTrayMenu() {
     case kCmdPickFont:
         pickFont();
         break;
-    case kCmdFontColor:
-        pickLyricColor();
+    case kCmdPlayedColor:
+        pickPlayedColor();
+        break;
+    case kCmdUnplayedColor:
+        pickUnplayedColor();
         break;
     case kCmdToggleGlow:
         lyricGlow_ = !lyricGlow_;
         if (taskbarHost)
             taskbarHost->setFontGlow(lyricGlow_);
         saveSettings();
+        break;
+    case kCmdToggleOutline:
+        lyricOutline_ = !lyricOutline_;
+        if (taskbarHost)
+            taskbarHost->setFontOutline(lyricOutline_);
+        saveSettings();
+        break;
+    case kCmdGlowColor:
+        pickGlowColor();
+        break;
+    case kCmdOutlineColor:
+        pickOutlineColor();
         break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
@@ -617,20 +692,50 @@ void App::pickFont() {
     saveSettings();
 }
 
-void App::pickLyricColor() {
-    if (!taskbarHost)
-        return;
+bool App::pickColor(COLORREF& target) {
     static COLORREF custom[16] = {}; // 记住用户自定义颜色
     CHOOSECOLORW cc{};
     cc.lStructSize = sizeof(cc);
     cc.hwndOwner = trayHwnd;
-    cc.rgbResult = lyricColor_;
+    cc.rgbResult = target;
     cc.lpCustColors = custom;
     cc.Flags = CC_RGBINIT | CC_FULLOPEN;
     if (!ChooseColorW(&cc))
+        return false;
+    target = cc.rgbResult;
+    return true;
+}
+
+void App::applyFontColors() {
+    for (auto* h : hosts())
+        h->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
+}
+
+void App::pickPlayedColor() {
+    if (!pickColor(lyricColor_))
         return;
-    lyricColor_ = cc.rgbResult;
-    taskbarHost->setFontColor(lyricColor_);
+    applyFontColors();
+    saveSettings();
+}
+
+void App::pickUnplayedColor() {
+    if (!pickColor(lyricUnplayedColor_))
+        return;
+    applyFontColors();
+    saveSettings();
+}
+
+void App::pickGlowColor() {
+    if (!taskbarHost || !pickColor(lyricGlowColor_))
+        return;
+    taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
+    saveSettings();
+}
+
+void App::pickOutlineColor() {
+    if (!taskbarHost || !pickColor(lyricOutlineColor_))
+        return;
+    taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
     saveSettings();
 }
 

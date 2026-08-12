@@ -167,12 +167,17 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushDim_ = nullptr;
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
     ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
-    ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 歌词主色（用户可配）
-    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（主色降透明度）
+    ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 已播放歌词颜色（用户可配）
+    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+透明度）
     ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
     ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
-    COLORREF lyricColor_ = RGB(49, 194, 124);           // 默认 QQ 绿
-    bool lyricGlow_ = false;                            // 描边+光晕开关
+    COLORREF lyricColor_ = RGB(49, 194, 124);           // 已播放颜色，默认 QQ 绿
+    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);   // 逐字未播放颜色
+    int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放透明度（%）
+    COLORREF lyricGlowColor_ = RGB(49, 194, 124);       // 光晕颜色
+    COLORREF lyricOutlineColor_ = RGB(0, 0, 0);         // 描边颜色
+    bool lyricGlow_ = false;                            // 光晕开关
+    bool lyricOutline_ = false;                         // 描边开关
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
     ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
@@ -391,13 +396,13 @@ struct TaskbarHost::Impl {
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f), &brushBtn_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.35f), &brushBtnDisabled_);
         }
-        // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这三个）
+        // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这四个）
         createLyricBrushes();
         rt->CreateLayer(&coverLayer_);
         recreateFormats();
     }
 
-    // 歌词主色/光晕/描边画刷：随用户颜色重建，与主题画刷解耦
+    // 歌词已播放/未播放/光晕/描边画刷：随用户颜色重建，与主题画刷解耦
     void createLyricBrushes() {
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -418,19 +423,33 @@ struct TaskbarHost::Impl {
             brushLyricOutline_->Release();
             brushLyricOutline_ = nullptr;
         }
-        float r = GetRValue(lyricColor_) / 255.0f;
-        float g = GetGValue(lyricColor_) / 255.0f;
-        float b = GetBValue(lyricColor_) / 255.0f;
-        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 1.00f), &brushLyric_);
-        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 0.45f), &brushLyricDim_);
-        rt->CreateSolidColorBrush(D2D1::ColorF(r, g, b, 0.28f), &brushLyricGlow_);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushLyricOutline_);
+        auto rgb = [](COLORREF c, float a) {
+            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
+                                GetBValue(c) / 255.0f, a);
+        };
+        rt->CreateSolidColorBrush(rgb(lyricColor_, 1.00f), &brushLyric_);
+        rt->CreateSolidColorBrush(rgb(lyricUnplayedColor_, lyricUnplayedAlphaPct_ / 100.0f),
+                                  &brushLyricDim_);
+        rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f), &brushLyricGlow_);
+        rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
     }
 
-    void setFontColor(COLORREF rgb) {
-        if (lyricColor_ == rgb)
+    void setFontGlowColors(COLORREF glow, COLORREF outline) {
+        if (lyricGlowColor_ == glow && lyricOutlineColor_ == outline)
             return;
-        lyricColor_ = rgb;
+        lyricGlowColor_ = glow;
+        lyricOutlineColor_ = outline;
+        createLyricBrushes();
+        render();
+    }
+
+    void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
+        if (lyricColor_ == played && lyricUnplayedColor_ == unplayed &&
+            lyricUnplayedAlphaPct_ == unplayedAlphaPct)
+            return;
+        lyricColor_ = played;
+        lyricUnplayedColor_ = unplayed;
+        lyricUnplayedAlphaPct_ = unplayedAlphaPct;
         createLyricBrushes();
         render();
     }
@@ -439,6 +458,13 @@ struct TaskbarHost::Impl {
         if (lyricGlow_ == on)
             return;
         lyricGlow_ = on;
+        render();
+    }
+
+    void setFontOutline(bool on) {
+        if (lyricOutline_ == on)
+            return;
+        lyricOutline_ = on;
         render();
     }
 
@@ -903,8 +929,8 @@ struct TaskbarHost::Impl {
 
     // 绘制可滚动文本：容得下则居中，容不下则向左无缝滚动。
     // outline/glow 非空时先画 8 方向光晕层和深色描边层，再画主文字。
-    // karaokeBrush 非空时启用逐字高亮：整行先用 brush（暗色）画一遍，
-    // 再按像素裁剪出 [文本起点, karaokeX] 区域用 karaokeBrush 画第二遍，
+    // karaokeBrush 非空时启用逐字高亮：整行先用 brush（未播放色）画一遍，
+    // 再按像素裁剪出 [文本起点, karaokeX] 区域用 karaokeBrush（已播放色）画第二遍，
     // 实现字内平滑填充（裁剪基于像素，不受滚动偏移影响）
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
                            float x, float y, float offset, ID2D1Brush* brush,
@@ -1055,7 +1081,7 @@ struct TaskbarHost::Impl {
                 drawButton(i, D2D1::Point2F(cx + (i - 1) * spacing, cy), r);
         } else {
             // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
-            // 整行先画暗色，再按像素进度裁剪出已唱区域画歌词主色
+            // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
             const LyricLine* curLine = karaokeLine();
             bool karaoke = curLine && brushLyric_ && brushLyricDim_;
             float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
@@ -1063,7 +1089,7 @@ struct TaskbarHost::Impl {
                               lyricY, lyricScrollOffset_,
                               karaoke ? brushLyricDim_
                                       : (brushLyric_ ? brushLyric_ : brushText_),
-                              lyricGlow_ ? brushLyricOutline_ : nullptr,
+                              lyricOutline_ ? brushLyricOutline_ : nullptr,
                               lyricGlow_ ? brushLyricGlow_ : nullptr,
                               karaoke ? brushLyric_ : nullptr, progX);
         }
@@ -1330,12 +1356,20 @@ void TaskbarHost::setFont(const std::wstring& family, float size) {
     impl_->setFont(family, size);
 }
 
-void TaskbarHost::setFontColor(COLORREF rgb) {
-    impl_->setFontColor(rgb);
+void TaskbarHost::setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
+    impl_->setFontColors(played, unplayed, unplayedAlphaPct);
 }
 
 void TaskbarHost::setFontGlow(bool on) {
     impl_->setFontGlow(on);
+}
+
+void TaskbarHost::setFontOutline(bool on) {
+    impl_->setFontOutline(on);
+}
+
+void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
+    impl_->setFontGlowColors(glow, outline);
 }
 
 void TaskbarHost::setClickThrough(bool on) {

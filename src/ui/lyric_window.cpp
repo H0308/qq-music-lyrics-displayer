@@ -239,11 +239,15 @@ struct OverlayHost::Impl {
     LyricRenderer renderer;
     ID2D1SolidColorBrush* brushBg = nullptr;
     ID2D1SolidColorBrush* brushNormal = nullptr;
-    ID2D1SolidColorBrush* brushCurrent = nullptr;
     ID2D1SolidColorBrush* brushShadow = nullptr;
     ID2D1SolidColorBrush* brushGradientOverlay = nullptr; // 渐变背景上的暗色遮罩
     ID2D1LinearGradientBrush* brushGradient = nullptr;     // 封面主辅色渐变
     ID2D1SolidColorBrush* brushBarBg = nullptr;            // 底部控制条独立背景
+    ID2D1SolidColorBrush* brushLyricPlayed_ = nullptr;     // 已播放歌词颜色（用户可配）
+    ID2D1SolidColorBrush* brushLyricUnplayed_ = nullptr;   // 逐字未播放歌词颜色（用户可配，含透明度）
+    COLORREF lyricPlayedColor_ = RGB(49, 194, 124);        // 默认 QQ 绿
+    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);
+    int lyricUnplayedAlphaPct_ = 45;
     IDWriteTextFormat* fmtLine = nullptr;
     IDWriteTextFormat* fmtCurrent = nullptr;
 
@@ -270,7 +274,6 @@ struct OverlayHost::Impl {
         rt->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.30f), &brushBg);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.60f), &brushNormal);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.19f, 0.76f, 0.49f, 1.0f),&brushCurrent); // QQ 绿
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.65f), &brushShadow);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f), &brushGradientOverlay);
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f), &brushBarBg);
@@ -283,8 +286,40 @@ struct OverlayHost::Impl {
         }
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f), &brushBarLight);
         rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.25f), &brushBarDividerLight);
+        // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这两个）
+        createLyricBrushes();
         rt->CreateLayer(&coverLayer);
         recreateFormats();
+    }
+
+    // 歌词已播放/未播放画刷：随用户颜色重建，与主题画刷解耦
+    void createLyricBrushes() {
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        if (brushLyricPlayed_) {
+            brushLyricPlayed_->Release();
+            brushLyricPlayed_ = nullptr;
+        }
+        if (brushLyricUnplayed_) {
+            brushLyricUnplayed_->Release();
+            brushLyricUnplayed_ = nullptr;
+        }
+        auto rgb = [](COLORREF c, float a) {
+            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
+                                GetBValue(c) / 255.0f, a);
+        };
+        rt->CreateSolidColorBrush(rgb(lyricPlayedColor_, 1.0f), &brushLyricPlayed_);
+        rt->CreateSolidColorBrush(rgb(lyricUnplayedColor_, lyricUnplayedAlphaPct_ / 100.0f),
+                                  &brushLyricUnplayed_);
+    }
+
+    void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
+        lyricPlayedColor_ = played;
+        lyricUnplayedColor_ = unplayed;
+        lyricUnplayedAlphaPct_ = unplayedAlphaPct;
+        createLyricBrushes();
+        render();
     }
 
     void ensureGradientBrush() {
@@ -717,7 +752,8 @@ struct OverlayHost::Impl {
         r(coverLayer);
         r(brushBg);
         r(brushNormal);
-        r(brushCurrent);
+        r(brushLyricPlayed_);
+        r(brushLyricUnplayed_);
         r(brushShadow);
         r(brushGradientOverlay);
         r(brushGradient);
@@ -823,7 +859,7 @@ struct OverlayHost::Impl {
                         sungLen += (UINT32)c.text.size();
                     }
                     rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
-                    rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushNormal);
+                    rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushLyricUnplayed_);
                     if (curChar) {
                         // 当前字的文本偏移与像素起止位置
                         UINT32 charOff = sungLen - (UINT32)curChar->text.size();
@@ -864,18 +900,19 @@ struct OverlayHost::Impl {
                         if (rowTop > 0.5f) {
                             rt->PushAxisAlignedClip(D2D1::RectF(0.0f, y, wndW, y + rowTop),
                                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                            rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushCurrent);
+                            rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushLyricPlayed_);
                             rt->PopAxisAlignedClip();
                         }
                         // 当前视觉行：高亮到字内进度 x
                         rt->PushAxisAlignedClip(
                             D2D1::RectF(0.0f, y + rowTop, x + progX, y + rowBottom),
                             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                        rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushCurrent);
+                        rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brushLyricPlayed_);
                         rt->PopAxisAlignedClip();
                     }
                 } else {
-                    ID2D1SolidColorBrush* brush = cur ? brushCurrent : brushNormal;
+                    // LRC 单行歌词：当前行用已播放色，其余行保持普通色
+                    ID2D1SolidColorBrush* brush = cur ? brushLyricPlayed_ : brushNormal;
                     rt->DrawTextLayout(D2D1::Point2F(x + 1.0f, y + 1.5f), lay, brushShadow);
                     rt->DrawTextLayout(D2D1::Point2F(x, y), lay, brush);
                 }
@@ -1170,6 +1207,10 @@ void OverlayHost::changeFont(float delta) {
 
 void OverlayHost::setFont(const std::wstring& family, float size) {
     impl_->setFont(family, size);
+}
+
+void OverlayHost::setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
+    impl_->setFontColors(played, unplayed, unplayedAlphaPct);
 }
 
 void OverlayHost::setClickThrough(bool on) {
