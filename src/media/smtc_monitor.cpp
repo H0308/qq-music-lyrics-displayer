@@ -130,6 +130,9 @@ struct SmtcMonitor::Impl {
                 s.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
                 if (s.anchorUtcMs == 0)
                     s.anchorUtcMs = nowUtcMs();
+                // 同 refreshTimeline：过旧锚点按此刻锚定，避免插值前跳
+                if (nowUtcMs() - s.anchorUtcMs > 2000)
+                    s.anchorUtcMs = nowUtcMs();
         } catch (...) {
         }
         try {
@@ -160,6 +163,10 @@ struct SmtcMonitor::Impl {
                 int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
                 if (newAnchor == 0)
                     newAnchor = nowUtcMs();
+                // 锚点过旧（如恢复播放瞬间读到暂停前的残留 Timeline）：按此刻锚定，
+                // 否则 snapshot 插值会把整段暂停时长计入，位置瞬间前跳再被真实更新拉回
+                if (nowUtcMs() - newAnchor > 2000)
+                    newAnchor = nowUtcMs();
                 if (!isStaleTimelineUpdate(newPos, newAnchor)) {
                     snap.positionMs = newPos;
                     snap.anchorUtcMs = newAnchor;
@@ -176,17 +183,31 @@ struct SmtcMonitor::Impl {
         {
             std::lock_guard<std::mutex> lk(mtx);
             try {
+                auto info = session.GetPlaybackInfo();
+                auto newStatus = mapStatus(info.PlaybackStatus());
+                // 暂停->播放过渡：此时 QQ 常仍上报暂停前的残留 Timeline（锚点停在暂停
+                // 时刻），若走常规路径会把整段暂停时长计入插值；若只做重锚定再交噪声
+                // 过滤，偏差又恰落在 250ms~2s 拒绝窗口被永久丢弃。
+                // 过渡是已知事件：上报位置即恢复点，锚点直接按此刻重建，跳过滤波
+                bool resumed = newStatus == PlaybackStatus::Playing &&
+                               snap.status != PlaybackStatus::Playing;
+
                 auto tl = session.GetTimelineProperties();
                 int64_t newPos = timeSpanMs(tl.Position());
                 int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
                 if (newAnchor == 0)
                     newAnchor = nowUtcMs();
-                if (!isStaleTimelineUpdate(newPos, newAnchor)) {
+                // 过旧锚点按此刻锚定（残留 Timeline）
+                if (nowUtcMs() - newAnchor > 2000)
+                    newAnchor = nowUtcMs();
+                if (resumed) {
+                    snap.positionMs = newPos;
+                    snap.anchorUtcMs = nowUtcMs();
+                } else if (!isStaleTimelineUpdate(newPos, newAnchor)) {
                     snap.positionMs = newPos;
                     snap.anchorUtcMs = newAnchor;
                 }
-                auto info = session.GetPlaybackInfo();
-                snap.status = mapStatus(info.PlaybackStatus());
+                snap.status = newStatus;
                 auto c = info.Controls();
                 snap.canPrev = c.IsPreviousEnabled();
                 snap.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
@@ -264,10 +285,20 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         dt = std::chrono::duration<float, std::milli>(now - impl_->posTick_).count();
     impl_->posTick_ = now;
     if (s.status != PlaybackStatus::Playing) {
-        // 暂停中直接跟随原始值（拖动进度条需实时响应）
-        impl_->smoothPos_ = (double)s.positionMs;
+        // 暂停中：仅当平滑值落后于原始值（err>0 且 ≤800ms）时保留——播放时平滑值经
+        // 慢速校正本就略落后于原始值，暂停瞬间若直接对齐原始值，逐字填充会抢跑补上
+        // 这一截；反之平滑值超前（err<0，播放中"不倒退"钳制所致）必须回落对齐，
+        // 否则恢复播放后会从超前位置继续自走，整首歌都快一截；
+        // err>800 视为暂停中拖进度条，立即跟随保证 seek 实时响应
+        double err = (double)s.positionMs - impl_->smoothPos_;
+        if (!impl_->posInit_ || impl_->posTrackKey_ != key || err < 0 || err > 800.0)
+            impl_->smoothPos_ = (double)s.positionMs;
         impl_->posTrackKey_ = key;
         impl_->posInit_ = true;
+        int64_t paused = (int64_t)(impl_->smoothPos_ + 0.5);
+        if (s.durationMs > 0 && paused > s.durationMs)
+            paused = s.durationMs;
+        s.positionMs = std::max<int64_t>(paused, 0);
         return s;
     }
     if (!impl_->posInit_ || impl_->posTrackKey_ != key) {
