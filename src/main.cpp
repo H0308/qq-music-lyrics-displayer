@@ -4,7 +4,7 @@
 #include "ui/taskbar_host.h"
 #include "ui/manual_search_dialog.h"
 #include "ui/font_picker_dialog.h"
-#include "ui/color_picker_dialog.h"
+#include "ui/font_color_dialog.h"
 #include "ui/fluent_menu.h"
 #include "media/smtc_monitor.h"
 #include "resource.h"
@@ -39,21 +39,10 @@ constexpr UINT kTrayIconId = 1;
 constexpr UINT kCmdToggleOverlay = 100;
 constexpr UINT kCmdToggleTaskbar = 101;
 constexpr UINT kCmdClickThrough = 102;
-constexpr UINT kCmdFontUp = 103;
-constexpr UINT kCmdFontDown = 104;
 constexpr UINT kCmdPickFont = 105;
 constexpr UINT kCmdExit = 106;
 constexpr UINT kCmdManualSearch = 107;
-constexpr UINT kCmdPlayedColor = 108;
-constexpr UINT kCmdToggleGlow = 109;
-constexpr UINT kCmdUnplayedColor = 110;
-// 111..115：未播放透明度预设（kUnplayedAlphaPresets 下标偏移）
-constexpr UINT kCmdUnplayedAlphaBase = 111;
-constexpr int kUnplayedAlphaPresets[] = {25, 45, 65, 85, 100};
-constexpr int kUnplayedAlphaPresetCount = 5;
-constexpr UINT kCmdGlowColor = 116;
-constexpr UINT kCmdOutlineColor = 117;
-constexpr UINT kCmdToggleOutline = 118;
+constexpr UINT kCmdFontColorEffect = 108;
 
 struct CoverPayload {
     std::wstring key;
@@ -107,12 +96,7 @@ struct App {
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
-    // 颜色选择器可同时打开多个（已播放/未播放/光晕/描边各一个），key 区分用途
-    struct ColorPickerEntry {
-        int key;
-        std::unique_ptr<ColorPickerDialog> dlg;
-    };
-    std::vector<ColorPickerEntry> colorPickerDialogs_;
+    std::unique_ptr<FontColorDialog> fontColorDialog;
     std::wstring currentKey;
     std::wstring currentTitle;
     std::wstring currentArtist;
@@ -434,12 +418,7 @@ struct App {
     void showTrayMenu();
     void onMenuCommand(int cmd);
     void pickFont();
-    void showColorPicker(int key, COLORREF initial, const wchar_t* title,
-                         std::function<void(COLORREF)> apply);
-    void pickPlayedColor();
-    void pickUnplayedColor();
-    void pickGlowColor();
-    void pickOutlineColor();
+    void showFontColorDialog();
     void applyFontColors();
     void loadSettings();
     void saveSettings();
@@ -575,30 +554,9 @@ void App::showTrayMenu() {
         addItem(kCmdClickThrough, L"鼠标穿透", overlayHost->clickThrough());
         addSeparator();
     }
-    addItem(kCmdFontUp, L"增大字号");
-    addItem(kCmdFontDown, L"减小字号");
     addItem(kCmdPickFont, L"字体…");
     if (taskbarHost || overlayHost) {
-        addItem(kCmdPlayedColor, L"已播放颜色…");
-        addItem(kCmdUnplayedColor, L"未播放颜色…");
-        fluent::FluentMenuItem alpha;
-        alpha.text = L"未播放透明度";
-        for (int i = 0; i < kUnplayedAlphaPresetCount; ++i) {
-            wchar_t label[16];
-            swprintf_s(label, L"%d%%", kUnplayedAlphaPresets[i]);
-            fluent::FluentMenuItem sub;
-            sub.id = static_cast<int>(kCmdUnplayedAlphaBase + i);
-            sub.text = label;
-            sub.checked = lyricUnplayedAlphaPct_ == kUnplayedAlphaPresets[i];
-            alpha.submenu.push_back(std::move(sub));
-        }
-        items.push_back(std::move(alpha));
-    }
-    if (taskbarHost) {
-        addItem(kCmdToggleGlow, L"歌词光晕", lyricGlow_);
-        addItem(kCmdToggleOutline, L"歌词描边", lyricOutline_);
-        addItem(kCmdGlowColor, L"光晕颜色…");
-        addItem(kCmdOutlineColor, L"描边颜色…");
+        addItem(kCmdFontColorEffect, L"字体颜色与效果…");
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
     addSeparator();
@@ -611,15 +569,6 @@ void App::showTrayMenu() {
 }
 
 void App::onMenuCommand(int cmd) {
-    // 未播放透明度子菜单：命令 ID = 基数 + 预设下标
-    if (cmd >= (int)kCmdUnplayedAlphaBase &&
-        cmd < (int)kCmdUnplayedAlphaBase + kUnplayedAlphaPresetCount) {
-        lyricUnplayedAlphaPct_ = kUnplayedAlphaPresets[cmd - kCmdUnplayedAlphaBase];
-        applyFontColors();
-        saveSettings();
-        return;
-    }
-
     switch (cmd) {
     case kCmdToggleOverlay:
         toggleOverlay();
@@ -634,46 +583,11 @@ void App::onMenuCommand(int cmd) {
             overlayHost->setClickThrough(!overlayHost->clickThrough());
         saveSettings();
         break;
-    case kCmdFontUp:
-        hasUserFont_ = true;
-        fontSize_ = std::clamp(fontSize_ + 2.0f, 8.0f, 48.0f);
-        if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
-        if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
-        saveSettings();
-        break;
-    case kCmdFontDown:
-        hasUserFont_ = true;
-        fontSize_ = std::clamp(fontSize_ - 2.0f, 8.0f, 48.0f);
-        if (overlayHost) overlayHost->setFont(fontFamily_, fontSize_);
-        if (taskbarHost) taskbarHost->setFont(fontFamily_, fontSize_);
-        saveSettings();
-        break;
     case kCmdPickFont:
         pickFont();
         break;
-    case kCmdPlayedColor:
-        pickPlayedColor();
-        break;
-    case kCmdUnplayedColor:
-        pickUnplayedColor();
-        break;
-    case kCmdToggleGlow:
-        lyricGlow_ = !lyricGlow_;
-        if (taskbarHost)
-            taskbarHost->setFontGlow(lyricGlow_);
-        saveSettings();
-        break;
-    case kCmdToggleOutline:
-        lyricOutline_ = !lyricOutline_;
-        if (taskbarHost)
-            taskbarHost->setFontOutline(lyricOutline_);
-        saveSettings();
-        break;
-    case kCmdGlowColor:
-        pickGlowColor();
-        break;
-    case kCmdOutlineColor:
-        pickOutlineColor();
+    case kCmdFontColorEffect:
+        showFontColorDialog();
         break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
@@ -709,69 +623,52 @@ void App::pickFont() {
     fontPickerDialog->show();
 }
 
-void App::showColorPicker(int key, COLORREF initial, const wchar_t* title,
-                          std::function<void(COLORREF)> apply) {
-    // 清理已关闭的实例
-    std::erase_if(colorPickerDialogs_, [](const ColorPickerEntry& e) {
-        return !e.dlg->isOpen();
-    });
-    // 同用途的对话框已打开则置前，不重复打开
-    for (auto& e : colorPickerDialogs_) {
-        if (e.key == key) {
-            SetForegroundWindow(e.dlg->hwnd());
-            return;
-        }
-    }
-    auto dlg = std::make_unique<ColorPickerDialog>();
-    if (!dlg->create(GetModuleHandleW(nullptr), trayHwnd, initial, title,
-                     static_cast<int>(colorPickerDialogs_.size())))
-        return;
-    dlg->setApplyCallback(std::move(apply));
-    dlg->show();
-    colorPickerDialogs_.push_back({key, std::move(dlg)});
-}
-
 void App::applyFontColors() {
     for (auto* h : hosts())
         h->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
 }
 
-void App::pickPlayedColor() {
-    showColorPicker(0, lyricColor_, L"已播放颜色", [this](COLORREF c) {
-        lyricColor_ = c;
-        applyFontColors();
-        saveSettings();
-    });
-}
-
-void App::pickUnplayedColor() {
-    showColorPicker(1, lyricUnplayedColor_, L"未播放颜色", [this](COLORREF c) {
-        lyricUnplayedColor_ = c;
-        applyFontColors();
-        saveSettings();
-    });
-}
-
-void App::pickGlowColor() {
-    if (!taskbarHost)
+void App::showFontColorDialog() {
+    if (!overlayHost && !taskbarHost)
         return;
-    showColorPicker(2, lyricGlowColor_, L"光晕颜色", [this](COLORREF c) {
-        lyricGlowColor_ = c;
-        if (taskbarHost)
-            taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
-        saveSettings();
-    });
-}
-
-void App::pickOutlineColor() {
-    if (!taskbarHost)
+    if (fontColorDialog && fontColorDialog->isOpen()) {
+        SetForegroundWindow(fontColorDialog->hwnd());
         return;
-    showColorPicker(3, lyricOutlineColor_, L"描边颜色", [this](COLORREF c) {
-        lyricOutlineColor_ = c;
-        if (taskbarHost)
+    }
+    fontColorDialog = std::make_unique<FontColorDialog>();
+    FontColorDialog::State st{};
+    st.played = lyricColor_;
+    st.unplayed = lyricUnplayedColor_;
+    st.unplayedAlphaPct = lyricUnplayedAlphaPct_;
+    st.glowColor = lyricGlowColor_;
+    st.outlineColor = lyricOutlineColor_;
+    st.glowOn = lyricGlow_;
+    st.outlineOn = lyricOutline_;
+    st.fontFamily = fontFamily_;
+    // 与任务栏实际渲染字号一致：setFont 钳制 9..18，绘制时放大 1.18 倍
+    float baseSize = hasUserFont_ ? fontSize_ : 12.0f;
+    st.lyricFontSize = std::clamp(baseSize, 9.0f, 18.0f) * 1.18f;
+    if (!fontColorDialog->create(GetModuleHandleW(nullptr), trayHwnd, st)) {
+        fontColorDialog.reset();
+        return;
+    }
+    fontColorDialog->setApplyCallback([this](const FontColorDialog::Result& r) {
+        lyricColor_ = r.played;
+        lyricUnplayedColor_ = r.unplayed;
+        lyricUnplayedAlphaPct_ = r.unplayedAlphaPct;
+        lyricGlowColor_ = r.glowColor;
+        lyricOutlineColor_ = r.outlineColor;
+        lyricGlow_ = r.glowOn;
+        lyricOutline_ = r.outlineOn;
+        applyFontColors();
+        if (taskbarHost) {
+            taskbarHost->setFontGlow(lyricGlow_);
+            taskbarHost->setFontOutline(lyricOutline_);
             taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
+        }
         saveSettings();
     });
+    fontColorDialog->show();
 }
 
 LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -877,14 +774,8 @@ int main() {
         if (app.fontPickerDialog && app.fontPickerDialog->isOpen() &&
             IsDialogMessageW(app.fontPickerDialog->hwnd(), &msg))
             continue;
-        bool colorHandled = false;
-        for (auto& e : app.colorPickerDialogs_) {
-            if (e.dlg->isOpen() && IsDialogMessageW(e.dlg->hwnd(), &msg)) {
-                colorHandled = true;
-                break;
-            }
-        }
-        if (colorHandled)
+        if (app.fontColorDialog && app.fontColorDialog->isOpen() &&
+            app.fontColorDialog->isDialogMessage(&msg))
             continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
