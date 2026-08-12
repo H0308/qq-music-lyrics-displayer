@@ -34,8 +34,11 @@ add_executable(QQMusicLyric
 
 target_include_directories(QQMusicLyric PRIVATE src)
 
-# 清单文件已通过 resource.rc 嵌入（app.manifest），关闭链接器的默认清单生成，避免重复
-set_target_properties(QQMusicLyric PROPERTIES LINK_FLAGS "/MANIFEST:NO")
+# 清单文件已通过 resource.rc 嵌入（app.manifest），关闭链接器的默认清单生成，避免重复。
+# Release 使用 Windows 子系统（不弹控制台黑窗），代码入口是 main()，
+# 需显式指定 CRT 入口 mainCRTStartup；Debug 保留控制台便于查看日志
+target_link_options(QQMusicLyric PRIVATE /MANIFEST:NO
+    $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
 
 target_compile_definitions(QQMusicLyric PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
 target_compile_options(QQMusicLyric PRIVATE /utf-8 /EHsc)
