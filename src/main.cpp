@@ -8,6 +8,7 @@
 #include "ui/fluent_menu.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
+#include "util/dominant_color.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -46,6 +47,7 @@ constexpr UINT kCmdTaskbarPosNotify = 109;
 constexpr UINT kCmdTaskbarPosLeft = 110;
 constexpr UINT kCmdSpectrum = 111;
 constexpr UINT kCmdAutoStart = 112;
+constexpr UINT kCmdFollowAlbum = 113;
 
 struct CoverPayload {
     std::wstring key;
@@ -158,6 +160,12 @@ struct App {
     bool lyricOutline_ = false;                       // 描边开关（任务栏独有）
     COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色
     COLORREF lyricOutlineColor_ = RGB(0, 0, 0);       // 描边颜色
+
+    // 已播放颜色跟随专辑封面主色调：开启时覆盖 lyricColor_，关闭后恢复配置色
+    bool lyricFollowAlbum_ = false;
+    bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
+    COLORREF albumColor_ = RGB(49, 194, 124);
+    std::shared_ptr<const std::vector<uint8_t>> lastCover_; // 当前曲目有效封面（SMTC 优先，API 兜底）
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
@@ -309,6 +317,8 @@ struct App {
             currentKey.clear();
             lastStatus = PlaybackStatus::Stopped;
             lyricLoading_ = false;
+            lastCover_.reset();
+            hasAlbumColor_ = false;
             for (auto* h : hs) {
                 h->setLyrics({});
                 h->setMediaInfo({});
@@ -344,6 +354,10 @@ struct App {
             currentDurationMs = snap.durationMs;
             std::wprintf(L"[smtc] track: %s - %s (%lld ms)\n", snap.title.c_str(),
                 snap.artist.c_str(), snap.durationMs);
+            lastCover_.reset();
+            hasAlbumColor_ = false;
+            if (lyricFollowAlbum_)
+                applyFontColors(); // 新封面就绪前先回到配置色
             for (auto* h : hs) {
                 h->setLyrics({});
                 h->setStatusText(L"歌词加载中…");
@@ -353,6 +367,9 @@ struct App {
                 PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
             });
         }
+        if (snap.thumbnail && !snap.thumbnail->empty())
+            lastCover_ = snap.thumbnail;
+        tryExtractAlbumColor();
     }
 
     void onLyricReady(bool ok) {
@@ -409,6 +426,8 @@ struct App {
         mi.canNext = snap.canNext;
         mi.playing = snap.status == PlaybackStatus::Playing;
         for (auto* h : hosts()) h->setMediaInfo(mi);
+        lastCover_ = payload->cover;
+        tryExtractAlbumColor();
     }
 
     // 30fps：插值进度 -> 二分定位当前行
@@ -436,6 +455,8 @@ struct App {
     void pickFont();
     void showFontColorDialog();
     void applyFontColors();
+    COLORREF effectivePlayedColor() const;
+    void tryExtractAlbumColor();
     void loadSettings();
     void saveSettings();
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
@@ -471,6 +492,7 @@ void App::loadSettings() {
         lyricOutline_ = j.value("lyricOutline", lyricGlow_);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         spectrumOn_ = j.value("spectrum", false);
+        lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
     } catch (...) {
     }
 }
@@ -492,6 +514,7 @@ void App::saveSettings() {
         j["lyricOutline"] = lyricOutline_;
         j["taskbarPosition"] = taskbarPosition_;
         j["spectrum"] = spectrumOn_;
+        j["lyricFollowAlbum"] = lyricFollowAlbum_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -584,6 +607,7 @@ void App::showTrayMenu() {
     addItem(kCmdPickFont, L"字体…");
     if (taskbarHost) {
         addItem(kCmdFontColorEffect, L"字体颜色与效果…");
+        addItem(kCmdFollowAlbum, L"已播放颜色跟随专辑", lyricFollowAlbum_);
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
     addSeparator();
@@ -628,6 +652,16 @@ void App::onMenuCommand(int cmd) {
     case kCmdFontColorEffect:
         showFontColorDialog();
         break;
+    case kCmdFollowAlbum:
+        lyricFollowAlbum_ = !lyricFollowAlbum_;
+        if (lyricFollowAlbum_) {
+            tryExtractAlbumColor(); // 立即用当前封面取色
+        } else {
+            hasAlbumColor_ = false; // 下次开启时重新提取
+            applyFontColors();      // 恢复配置色
+        }
+        saveSettings();
+        break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
         break;
@@ -668,9 +702,29 @@ void App::pickFont() {
     fontPickerDialog->show();
 }
 
+COLORREF App::effectivePlayedColor() const {
+    return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : lyricColor_;
+}
+
+// 开关开启且当前曲目还没提取过时，从有效封面提取主色调作为已播放颜色
+void App::tryExtractAlbumColor() {
+    if (!lyricFollowAlbum_ || hasAlbumColor_)
+        return;
+    if (!lastCover_ || lastCover_->empty())
+        return;
+    auto color = extractDominantColor(*lastCover_);
+    if (!color)
+        return;
+    albumColor_ = *color;
+    hasAlbumColor_ = true;
+    std::wprintf(L"[color] album dominant: #%02X%02X%02X : %s\n", GetRValue(albumColor_),
+                 GetGValue(albumColor_), GetBValue(albumColor_), currentKey.c_str());
+    applyFontColors();
+}
+
 void App::applyFontColors() {
     for (auto* h : hosts())
-        h->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
+        h->setFontColors(effectivePlayedColor(), lyricUnplayedColor_, lyricUnplayedAlphaPct_);
 }
 
 void App::showFontColorDialog() {
