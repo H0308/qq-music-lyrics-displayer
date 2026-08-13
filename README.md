@@ -86,4 +86,5 @@
 
 - 歌词与封面数据来自 QQ 音乐公开接口
 - 频谱捕获方案参考微软 [Application Loopback Audio 官方示例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/)
+- 部分歌词操作参考[Lyricify-Lyrics-Helper](https://github.com/WXRIW/Lyricify-Lyrics-Helper)
 - 灵感来自各类任务栏歌词/系统监控工具（如 TrafficMonitor）的任务栏嵌入思路
