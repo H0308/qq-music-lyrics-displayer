@@ -25,19 +25,25 @@ struct SongInfo {
     std::wstring albummid;
 };
 
+enum class LyricSource {
+    Qrc, // QQ 音乐原生逐字歌词
+    Krc, // 酷狗逐字歌词
+    Lrc  // QQ 音乐整行歌词
+};
+
 // 手动搜索返回的候选歌曲
 struct SearchCandidate {
     std::wstring songmid;   // QQ 歌曲 mid（LRC 候选使用）
+    std::wstring songid;    // QQ 数字歌曲 ID（QRC 候选使用）
     std::wstring albummid;
     std::wstring kugouHash; // 酷狗歌曲 hash（KRC 候选使用）
     std::wstring name;
     std::wstring singer;
     int64_t durationMs = 0;
-    bool krc = false; // true = 酷狗 KRC 逐字歌词候选，false = QQ LRC 整行歌词候选
+    LyricSource source = LyricSource::Lrc;
 };
 
-// 歌词获取：优先酷狗 KRC 逐字歌词（搜歌拿 hash -> 搜词 -> 下载解码），
-// 失败回退 QQ 音乐公开接口（搜索 -> 三重匹配 -> 下载 -> base64 解码 -> 解析 LRC）
+// 歌词获取：优先 QQ 音乐原生 QRC 逐字歌词，失败后依次回退酷狗 KRC 与 QQ LRC。
 class LyricProvider {
 public:
     using ReadyCallback = std::function<void(bool ok)>; // 在工作线程触发（缓存命中时同步触发）
@@ -56,7 +62,7 @@ public:
     void requestAsync(const std::wstring& title, const std::wstring& artist, int64_t durationMs,
                       ReadyCallback cb);
 
-    // 手动搜索候选（KRC 逐字与 LRC 整行各最多 5 条，KRC 在前），结果在 UI 线程回调
+    // 手动搜索候选（QRC、KRC、LRC 各最多 5 条），结果在 UI 线程回调
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                SearchCallback cb);
 

@@ -24,6 +24,8 @@ add_executable(QQMusicLyric
     src/media/smtc_monitor.cpp
     src/media/audio_spectrum.cpp
     src/lyric/lyric_provider.cpp
+    src/lyric/qrc_decoder.cpp
+    src/lyric/qrc_des.cpp
     src/lyric/cover_provider.cpp
     src/ui/lyric_renderer.cpp
     src/ui/taskbar_host.cpp

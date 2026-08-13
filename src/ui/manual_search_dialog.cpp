@@ -39,6 +39,7 @@ public:
 
     void setLyrics(const std::vector<LyricLine>& lines) {
         lines_ = lines;
+        positionMs_ = 0;
         topLine_ = 0;
         currentLine_ = -1;
         manualScroll_ = false;
@@ -49,6 +50,7 @@ public:
     }
 
     void setPosition(int64_t positionMs) {
+        positionMs_ = positionMs;
         currentLine_ = LyricProvider::findLine(lines_, positionMs);
         if (!manualScroll_) {
             syncToCurrentLine();
@@ -151,6 +153,84 @@ private:
             topLine_ = std::clamp(currentLine_ - kMid, 0, maxTop);
     }
 
+    float karaokeProgressX(IDWriteTextLayout* layout, const LyricLine& line) const {
+        if (!layout || line.chars.empty() || line.text.empty())
+            return 0.0f;
+
+        UINT32 sungLength = 0;
+        const LyricChar* currentChar = nullptr;
+        for (const auto& ch : line.chars) {
+            if (ch.startMs > positionMs_)
+                break;
+            currentChar = &ch;
+            sungLength += static_cast<UINT32>(ch.text.size());
+        }
+        if (!currentChar || sungLength == 0)
+            return 0.0f;
+
+        const UINT32 textLength = static_cast<UINT32>(line.text.size());
+        sungLength = std::min(sungLength, textLength);
+        const UINT32 charLength = std::min(static_cast<UINT32>(currentChar->text.size()), sungLength);
+        const UINT32 charOffset = sungLength - charLength;
+
+        DWRITE_HIT_TEST_METRICS metrics{};
+        float startX = 0.0f;
+        float hitY = 0.0f;
+        if (FAILED(layout->HitTestTextPosition(charOffset, FALSE, &startX, &hitY, &metrics)))
+            return 0.0f;
+
+        float endX = startX;
+        if (FAILED(layout->HitTestTextPosition(sungLength - 1, TRUE, &endX, &hitY, &metrics)))
+            endX = startX;
+
+        const int64_t durationMs = std::max<int64_t>(currentChar->endMs - currentChar->startMs, 1);
+        const float fraction = static_cast<float>(std::clamp(
+            static_cast<double>(positionMs_ - currentChar->startMs) /
+                static_cast<double>(durationMs),
+            0.0, 1.0));
+        return startX + (endX - startX) * fraction;
+    }
+
+    void drawCurrentLine(ID2D1DCRenderTarget* rt, ID2D1SolidColorBrush* br,
+                         const fluent::Palette& palette, const LyricLine& line,
+                         const D2D1_RECT_F& rect) {
+        auto* fmt = textFormat(15.0f, 700, true);
+        if (!fmt)
+            return;
+
+        if (line.chars.empty()) {
+            br->SetColor(fluent::toD2D(RGB(49, 194, 124)));
+            rt->DrawTextW(line.text.c_str(), static_cast<UINT32>(line.text.size()), fmt, rect, br);
+            return;
+        }
+
+        IDWriteTextLayout* layout = nullptr;
+        IDWriteFactory* dw = dwrite();
+        if (!dw || FAILED(dw->CreateTextLayout(
+                       line.text.c_str(), static_cast<UINT32>(line.text.size()), fmt,
+                       std::max(rect.right - rect.left, 1.0f),
+                       std::max(rect.bottom - rect.top, 1.0f), &layout)) ||
+            !layout) {
+            return;
+        }
+
+        const D2D1_POINT_2F origin = D2D1::Point2F(rect.left, rect.top);
+        br->SetColor(palette.textSecondary);
+        rt->DrawTextLayout(origin, layout, br);
+
+        const float progressX = karaokeProgressX(layout, line);
+        if (progressX > 0.0f) {
+            rt->PushAxisAlignedClip(
+                D2D1::RectF(rect.left, rect.top,
+                            std::min(rect.left + progressX, rect.right), rect.bottom),
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            br->SetColor(fluent::toD2D(RGB(49, 194, 124)));
+            rt->DrawTextLayout(origin, layout, br);
+            rt->PopAxisAlignedClip();
+        }
+        layout->Release();
+    }
+
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
         const fluent::Palette& p = fluent::palette();
         auto* br = brush(rt);
@@ -185,9 +265,7 @@ private:
             D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, wDip - pad, (i + 1) * slotH);
             // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
             if (cur) {
-                br->SetColor(fluent::toD2D(RGB(49, 194, 124))); // QQ 绿，与桌面歌词一致
-                if (auto* fmt = textFormat(15.0f, 700, true))
-                    rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, br);
+                drawCurrentLine(rt, br, p, lines_[lineIdx], rect);
             } else if (auto* fmt = textFormat(14.0f, 400, true)) {
                 br->SetColor(p.text);
                 rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, br);
@@ -196,6 +274,7 @@ private:
     }
 
     std::vector<LyricLine> lines_;
+    int64_t positionMs_ = 0;
     int topLine_ = 0;
     int currentLine_ = -1;
     bool manualScroll_ = false;
@@ -208,7 +287,6 @@ private:
 struct ManualSearchDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    bool backdrop = false;
 
     fluent::FluentEdit titleEdit;
     fluent::FluentEdit artistEdit;
@@ -255,9 +333,13 @@ struct ManualSearchDialog::Impl {
             return 0;
         case WM_SIZE:
             layout();
+            // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
         case WM_ERASEBKGND:
-            if (!backdrop) {
+            // 即使 DWM 材质已启用，也要为拉伸新增区域提供确定的底色；否则会暴露黑色表面。
+            {
                 HDC hdc = reinterpret_cast<HDC>(wp);
                 RECT rc;
                 GetClientRect(hwnd, &rc);
@@ -316,7 +398,7 @@ struct ManualSearchDialog::Impl {
 
         statusLabel.create(hwnd, kIdStatus, L"", false);
         hintLabel.create(hwnd, kIdHint,
-                         L"KRC 为逐字歌词（逐字填充高亮，来自酷狗）；LRC 为普通歌词（整行高亮，来自 QQ 音乐）",
+                         L"QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词；LRC 为 QQ 整行歌词",
                          true);
 
         list.create(hwnd, kIdCandidateList);
@@ -418,12 +500,12 @@ struct ManualSearchDialog::Impl {
         itemToCand.clear();
         searchBtn.setEnabled(true);
 
-        // 分组展示：KRC 逐字在前，LRC 整行在后，各带一行分组标题
-        int krcCount = 0;
-        for (const auto& c : candidates)
-            if (c.krc)
-                ++krcCount;
-        int lrcCount = (int)candidates.size() - krcCount;
+        int qrcCount = 0, krcCount = 0, lrcCount = 0;
+        for (const auto& c : candidates) {
+            if (c.source == LyricSource::Qrc) ++qrcCount;
+            else if (c.source == LyricSource::Krc) ++krcCount;
+            else ++lrcCount;
+        }
 
         std::vector<fluent::FluentListItem> items;
         auto addHeader = [&](const wchar_t* text) {
@@ -435,16 +517,22 @@ struct ManualSearchDialog::Impl {
             items.push_back({c.name + L" - " + c.singer, false});
             itemToCand.push_back(idx);
         };
-        if (krcCount > 0) {
-            addHeader(L"逐字歌词（KRC）");
+        if (qrcCount > 0) {
+            addHeader(L"QQ 音乐逐字歌词（QRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
-                if (candidates[i].krc)
+                if (candidates[i].source == LyricSource::Qrc)
+                    addItem(i);
+        }
+        if (krcCount > 0) {
+            addHeader(L"酷狗逐字歌词（KRC）");
+            for (int i = 0; i < (int)candidates.size(); ++i)
+                if (candidates[i].source == LyricSource::Krc)
                     addItem(i);
         }
         if (lrcCount > 0) {
             addHeader(L"整行歌词（LRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
-                if (!candidates[i].krc)
+                if (candidates[i].source == LyricSource::Lrc)
                     addItem(i);
         }
         list.setItems(std::move(items));
@@ -452,7 +540,8 @@ struct ManualSearchDialog::Impl {
         if (candidates.empty()) {
             statusLabel.setText(L"未找到相关歌曲，请尝试更换关键词。");
         } else {
-            statusLabel.setText(L"找到 " + std::to_wstring(krcCount) + L" 条逐字（KRC）、 " +
+            statusLabel.setText(L"找到 " + std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
+                                std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
                                 std::to_wstring(lrcCount) + L" 条整行（LRC）候选，点击选择以预览歌词。");
             // 默认选中第一条非分组标题的候选
             for (int i = 0; i < (int)itemToCand.size(); ++i) {
@@ -500,7 +589,7 @@ struct ManualSearchDialog::Impl {
         previewInfo = info;
         preview.setLyrics(previewLines);
         okBtn.setEnabled(true);
-        // 实际拿到的歌词是否带逐字时间轴（KRC 候选失败或 LRC 候选时为整行）
+        // QRC/KRC 均带逐字时间轴，LRC 为整行时间轴。
         bool wordByWord = false;
         for (const auto& l : lines) {
             if (!l.chars.empty()) {
@@ -580,7 +669,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
                         w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
+    fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

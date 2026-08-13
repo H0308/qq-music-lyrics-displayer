@@ -130,7 +130,6 @@ private:
 struct FontPickerDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    bool backdrop = false;
 
     fluent::FluentEdit filterEdit;
     fluent::FluentList familyList;
@@ -178,6 +177,9 @@ struct FontPickerDialog::Impl {
             return 0;
         case WM_SIZE:
             layout();
+            // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
         case WM_MOUSEWHEEL: {
             // 滚轮消息默认发往焦点窗口，这里按光标位置转发给两个列表
@@ -191,8 +193,8 @@ struct FontPickerDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            if (!backdrop) {
-                // 亚克力材质不可用时的实心回退背景
+            // DWM 材质只负责窗口效果，拉伸新增客户区仍需由应用明确擦除。
+            {
                 HDC hdc = reinterpret_cast<HDC>(wp);
                 RECT rc;
                 GetClientRect(hwnd, &rc);
@@ -493,7 +495,7 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
+    fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

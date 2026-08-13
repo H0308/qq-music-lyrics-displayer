@@ -1,4 +1,5 @@
 #include "lyric_provider.h"
+#include "qrc_decoder.h"
 
 #include "util/base64.h"
 
@@ -71,11 +72,19 @@ bool httpGet(CURL* curl, const std::string& url, const char* referer, std::strin
 
 struct Candidate {
     std::string songmid;
+    std::string songid;
     std::string albummid;
     std::wstring name;
     std::wstring singer;
     int64_t intervalMs = 0;
 };
+
+std::string jsonString(const nlohmann::json& value) {
+    if (value.is_string()) return value.get<std::string>();
+    if (value.is_number_integer()) return std::to_string(value.get<int64_t>());
+    if (value.is_number_unsigned()) return std::to_string(value.get<uint64_t>());
+    return {};
+}
 
 // ---------- 歌曲匹配辅助函数 ----------
 
@@ -422,6 +431,10 @@ bool searchSongs(CURL* curl, const std::wstring& query, std::vector<Candidate>& 
     for (auto& s : list) {
         Candidate c;
         c.songmid = s.value("mid", s.value("songmid", ""));
+        if (s.contains("id"))
+            c.songid = jsonString(s["id"]);
+        if (c.songid.empty() && s.contains("songid"))
+            c.songid = jsonString(s["songid"]);
         c.albummid = s.value("album", nlohmann::json::object())
                          .value("mid", s.value("albummid", ""));
         c.name = toWide(s.value("name", s.value("songname", "")));
@@ -439,6 +452,41 @@ bool searchSongs(CURL* curl, const std::wstring& query, std::vector<Candidate>& 
             out.push_back(std::move(c));
     }
     return true;
+}
+
+std::string xmlInnerText(const std::string& xml, const std::string& tag) {
+    const std::string open = "<" + tag;
+    size_t begin = xml.find(open);
+    if (begin == std::string::npos) return {};
+    begin = xml.find('>', begin + open.size());
+    if (begin == std::string::npos) return {};
+    ++begin;
+    const std::string close = "</" + tag + ">";
+    size_t end = xml.find(close, begin);
+    if (end == std::string::npos) return {};
+    std::string text = xml.substr(begin, end - begin);
+    if (text.compare(0, 9, "<![CDATA[") == 0 && text.size() >= 12 &&
+        text.compare(text.size() - 3, 3, "]]>") == 0)
+        text = text.substr(9, text.size() - 12);
+    return text;
+}
+
+// QQ 音乐客户端原生逐字歌词：XML content 字段为十六进制 3DES+zlib QRC。
+bool downloadQrc(CURL* curl, const std::string& songid, std::vector<LyricLine>& out) {
+    if (songid.empty()) {
+        return false;
+    }
+    std::string body;
+    std::string url = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg"
+                      "?musicid=" + songid + "&version=15&miniversion=82&lrctype=4";
+    if (!httpGet(curl, url, "https://c.y.qq.com/", body)) {
+        return false;
+    }
+    std::string encrypted = xmlInnerText(body, "content");
+    if (encrypted.empty()) {
+        return false;
+    }
+    return decodeQrcLyrics(encrypted, out);
 }
 
 // 按 songmid 下载并解析歌词；成功返回 true 并填充 out
@@ -956,14 +1004,6 @@ struct LyricProvider::Impl {
         CURL* curl = curl_easy_init();
         if (!curl) return false;
 
-        // 优先酷狗 KRC 逐字歌词
-        if (fetchKrc(curl, title, artist, durationMs, out)) {
-            fillSongInfo(curl, title, artist, durationMs, info); // 补齐 albummid 供封面兜底
-            curl_easy_cleanup(curl);
-            return true;
-        }
-
-        // 回退 QQ 音乐 LRC
         MatchQuery q{title, artist, durationMs, extractVersionTags(title)};
 
         // 打分合格（总分 >= 阈值且各维度不触及下限）的候选按分数降序排列；
@@ -987,13 +1027,15 @@ struct LyricProvider::Impl {
         // 依次尝试候选：第一名没有歌词（伴奏版/剧情版等）时自动试次优候选；
         // 行数过少视为无效歌词（纯音乐占位词等），继续试下一个
         constexpr int kMaxDownloadTries = 5;
-        auto tryDownload = [&](const std::vector<Candidate>& cands) -> bool {
+        auto tryDownload = [&](const std::vector<Candidate>& cands, LyricSource source) -> bool {
             int tries = 0;
             for (const auto& [score, c] : rankCandidates(cands)) {
                 if (++tries > kMaxDownloadTries)
                     break;
-                // 不带 Referer 会返回 -1310
-                if (downloadLyric(curl, c->songmid, out) && out.size() >= 3) {
+                bool downloaded = source == LyricSource::Qrc
+                                      ? downloadQrc(curl, c->songid, out)
+                                      : downloadLyric(curl, c->songmid, out);
+                if (downloaded && out.size() >= 3) {
                     info.songmid = toWide(c->songmid);
                     info.albummid = toWide(c->albummid);
                     return true;
@@ -1010,19 +1052,36 @@ struct LyricProvider::Impl {
             query += artist;
         }
         std::vector<Candidate> cands;
-        if (!searchSongs(curl, query, cands)) {
+        bool qqSearchOk = searchSongs(curl, query, cands);
+        if (qqSearchOk && cands.empty())
+            qqSearchOk = searchSongs(curl, queryTitle, cands);
+
+        // 同平台、同版本的 QQ 原生 QRC 优先，避免跨平台音源与时间轴不一致。
+        if (qqSearchOk && tryDownload(cands, LyricSource::Qrc)) {
             curl_easy_cleanup(curl);
-            return false;
+            return true;
         }
-        if (!tryDownload(cands)) {
-            // 带歌手搜不到合适歌词时，尝试只按歌名搜索（部分歌曲 SMTC 歌手名与平台不一致）
-            if (!searchSongs(curl, queryTitle, cands) || !tryDownload(cands)) {
-                curl_easy_cleanup(curl);
-                return false;
-            }
+
+        // QRC 不存在或接口失败时，保持原有酷狗 KRC 逐字歌词覆盖率。
+        out.clear();
+        if (fetchKrc(curl, title, artist, durationMs, out)) {
+            fillSongInfo(curl, title, artist, durationMs, info);
+            curl_easy_cleanup(curl);
+            return true;
+        }
+
+        // 最后回退 QQ LRC；首轮候选不合适时再只按歌名搜索。
+        out.clear();
+        if (qqSearchOk && tryDownload(cands, LyricSource::Lrc)) {
+            curl_easy_cleanup(curl);
+            return true;
+        }
+        if (searchSongs(curl, queryTitle, cands) && tryDownload(cands, LyricSource::Lrc)) {
+            curl_easy_cleanup(curl);
+            return true;
         }
         curl_easy_cleanup(curl);
-        return true;
+        return false;
     }
 };
 
@@ -1112,15 +1171,7 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
         CURL* curl = curl_easy_init();
         std::vector<SearchCandidate> result;
         if (curl) {
-            // 酷狗 KRC 逐字候选（最多 5 条，排在前面）
-            std::vector<KugouSong> kugouSongs;
-            if (kugouSearchSongs(curl, stripVersionSuffix(title), artist, 5, kugouSongs)) {
-                for (auto& s : kugouSongs) {
-                    result.push_back({{}, {}, toWide(s.hash), s.name, s.singer, s.durationMs,
-                                      true});
-                }
-            }
-            // QQ LRC 整行候选（最多 5 条）；与自动链路一致使用净化后的标题
+            // QQ 候选同时提供 QRC 逐字与 LRC 整行入口。
             std::wstring queryTitle = stripVersionSuffix(title);
             std::wstring query = queryTitle;
             if (!artist.empty() && !titleEndsWithArtist(title, artist))
@@ -1129,12 +1180,26 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
             searchSongs(curl, query, cands);
             if (cands.empty())
                 searchSongs(curl, queryTitle, cands);
-            curl_easy_cleanup(curl);
             for (size_t i = 0; i < cands.size() && i < 5; ++i) {
                 const auto& c = cands[i];
-                result.push_back({toWide(c.songmid), toWide(c.albummid), {}, c.name, c.singer,
-                                  c.intervalMs, false});
+                if (!c.songid.empty())
+                    result.push_back({toWide(c.songmid), toWide(c.songid), toWide(c.albummid), {},
+                                      c.name, c.singer, c.intervalMs, LyricSource::Qrc});
             }
+
+            std::vector<KugouSong> kugouSongs;
+            if (kugouSearchSongs(curl, queryTitle, artist, 5, kugouSongs)) {
+                for (auto& s : kugouSongs) {
+                    result.push_back({{}, {}, {}, toWide(s.hash), s.name, s.singer, s.durationMs,
+                                      LyricSource::Krc});
+                }
+            }
+            for (size_t i = 0; i < cands.size() && i < 5; ++i) {
+                const auto& c = cands[i];
+                result.push_back({toWide(c.songmid), toWide(c.songid), toWide(c.albummid), {},
+                                  c.name, c.singer, c.intervalMs, LyricSource::Lrc});
+            }
+            curl_easy_cleanup(curl);
         }
         if (cb)
             cb(std::move(result));
@@ -1150,8 +1215,9 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
         std::vector<LyricLine> lines;
         bool ok = false;
         if (curl) {
-            // 按候选来源取词：KRC 候选用酷狗 hash 拉逐字歌词，LRC 候选用 QQ songmid
-            if (cand.krc)
+            if (cand.source == LyricSource::Qrc)
+                ok = downloadQrc(curl, toUtf8(cand.songid), lines);
+            else if (cand.source == LyricSource::Krc)
                 ok = fetchKrcByHash(curl, toUtf8(cand.kugouHash), cand.durationMs, lines);
             else
                 ok = downloadLyric(curl, toUtf8(cand.songmid), lines);
