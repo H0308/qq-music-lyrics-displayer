@@ -13,6 +13,12 @@ find_package(ZLIB REQUIRED)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
                ${CMAKE_CURRENT_BINARY_DIR}/resource.rc @ONLY)
 
+# RC 里通过 1 24 "..." 引用的外部文件不会被 Ninja 自动跟踪，
+# 显式声明依赖，否则改清单/图标后资源不会重编（曾导致 Debug 静默使用过期清单）
+set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
+    PROPERTIES OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo.ico")
+
 add_executable(QQMusicLyric
     src/main.cpp
     src/media/smtc_monitor.cpp
@@ -56,6 +62,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     gdi32
     shell32
     ole32
+    shcore
     uiautomationcore
     dwmapi
     uxtheme

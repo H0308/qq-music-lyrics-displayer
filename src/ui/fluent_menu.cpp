@@ -4,6 +4,7 @@
 #include "ui/fluent_theme.h"
 
 #include <windowsx.h>
+#include <shellscalingapi.h> // GetDpiForMonitor
 
 #include <algorithm>
 #include <cmath>
@@ -282,14 +283,17 @@ MenuWnd* createMenuLevel(HWND owner, MenuWnd* parent, std::vector<FluentMenuItem
     mw->measure(mw->renderer.dwrite(), wDip);
     float hDip = mw->heightDip();
 
-    UINT dpi = owner ? GetDpiForWindow(owner) : 96;
-    // 取目标显示器 DPI 更准确，但 owner 在托盘，菜单弹在鼠标处，近似即可
+    // 取菜单弹出位置所在显示器的真实 DPI：owner 是不可见托盘窗口，显示 DPI 变化后
+    // 隐藏窗口可能收不到 WM_DPICHANGED 导致其 DPI 过期；GetDpiForMonitor 始终返回
+    // 显示器当前 DPI，且天然适配多显示器
+    HMONITOR mon = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONEAREST);
+    UINT dpi = 96;
+    GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &dpi, &dpi);
     float s = dipScale(dpi);
     int w = static_cast<int>(std::lround(wDip * s));
     int h = static_cast<int>(std::lround(hDip * s));
 
     // 边界修正：保持在工作区内
-    HMONITOR mon = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi{sizeof(mi)};
     GetMonitorInfoW(mon, &mi);
     int x = screenPt.x;
@@ -456,6 +460,11 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
             if (!chainOwns(other))
                 closeChain();
         }
+        return 0;
+    case WM_DPICHANGED:
+        // 显示 DPI 变化（切换分辨率/缩放）：菜单是瞬时 UI，直接关闭，
+        // 下次弹出时按新 DPI 重建，避免旧尺寸内容被拉伸
+        closeChain();
         return 0;
     case kMsgOutsideClick:
         closeChain();

@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" xmlns:asmv3="urn:schemas-microsoft-com:asm.v3" manifestVersion="1.0">
   <assemblyIdentity version="1.0.0.0" name="QQMusicLyric.app" type="win32"/>
+  <!-- DPI 感知：PerMonitorV2 只能写在清单里才生效。
+       运行时 SetProcessDpiAwarenessContext 请求 V2 会被 win32k 静默降级为 V1（已实测），
+       V1 窗口在显示 DPI 变化（切换分辨率/缩放）后会被 DWM 位图拉伸，右键菜单文字重影 -->
+  <asmv3:application>
+    <asmv3:windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </asmv3:windowsSettings>
+  </asmv3:application>
   <!-- comctl32 v6：让 EDIT 等真控件获得主题化渲染 -->
   <dependency>
     <dependentAssembly>

@@ -91,6 +91,9 @@ struct SmtcMonitor::Impl {
     mutable std::chrono::steady_clock::time_point posTick_{};
     mutable bool posInit_ = false;
     mutable std::wstring posTrackKey_;
+    mutable int64_t prevRawMs_ = 0; // 上次 snapshot 读到的 SMTC 原始位置（未插值）
+    mutable bool prevPaused_ = false; // 上一帧 snapshot 是否处于非播放分支
+    int64_t lastStatusChangeMs_ = 0;  // 最近一次播放状态切换（UTC ms），识别过渡期残留事件
 
     // 播放中 QQ 可能推送过期/量化的 Timeline（Position 与 LastUpdatedTime 不成对，
     // 或 LastUpdatedTime 缺失回退为当前时刻），换算到当前时刻后若比现有锚点
@@ -163,13 +166,22 @@ struct SmtcMonitor::Impl {
                 int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
                 if (newAnchor == 0)
                     newAnchor = nowUtcMs();
-                // 锚点过旧（如恢复播放瞬间读到暂停前的残留 Timeline）：按此刻锚定，
-                // 否则 snapshot 插值会把整段暂停时长计入，位置瞬间前跳再被真实更新拉回
-                if (nowUtcMs() - newAnchor > 2000)
-                    newAnchor = nowUtcMs();
-                if (!isStaleTimelineUpdate(newPos, newAnchor)) {
-                    snap.positionMs = newPos;
-                    snap.anchorUtcMs = newAnchor;
+                bool anchorStale = nowUtcMs() - newAnchor > 2000;
+                // 播放中且刚经历状态切换（2s 内）时，锚点过旧的 Timeline 是快速暂停/播放
+                // 残留的延迟事件——真实 seek 的 LastUpdatedTime 必为 seek 当下，不会过旧。
+                // 若重锚定后接受，>2s 的倒退会被当成真实 seek，造成高亮整段回退，故丢弃
+                // （只更新时长，位置/锚点保持，等下一条新鲜事件）
+                bool dropResidual = anchorStale && snap.status == PlaybackStatus::Playing &&
+                                    nowUtcMs() - lastStatusChangeMs_ < 2000;
+                if (!dropResidual) {
+                    // 锚点过旧（如恢复播放瞬间读到暂停前的残留 Timeline）：按此刻锚定，
+                    // 否则 snapshot 插值会把整段暂停时长计入，位置瞬间前跳再被真实更新拉回
+                    if (anchorStale)
+                        newAnchor = nowUtcMs();
+                    if (!isStaleTimelineUpdate(newPos, newAnchor)) {
+                        snap.positionMs = newPos;
+                        snap.anchorUtcMs = newAnchor;
+                    }
                 }
             } catch (...) {
                 return;
@@ -185,10 +197,12 @@ struct SmtcMonitor::Impl {
             try {
                 auto info = session.GetPlaybackInfo();
                 auto newStatus = mapStatus(info.PlaybackStatus());
-                // 暂停->播放过渡：此时 QQ 常仍上报暂停前的残留 Timeline（锚点停在暂停
-                // 时刻），若走常规路径会把整段暂停时长计入插值；若只做重锚定再交噪声
-                // 过滤，偏差又恰落在 250ms~2s 拒绝窗口被永久丢弃。
-                // 过渡是已知事件：上报位置即恢复点，锚点直接按此刻重建，跳过滤波
+                if (newStatus != snap.status)
+                    lastStatusChangeMs_ = nowUtcMs();
+                // 暂停->播放过渡：QQ 此刻常上报暂停前的残留 Timeline，直接采用会把滞后
+                // 位置烘焙进锚点，随后被播放分支 >800 对齐造成整段高亮回退。
+                // 而暂停期间位置本就不会移动（暂停中拖进度条已实时跟随进 smoothPos_），
+                // 本地平滑值就是最佳恢复点：以它重建锚点，不信此刻的上报值
                 bool resumed = newStatus == PlaybackStatus::Playing &&
                                snap.status != PlaybackStatus::Playing;
 
@@ -201,7 +215,12 @@ struct SmtcMonitor::Impl {
                 if (nowUtcMs() - newAnchor > 2000)
                     newAnchor = nowUtcMs();
                 if (resumed) {
-                    snap.positionMs = newPos;
+                    std::wstring key = snap.title + L'|' + snap.artist;
+                    snap.positionMs = (posInit_ && posTrackKey_ == key)
+                                          ? (int64_t)(smoothPos_ + 0.5)
+                                          : newPos; // 无平滑状态（如刚启动）才退回上报值
+                    if (snap.durationMs > 0 && snap.positionMs > snap.durationMs)
+                        snap.positionMs = snap.durationMs;
                     snap.anchorUtcMs = nowUtcMs();
                 } else if (!isStaleTimelineUpdate(newPos, newAnchor)) {
                     snap.positionMs = newPos;
@@ -265,6 +284,7 @@ void SmtcMonitor::start(ChangeCallback onChange) {
 SmtcSnapshot SmtcMonitor::snapshot() const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     SmtcSnapshot s = impl_->snap;
+    const int64_t rawPos = s.positionMs; // SMTC 原始上报值（下方 Playing 分支才会插值）
     if (s.sessionAlive && s.status == PlaybackStatus::Playing) {
         int64_t elapsed = nowUtcMs() - s.anchorUtcMs;
         if (elapsed > 0) {
@@ -275,6 +295,7 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
     }
     if (!s.sessionAlive) {
         impl_->posInit_ = false;
+        impl_->prevPaused_ = false;
         return s;
     }
     // 进度平滑：本地时钟自走 + 慢速校正，滤掉锚点阶跃
@@ -285,16 +306,19 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         dt = std::chrono::duration<float, std::milli>(now - impl_->posTick_).count();
     impl_->posTick_ = now;
     if (s.status != PlaybackStatus::Playing) {
-        // 暂停中：仅当平滑值落后于原始值（err>0 且 ≤800ms）时保留——播放时平滑值经
-        // 慢速校正本就略落后于原始值，暂停瞬间若直接对齐原始值，逐字填充会抢跑补上
-        // 这一截；反之平滑值超前（err<0，播放中"不倒退"钳制所致）必须回落对齐，
-        // 否则恢复播放后会从超前位置继续自走，整首歌都快一截；
-        // err>800 视为暂停中拖进度条，立即跟随保证 seek 实时响应
-        double err = (double)s.positionMs - impl_->smoothPos_;
-        if (!impl_->posInit_ || impl_->posTrackKey_ != key || err < 0 || err > 800.0)
+        // 非播放态冻结在平滑值，不高亮回退也不抢跑。
+        // 进入暂停的第一帧（上一帧还在播放）无条件冻结：快速连续暂停/播放时 QQ 此刻
+        // 上报的 Timeline 可能是被合并/滞后的残留值（甚至可能以 >2s 倒退穿过噪声过滤），
+        // 跟随会回退逐字高亮；只有持续暂停中原始值自身跳变（>250ms，用户拖进度条，
+        // 250 与 isStaleTimelineUpdate 的噪声窗口一致）才跟随
+        double rawJump = (double)(rawPos - impl_->prevRawMs_);
+        bool seekWhilePaused = impl_->prevPaused_ && std::fabs(rawJump) > 250.0;
+        if (!impl_->posInit_ || impl_->posTrackKey_ != key || seekWhilePaused)
             impl_->smoothPos_ = (double)s.positionMs;
         impl_->posTrackKey_ = key;
         impl_->posInit_ = true;
+        impl_->prevRawMs_ = rawPos;
+        impl_->prevPaused_ = true;
         int64_t paused = (int64_t)(impl_->smoothPos_ + 0.5);
         if (s.durationMs > 0 && paused > s.durationMs)
             paused = s.durationMs;
@@ -325,6 +349,8 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
     if (smoothed < 0)
         smoothed = 0;
     s.positionMs = smoothed;
+    impl_->prevRawMs_ = rawPos; // 播放中也要保持最新，暂停瞬间的 rawJump 才测得准
+    impl_->prevPaused_ = false;
     return s;
 }
 
