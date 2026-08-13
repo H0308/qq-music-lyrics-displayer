@@ -678,9 +678,11 @@ void App::showTrayMenu() {
     } else if (!currentHasTranslation_ && !currentHasRomanization_) {
         addItem(kCmdSwitchSecondaryLyric, L"无罗马音和翻译", false, false);
     } else if (preferRomanization_) {
-        addItem(kCmdSwitchSecondaryLyric, L"切换到翻译", false, currentHasTranslation_);
+        // 只要当前歌曲存在任意一种辅助歌词，切换按钮就保持可用。
+        // 目标类型不存在时由歌词渲染层显示空的辅助行，保留原文歌词。
+        addItem(kCmdSwitchSecondaryLyric, L"切换到翻译", false, true);
     } else {
-        addItem(kCmdSwitchSecondaryLyric, L"切换到罗马音", false, currentHasRomanization_);
+        addItem(kCmdSwitchSecondaryLyric, L"切换到罗马音", false, true);
     }
     addSeparator();
     addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
