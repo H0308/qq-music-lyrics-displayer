@@ -121,12 +121,27 @@ std::optional<COLORREF> extractDominantColor(const std::vector<uint8_t>& imageBy
 
     int best = -1;
     uint32_t bestCount = 0;
+    int chromaticBest = -1;
+    uint32_t chromaticBestCount = 0;
     for (int i = 0; i < kBucketCount; ++i) {
         if (buckets[i] > bestCount) {
             bestCount = buckets[i];
             best = i;
         }
+
+        // 浅色封面常有大面积白色/灰色背景。优先从有明显色相的桶中
+        // 选主色，避免背景数量更多时把粉色、蓝色等封面主色冲掉。
+        const int r = (((i >> 8) & 0xF) << 4) + 8;
+        const int g = (((i >> 4) & 0xF) << 4) + 8;
+        const int b = ((i & 0xF) << 4) + 8;
+        const int chroma = std::max({r, g, b}) - std::min({r, g, b});
+        if (chroma >= 24 && buckets[i] > chromaticBestCount) {
+            chromaticBestCount = buckets[i];
+            chromaticBest = i;
+        }
     }
+    if (chromaticBest >= 0)
+        best = chromaticBest;
     if (best < 0)
         return std::nullopt;
 
