@@ -26,6 +26,8 @@ constexpr int kIdCancelBtn = 106;
 constexpr int kIdPreviewPanel = 107;
 constexpr int kIdStatus = 108;
 constexpr int kIdHint = 109;
+constexpr int kIdAdvanceLyric = 110;
+constexpr int kIdDelayLyric = 111;
 
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
@@ -321,6 +323,8 @@ struct ManualSearchDialog::Impl {
     fluent::FluentLabel hintLabel;
     fluent::FluentButton okBtn;
     fluent::FluentButton cancelBtn;
+    fluent::FluentButton advanceLyricBtn;
+    fluent::FluentButton delayLyricBtn;
     LyricPreviewPanel preview;
 
     LyricProvider* provider = nullptr;
@@ -332,6 +336,8 @@ struct ManualSearchDialog::Impl {
     int selectedIdx = -1;
     std::vector<LyricLine> previewLines;
     SongInfo previewInfo;
+    int64_t previewOffsetMs = 0;
+    int64_t playbackPositionMs = 0;
 
     ManualSearchDialog::ApplyCallback onApply;
 
@@ -431,6 +437,10 @@ struct ManualSearchDialog::Impl {
         okBtn.create(hwnd, kIdOkBtn, L"使用此歌词", true);
         okBtn.setEnabled(false);
         cancelBtn.create(hwnd, kIdCancelBtn, L"取消", false);
+        advanceLyricBtn.create(hwnd, kIdAdvanceLyric, L"提前 0.5 秒", false);
+        advanceLyricBtn.setEnabled(false);
+        delayLyricBtn.create(hwnd, kIdDelayLyric, L"延后 0.5 秒", false);
+        delayLyricBtn.setEnabled(false);
 
         preview.create(hwnd, inst, 0, 0, 0, 0);
     }
@@ -478,6 +488,9 @@ struct ManualSearchDialog::Impl {
         int cancelW = px(88);
         int btnH = px(32);
         int btnY = h - pad - btnH;
+        int timingW = px(100);
+        advanceLyricBtn.move(pad, btnY, timingW, btnH);
+        delayLyricBtn.move(pad + timingW + gap, btnY, timingW, btnH);
         okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
         cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
     }
@@ -489,6 +502,10 @@ struct ManualSearchDialog::Impl {
             this->destroy();
         } else if (id == kIdOkBtn && code == BN_CLICKED) {
             this->applySelection();
+        } else if (id == kIdAdvanceLyric && code == BN_CLICKED) {
+            this->shiftPreviewTimes(-500);
+        } else if (id == kIdDelayLyric && code == BN_CLICKED) {
+            this->shiftPreviewTimes(500);
         } else if (id == kIdCandidateList && code == LBN_SELCHANGE) {
             this->onSelectionChanged();
         } else if ((id == kIdTitleEdit || id == kIdArtistEdit) && code == EN_KILLFOCUS) {
@@ -503,9 +520,13 @@ struct ManualSearchDialog::Impl {
         list.clear();
         preview.setLyrics({});
         selectedIdx = -1;
+        previewLines.clear();
+        previewOffsetMs = 0;
         candidates.clear();
         itemToCand.clear();
         okBtn.setEnabled(false);
+        advanceLyricBtn.setEnabled(false);
+        delayLyricBtn.setEnabled(false);
         statusLabel.setText(L"搜索中，请稍候…");
 
         std::wstring title = titleEdit.text();
@@ -588,7 +609,11 @@ struct ManualSearchDialog::Impl {
             return; // 分组标题不可选（FluentList 已保证不会选中标题行）
         selectedIdx = idx;
         preview.setLyrics({});
+        previewLines.clear();
+        previewOffsetMs = 0;
         okBtn.setEnabled(false);
+        advanceLyricBtn.setEnabled(false);
+        delayLyricBtn.setEnabled(false);
         statusLabel.setText(L"正在加载《" + candidates[idx].name + L"》的歌词预览…");
         HWND hwndCopy = hwnd;
         int idxCopy = idx;
@@ -612,8 +637,11 @@ struct ManualSearchDialog::Impl {
         }
         previewLines = lines;
         previewInfo = info;
+        previewOffsetMs = 0;
         preview.setLyrics(previewLines);
         okBtn.setEnabled(true);
+        advanceLyricBtn.setEnabled(true);
+        delayLyricBtn.setEnabled(true);
         // QRC/KRC 均带逐字时间轴，LRC 为整行时间轴。
         bool wordByWord = false;
         for (const auto& l : lines) {
@@ -639,6 +667,27 @@ struct ManualSearchDialog::Impl {
         if (onApply)
             onApply();
         this->destroy();
+    }
+
+    void shiftPreviewTimes(int64_t deltaMs) {
+        if (previewLines.empty())
+            return;
+        previewOffsetMs += deltaMs;
+        for (auto& line : previewLines) {
+            line.ms += deltaMs;
+            for (auto& ch : line.chars) {
+                ch.startMs += deltaMs;
+                ch.endMs += deltaMs;
+            }
+        }
+        preview.setLyrics(previewLines);
+        preview.setPosition(playbackPositionMs);
+        std::wstring offsetText = previewOffsetMs >= 0 ? L"+" : L"";
+        offsetText += std::to_wstring(previewOffsetMs / 1000);
+        std::wstring status = L"预览时间已调整 ";
+        status += offsetText;
+        status += L" 秒，确认后点击“使用此歌词”。";
+        statusLabel.setText(status);
     }
 
     void destroy() {
@@ -735,5 +784,6 @@ void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
 }
 
 void ManualSearchDialog::setPlaybackPosition(int64_t positionMs) {
+    impl_->playbackPositionMs = positionMs;
     impl_->preview.setPosition(positionMs);
 }

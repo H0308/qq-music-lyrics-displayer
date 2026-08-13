@@ -16,7 +16,7 @@ constexpr int kBucketCount = 4096;
 // 作为文字颜色的可读亮度区间（HSL 的 L）：上限压低，提取到浅色时调成同色相稍深的颜色；
 // 过暗的颜色也会适当提亮，避免在深/浅任务栏上看不清
 constexpr float kMinLightness = 0.35f;
-constexpr float kMaxLightness = 0.60f;
+constexpr float kMaxLightness = 0.45f;
 
 void rgbToHsl(int ri, int gi, int bi, float& h, float& s, float& l) {
     const float r = ri / 255.0f, g = gi / 255.0f, b = bi / 255.0f;
@@ -123,6 +123,8 @@ std::optional<COLORREF> extractDominantColor(const std::vector<uint8_t>& imageBy
     uint32_t bestCount = 0;
     int chromaticBest = -1;
     uint32_t chromaticBestCount = 0;
+    int darkChromaticBest = -1;
+    uint32_t darkChromaticBestCount = 0;
     for (int i = 0; i < kBucketCount; ++i) {
         if (buckets[i] > bestCount) {
             bestCount = buckets[i];
@@ -139,8 +141,20 @@ std::optional<COLORREF> extractDominantColor(const std::vector<uint8_t>& imageBy
             chromaticBestCount = buckets[i];
             chromaticBest = i;
         }
+        if (chroma >= 24 && buckets[i] > darkChromaticBestCount) {
+            float hh = 0.0f, ss = 0.0f, ll = 0.0f;
+            rgbToHsl(r, g, b, hh, ss, ll);
+            if (ll <= kMaxLightness) {
+                darkChromaticBestCount = buckets[i];
+                darkChromaticBest = i;
+            }
+        }
     }
-    if (chromaticBest >= 0)
+    // 明亮主色不直接压成同色的亮色版本：优先换用封面中更暗的其他有色桶，
+    // 这样能避开黄色、荧光绿等刺眼颜色，同时保留专辑的色彩倾向。
+    if (darkChromaticBest >= 0)
+        best = darkChromaticBest;
+    else if (chromaticBest >= 0)
         best = chromaticBest;
     if (best < 0)
         return std::nullopt;

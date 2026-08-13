@@ -51,6 +51,7 @@ constexpr UINT kCmdFollowAlbum = 113;
 constexpr UINT kCmdSecondaryLyric = 114;
 constexpr UINT kCmdSwitchSecondaryLyric = 115;
 constexpr UINT kCmdSongInfo = 116;
+constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
     std::wstring key;
@@ -326,7 +327,8 @@ struct App {
         } else {
             host->setStatusText(L"");
         }
-        int idx = LyricProvider::findLine(host->lyrics(), snap.positionMs);
+        int idx = LyricProvider::findLine(host->lyrics(),
+                                          snap.positionMs + kLyricTransitionLeadMs);
         host->setCurrentLine(idx);
     }
 
@@ -479,7 +481,10 @@ struct App {
         SmtcSnapshot snap = monitor.snapshot();
         if (!snap.sessionAlive) return;
         for (auto* h : hosts()) {
-            int idx = LyricProvider::findLine(h->lyrics(), snap.positionMs);
+            // 提前切换显示行，让上下滚动动画在下一句真正开始前完成；
+            // setPosition 仍传真实播放时间，避免逐字高亮跟着提前。
+            int idx = LyricProvider::findLine(h->lyrics(),
+                                              snap.positionMs + kLyricTransitionLeadMs);
             h->setCurrentLine(idx);
             h->setPosition(snap.positionMs);
         }
