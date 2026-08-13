@@ -39,6 +39,20 @@ public:
 
     void setLyrics(const std::vector<LyricLine>& lines) {
         lines_ = lines;
+        bool hasTranslation = false;
+        bool hasRomanization = false;
+        for (const auto& line : lines_) {
+            hasTranslation = hasTranslation || !line.translation.empty();
+            hasRomanization = hasRomanization || !line.romanization.empty();
+        }
+        if (hasTranslation && hasRomanization)
+            capabilityLabel_ = L"[支持翻译+罗马音]";
+        else if (hasTranslation)
+            capabilityLabel_ = L"[支持翻译]";
+        else if (hasRomanization)
+            capabilityLabel_ = L"[支持罗马音]";
+        else
+            capabilityLabel_.clear();
         positionMs_ = 0;
         topLine_ = 0;
         currentLine_ = -1;
@@ -253,16 +267,26 @@ private:
             }
             return;
         }
+        float contentTop = 0.0f;
+        if (!capabilityLabel_.empty()) {
+            if (auto* fmt = textFormat(11.0f, 400, true)) {
+                br->SetColor(p.textSecondary);
+                rt->DrawTextW(capabilityLabel_.c_str(), static_cast<UINT32>(capabilityLabel_.size()),
+                              fmt, D2D1::RectF(pad, 7.0f, wDip - pad, 27.0f), br);
+            }
+            contentTop = 27.0f;
+        }
         int total = static_cast<int>(lines_.size());
         int maxTop = std::max(0, total - kVisible);
         int top = std::clamp(topLine_, 0, maxTop);
         int count = std::min(kVisible, total - top);
-        float slotH = hDip / kVisible;
+        float slotH = std::max(1.0f, (hDip - contentTop) / kVisible);
         for (int i = 0; i < count; ++i) {
             int lineIdx = top + i;
             bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
             const std::wstring& text = lines_[lineIdx].text;
-            D2D1_RECT_F rect = D2D1::RectF(pad, i * slotH, wDip - pad, (i + 1) * slotH);
+            D2D1_RECT_F rect = D2D1::RectF(pad, contentTop + i * slotH, wDip - pad,
+                                           contentTop + (i + 1) * slotH);
             // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
             if (cur) {
                 drawCurrentLine(rt, br, p, lines_[lineIdx], rect);
@@ -274,6 +298,7 @@ private:
     }
 
     std::vector<LyricLine> lines_;
+    std::wstring capabilityLabel_;
     int64_t positionMs_ = 0;
     int topLine_ = 0;
     int currentLine_ = -1;
@@ -517,20 +542,20 @@ struct ManualSearchDialog::Impl {
             items.push_back({c.name + L" - " + c.singer, false});
             itemToCand.push_back(idx);
         };
-        if (qrcCount > 0) {
-            addHeader(L"QQ 音乐逐字歌词（QRC）");
-            for (int i = 0; i < (int)candidates.size(); ++i)
-                if (candidates[i].source == LyricSource::Qrc)
-                    addItem(i);
-        }
         if (krcCount > 0) {
             addHeader(L"酷狗逐字歌词（KRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
                 if (candidates[i].source == LyricSource::Krc)
                     addItem(i);
         }
+        if (qrcCount > 0) {
+            addHeader(L"QQ 音乐逐字歌词（QRC）");
+            for (int i = 0; i < (int)candidates.size(); ++i)
+                if (candidates[i].source == LyricSource::Qrc)
+                    addItem(i);
+        }
         if (lrcCount > 0) {
-            addHeader(L"整行歌词（LRC）");
+            addHeader(L"QQ 音乐逐行歌词（LRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
                 if (candidates[i].source == LyricSource::Lrc)
                     addItem(i);
@@ -540,9 +565,9 @@ struct ManualSearchDialog::Impl {
         if (candidates.empty()) {
             statusLabel.setText(L"未找到相关歌曲，请尝试更换关键词。");
         } else {
-            statusLabel.setText(L"找到 " + std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
-                                std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
-                                std::to_wstring(lrcCount) + L" 条整行（LRC）候选，点击选择以预览歌词。");
+            statusLabel.setText(L"找到 " + std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
+                                std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
+                                std::to_wstring(lrcCount) + L" 条 QQ 逐行（LRC）候选，点击选择以预览歌词。");
             // 默认选中第一条非分组标题的候选
             for (int i = 0; i < (int)itemToCand.size(); ++i) {
                 if (itemToCand[i] >= 0) {

@@ -62,7 +62,8 @@ struct MenuWnd {
     LRESULT handleMsg(UINT msg, WPARAM wp, LPARAM lp);
 
     bool selectable(int row) const {
-        return row >= 0 && row < static_cast<int>(items.size()) && !items[row].separator;
+        return row >= 0 && row < static_cast<int>(items.size()) && !items[row].separator &&
+               items[row].enabled;
     }
 
     float rowY(int row) const {
@@ -168,7 +169,7 @@ struct MenuWnd {
                 y += kSepH;
                 continue;
             }
-            bool hov = i == hover;
+            bool hov = i == hover && it.enabled;
             if (hov) {
                 brush->SetColor(p.listHover);
                 rt->FillRoundedRectangle(
@@ -178,13 +179,13 @@ struct MenuWnd {
             }
             if (it.checked) {
                 // 勾选标记：手绘折线
-                brush->SetColor(p.text);
+                brush->SetColor(it.enabled ? p.text : p.textSecondary);
                 float cx = kPadX + 10.0f, cy = y + kItemH / 2.0f;
                 rt->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(cx + 3.5f, cy + 3.5f), brush, 1.6f);
                 rt->DrawLine(D2D1::Point2F(cx + 3.5f, cy + 3.5f), D2D1::Point2F(cx + 9.0f, cy - 4.0f),
                              brush, 1.6f);
             }
-            brush->SetColor(p.text);
+            brush->SetColor(it.enabled ? p.text : p.textSecondary);
             rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,
                           D2D1::RectF(kGutter, y, wDip - kRightPad, y + kItemH), brush);
             if (!it.submenu.empty()) {
@@ -364,6 +365,8 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     case WM_MOUSEMOVE: {
         int row = rowAt(dipY(lp));
+        if (!selectable(row))
+            row = -1;
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme); // 重复武装是幂等的
         if (row != hover) {

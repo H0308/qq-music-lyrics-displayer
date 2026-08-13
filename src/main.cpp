@@ -48,6 +48,9 @@ constexpr UINT kCmdTaskbarPosLeft = 110;
 constexpr UINT kCmdSpectrum = 111;
 constexpr UINT kCmdAutoStart = 112;
 constexpr UINT kCmdFollowAlbum = 113;
+constexpr UINT kCmdSecondaryLyric = 114;
+constexpr UINT kCmdSwitchSecondaryLyric = 115;
+constexpr UINT kCmdSongInfo = 116;
 
 struct CoverPayload {
     std::wstring key;
@@ -163,6 +166,11 @@ struct App {
 
     // 已播放颜色跟随专辑封面主色调：开启时覆盖 lyricColor_，关闭后恢复配置色
     bool lyricFollowAlbum_ = false;
+    // 总开关与类型选择独立于当前歌曲能力；缺少所选内容时暂不显示，后续自动恢复。
+    bool secondaryLyricEnabled_ = true;
+    bool preferRomanization_ = false;
+    bool currentHasTranslation_ = false;
+    bool currentHasRomanization_ = false;
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
     COLORREF albumColor_ = RGB(49, 194, 124);
     std::shared_ptr<const std::vector<uint8_t>> lastCover_; // 当前曲目有效封面（SMTC 优先，API 兜底）
@@ -173,6 +181,7 @@ struct App {
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
     bool spectrumOn_ = false;
+    bool songInfoVisible_ = true;
 
     std::wstring settingsPath_;
 
@@ -180,6 +189,22 @@ struct App {
         std::vector<ILyricHost*> v;
         if (taskbarHost) v.push_back(taskbarHost.get());
         return v;
+    }
+
+    void updateLyricCapabilities(const std::vector<LyricLine>& lines) {
+        currentHasTranslation_ = false;
+        currentHasRomanization_ = false;
+        for (const auto& line : lines) {
+            currentHasTranslation_ = currentHasTranslation_ || !line.translation.empty();
+            currentHasRomanization_ = currentHasRomanization_ || !line.romanization.empty();
+        }
+    }
+
+    void applySecondaryLyricMode() {
+        const bool showTranslation = secondaryLyricEnabled_ && !preferRomanization_;
+        const bool showRomanization = secondaryLyricEnabled_ && preferRomanization_;
+        for (auto* h : hosts())
+            h->setSecondaryLyricMode(showTranslation, showRomanization);
     }
 
     bool createTaskbar(HINSTANCE inst) {
@@ -199,6 +224,9 @@ struct App {
         taskbarHost->setFontGlow(lyricGlow_);
         taskbarHost->setFontOutline(lyricOutline_);
         taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
+        taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
+                                           secondaryLyricEnabled_ && preferRomanization_);
+        taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setSpectrumVisible(spectrumOn_);
         if (spectrumOn_)
@@ -236,6 +264,7 @@ struct App {
             return;
         }
         manualSearchDialog->setApplyCallback([this] {
+            updateLyricCapabilities(provider.lines());
             auto hs = hosts();
             for (auto* h : hs) {
                 h->setLyrics(provider.lines());
@@ -317,6 +346,7 @@ struct App {
             currentKey.clear();
             lastStatus = PlaybackStatus::Stopped;
             lyricLoading_ = false;
+            updateLyricCapabilities({});
             lastCover_.reset();
             hasAlbumColor_ = false;
             for (auto* h : hs) {
@@ -356,6 +386,7 @@ struct App {
                 snap.artist.c_str(), snap.durationMs);
             lastCover_.reset();
             hasAlbumColor_ = false;
+            updateLyricCapabilities({});
             if (lyricFollowAlbum_)
                 applyFontColors(); // 新封面就绪前先回到配置色
             for (auto* h : hs) {
@@ -376,6 +407,7 @@ struct App {
         lyricLoading_ = false;
         auto hs = hosts();
         if (ok) {
+            updateLyricCapabilities(provider.lines());
             for (auto* h : hs) {
                 h->setLyrics(provider.lines());
                 std::wprintf(L"[lyric] loaded %zu lines: %s\n", h->lyrics().size(),
@@ -399,6 +431,7 @@ struct App {
             }
         }
         else {
+            updateLyricCapabilities({});
             for (auto* h : hs) {
                 h->setLyrics({});
                 h->setStatusText(L"暂无歌词");
@@ -493,6 +526,18 @@ void App::loadSettings() {
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         spectrumOn_ = j.value("spectrum", false);
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
+        if (j.contains("secondaryLyricEnabled") || j.contains("secondaryLyricType")) {
+            secondaryLyricEnabled_ = j.value("secondaryLyricEnabled", true);
+            preferRomanization_ = j.value("secondaryLyricType", std::string("translation")) ==
+                                    "romanization";
+        } else {
+            // 从上一版的两个互斥开关迁移：两者都关时视为总开关关闭，类型保留翻译。
+            bool oldTranslation = j.value("translationEnabled", true);
+            bool oldRomanization = j.value("romanizationEnabled", false);
+            secondaryLyricEnabled_ = oldTranslation || oldRomanization;
+            preferRomanization_ = oldRomanization && !oldTranslation;
+        }
+        songInfoVisible_ = j.value("songInfoVisible", true);
     } catch (...) {
     }
 }
@@ -515,6 +560,9 @@ void App::saveSettings() {
         j["taskbarPosition"] = taskbarPosition_;
         j["spectrum"] = spectrumOn_;
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
+        j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
+        j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
+        j["songInfoVisible"] = songInfoVisible_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -574,11 +622,13 @@ void App::updateTrayIcon() {
 
 void App::showTrayMenu() {
     std::vector<fluent::FluentMenuItem> items;
-    auto addItem = [&items](int id, const wchar_t* text, bool checked = false) {
+    auto addItem = [&items](int id, const wchar_t* text, bool checked = false,
+                            bool enabled = true) {
         fluent::FluentMenuItem it;
         it.id = id;
         it.text = text;
         it.checked = checked;
+        it.enabled = enabled;
         items.push_back(std::move(it));
     };
     auto addSeparator = [&items] {
@@ -601,6 +651,7 @@ void App::showTrayMenu() {
         sub.checked = taskbarPosition_ == 1;
         pos.submenu.push_back(sub);
         items.push_back(std::move(pos));
+        addItem(kCmdSongInfo, L"显示歌曲信息", songInfoVisible_);
         addItem(kCmdSpectrum, L"频谱", spectrumOn_);
     }
     addSeparator();
@@ -610,6 +661,16 @@ void App::showTrayMenu() {
         addItem(kCmdFollowAlbum, L"已播放颜色跟随专辑", lyricFollowAlbum_);
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
+    addItem(kCmdSecondaryLyric, L"开启翻译/罗马音", secondaryLyricEnabled_);
+    if (lyricLoading_) {
+        addItem(kCmdSwitchSecondaryLyric, L"正在检查翻译和罗马音", false, false);
+    } else if (!currentHasTranslation_ && !currentHasRomanization_) {
+        addItem(kCmdSwitchSecondaryLyric, L"无罗马音和翻译", false, false);
+    } else if (preferRomanization_) {
+        addItem(kCmdSwitchSecondaryLyric, L"切换到翻译", false, currentHasTranslation_);
+    } else {
+        addItem(kCmdSwitchSecondaryLyric, L"切换到罗马音", false, currentHasRomanization_);
+    }
     addSeparator();
     addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
     addSeparator();
@@ -664,6 +725,22 @@ void App::onMenuCommand(int cmd) {
         break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
+        break;
+    case kCmdSecondaryLyric:
+        secondaryLyricEnabled_ = !secondaryLyricEnabled_;
+        applySecondaryLyricMode();
+        saveSettings();
+        break;
+    case kCmdSongInfo:
+        songInfoVisible_ = !songInfoVisible_;
+        if (taskbarHost)
+            taskbarHost->setSongInfoVisible(songInfoVisible_);
+        saveSettings();
+        break;
+    case kCmdSwitchSecondaryLyric:
+        preferRomanization_ = !preferRomanization_;
+        applySecondaryLyricMode();
+        saveSettings();
         break;
     case kCmdAutoStart: {
         bool enable = !autoStartEnabled();

@@ -236,9 +236,13 @@ struct TaskbarHost::Impl {
     float lyricHeight_ = 0.0f;
     float lyricScrollOffset_ = 0.0f;
     float lyricScrollSpeed_ = kLyricScrollSpeed; // 动态速度：随当前行时长变化，最慢 kLyricScrollSpeed
+    float secondaryWidth_ = 0.0f;
+    float secondaryHeight_ = 0.0f;
+    float secondaryScrollOffset_ = 0.0f;
     std::wstring lastTitle_;
     std::wstring lastArtist_;
     std::wstring lastLyric_;
+    std::wstring lastSecondary_;
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -247,9 +251,11 @@ struct TaskbarHost::Impl {
     IDWriteTextFormat* fmtTitle_ = nullptr;
     IDWriteTextFormat* fmtArtist_ = nullptr;
     IDWriteTextFormat* fmtLyric_ = nullptr;
+    IDWriteTextFormat* fmtSecondary_ = nullptr;
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
+    IDWriteTextLayout* secondaryLayout_ = nullptr;
     ID2D1SolidColorBrush* brushBg_ = nullptr;
     ID2D1SolidColorBrush* brushText_ = nullptr;
     ID2D1SolidColorBrush* brushDim_ = nullptr;
@@ -266,6 +272,9 @@ struct TaskbarHost::Impl {
     COLORREF lyricOutlineColor_ = RGB(0, 0, 0);         // 描边颜色
     bool lyricGlow_ = false;                            // 光晕开关
     bool lyricOutline_ = false;                         // 描边开关
+    bool translationEnabled_ = true;
+    bool romanizationEnabled_ = false;
+    bool songInfoVisible_ = true;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
     bool spectrumVisible_ = false;
@@ -380,8 +389,16 @@ struct TaskbarHost::Impl {
             pxH = taskbarH;
 
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
-        int minW = (int)std::lround(kMinWidthDip * scale());
-        int maxW = (int)std::lround(kMaxWidthDip * scale());
+        float minWidthDip = kMinWidthDip;
+        float maxWidthDip = kMaxWidthDip;
+        if (!songInfoVisible_) {
+            // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为封面本身。
+            const float compactLeftDip = kCoverPadding + dip(pxH) - kCoverPadding * 2.0f;
+            minWidthDip = kMinWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
+            maxWidthDip = kMaxWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
+        }
+        int minW = (int)std::lround(minWidthDip * scale());
+        int maxW = (int)std::lround(maxWidthDip * scale());
         // 频谱开启时整体加宽（频谱簇 + 与歌词的间距），不压缩歌词原有宽度；关闭即恢复
         if (spectrumVisible_) {
             int extra = (int)std::lround((spectrumClusterW() + kTextPadding) * scale());
@@ -589,6 +606,18 @@ struct TaskbarHost::Impl {
         render();
     }
 
+    void setSecondaryLyricMode(bool translation, bool romanization) {
+        // 调用方保证互斥，这里再收紧一次，避免异常状态绘制三行。
+        if (translation && romanization)
+            romanization = false;
+        if (translationEnabled_ == translation && romanizationEnabled_ == romanization)
+            return;
+        translationEnabled_ = translation;
+        romanizationEnabled_ = romanization;
+        textDirty_ = true;
+        render();
+    }
+
     void setSpectrumVisible(bool on) {
         if (spectrumVisible_ == on)
             return;
@@ -597,6 +626,17 @@ struct TaskbarHost::Impl {
             spectrumBands_.fill(0.0f);
         // 先改窗口宽度再渲染：若在 render 内经 layoutDirty_ 改大小，
         // render 结尾的 present 会用旧尺寸位图把窗口尺寸拽回去（与 setPositionMode 同序）
+        adjustPosition();
+        render();
+    }
+
+    void setSongInfoVisible(bool on) {
+        if (songInfoVisible_ == on)
+            return;
+        songInfoVisible_ = on;
+        titleScrollOffset_ = 0.0f;
+        artistScrollOffset_ = 0.0f;
+        textDirty_ = true;
         adjustPosition();
         render();
     }
@@ -691,6 +731,8 @@ struct TaskbarHost::Impl {
              &fmtArtist_);
         make(fontSize_ * 1.18f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtLyric_);
+        make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+             &fmtSecondary_);
         textDirty_ = true;
     }
 
@@ -717,9 +759,11 @@ struct TaskbarHost::Impl {
         r(fmtTitle_);
         r(fmtArtist_);
         r(fmtLyric_);
+        r(fmtSecondary_);
         r(titleLayout_);
         r(artistLayout_);
         r(lyricLayout_);
+        r(secondaryLayout_);
         r(brushBg_);
         r(brushText_);
         r(brushDim_);
@@ -886,6 +930,10 @@ struct TaskbarHost::Impl {
             lyricLayout_->Release();
             lyricLayout_ = nullptr;
         }
+        if (secondaryLayout_) {
+            secondaryLayout_->Release();
+            secondaryLayout_ = nullptr;
+        }
 
         float infoX = kCoverPadding + coverSize() + kCoverPadding;
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
@@ -893,7 +941,7 @@ struct TaskbarHost::Impl {
         titleHeight_ = 0.0f;
         artistWidth_ = 0.0f;
         artistHeight_ = 0.0f;
-        if (!media.title.empty()) {
+        if (songInfoVisible_ && !media.title.empty()) {
             dwrite->CreateTextLayout(media.title.c_str(), (UINT32)media.title.size(), fmtTitle_,
                                      100000.0f, 40.0f, &titleLayout_);
             if (titleLayout_) {
@@ -903,7 +951,7 @@ struct TaskbarHost::Impl {
                 titleHeight_ = m.height;
             }
         }
-        if (!media.artist.empty()) {
+        if (songInfoVisible_ && !media.artist.empty()) {
             dwrite->CreateTextLayout(media.artist.c_str(), (UINT32)media.artist.size(), fmtArtist_,
                                      100000.0f, 40.0f, &artistLayout_);
             if (artistLayout_) {
@@ -915,17 +963,27 @@ struct TaskbarHost::Impl {
         }
 
         std::wstring lyric;
+        std::wstring secondary;
         if (currentLine >= 0 && (size_t)currentLine < lines.size()) {
             lyric = lines[(size_t)currentLine].text;
+            secondary = translationEnabled_ ? lines[(size_t)currentLine].translation
+                                            : (romanizationEnabled_
+                                                   ? lines[(size_t)currentLine].romanization
+                                                   : std::wstring());
         } else if (!lines.empty()) {
             // 进度还没到达首句时，先显示第一句，避免空白
             lyric = lines.front().text;
+            secondary = translationEnabled_ ? lines.front().translation
+                                            : (romanizationEnabled_ ? lines.front().romanization
+                                                                    : std::wstring());
         } else {
             lyric = statusText;
         }
         lyricLayout_ = nullptr;
         lyricWidth_ = 0.0f;
         lyricHeight_ = 0.0f;
+        secondaryWidth_ = 0.0f;
+        secondaryHeight_ = 0.0f;
         if (!lyric.empty()) {
             // 用足够大的宽度创建布局以准确测量文本宽度
             dwrite->CreateTextLayout(lyric.c_str(), (UINT32)lyric.size(), fmtLyric_, 100000.0f,
@@ -936,6 +994,17 @@ struct TaskbarHost::Impl {
                 lyricLayout_->GetMetrics(&m);
                 lyricWidth_ = m.width;
                 lyricHeight_ = m.height;
+            }
+        }
+        if (!secondary.empty() && fmtSecondary_) {
+            dwrite->CreateTextLayout(secondary.c_str(), (UINT32)secondary.size(), fmtSecondary_,
+                                     100000.0f, 100.0f, &secondaryLayout_);
+            if (secondaryLayout_) {
+                secondaryLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                DWRITE_TEXT_METRICS m{};
+                secondaryLayout_->GetMetrics(&m);
+                secondaryWidth_ = m.width;
+                secondaryHeight_ = m.height;
             }
         }
         // 动态滚动速度：让歌词在当前行时长内滚动完一圈。两句间隔越小速度越快，
@@ -953,6 +1022,7 @@ struct TaskbarHost::Impl {
         bool titleChanged = media.title != lastTitle_;
         bool artistChanged = media.artist != lastArtist_;
         bool lyricChanged = lyric != lastLyric_;
+        bool secondaryChanged = secondary != lastSecondary_;
         if (titleChanged) {
             titleScrollOffset_ = 0.0f;
             lastTitle_ = media.title;
@@ -965,7 +1035,11 @@ struct TaskbarHost::Impl {
             lyricScrollOffset_ = 0.0f;
             lastLyric_ = lyric;
         }
-        if (titleChanged || artistChanged || lyricChanged) {
+        if (secondaryChanged) {
+            secondaryScrollOffset_ = 0.0f;
+            lastSecondary_ = secondary;
+        }
+        if (titleChanged || artistChanged || lyricChanged || secondaryChanged) {
             lastTickMs_ = 0;
         }
     }
@@ -1289,7 +1363,8 @@ struct TaskbarHost::Impl {
         float h = dip(pxH);
         // 频谱加宽的额外宽度不参与左右分区：左侧信息区与歌词区保持原宽，额外宽度全给频谱
         float effW = w - spectrumExtraW();
-        float leftW = effW * kLeftRatio;
+        float leftW = songInfoVisible_ ? effW * kLeftRatio
+                                       : kCoverPadding + coverSize();
         float rightW = w - leftW;
 
         if (textDirty_)
@@ -1322,22 +1397,26 @@ struct TaskbarHost::Impl {
             rt->FillRoundedRectangle(rr, brushDim_);
         }
 
-        // 左侧歌曲信息（封面右侧垂直排列，整体垂直居中，超长自动滚动）
-        float infoX = coverX + s + kCoverPadding;
-        float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
-        float infoGap = 2.0f;
-        float totalInfoH = titleHeight_ + infoGap + artistHeight_;
-        float infoY = (h - totalInfoH) * 0.5f;
-        drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
-                          titleScrollOffset_, brushText_);
-        drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
-                          infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_);
+        if (songInfoVisible_) {
+            // 左侧歌曲信息（封面右侧垂直排列，整体垂直居中，超长自动滚动）
+            float infoX = coverX + s + kCoverPadding;
+            float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
+            float infoGap = 2.0f;
+            float totalInfoH = titleHeight_ + infoGap + artistHeight_;
+            float infoY = (h - totalInfoH) * 0.5f;
+            drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
+                              titleScrollOffset_, brushText_);
+            drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
+                              infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_);
+        }
 
         // 右侧歌词区：未悬浮时滚动显示歌词，悬浮时显示控制按钮
         float lyricAreaX = leftW + kTextPadding;
         float lyricAreaW =
             std::max(1.0f, rightW - kTextPadding * 2.0f - spectrumExtraW());
-        float lyricY = h * 0.5f - lyricHeight_ * 0.5f;
+        float secondaryGap = secondaryLayout_ ? 1.0f : 0.0f;
+        float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
+        float lyricY = h * 0.5f - lyricBlockH * 0.5f;
 
         // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
         bool showSpectrum = spectrumVisible_ && !mouseOver_;
@@ -1364,6 +1443,11 @@ struct TaskbarHost::Impl {
                               lyricOutline_ ? brushLyricOutline_ : nullptr,
                               lyricGlow_ ? brushLyricGlow_ : nullptr,
                               karaoke ? brushLyric_ : nullptr, progX);
+            // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
+            if (secondaryLayout_)
+                drawScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_, lyricAreaW,
+                                  lyricAreaX, lyricY + lyricHeight_ + secondaryGap,
+                                  secondaryScrollOffset_, brushDim_);
         }
 
         HRESULT hr = rt->EndDraw();
@@ -1404,7 +1488,8 @@ struct TaskbarHost::Impl {
         if (h <= 0.0f || w <= 0.0f)
             return;
 
-        float leftW = (w - spectrumExtraW()) * kLeftRatio;
+        float leftW = songInfoVisible_ ? (w - spectrumExtraW()) * kLeftRatio
+                                       : kCoverPadding + coverSize();
         float rightW = w - leftW;
         float infoX = kCoverPadding + coverSize() + kCoverPadding;
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
@@ -1412,8 +1497,10 @@ struct TaskbarHost::Impl {
         float lyricAreaW =
             std::max(1.0f, rightW - kTextPadding * 2.0f - spectrumExtraW());
 
-        marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
-        marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
+        if (songInfoVisible_) {
+            marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
+            marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
+        }
         if (mouseOver_)
             return;
         // 逐字歌词：滚动位置跟随逐字填充进度，把当前唱到的位置保持在区域 30% 处，
@@ -1434,6 +1521,7 @@ struct TaskbarHost::Impl {
         } else {
             marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
         }
+        marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
     }
 
     // ---------- 事件 ----------
@@ -1641,6 +1729,14 @@ void TaskbarHost::setFontOutline(bool on) {
 
 void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
     impl_->setFontGlowColors(glow, outline);
+}
+
+void TaskbarHost::setSecondaryLyricMode(bool translation, bool romanization) {
+    impl_->setSecondaryLyricMode(translation, romanization);
+}
+
+void TaskbarHost::setSongInfoVisible(bool on) {
+    impl_->setSongInfoVisible(on);
 }
 
 void TaskbarHost::setSpectrumVisible(bool on) {

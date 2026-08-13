@@ -13,6 +13,7 @@ struct FluentMenuItem {
     int id = 0;
     std::wstring text;
     bool checked = false;
+    bool enabled = true;
     bool separator = false;
     std::vector<FluentMenuItem> submenu;
 };

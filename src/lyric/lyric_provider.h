@@ -17,6 +17,8 @@ struct LyricLine {
     int64_t ms = 0;
     std::wstring text;
     std::vector<LyricChar> chars; // 非空表示有逐字时间轴；text 为 chars 拼接
+    std::wstring translation;     // 与本行时间轴对齐的翻译（可空）
+    std::wstring romanization;    // 与本行时间轴对齐的罗马音（可空）
 };
 
 // 搜索匹配到的歌曲信息（用于歌词下载，也用于封面兜底）

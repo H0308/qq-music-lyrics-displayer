@@ -52,4 +52,6 @@ public:
     virtual void setCurrentLine(int index) = 0;
     virtual void setPosition(int64_t positionMs) = 0; // 每帧下发播放进度，驱动逐字高亮
     virtual void setStatusText(const std::wstring& text) = 0;
+    // 翻译与罗马音互斥；两者均 false 时只显示原文。
+    virtual void setSecondaryLyricMode(bool translation, bool romanization) = 0;
 };

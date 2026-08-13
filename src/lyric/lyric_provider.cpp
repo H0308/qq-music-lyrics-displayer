@@ -454,6 +454,27 @@ bool searchSongs(CURL* curl, const std::wstring& query, std::vector<Candidate>& 
     return true;
 }
 
+// 将独立 LRC 时间轴附着到最近的主歌词行。QQ 的 QRC 与 LRC 起始时间偶有少量偏差，
+// 因此不能只按完全相同的毫秒值匹配；超过 1500ms 则视为不同歌词行。
+void attachSecondary(std::vector<LyricLine>& mainLines, const std::vector<LyricLine>& secondary,
+                     bool translation) {
+    if (mainLines.empty() || secondary.empty())
+        return;
+    size_t cursor = 0;
+    for (const auto& extra : secondary) {
+        while (cursor + 1 < mainLines.size() &&
+               std::llabs(mainLines[cursor + 1].ms - extra.ms) <=
+                   std::llabs(mainLines[cursor].ms - extra.ms))
+            ++cursor;
+        if (std::llabs(mainLines[cursor].ms - extra.ms) > 1500)
+            continue;
+        std::wstring& target = translation ? mainLines[cursor].translation
+                                           : mainLines[cursor].romanization;
+        if (target.empty())
+            target = extra.text;
+    }
+}
+
 std::string xmlInnerText(const std::string& xml, const std::string& tag) {
     const std::string open = "<" + tag;
     size_t begin = xml.find(open);
@@ -502,7 +523,32 @@ bool downloadLyric(CURL* curl, const std::string& songmid, std::vector<LyricLine
     std::string lrc = base64Decode(j.value("lyric", std::string()));
     if (lrc.empty()) return false;
     out = parseLrc(lrc);
+    const std::string trans = base64Decode(j.value("trans", std::string()));
+    const std::string roma = base64Decode(j.value("roma", std::string()));
+    if (!trans.empty())
+        attachSecondary(out, parseLrc(trans), true);
+    if (!roma.empty())
+        attachSecondary(out, parseLrc(roma), false);
     return !out.empty();
+}
+
+// QRC/KRC 提供主逐字时间轴时，仍从 QQ LRC 接口补充同歌曲的翻译与罗马音。
+void attachQqSecondary(CURL* curl, const std::string& songmid, std::vector<LyricLine>& out) {
+    if (songmid.empty() || out.empty())
+        return;
+    std::vector<LyricLine> qqLines;
+    if (!downloadLyric(curl, songmid, qqLines))
+        return;
+    std::vector<LyricLine> trans;
+    std::vector<LyricLine> roma;
+    for (const auto& line : qqLines) {
+        if (!line.translation.empty())
+            trans.push_back({line.ms, line.translation});
+        if (!line.romanization.empty())
+            roma.push_back({line.ms, line.romanization});
+    }
+    attachSecondary(out, trans, true);
+    attachSecondary(out, roma, false);
 }
 
 // ---------- 酷狗 KRC 逐字歌词 ----------
@@ -580,10 +626,15 @@ bool parseKrc(std::string content, std::vector<LyricLine>& out) {
     replaceAll(content, "&amp;", "&");
 
     std::vector<LyricLine> lines;
+    std::string languagePayload;
     std::istringstream ss(content);
     std::string raw;
     while (std::getline(ss, raw)) {
         if (!raw.empty() && raw.back() == '\r') raw.pop_back();
+        if (raw.compare(0, 10, "[language:") == 0 && raw.size() > 11 && raw.back() == ']') {
+            languagePayload = raw.substr(10, raw.size() - 11);
+            continue;
+        }
         // 行头必须是 [数字,数字]，否则为元数据行（ti:/ar:/language: 等）
         if (raw.size() < 3 || raw[0] != '[' || !std::isdigit((unsigned char)raw[1]))
             continue;
@@ -655,6 +706,41 @@ bool parseKrc(std::string content, std::vector<LyricLine>& out) {
         return false;
     std::sort(lines.begin(), lines.end(),
               [](const LyricLine& a, const LyricLine& b) { return a.ms < b.ms; });
+    // KRC 的 language 元数据是 Base64 JSON；type=0 为音译，type=1 为翻译，
+    // lyricContent 按主歌词行号对应，不另带时间戳。
+    if (!languagePayload.empty()) {
+        auto lang = nlohmann::json::parse(base64Decode(languagePayload), nullptr, false);
+        if (!lang.is_discarded() && lang["content"].is_array()) {
+            for (const auto& block : lang["content"]) {
+                int type = block.value("type", -1);
+                if (type != 0 && type != 1)
+                    continue;
+                const auto& contentLines = block["lyricContent"];
+                if (!contentLines.is_array())
+                    continue;
+                size_t count = std::min(lines.size(), contentLines.size());
+                for (size_t i = 0; i < count; ++i) {
+                    if (!contentLines[i].is_array())
+                        continue;
+                    std::wstring text;
+                    for (const auto& token : contentLines[i]) {
+                        if (!token.is_string())
+                            continue;
+                        std::wstring part = toWide(token.get<std::string>());
+                        if (type == 0 && !text.empty() && !part.empty() && text.back() != L' ' &&
+                            part.front() != L' ')
+                            text += L' ';
+                        text += part;
+                    }
+                    text = trimW(text);
+                    if (type == 0)
+                        lines[i].romanization = std::move(text);
+                    else
+                        lines[i].translation = std::move(text);
+                }
+            }
+        }
+    }
     out = std::move(lines);
     return true;
 }
@@ -915,6 +1001,11 @@ struct LyricProvider::Impl {
                                                   toWide(c[2].get<std::string>())});
                         }
                     }
+                    // 第四、五项分别为翻译和罗马音；旧文件缺失时保持为空。
+                    if (l.size() >= 4 && l[3].is_string())
+                        line.translation = toWide(l[3].get<std::string>());
+                    if (l.size() >= 5 && l[4].is_string())
+                        line.romanization = toWide(l[4].get<std::string>());
                     entry.lines.push_back(std::move(line));
                 }
             }
@@ -941,7 +1032,8 @@ struct LyricProvider::Impl {
                 nlohmann::json chars = nlohmann::json::array();
                 for (const auto& c : l.chars)
                     chars.push_back({c.startMs, c.endMs, toUtf8(c.text)});
-                arr.push_back({l.ms, toUtf8(l.text), std::move(chars)});
+                arr.push_back({l.ms, toUtf8(l.text), std::move(chars), toUtf8(l.translation),
+                               toUtf8(l.romanization)});
             }
             e["lines"] = std::move(arr);
             std::ofstream f(std::filesystem::path(path), std::ios::binary | std::ios::trunc);
@@ -1036,6 +1128,8 @@ struct LyricProvider::Impl {
                                       ? downloadQrc(curl, c->songid, out)
                                       : downloadLyric(curl, c->songmid, out);
                 if (downloaded && out.size() >= 3) {
+                    if (source == LyricSource::Qrc)
+                        attachQqSecondary(curl, c->songmid, out);
                     info.songmid = toWide(c->songmid);
                     info.albummid = toWide(c->albummid);
                     return true;
@@ -1056,21 +1150,22 @@ struct LyricProvider::Impl {
         if (qqSearchOk && cands.empty())
             qqSearchOk = searchSongs(curl, queryTitle, cands);
 
-        // 同平台、同版本的 QQ 原生 QRC 优先，避免跨平台音源与时间轴不一致。
+        // 默认优先酷狗 KRC 逐字歌词。
+        if (fetchKrc(curl, title, artist, durationMs, out)) {
+            fillSongInfo(curl, title, artist, durationMs, info);
+            attachQqSecondary(curl, toUtf8(info.songmid), out);
+            curl_easy_cleanup(curl);
+            return true;
+        }
+
+        // KRC 不可用时尝试 QQ 原生 QRC 逐字歌词。
+        out.clear();
         if (qqSearchOk && tryDownload(cands, LyricSource::Qrc)) {
             curl_easy_cleanup(curl);
             return true;
         }
 
-        // QRC 不存在或接口失败时，保持原有酷狗 KRC 逐字歌词覆盖率。
-        out.clear();
-        if (fetchKrc(curl, title, artist, durationMs, out)) {
-            fillSongInfo(curl, title, artist, durationMs, info);
-            curl_easy_cleanup(curl);
-            return true;
-        }
-
-        // 最后回退 QQ LRC；首轮候选不合适时再只按歌名搜索。
+        // 最后使用 QQ LRC 逐行歌词；首轮候选不合适时再只按歌名搜索。
         out.clear();
         if (qqSearchOk && tryDownload(cands, LyricSource::Lrc)) {
             curl_easy_cleanup(curl);
@@ -1221,6 +1316,8 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
                 ok = fetchKrcByHash(curl, toUtf8(cand.kugouHash), cand.durationMs, lines);
             else
                 ok = downloadLyric(curl, toUtf8(cand.songmid), lines);
+            if (ok && cand.source != LyricSource::Lrc && !cand.songmid.empty())
+                attachQqSecondary(curl, toUtf8(cand.songmid), lines);
             curl_easy_cleanup(curl);
         }
         SongInfo info{cand.songmid, cand.albummid};
