@@ -1242,11 +1242,14 @@ struct TaskbarHost::Impl {
     int hitButton(float x, float y) const {
         RECT rc{};
         GetClientRect(hwnd, &rc);
-        float w = static_cast<float>(rc.right - rc.left);
-        float h = static_cast<float>(rc.bottom - rc.top);
-        // 与 render 同口径：频谱加宽的额外宽度不参与按钮中心计算，
-        // 否则绘制位置与命中位置错位（点"下一首"落到"暂停"上）
-        float leftW = (w - spectrumExtraW() * scale()) * kLeftRatio;
+        // 鼠标消息使用像素坐标，而 render 使用 DIP；先统一到 DIP，
+        // 并与 render 使用完全相同的左侧分区计算。
+        float w = dip(rc.right - rc.left);
+        float h = dip(rc.bottom - rc.top);
+        x = dip(static_cast<int>(x));
+        y = dip(static_cast<int>(y));
+        float leftW = songInfoVisible_ ? (w - spectrumExtraW()) * kLeftRatio
+                                       : kCoverPadding + coverSize();
         if (x < leftW || x > w)
             return -1;
 
