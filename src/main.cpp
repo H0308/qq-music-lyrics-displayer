@@ -181,6 +181,8 @@ struct App {
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
     bool spectrumOn_ = false;
+    bool spectrumSessionAlive_ = false;
+    std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
 
     std::wstring settingsPath_;
@@ -341,6 +343,10 @@ struct App {
         auto hs = hosts();
         SmtcSnapshot snap = monitor.snapshot();
         if (!snap.sessionAlive) {
+            if (spectrumSessionAlive_)
+                spectrum_.requestReconnect();
+            spectrumSessionAlive_ = false;
+            spectrumSessionKey_.clear();
             if (!currentKey.empty() || lastStatus != PlaybackStatus::Stopped)
                 std::wprintf(L"[smtc] QQ Music session closed\n");
             currentKey.clear();
@@ -357,6 +363,11 @@ struct App {
             }
             return;
         }
+        std::wstring spectrumKey = LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
+        if (!spectrumSessionAlive_ || spectrumSessionKey_ != spectrumKey)
+            spectrum_.requestReconnect();
+        spectrumSessionAlive_ = true;
+        spectrumSessionKey_ = spectrumKey;
         for (auto* h : hs) h->show();
         OverlayMediaInfo mi;
         mi.title = snap.title;

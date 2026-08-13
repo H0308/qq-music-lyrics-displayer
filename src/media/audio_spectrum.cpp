@@ -3,12 +3,14 @@
 #include <windows.h>
 #include <audioclient.h>
 #include <audioclientactivationparams.h>
+#include <audiopolicy.h>
 #include <mmdeviceapi.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <string>
 #include <vector>
 
 namespace {
@@ -21,6 +23,7 @@ constexpr float kBandHighHz = 14000.0f;        // 频段上界
 constexpr float kMinDb = -50.0f;               // 电平映射：minDb..maxDb -> 0..1
 constexpr float kMaxDb = -6.0f;
 constexpr float kRelease = 0.90f;              // 每个 FFT 帧的回落系数（~150ms 时间常数）
+constexpr ULONGLONG kNoDataRebuildMs = 2000;  // 连续无音频包约 2s 后重建捕获会话
 
 // 找 QQ 音乐进程树根：父进程不是 QQMusic.exe 的那个 QQMusic.exe。
 // 进程级回环捕获 INCLUDE 模式覆盖目标进程及其子进程，从树根捕获最完整。
@@ -46,6 +49,78 @@ DWORD findQQMusicRootPid() {
             return p.pid;
     }
     return qq.empty() ? 0 : qq.front().pid;
+}
+
+bool isQQMusicProcess(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process)
+        return false;
+
+    wchar_t path[MAX_PATH]{};
+    DWORD length = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
+    bool match = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+    CloseHandle(process);
+    if (!match)
+        return false;
+
+    const wchar_t* name = wcsrchr(path, L'\\');
+    return _wcsicmp(name ? name + 1 : path, L"QQMusic.exe") == 0;
+}
+
+// 从当前默认输出设备的活动音频会话中找真正产生声音的 QQMusic.exe。
+// QQ 音乐重启后可能同时存在多个同名进程，不能再依赖进程快照中的第一个根进程。
+DWORD findQQMusicAudioPid() {
+    IMMDeviceEnumerator* devices = nullptr;
+    IMMDevice* device = nullptr;
+    IAudioSessionManager2* manager = nullptr;
+    IAudioSessionEnumerator* sessions = nullptr;
+    DWORD result = 0;
+
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+                                  __uuidof(IMMDeviceEnumerator),
+                                  reinterpret_cast<void**>(&devices));
+    if (SUCCEEDED(hr))
+        hr = devices->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    if (SUCCEEDED(hr))
+        hr = device->Activate(__uuidof(IAudioSessionManager2), CLSCTX_ALL, nullptr,
+                              reinterpret_cast<void**>(&manager));
+    if (SUCCEEDED(hr))
+        hr = manager->GetSessionEnumerator(&sessions);
+
+    int count = 0;
+    if (SUCCEEDED(hr))
+        hr = sessions->GetCount(&count);
+    for (int i = 0; SUCCEEDED(hr) && i < count && !result; ++i) {
+        IAudioSessionControl* control = nullptr;
+        IAudioSessionControl2* control2 = nullptr;
+        AudioSessionState state = AudioSessionStateExpired;
+        DWORD pid = 0;
+
+        hr = sessions->GetSession(i, &control);
+        if (SUCCEEDED(hr))
+            hr = control->GetState(&state);
+        if (SUCCEEDED(hr) && state == AudioSessionStateActive)
+            hr = control->QueryInterface(__uuidof(IAudioSessionControl2),
+                                          reinterpret_cast<void**>(&control2));
+        if (SUCCEEDED(hr) && control2 && SUCCEEDED(control2->GetProcessId(&pid)) &&
+            pid != 0 && isQQMusicProcess(pid))
+            result = pid;
+
+        if (control2)
+            control2->Release();
+        if (control)
+            control->Release();
+    }
+
+    if (sessions)
+        sessions->Release();
+    if (manager)
+        manager->Release();
+    if (device)
+        device->Release();
+    if (devices)
+        devices->Release();
+    return result;
 }
 
 // ActivateAudioInterfaceAsync 完成回调：把结果转交给等待中的捕获线程
@@ -231,6 +306,10 @@ void AudioSpectrum::stop() {
         v.store(0.0f, std::memory_order_relaxed);
 }
 
+void AudioSpectrum::requestReconnect() {
+    reconnectRequested_.store(true, std::memory_order_release);
+}
+
 std::array<float, AudioSpectrum::kBandCount> AudioSpectrum::bands() const {
     std::array<float, kBandCount> r;
     for (int i = 0; i < kBandCount; ++i)
@@ -243,12 +322,17 @@ void AudioSpectrum::run() {
 
     auto sleepOrStop = [this](DWORD ms) {
         // 分段睡眠以便 stop() 快速响应
-        for (DWORD t = 0; t < ms && !stop_.load(); t += 100)
+        for (DWORD t = 0; t < ms && !stop_.load() && !reconnectRequested_.load(); t += 100)
             Sleep(std::min<DWORD>(100, ms - t));
     };
 
     while (!stop_.load()) {
-        DWORD pid = findQQMusicRootPid();
+        reconnectRequested_.store(false, std::memory_order_release);
+        // 优先使用当前真正出声的 QQ 音乐音频会话，避免重启后命中同名辅助进程。
+        // 暂停或尚未开始播放时没有活动会话，再回退到进程树扫描。
+        DWORD pid = findQQMusicAudioPid();
+        if (!pid)
+            pid = findQQMusicRootPid();
         if (!pid) {
             for (auto& v : bands_)
                 v.store(0.0f, std::memory_order_relaxed);
@@ -317,8 +401,8 @@ void AudioSpectrum::run() {
         bool sessionOk = SUCCEEDED(hr);
 
         // ---- 捕获循环：事件驱动取包；静音/暂停时不投递数据包，用等量静音推进分析让频段自然回落 ----
-        int timeouts = 0;
-        while (sessionOk && !stop_.load()) {
+        ULONGLONG lastPacketTick = GetTickCount64();
+        while (sessionOk && !stop_.load() && !reconnectRequested_.load(std::memory_order_acquire)) {
             DWORD wr = WaitForSingleObject(dataReady, 500);
             if (wr == WAIT_FAILED) {
                 sessionOk = false;
@@ -326,15 +410,13 @@ void AudioSpectrum::run() {
             }
             if (wr == WAIT_TIMEOUT) {
                 analyzer.pushSilence(kSampleRate / 2); // 0.5s 静音 -> 按 release 节奏回落
-                // QQ 退出/重启时进程回环不再来数据，每 ~2s 检查一次进程是否还在
-                if (++timeouts >= 4) {
-                    timeouts = 0;
-                    if (findQQMusicRootPid() != pid)
-                        break;
+                // QQ 退出/重启或音频会话重建时，进程回环可能不再来数据。
+                // 不能只依赖 WAIT_TIMEOUT：旧会话也可能持续触发事件但没有数据包。
+                if (GetTickCount64() - lastPacketTick >= kNoDataRebuildMs) {
+                    break;
                 }
                 continue;
             }
-            timeouts = 0;
 
             UINT32 packet = 0;
             hr = capture->GetNextPacketSize(&packet);
@@ -350,10 +432,14 @@ void AudioSpectrum::run() {
                 else
                     analyzer.push(reinterpret_cast<const float*>(data), frames);
                 capture->ReleaseBuffer(frames);
+                if (frames > 0)
+                    lastPacketTick = GetTickCount64();
                 hr = capture->GetNextPacketSize(&packet);
             }
             if (FAILED(hr))
                 sessionOk = false;
+            else if (GetTickCount64() - lastPacketTick >= kNoDataRebuildMs)
+                break;
         }
 
         client->Stop();
@@ -361,7 +447,8 @@ void AudioSpectrum::run() {
         releaseCom(client);
         CloseHandle(dataReady);
         analyzer.publishZeros();
-        sleepOrStop(1000); // 会话断开（QQ 重启等）后重建
+        if (!reconnectRequested_.load(std::memory_order_acquire))
+            sleepOrStop(1000); // 会话断开（QQ 重启等）后重建
     }
 
     CoUninitialize();

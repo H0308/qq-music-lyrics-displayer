@@ -19,6 +19,8 @@ public:
 
     void start();
     void stop();
+    // 通知捕获线程：QQ 音乐的 SMTC 会话已关闭或重新建立。
+    void requestReconnect();
 
     std::array<float, kBandCount> bands() const;
 
@@ -27,5 +29,6 @@ private:
 
     std::thread thread_;
     std::atomic<bool> stop_{false};
+    std::atomic<bool> reconnectRequested_{false};
     std::array<std::atomic<float>, kBandCount> bands_{};
 };
