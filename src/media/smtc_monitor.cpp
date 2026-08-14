@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cwchar>
 #include <mutex>
 #include <utility>
 
@@ -18,6 +19,14 @@ using namespace winrt::Windows::Media::Control;
 namespace {
 
 constexpr wchar_t kTargetAppId[] = L"QQMusic.exe";
+constexpr wchar_t kNeteaseGenrePrefix[] = L"NCM-";
+
+struct SessionIdentity {
+    SmtcPlayerType player = SmtcPlayerType::Unknown;
+    std::wstring neteaseSongId;
+    std::wstring sourceAppUserModelId;
+    bool enhancedSmtc = false;
+};
 
 int64_t nowUtcMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -33,6 +42,58 @@ int64_t lastUpdatedMs(DateTime dt) {
     constexpr int64_t kFileTimeEpochOffsetMs = 11644473600000LL;
     int64_t ms = dt.time_since_epoch().count() / 10000 - kFileTimeEpochOffsetMs;
     return ms > 0 ? ms : 0;
+}
+
+bool parseNeteaseGenre(const std::wstring& genre, std::wstring& songId) {
+    if (genre.rfind(kNeteaseGenrePrefix, 0) != 0)
+        return false;
+    std::wstring value = genre.substr(std::wcslen(kNeteaseGenrePrefix));
+    if (value.empty())
+        return false;
+    for (wchar_t ch : value) {
+        if (ch < L'0' || ch > L'9')
+            return false;
+    }
+    songId = std::move(value);
+    return true;
+}
+
+SessionIdentity identifySession(
+    const GlobalSystemMediaTransportControlsSession& session) {
+    SessionIdentity identity;
+    if (!session)
+        return identity;
+
+    try {
+        identity.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
+        if (identity.sourceAppUserModelId == kTargetAppId) {
+            identity.player = SmtcPlayerType::QQMusic;
+            return identity;
+        }
+
+        // InfLink-rs and the自研桥接器约定把网易云歌曲 ID 放在 SMTC Genres 中，
+        // 这样主程序无需依赖 BetterNCM/Chromium 的内部 API。
+        auto props = session.TryGetMediaPropertiesAsync().get();
+        auto genres = props.Genres();
+        for (uint32_t i = 0; i < genres.Size(); ++i) {
+            std::wstring songId;
+            if (parseNeteaseGenre(genres.GetAt(i).c_str(), songId)) {
+                identity.player = SmtcPlayerType::NetEase;
+                identity.neteaseSongId = std::move(songId);
+                identity.enhancedSmtc = true;
+                break;
+            }
+        }
+    } catch (...) {
+        // 媒体会话可能在枚举期间退出；保留 Unknown，让调用方忽略它。
+    }
+    return identity;
+}
+
+std::wstring positionTrackKey(const SmtcSnapshot& snapshot) {
+    if (snapshot.player == SmtcPlayerType::NetEase && !snapshot.neteaseSongId.empty())
+        return L"netease|" + snapshot.neteaseSongId;
+    return L"qq|" + snapshot.title + L'|' + snapshot.artist;
 }
 
 PlaybackStatus mapStatus(GlobalSystemMediaTransportControlsSessionPlaybackStatus s) {
@@ -115,7 +176,12 @@ struct SmtcMonitor::Impl {
 
     void refreshAll() {
         SmtcSnapshot s;
-        s.sessionAlive = session != nullptr;
+        const SessionIdentity identity = identifySession(session);
+        s.player = identity.player;
+        s.neteaseSongId = identity.neteaseSongId;
+        s.sourceAppUserModelId = identity.sourceAppUserModelId;
+        s.enhancedSmtc = identity.enhancedSmtc;
+        s.sessionAlive = identity.player != SmtcPlayerType::Unknown;
         if (session) {
             try {
                 auto props = session.TryGetMediaPropertiesAsync().get();
@@ -215,7 +281,7 @@ struct SmtcMonitor::Impl {
                 if (nowUtcMs() - newAnchor > 2000)
                     newAnchor = nowUtcMs();
                 if (resumed) {
-                    std::wstring key = snap.title + L'|' + snap.artist;
+                    std::wstring key = positionTrackKey(snap);
                     snap.positionMs = (posInit_ && posTrackKey_ == key)
                                           ? (int64_t)(smoothPos_ + 0.5)
                                           : newPos; // 无平滑状态（如刚启动）才退回上报值
@@ -257,10 +323,14 @@ struct SmtcMonitor::Impl {
         if (manager) {
             try {
                 for (auto const& s : manager.GetSessions()) {
-                    if (s.SourceAppUserModelId() == kTargetAppId) {
+                    const SessionIdentity identity = identifySession(s);
+                    if (identity.player == SmtcPlayerType::QQMusic) {
+                        // QQ 原有选择逻辑保持优先，避免同时存在多个媒体会话时改变现有行为。
                         found = s;
                         break;
                     }
+                    if (!found && identity.player == SmtcPlayerType::NetEase)
+                        found = s;
                 }
             } catch (...) {
             }
@@ -299,7 +369,7 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         return s;
     }
     // 进度平滑：本地时钟自走 + 慢速校正，滤掉锚点阶跃
-    std::wstring key = s.title + L'|' + s.artist;
+    std::wstring key = positionTrackKey(s);
     auto now = std::chrono::steady_clock::now();
     float dt = 16.7f;
     if (impl_->posTick_ != std::chrono::steady_clock::time_point{})

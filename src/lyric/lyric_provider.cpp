@@ -409,6 +409,129 @@ std::vector<LyricLine> parseLrc(const std::string& lrc) {
     return lines;
 }
 
+bool parseIntegerField(const std::string& value, int64_t& out) {
+    if (value.empty())
+        return false;
+    char* end = nullptr;
+    long long parsed = std::strtoll(value.c_str(), &end, 10);
+    if (end != value.c_str() + value.size())
+        return false;
+    out = static_cast<int64_t>(parsed);
+    return true;
+}
+
+// 解析网易云 YRC 文本（[行开始,行时长](字开始,字时长,0)文本）。
+// YRC 中每个括号后的文本块可以是一个字，也可以是一个词，LyricChar 均可承载。
+std::vector<LyricLine> parseYrc(std::string content) {
+    if (!content.empty() && content.compare(0, 3, "\xEF\xBB\xBF") == 0)
+        content.erase(0, 3); // 去 BOM
+
+    std::vector<LyricLine> lines;
+    std::istringstream ss(content);
+    std::string raw;
+    while (std::getline(ss, raw)) {
+        if (!raw.empty() && raw.back() == '\r')
+            raw.pop_back();
+        size_t begin = raw.find_first_not_of(" \t");
+        if (begin == std::string::npos || raw[begin] != '[')
+            continue; // YRC 可能包含 JSON 信息行
+
+        size_t close = raw.find(']', begin + 1);
+        if (close == std::string::npos)
+            continue;
+        std::string header = raw.substr(begin + 1, close - begin - 1);
+        size_t comma = header.find(',');
+        if (comma == std::string::npos) {
+            // 个别接口响应会在 yrc 字段中混入普通 LRC 行，保留它们作为非逐字行。
+            int64_t lineStart = 0;
+            if (!parseTimeStamp(header, lineStart))
+                continue;
+            std::wstring plain = toWide(raw.substr(close + 1));
+            while (!plain.empty() && (plain.back() == L' ' || plain.back() == L'\t'))
+                plain.pop_back();
+            if (!plain.empty())
+                lines.push_back({lineStart, std::move(plain)});
+            continue;
+        }
+        int64_t lineStart = 0;
+        int64_t lineDuration = 0;
+        if (!parseIntegerField(header.substr(0, comma), lineStart) ||
+            !parseIntegerField(header.substr(comma + 1), lineDuration) || lineStart < 0)
+            continue;
+        (void)lineDuration;
+
+        std::vector<LyricChar> chars;
+        std::wstring text;
+        size_t pos = close + 1;
+        while (pos < raw.size() && raw[pos] == '(') {
+            size_t tokenClose = raw.find(')', pos + 1);
+            if (tokenClose == std::string::npos)
+                break;
+            std::string token = raw.substr(pos + 1, tokenClose - pos - 1);
+            size_t comma1 = token.find(',');
+            size_t comma2 = comma1 == std::string::npos ? comma1 : token.find(',', comma1 + 1);
+            if (comma2 == std::string::npos)
+                break;
+
+            int64_t charOffset = 0;
+            int64_t charDuration = 0;
+            if (!parseIntegerField(token.substr(0, comma1), charOffset) ||
+                !parseIntegerField(token.substr(comma1 + 1, comma2 - comma1 - 1), charDuration))
+                break;
+
+            size_t nextToken = std::string::npos;
+            for (size_t candidate = raw.find('(', tokenClose + 1);
+                 candidate != std::string::npos;
+                 candidate = raw.find('(', candidate + 1)) {
+                size_t candidateClose = raw.find(')', candidate + 1);
+                if (candidateClose == std::string::npos)
+                    break;
+                std::string candidateToken =
+                    raw.substr(candidate + 1, candidateClose - candidate - 1);
+                size_t candidateComma1 = candidateToken.find(',');
+                size_t candidateComma2 = candidateComma1 == std::string::npos
+                                             ? candidateComma1
+                                             : candidateToken.find(',', candidateComma1 + 1);
+                int64_t ignoredStart = 0;
+                int64_t ignoredDuration = 0;
+                if (candidateComma2 != std::string::npos &&
+                    parseIntegerField(candidateToken.substr(0, candidateComma1),
+                                      ignoredStart) &&
+                    parseIntegerField(candidateToken.substr(candidateComma1 + 1,
+                                                             candidateComma2 - candidateComma1 - 1),
+                                      ignoredDuration)) {
+                    nextToken = candidate;
+                    break;
+                }
+            }
+            std::string tokenText = raw.substr(
+                tokenClose + 1,
+                nextToken == std::string::npos ? std::string::npos : nextToken - tokenClose - 1);
+            std::wstring tokenWide = toWide(tokenText);
+            if (!tokenWide.empty()) {
+                // YRC 的字时间戳是相对整首歌曲的绝对时间；例如行首和首字通常相同。
+                int64_t start = charOffset;
+                int64_t end = start + std::max<int64_t>(charDuration, 1);
+                chars.push_back({start, end, tokenWide});
+                text += tokenWide;
+            }
+            if (nextToken == std::string::npos)
+                break;
+            pos = nextToken;
+        }
+
+        while (!text.empty() && (text.back() == L' ' || text.back() == L'\t'))
+            text.pop_back();
+        if (text.empty() || chars.empty())
+            continue;
+        lines.push_back({lineStart, std::move(text), std::move(chars)});
+    }
+
+    std::sort(lines.begin(), lines.end(),
+              [](const LyricLine& a, const LyricLine& b) { return a.ms < b.ms; });
+    return lines;
+}
+
 // 按关键词搜索歌曲，填充 out；返回 true 表示 HTTP/JSON 解析成功（结果可能为空）
 bool searchSongs(CURL* curl, const std::wstring& query, std::vector<Candidate>& out) {
     out.clear();
@@ -530,6 +653,70 @@ bool downloadLyric(CURL* curl, const std::string& songmid, std::vector<LyricLine
     if (!roma.empty())
         attachSecondary(out, parseLrc(roma), false);
     return !out.empty();
+}
+
+std::string lyricField(const nlohmann::json& root, const char* name) {
+    if (!root.is_object())
+        return {};
+    const auto it = root.find(name);
+    if (it == root.end() || !it->is_object())
+        return {};
+    return it->value("lyric", std::string());
+}
+
+// 按网易云歌曲 ID 下载歌词；YRC 不可用时回退同一响应中的 LRC。
+bool downloadNeteaseLyric(CURL* curl, const std::wstring& songId,
+                          std::vector<LyricLine>& out) {
+    if (songId.empty())
+        return false;
+
+    std::string body;
+    const std::string id = toUtf8(songId);
+    const std::string url = "https://music.163.com/api/song/lyric?id=" + id +
+                            "&lv=1&kv=1&tv=1&yv=1&ytv=1&rv=1&yrv=1";
+    if (!httpGet(curl, url, "https://music.163.com/", body))
+        return false;
+
+    auto root = nlohmann::json::parse(body, nullptr, false);
+    if (root.is_discarded() || !root.is_object())
+        return false;
+
+    std::vector<LyricLine> lines;
+    const std::string yrc = lyricField(root, "yrc");
+    if (!yrc.empty())
+        lines = parseYrc(yrc);
+    if (lines.empty()) {
+        const std::string lrc = lyricField(root, "lrc");
+        if (lrc.empty())
+            return false;
+        lines = parseLrc(lrc);
+    }
+    if (lines.empty())
+        return false;
+
+    // YRC 主歌词也可以附着网易云返回的翻译/罗马音；新字段优先，
+    // 旧字段为空时使用兼容字段。
+    std::string translation = lyricField(root, "ytlrc");
+    if (translation.empty())
+        translation = lyricField(root, "tlyric");
+    std::string romanization = lyricField(root, "yromalrc");
+    if (romanization.empty())
+        romanization = lyricField(root, "romalrc");
+    if (!translation.empty()) {
+        auto translatedLines = parseYrc(translation);
+        if (translatedLines.empty())
+            translatedLines = parseLrc(translation);
+        attachSecondary(lines, translatedLines, true);
+    }
+    if (!romanization.empty()) {
+        auto romanizedLines = parseYrc(romanization);
+        if (romanizedLines.empty())
+            romanizedLines = parseLrc(romanization);
+        attachSecondary(lines, romanizedLines, false);
+    }
+
+    out = std::move(lines);
+    return true;
 }
 
 // QRC/KRC 提供主逐字时间轴时，仍从 QQ LRC 接口补充同歌曲的翻译与罗马音。
@@ -1178,6 +1365,18 @@ struct LyricProvider::Impl {
         curl_easy_cleanup(curl);
         return false;
     }
+
+    bool fetchNetease(const std::wstring& songId, std::vector<LyricLine>& out,
+                     SongInfo& info) {
+        CURL* curl = curl_easy_init();
+        if (!curl)
+            return false;
+        bool ok = downloadNeteaseLyric(curl, songId, out);
+        curl_easy_cleanup(curl);
+        if (ok)
+            info = SongInfo{}; // 网易云歌词不使用 QQ songmid/albummid 封面兜底
+        return ok;
+    }
 };
 
 LyricProvider::LyricProvider() : impl_(std::make_unique<Impl>()) {
@@ -1221,6 +1420,50 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
                 impl->currentSongInfo = info;
                 impl->cachePut(key, CacheEntry{std::move(result), std::move(info)});
                 if (cb) cb(true);
+            }
+        } else if (impl->generation == gen && cb) {
+            cb(false);
+        }
+    });
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    impl_->workers.push_back(std::move(t));
+}
+
+void LyricProvider::requestNeteaseAsync(const std::wstring& songId, ReadyCallback cb) {
+    if (songId.empty()) {
+        if (cb)
+            cb(false);
+        return;
+    }
+
+    // 网易云使用歌曲 ID 作为缓存键，避免同名歌曲复用 QQ 或其他网易云歌曲的歌词。
+    const std::wstring key = L"netease|" + songId;
+    uint64_t gen = ++impl_->generation;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mtx);
+        CacheEntry cached;
+        if (impl_->cacheGet(key, cached)) {
+            impl_->current = std::move(cached.lines);
+            impl_->currentSongInfo = std::move(cached.info);
+            if (cb)
+                cb(true);
+            return;
+        }
+    }
+
+    Impl* impl = impl_.get();
+    std::thread t([impl, gen, key, songId, cb = std::move(cb)]() mutable {
+        std::vector<LyricLine> result;
+        SongInfo info;
+        bool ok = impl->fetchNetease(songId, result, info);
+        if (ok) {
+            std::lock_guard<std::mutex> lk(impl->mtx);
+            if (impl->generation == gen) {
+                impl->current = result;
+                impl->currentSongInfo = info;
+                impl->cachePut(key, CacheEntry{std::move(result), std::move(info)});
+                if (cb)
+                    cb(true);
             }
         } else if (impl->generation == gen && cb) {
             cb(false);

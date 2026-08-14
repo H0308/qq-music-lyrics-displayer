@@ -132,6 +132,20 @@ const wchar_t* statusName(PlaybackStatus s) {
     }
 }
 
+const wchar_t* playerName(SmtcPlayerType player) {
+    switch (player) {
+    case SmtcPlayerType::QQMusic: return L"QQ Music";
+    case SmtcPlayerType::NetEase: return L"NetEase Music";
+    default: return L"Unknown";
+    }
+}
+
+std::wstring makeTrackKey(const SmtcSnapshot& snap) {
+    if (snap.player == SmtcPlayerType::NetEase && !snap.neteaseSongId.empty())
+        return L"netease|" + snap.neteaseSongId;
+    return L"qq|" + LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
+}
+
 struct App {
     DWORD mainThread = GetCurrentThreadId();
     SmtcMonitor monitor;
@@ -146,6 +160,7 @@ struct App {
     std::wstring currentArtist;
     int64_t currentDurationMs = 0;
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
+    SmtcPlayerType lastPlayer_ = SmtcPlayerType::Unknown;
     bool lyricLoading_ = false;
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
@@ -194,6 +209,10 @@ struct App {
         std::vector<ILyricHost*> v;
         if (taskbarHost) v.push_back(taskbarHost.get());
         return v;
+    }
+
+    const wchar_t* notRunningStatus() const {
+        return lastPlayer_ == SmtcPlayerType::NetEase ? L"网易云音乐未运行" : L"QQ 音乐未运行";
     }
 
     void updateLyricCapabilities(const std::vector<LyricLine>& lines) {
@@ -303,7 +322,7 @@ struct App {
         if (!snap.sessionAlive) {
             host->setLyrics({});
             host->setMediaInfo({});
-            host->setStatusText(L"QQ 音乐未运行");
+            host->setStatusText(notRunningStatus());
             host->hide();
             return;
         }
@@ -363,16 +382,27 @@ struct App {
             for (auto* h : hs) {
                 h->setLyrics({});
                 h->setMediaInfo({});
-                h->setStatusText(L"QQ 音乐未运行");
+                h->setStatusText(notRunningStatus());
                 h->hide();
             }
             return;
         }
-        std::wstring spectrumKey = LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
-        if (!spectrumSessionAlive_ || spectrumSessionKey_ != spectrumKey)
-            spectrum_.requestReconnect();
-        spectrumSessionAlive_ = true;
-        spectrumSessionKey_ = spectrumKey;
+        lastPlayer_ = snap.player;
+        if (snap.player == SmtcPlayerType::QQMusic) {
+            if (spectrumOn_)
+                spectrum_.start();
+            std::wstring spectrumKey = LyricProvider::makeKey(snap.title, snap.artist,
+                                                               snap.durationMs);
+            if (!spectrumSessionAlive_ || spectrumSessionKey_ != spectrumKey)
+                spectrum_.requestReconnect();
+            spectrumSessionAlive_ = true;
+            spectrumSessionKey_ = spectrumKey;
+        } else {
+            // 第一版网易云只消费 SMTC 元数据/时间线，不启用 QQ 进程频谱捕获。
+            spectrum_.stop();
+            spectrumSessionAlive_ = false;
+            spectrumSessionKey_.clear();
+        }
         for (auto* h : hs) h->show();
         OverlayMediaInfo mi;
         mi.title = snap.title;
@@ -389,17 +419,25 @@ struct App {
         for (auto* h : hs) h->setMediaInfo(mi);
         lastSmtcThumbnail = snap.thumbnail;
         if (snap.status != lastStatus) {
-            std::wprintf(L"[smtc] status: %s\n", statusName(snap.status));
+            std::wprintf(L"[smtc] %s status: %s\n", playerName(snap.player),
+                         statusName(snap.status));
             lastStatus = snap.status;
         }
-        std::wstring key = LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
+        std::wstring key = makeTrackKey(snap);
         if (key != currentKey && !snap.title.empty()) {
             currentKey = key;
             currentTitle = snap.title;
             currentArtist = snap.artist;
             currentDurationMs = snap.durationMs;
-            std::wprintf(L"[smtc] track: %s - %s (%lld ms)\n", snap.title.c_str(),
-                snap.artist.c_str(), snap.durationMs);
+            if (snap.player == SmtcPlayerType::NetEase) {
+                std::wprintf(L"[smtc] %s track: %s - %s [%s] (%lld ms)\n",
+                             playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
+                             snap.neteaseSongId.c_str(), snap.durationMs);
+            } else {
+                std::wprintf(L"[smtc] %s track: %s - %s (%lld ms)\n",
+                             playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
+                             snap.durationMs);
+            }
             lastCover_.reset();
             hasAlbumColor_ = false;
             updateLyricCapabilities({});
@@ -410,9 +448,19 @@ struct App {
                 h->setStatusText(L"歌词加载中…");
             }
             lyricLoading_ = true;
-            provider.requestAsync(snap.title, snap.artist, snap.durationMs, [this](bool ok) {
-                PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
-            });
+            if (snap.player == SmtcPlayerType::NetEase) {
+                provider.requestNeteaseAsync(
+                    snap.neteaseSongId,
+                    [this](bool ok) {
+                        PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
+                    });
+            } else {
+                provider.requestAsync(snap.title, snap.artist, snap.durationMs,
+                                      [this](bool ok) {
+                                          PostThreadMessageW(mainThread, kMsgLyricReady,
+                                                             ok ? 1 : 0, 0);
+                                      });
+            }
         }
         if (snap.thumbnail && !snap.thumbnail->empty())
             lastCover_ = snap.thumbnail;
@@ -430,8 +478,9 @@ struct App {
                     currentKey.c_str());
             }
 
-            // SMTC 没给封面时，用 QQ 音乐接口兜底
-            if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
+            // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
+            if (monitor.snapshot().player == SmtcPlayerType::QQMusic &&
+                (!lastSmtcThumbnail || lastSmtcThumbnail->empty())) {
                 const std::wstring albummid = provider.songInfo().albummid;
                 if (albummid.empty()) {
                     std::wprintf(L"[cover] no albummid from search: %s\n", currentKey.c_str());
@@ -962,7 +1011,7 @@ int main() {
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
 
-    std::wprintf(L"QQMusicLyric started, waiting for QQ Music...\n");
+    std::wprintf(L"QQMusicLyric started, waiting for QQ Music or NetEase Music...\n");
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {

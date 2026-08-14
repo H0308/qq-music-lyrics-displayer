@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-// 逐字时间轴（KRC 解析结果）；text 为 KRC token，英文常为整词
+// 逐字时间轴（QRC/KRC/YRC 解析结果）；text 为歌词时间轴 token，英文常为整词
 struct LyricChar {
     int64_t startMs = 0;
     int64_t endMs = 0;
@@ -30,7 +30,8 @@ struct SongInfo {
 enum class LyricSource {
     Qrc, // QQ 音乐原生逐字歌词
     Krc, // 酷狗逐字歌词
-    Lrc  // QQ 音乐整行歌词
+    Lrc, // QQ 音乐整行歌词
+    Yrc  // 网易云音乐逐字歌词
 };
 
 // 手动搜索返回的候选歌曲
@@ -45,7 +46,7 @@ struct SearchCandidate {
     LyricSource source = LyricSource::Lrc;
 };
 
-// 歌词获取：优先 QQ 音乐原生 QRC 逐字歌词，失败后依次回退酷狗 KRC 与 QQ LRC。
+// 歌词获取：QQ 使用现有 QRC/KRC/LRC 链路；网易云按歌曲 ID 获取 YRC，失败后回退 LRC。
 class LyricProvider {
 public:
     using ReadyCallback = std::function<void(bool ok)>; // 在工作线程触发（缓存命中时同步触发）
@@ -63,6 +64,10 @@ public:
     // 本地无版本则候选优先不带版本），无合适结果时回退到加权模糊匹配
     void requestAsync(const std::wstring& title, const std::wstring& artist, int64_t durationMs,
                       ReadyCallback cb);
+
+    // 按网易云歌曲 ID 异步取歌词：优先 YRC，失败后回退网易云 LRC。
+    // 不使用标题/歌手搜索，避免把同名歌曲匹配到错误版本。
+    void requestNeteaseAsync(const std::wstring& songId, ReadyCallback cb);
 
     // 手动搜索候选（QRC、KRC、LRC 各最多 5 条），结果在 UI 线程回调
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
