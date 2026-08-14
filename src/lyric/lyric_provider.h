@@ -25,6 +25,7 @@ struct LyricLine {
 struct SongInfo {
     std::wstring songmid;
     std::wstring albummid;
+    std::wstring neteaseSongId;
 };
 
 enum class LyricSource {
@@ -44,6 +45,7 @@ struct SearchCandidate {
     std::wstring singer;
     int64_t durationMs = 0;
     LyricSource source = LyricSource::Lrc;
+    std::wstring neteaseSongId; // 网易云歌曲 ID（YRC 候选使用）
 };
 
 // 歌词获取：QQ 使用现有 QRC/KRC/LRC 链路；网易云按歌曲 ID 获取 YRC，失败后回退 LRC。
@@ -66,17 +68,20 @@ public:
                       ReadyCallback cb);
 
     // 按网易云歌曲 ID 异步取歌词：优先 YRC，失败后回退网易云 LRC。
-    // 不使用标题/歌手搜索，避免把同名歌曲匹配到错误版本。
-    void requestNeteaseAsync(const std::wstring& songId, ReadyCallback cb);
+    // 同时传入当前元数据，用于读取按歌曲 ID 保存的手动歌词覆盖。
+    void requestNeteaseAsync(const std::wstring& songId, const std::wstring& title,
+                             const std::wstring& artist, int64_t durationMs,
+                             ReadyCallback cb);
 
-    // 手动搜索候选（QRC、KRC、LRC 各最多 5 条），结果在 UI 线程回调
+    // 手动搜索候选（网易云 YRC/LRC、QQ QRC/KRC/LRC 各最多 5 条），结果在 UI 线程回调
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                SearchCallback cb);
 
     // 按 songmid 异步取歌词（不修改当前播放歌词），结果在 UI 线程回调
     void fetchLyricAsync(const SearchCandidate& cand, FetchCallback cb);
 
-    // 设置手动选择：写入缓存并作为当前歌词，以后同一首歌（同标题/歌手/时长）优先使用
+    // 设置手动选择：写入缓存并作为当前歌词；QQ 按标题/歌手/时长复用，
+    // 网易云按歌曲 ID 复用。
     void setManualOverride(const std::wstring& title, const std::wstring& artist,
                            int64_t durationMs, std::vector<LyricLine> lines, SongInfo info);
 

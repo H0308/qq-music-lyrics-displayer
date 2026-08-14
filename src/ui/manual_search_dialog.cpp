@@ -429,7 +429,7 @@ struct ManualSearchDialog::Impl {
 
         statusLabel.create(hwnd, kIdStatus, L"", false);
         hintLabel.create(hwnd, kIdHint,
-                         L"QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词；LRC 为 QQ 整行歌词",
+                         L"YRC/LRC 为网易云歌词；QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词",
                          true);
 
         list.create(hwnd, kIdCandidateList);
@@ -546,9 +546,10 @@ struct ManualSearchDialog::Impl {
         itemToCand.clear();
         searchBtn.setEnabled(true);
 
-        int qrcCount = 0, krcCount = 0, lrcCount = 0;
+        int yrcCount = 0, qrcCount = 0, krcCount = 0, lrcCount = 0;
         for (const auto& c : candidates) {
-            if (c.source == LyricSource::Qrc) ++qrcCount;
+            if (c.source == LyricSource::Yrc) ++yrcCount;
+            else if (c.source == LyricSource::Qrc) ++qrcCount;
             else if (c.source == LyricSource::Krc) ++krcCount;
             else ++lrcCount;
         }
@@ -563,6 +564,12 @@ struct ManualSearchDialog::Impl {
             items.push_back({c.name + L" - " + c.singer, false});
             itemToCand.push_back(idx);
         };
+        if (yrcCount > 0) {
+            addHeader(L"网易云歌词（YRC/LRC）");
+            for (int i = 0; i < (int)candidates.size(); ++i)
+                if (candidates[i].source == LyricSource::Yrc)
+                    addItem(i);
+        }
         if (krcCount > 0) {
             addHeader(L"酷狗逐字歌词（KRC）");
             for (int i = 0; i < (int)candidates.size(); ++i)
@@ -586,7 +593,8 @@ struct ManualSearchDialog::Impl {
         if (candidates.empty()) {
             statusLabel.setText(L"未找到相关歌曲，请尝试更换关键词。");
         } else {
-            statusLabel.setText(L"找到 " + std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
+            statusLabel.setText(L"找到 " + std::to_wstring(yrcCount) + L" 条网易云（YRC/LRC）、 " +
+                                std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
                                 std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
                                 std::to_wstring(lrcCount) + L" 条 QQ 逐行（LRC）候选，点击选择以预览歌词。");
             // 默认选中第一条非分组标题的候选
@@ -642,7 +650,7 @@ struct ManualSearchDialog::Impl {
         okBtn.setEnabled(true);
         advanceLyricBtn.setEnabled(true);
         delayLyricBtn.setEnabled(true);
-        // QRC/KRC 均带逐字时间轴，LRC 为整行时间轴。
+        // QRC/KRC/YRC 通常带逐字时间轴，LRC 或没有逐字数据时显示整行时间轴。
         bool wordByWord = false;
         for (const auto& l : lines) {
             if (!l.chars.empty()) {

@@ -461,6 +461,9 @@ struct App {
             if (snap.player == SmtcPlayerType::NetEase) {
                 provider.requestNeteaseAsync(
                     snap.neteaseSongId,
+                    snap.title,
+                    snap.artist,
+                    snap.durationMs,
                     [this](bool ok) {
                         PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
                     });

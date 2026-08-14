@@ -79,6 +79,13 @@ struct Candidate {
     int64_t intervalMs = 0;
 };
 
+struct NeteaseSong {
+    std::string id;
+    std::wstring name;
+    std::wstring singer;
+    int64_t durationMs = 0;
+};
+
 std::string jsonString(const nlohmann::json& value) {
     if (value.is_string()) return value.get<std::string>();
     if (value.is_number_integer()) return std::to_string(value.get<int64_t>());
@@ -573,6 +580,65 @@ bool searchSongs(CURL* curl, const std::wstring& query, std::vector<Candidate>& 
         c.intervalMs = (int64_t)s.value("interval", 0) * 1000;
         if (!c.songmid.empty())
             out.push_back(std::move(c));
+    }
+    return true;
+}
+
+// 按关键词搜索网易云单曲，填充 out；返回 true 表示 HTTP/JSON 解析成功。
+bool searchNeteaseSongs(CURL* curl, const std::wstring& query, int maxN,
+                        std::vector<NeteaseSong>& out) {
+    out.clear();
+    std::string keyword = toUtf8(query);
+    char* esc = curl_easy_escape(curl, keyword.c_str(), static_cast<int>(keyword.size()));
+    std::string url = "https://music.163.com/api/cloudsearch/pc?csrf_token=&s=" +
+                      std::string(esc ? esc : "") + "&type=1&offset=0&limit=" +
+                      std::to_string(maxN);
+    if (esc)
+        curl_free(esc);
+
+    std::string body;
+    if (!httpGet(curl, url, "https://music.163.com/", body))
+        return false;
+    auto root = nlohmann::json::parse(body, nullptr, false);
+    if (root.is_discarded() || !root.is_object())
+        return false;
+    auto resultIt = root.find("result");
+    if (resultIt == root.end() || !resultIt->is_object())
+        return false;
+    auto songsIt = resultIt->find("songs");
+    if (songsIt == resultIt->end() || !songsIt->is_array())
+        return false;
+
+    for (const auto& item : *songsIt) {
+        if (!item.is_object())
+            continue;
+        NeteaseSong song;
+        auto idIt = item.find("id");
+        if (idIt != item.end())
+            song.id = jsonString(*idIt);
+        song.name = toWide(item.value("name", std::string()));
+        if (song.name.empty() || song.id.empty())
+            continue;
+
+        auto artistsIt = item.find("ar");
+        if (artistsIt != item.end() && artistsIt->is_array()) {
+            for (const auto& artist : *artistsIt) {
+                if (!artist.is_object())
+                    continue;
+                const std::wstring name = toWide(artist.value("name", std::string()));
+                if (!name.empty()) {
+                    if (!song.singer.empty())
+                        song.singer += L'/';
+                    song.singer += name;
+                }
+            }
+        }
+        song.durationMs = static_cast<int64_t>(item.value("dt", 0LL));
+        if (song.durationMs <= 0)
+            song.durationMs = static_cast<int64_t>(item.value("duration", 0LL));
+        out.push_back(std::move(song));
+        if (static_cast<int>(out.size()) >= maxN)
+            break;
     }
     return true;
 }
@@ -1101,14 +1167,22 @@ uint64_t fnv1a64(const std::string& s) {
     return h;
 }
 
-// 手动歌词文件名：可读部分 + key 哈希，如 "歌名 - 歌手-a1b2c3d4e5f60708.json"
+// 手动歌词文件名：平台前缀 + 可读部分 + 来源键哈希，
+// 如 "qq-歌名 - 歌手-a1b2c3d4e5f60708.json"。
 std::wstring manualFileName(const std::wstring& title, const std::wstring& artist,
-                            int64_t durationMs) {
+                            const std::wstring& key, bool netease) {
     std::wstring readable = sanitizeFileName(title + L" - " + artist);
     wchar_t hex[17];
-    std::swprintf(hex, 17, L"%016llx",
-                  (unsigned long long)fnv1a64(toUtf8(LyricProvider::makeKey(title, artist,
-                                                                          durationMs))));
+    std::swprintf(hex, 17, L"%016llx", (unsigned long long)fnv1a64(toUtf8(key)));
+    return std::wstring(netease ? L"netease-" : L"qq-") + readable + L"-" + hex + L".json";
+}
+
+// 旧版本文件名没有平台前缀；保留此函数用于读取已有手动歌词。
+std::wstring legacyManualFileName(const std::wstring& title, const std::wstring& artist,
+                                  const std::wstring& key) {
+    std::wstring readable = sanitizeFileName(title + L" - " + artist);
+    wchar_t hex[17];
+    std::swprintf(hex, 17, L"%016llx", (unsigned long long)fnv1a64(toUtf8(key)));
     return readable + L"-" + hex + L".json";
 }
 
@@ -1156,11 +1230,15 @@ struct LyricProvider::Impl {
     // ---------- 手动歌词持久化（每首歌一个 JSON 文件，UTF-8） ----------
 
     // 某首歌对应的手动歌词文件路径；overrideDir 为空时返回空
-    std::wstring overrideFilePath(const std::wstring& title, const std::wstring& artist,
-                                  int64_t durationMs) const {
+    std::wstring overrideFilePath(const std::wstring& key, const std::wstring& title,
+                                  const std::wstring& artist, bool netease,
+                                  bool legacy) const {
         if (overrideDir.empty())
             return {};
-        return overrideDir + L"\\" + manualFileName(title, artist, durationMs);
+        const std::wstring fileName = legacy
+                                          ? legacyManualFileName(title, artist, key)
+                                          : manualFileName(title, artist, key, netease);
+        return overrideDir + L"\\" + fileName;
     }
 
     // 从单个文件解析手动歌词；文件不存在或解析失败返回 false
@@ -1174,6 +1252,7 @@ struct LyricProvider::Impl {
                 return false;
             entry.info.songmid = toWide(e.value("songmid", std::string()));
             entry.info.albummid = toWide(e.value("albummid", std::string()));
+            entry.info.neteaseSongId = toWide(e.value("neteaseSongId", std::string()));
             if (e["lines"].is_array()) {
                 for (const auto& l : e["lines"]) {
                     if (!l.is_array() || l.size() < 2)
@@ -1214,6 +1293,7 @@ struct LyricProvider::Impl {
             e["durationMs"] = durationMs;
             e["songmid"] = toUtf8(entry.info.songmid);
             e["albummid"] = toUtf8(entry.info.albummid);
+            e["neteaseSongId"] = toUtf8(entry.info.neteaseSongId);
             nlohmann::json arr = nlohmann::json::array();
             for (const auto& l : entry.lines) {
                 nlohmann::json chars = nlohmann::json::array();
@@ -1232,18 +1312,22 @@ struct LyricProvider::Impl {
     // 查找一首歌的手动歌词：先查内存，未命中再查对应文件（找到则载入内存）
     // 调用方需已持有 mtx
     bool manualOverrideGet(const std::wstring& key, const std::wstring& title,
-                           const std::wstring& artist, int64_t durationMs, CacheEntry& out) {
+                           const std::wstring& artist, bool netease, CacheEntry& out) {
         auto it = manualOverrides.find(key);
         if (it != manualOverrides.end()) {
             out = it->second;
             return true;
         }
-        std::wstring path = overrideFilePath(title, artist, durationMs);
+        std::wstring path = overrideFilePath(key, title, artist, netease, false);
         if (path.empty())
             return false;
         CacheEntry entry;
-        if (!loadOverrideFile(path, entry))
-            return false;
+        if (!loadOverrideFile(path, entry)) {
+            // 兼容改名前已经存在的无前缀文件；新保存的文件只使用带前缀路径。
+            const std::wstring legacyPath = overrideFilePath(key, title, artist, netease, true);
+            if (!loadOverrideFile(legacyPath, entry))
+                return false;
+        }
         manualOverrides[key] = entry;
         out = std::move(entry);
         return true;
@@ -1373,8 +1457,10 @@ struct LyricProvider::Impl {
             return false;
         bool ok = downloadNeteaseLyric(curl, songId, out);
         curl_easy_cleanup(curl);
-        if (ok)
+        if (ok) {
             info = SongInfo{}; // 网易云歌词不使用 QQ songmid/albummid 封面兜底
+            info.neteaseSongId = songId;
+        }
         return ok;
     }
 };
@@ -1393,7 +1479,7 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
         std::lock_guard<std::mutex> lk(impl_->mtx);
         // 1) 用户手动选择的歌词优先级最高（内存未命中时按 key 找对应文件）
         CacheEntry manual;
-        if (impl_->manualOverrideGet(key, title, artist, durationMs, manual)) {
+        if (impl_->manualOverrideGet(key, title, artist, false, manual)) {
             impl_->current = std::move(manual.lines);
             impl_->currentSongInfo = std::move(manual.info);
             if (cb) cb(true);
@@ -1429,7 +1515,10 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
     impl_->workers.push_back(std::move(t));
 }
 
-void LyricProvider::requestNeteaseAsync(const std::wstring& songId, ReadyCallback cb) {
+void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
+                                       const std::wstring& title,
+                                       const std::wstring& artist,
+                                       int64_t durationMs, ReadyCallback cb) {
     if (songId.empty()) {
         if (cb)
             cb(false);
@@ -1441,6 +1530,15 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId, ReadyCallbac
     uint64_t gen = ++impl_->generation;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
+        // 网易云手动选择按歌曲 ID 保存，优先级高于网络缓存。
+        CacheEntry manual;
+        if (impl_->manualOverrideGet(key, title, artist, true, manual)) {
+            impl_->current = std::move(manual.lines);
+            impl_->currentSongInfo = std::move(manual.info);
+            if (cb)
+                cb(true);
+            return;
+        }
         CacheEntry cached;
         if (impl_->cacheGet(key, cached)) {
             impl_->current = std::move(cached.lines);
@@ -1509,11 +1607,24 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
         CURL* curl = curl_easy_init();
         std::vector<SearchCandidate> result;
         if (curl) {
-            // QQ 候选同时提供 QRC 逐字与 LRC 整行入口。
             std::wstring queryTitle = stripVersionSuffix(title);
             std::wstring query = queryTitle;
             if (!artist.empty() && !titleEndsWithArtist(title, artist))
                 query += L' ' + artist;
+
+            // 网易云候选按歌曲 ID 获取歌词；同一响应内优先 YRC，不可用时由歌词接口回退 LRC。
+            std::vector<NeteaseSong> neteaseSongs;
+            bool neteaseSearchOk = searchNeteaseSongs(curl, query, 5, neteaseSongs);
+            if (neteaseSongs.empty())
+                neteaseSearchOk = searchNeteaseSongs(curl, queryTitle, 5, neteaseSongs);
+            if (neteaseSearchOk) {
+                for (const auto& s : neteaseSongs) {
+                    result.push_back({{}, {}, {}, {}, s.name, s.singer, s.durationMs,
+                                      LyricSource::Yrc, toWide(s.id)});
+                }
+            }
+
+            // QQ 候选同时提供 QRC 逐字与 LRC 整行入口。
             std::vector<Candidate> cands;
             searchSongs(curl, query, cands);
             if (cands.empty())
@@ -1557,13 +1668,15 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
                 ok = downloadQrc(curl, toUtf8(cand.songid), lines);
             else if (cand.source == LyricSource::Krc)
                 ok = fetchKrcByHash(curl, toUtf8(cand.kugouHash), cand.durationMs, lines);
+            else if (cand.source == LyricSource::Yrc)
+                ok = downloadNeteaseLyric(curl, cand.neteaseSongId, lines);
             else
                 ok = downloadLyric(curl, toUtf8(cand.songmid), lines);
             if (ok && cand.source != LyricSource::Lrc && !cand.songmid.empty())
                 attachQqSecondary(curl, toUtf8(cand.songmid), lines);
             curl_easy_cleanup(curl);
         }
-        SongInfo info{cand.songmid, cand.albummid};
+        SongInfo info{cand.songmid, cand.albummid, cand.neteaseSongId};
         if (cb)
             cb(ok, std::move(lines), info);
     });
@@ -1575,13 +1688,16 @@ void LyricProvider::setManualOverride(const std::wstring& title, const std::wstr
                                       int64_t durationMs, std::vector<LyricLine> lines,
                                       SongInfo info) {
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    const std::wstring key = makeKey(title, artist, durationMs);
+    const bool netease = !info.neteaseSongId.empty();
+    const std::wstring key = netease
+                                 ? L"netease|" + info.neteaseSongId
+                                 : makeKey(title, artist, durationMs);
     auto& stored = impl_->manualOverrides[key]; // 同一首歌重复手动选择时覆盖旧记录
     stored = CacheEntry{std::move(lines), std::move(info)};
     impl_->current = stored.lines;
     impl_->currentSongInfo = stored.info;
     // 写入这首歌自己的文件
-    std::wstring path = impl_->overrideFilePath(title, artist, durationMs);
+    std::wstring path = impl_->overrideFilePath(key, title, artist, netease, false);
     if (!path.empty())
         impl_->saveOverrideFile(path, title, artist, durationMs, stored);
 }
