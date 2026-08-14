@@ -132,6 +132,12 @@ std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
 
 // 成员顺序有意为之：revoker 最后声明、析构时最先退订，避免回调访问已销毁成员
 struct SmtcMonitor::Impl {
+    struct SessionWatcher {
+        GlobalSystemMediaTransportControlsSession session{ nullptr };
+        GlobalSystemMediaTransportControlsSession::PlaybackInfoChanged_revoker playbackRevoker;
+        GlobalSystemMediaTransportControlsSession::MediaPropertiesChanged_revoker propsRevoker;
+    };
+
     GlobalSystemMediaTransportControlsSessionManager manager{ nullptr };
     GlobalSystemMediaTransportControlsSession session{ nullptr };
 
@@ -140,9 +146,11 @@ struct SmtcMonitor::Impl {
     SmtcMonitor::ChangeCallback onChange;
 
     GlobalSystemMediaTransportControlsSessionManager::SessionsChanged_revoker sessionsRevoker;
-    GlobalSystemMediaTransportControlsSession::MediaPropertiesChanged_revoker propsRevoker;
+    GlobalSystemMediaTransportControlsSessionManager::CurrentSessionChanged_revoker
+        currentSessionRevoker;
     GlobalSystemMediaTransportControlsSession::TimelinePropertiesChanged_revoker timelineRevoker;
-    GlobalSystemMediaTransportControlsSession::PlaybackInfoChanged_revoker playbackRevoker;
+    // 所有媒体会话都保留轻量监听，避免只监听当前选中会话导致切换丢失。
+    std::vector<SessionWatcher> sessionWatchers;
 
     // 进度平滑状态（snapshot() 内使用）。
     // QQ 的 TimelineProperties 播放中会频繁阶跃更新（Position 可能是量化值），
@@ -306,31 +314,86 @@ struct SmtcMonitor::Impl {
 
     void attach(const GlobalSystemMediaTransportControlsSession& s) {
         session = s;
-        propsRevoker.revoke();
         timelineRevoker.revoke();
-        playbackRevoker.revoke();
         if (!session) return;
-        propsRevoker = session.MediaPropertiesChanged(winrt::auto_revoke,
-            [this](auto&&, auto&&) { refreshAll(); });
         timelineRevoker = session.TimelinePropertiesChanged(winrt::auto_revoke,
             [this](auto&&, auto&&) { refreshTimeline(); });
-        playbackRevoker = session.PlaybackInfoChanged(winrt::auto_revoke,
-            [this](auto&&, auto&&) { refreshPlayback(); });
     }
 
-    void updateSession() {
+    void watchSessions(const auto& sessions) {
+        sessionWatchers.clear();
+        for (auto const& watched : sessions) {
+            SessionWatcher watcher;
+            watcher.session = watched;
+            watcher.playbackRevoker = watched.PlaybackInfoChanged(winrt::auto_revoke,
+                [this](auto&&, auto&&) {
+                    // 先保留当前选中会话已有的暂停/恢复进度处理，
+                    // 再根据所有会话的最新状态重新选择来源。
+                    refreshPlayback();
+                    updateSession();
+                });
+            watcher.propsRevoker = watched.MediaPropertiesChanged(winrt::auto_revoke,
+                [this](auto&&, auto&&) {
+                    // 网易云可能先建立会话、后写入 NCM-{ID}，属性变化也要触发重新识别。
+                    updateSession();
+                });
+            sessionWatchers.push_back(std::move(watcher));
+        }
+    }
+
+    void updateSession(bool rebuildWatchers = false) {
         GlobalSystemMediaTransportControlsSession found{ nullptr };
         if (manager) {
             try {
-                for (auto const& s : manager.GetSessions()) {
-                    const SessionIdentity identity = identifySession(s);
-                    if (identity.player == SmtcPlayerType::QQMusic) {
-                        // QQ 原有选择逻辑保持优先，避免同时存在多个媒体会话时改变现有行为。
-                        found = s;
-                        break;
+                // Windows 已经维护了“用户当前最可能想控制”的媒体会话。
+                // 同时运行 QQ 和网易云时，优先使用这个会话，而不是依赖
+                // GetSessions() 的枚举顺序或固定的 QQ 优先级。
+                auto current = manager.GetCurrentSession();
+                const SessionIdentity currentIdentity = identifySession(current);
+                if (currentIdentity.player != SmtcPlayerType::Unknown) {
+                    try {
+                        if (mapStatus(current.GetPlaybackInfo().PlaybackStatus()) ==
+                            PlaybackStatus::Playing)
+                            found = current;
+                    } catch (...) {
                     }
-                    if (!found && identity.player == SmtcPlayerType::NetEase)
-                        found = s;
+                }
+
+                auto sessions = manager.GetSessions();
+                if (rebuildWatchers)
+                    watchSessions(sessions);
+                if (!found) {
+                    // 当前会话可能是暂停的，而另一个受支持会话正在播放；
+                    // 此时选择真正处于 Playing 的来源。
+                    for (auto const& s : sessions) {
+                        const SessionIdentity identity = identifySession(s);
+                        if (identity.player == SmtcPlayerType::Unknown)
+                            continue;
+                        try {
+                            if (mapStatus(s.GetPlaybackInfo().PlaybackStatus()) ==
+                                PlaybackStatus::Playing) {
+                                found = s;
+                                break;
+                            }
+                        } catch (...) {
+                        }
+                    }
+                }
+
+                if (!found && currentIdentity.player != SmtcPlayerType::Unknown) {
+                    // 没有播放中的会话时，保留 Windows 当前会话（例如暂停状态），
+                    // 这样恢复播放和拖动进度仍然由同一来源接收。
+                    found = current;
+                }
+
+                if (!found) {
+                    // 当前会话不可用时，保留一个可识别会话作为启动/恢复兜底。
+                    for (auto const& s : sessions) {
+                        if (identifySession(s).player != SmtcPlayerType::Unknown) {
+                            found = s;
+                            break;
+                        }
+                    }
                 }
             } catch (...) {
             }
@@ -347,8 +410,10 @@ void SmtcMonitor::start(ChangeCallback onChange) {
     impl_->onChange = std::move(onChange);
     impl_->manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
     impl_->sessionsRevoker = impl_->manager.SessionsChanged(winrt::auto_revoke,
+        [this](auto&&, auto&&) { impl_->updateSession(true); });
+    impl_->currentSessionRevoker = impl_->manager.CurrentSessionChanged(winrt::auto_revoke,
         [this](auto&&, auto&&) { impl_->updateSession(); });
-    impl_->updateSession();
+    impl_->updateSession(true);
 }
 
 SmtcSnapshot SmtcMonitor::snapshot() const {
