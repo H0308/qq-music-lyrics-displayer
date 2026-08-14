@@ -51,6 +51,7 @@ constexpr UINT kCmdFollowAlbum = 113;
 constexpr UINT kCmdSecondaryLyric = 114;
 constexpr UINT kCmdSwitchSecondaryLyric = 115;
 constexpr UINT kCmdSongInfo = 116;
+constexpr UINT kCmdAlbumCover = 117;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -185,6 +186,7 @@ struct App {
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
+    bool albumCoverVisible_ = true;
 
     std::wstring settingsPath_;
 
@@ -230,6 +232,7 @@ struct App {
         taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
+        taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setSpectrumVisible(spectrumOn_);
         if (spectrumOn_)
@@ -554,6 +557,7 @@ void App::loadSettings() {
             preferRomanization_ = oldRomanization && !oldTranslation;
         }
         songInfoVisible_ = j.value("songInfoVisible", true);
+        albumCoverVisible_ = j.value("albumCoverVisible", true);
     } catch (...) {
     }
 }
@@ -579,6 +583,7 @@ void App::saveSettings() {
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
         j["songInfoVisible"] = songInfoVisible_;
+        j["albumCoverVisible"] = albumCoverVisible_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -668,6 +673,7 @@ void App::showTrayMenu() {
         pos.submenu.push_back(sub);
         items.push_back(std::move(pos));
         addItem(kCmdSongInfo, L"显示歌曲信息", songInfoVisible_);
+        addItem(kCmdAlbumCover, L"显示专辑封面", albumCoverVisible_);
         addItem(kCmdSpectrum, L"频谱", spectrumOn_);
     }
     addSeparator();
@@ -753,6 +759,12 @@ void App::onMenuCommand(int cmd) {
         songInfoVisible_ = !songInfoVisible_;
         if (taskbarHost)
             taskbarHost->setSongInfoVisible(songInfoVisible_);
+        saveSettings();
+        break;
+    case kCmdAlbumCover:
+        albumCoverVisible_ = !albumCoverVisible_;
+        if (taskbarHost)
+            taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         saveSettings();
         break;
     case kCmdSwitchSecondaryLyric:

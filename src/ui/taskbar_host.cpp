@@ -289,6 +289,7 @@ struct TaskbarHost::Impl {
     bool translationEnabled_ = true;
     bool romanizationEnabled_ = false;
     bool songInfoVisible_ = true;
+    bool albumCoverVisible_ = true;
     bool clientAnimations_ = true;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
@@ -410,8 +411,8 @@ struct TaskbarHost::Impl {
         float minWidthDip = kMinWidthDip;
         float maxWidthDip = kMaxWidthDip;
         if (!songInfoVisible_) {
-            // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为封面本身。
-            const float compactLeftDip = kCoverPadding + dip(pxH) - kCoverPadding * 2.0f;
+            // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为可见的封面区域。
+            const float compactLeftDip = albumCoverVisible_ ? coverSlotWidth(dip(pxH)) : 0.0f;
             minWidthDip = kMinWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
             maxWidthDip = kMaxWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
         }
@@ -654,6 +655,15 @@ struct TaskbarHost::Impl {
         songInfoVisible_ = on;
         titleScrollOffset_ = 0.0f;
         artistScrollOffset_ = 0.0f;
+        textDirty_ = true;
+        adjustPosition();
+        render();
+    }
+
+    void setAlbumCoverVisible(bool on) {
+        if (albumCoverVisible_ == on)
+            return;
+        albumCoverVisible_ = on;
         textDirty_ = true;
         adjustPosition();
         render();
@@ -980,7 +990,7 @@ struct TaskbarHost::Impl {
         }
         lyricTransitionPending_ = false;
 
-        float infoX = kCoverPadding + coverSize() + kCoverPadding;
+        float infoX = infoStartX();
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
         titleWidth_ = 0.0f;
         titleHeight_ = 0.0f;
@@ -1096,6 +1106,31 @@ struct TaskbarHost::Impl {
         GetClientRect(hwnd, &rc);
         float h = dip(rc.bottom - rc.top);
         return h - kCoverPadding * 2.0f;
+    }
+
+    float coverSlotWidth(float heightDip) const {
+        return albumCoverVisible_ ? heightDip - kCoverPadding : 0.0f;
+    }
+
+    float infoStartX() const {
+        return albumCoverVisible_ ? kCoverPadding + coverSize() + kCoverPadding : kTextPadding;
+    }
+
+    struct LayoutMetrics {
+        float w = 0.0f;
+        float h = 0.0f;
+        float leftW = 0.0f;
+        float rightW = 0.0f;
+    };
+
+    LayoutMetrics layoutMetrics(int pxW, int pxH) const {
+        LayoutMetrics m;
+        m.w = dip(pxW);
+        m.h = dip(pxH);
+        float effW = m.w - spectrumExtraW();
+        m.leftW = songInfoVisible_ ? effW * kLeftRatio : coverSlotWidth(m.h);
+        m.rightW = m.w - m.leftW;
+        return m;
     }
 
     // 当前行有逐字时间轴且歌词布局对应该行时返回该行，否则 nullptr
@@ -1292,16 +1327,16 @@ struct TaskbarHost::Impl {
         GetClientRect(hwnd, &rc);
         // 鼠标消息使用像素坐标，而 render 使用 DIP；先统一到 DIP，
         // 并与 render 使用完全相同的左侧分区计算。
-        float w = dip(rc.right - rc.left);
-        float h = dip(rc.bottom - rc.top);
+        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        float w = layout.w;
+        float h = layout.h;
         x = dip(static_cast<int>(x));
         y = dip(static_cast<int>(y));
-        float leftW = songInfoVisible_ ? (w - spectrumExtraW()) * kLeftRatio
-                                       : kCoverPadding + coverSize();
+        float leftW = layout.leftW;
         if (x < leftW || x > w)
             return -1;
 
-        float cx = leftW + (w - leftW) * 0.5f;
+        float cx = leftW + layout.rightW * 0.5f;
         float cy = h * 0.5f;
         float r = h * 0.26f;
         float spacing = r * 2.8f;
@@ -1403,6 +1438,13 @@ struct TaskbarHost::Impl {
             return;
         createDeviceResources();
 
+        // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
+        // 把刚刚收缩/扩展的窗口尺寸恢复回去。
+        if (layoutDirty_) {
+            adjustPosition();
+            layoutDirty_ = false;
+        }
+
         RECT rc{};
         GetClientRect(hwnd, &rc);
         int pxW = rc.right - rc.left;
@@ -1423,22 +1465,15 @@ struct TaskbarHost::Impl {
             return;
         renderer.setDpi(dpi_);
 
-        if (layoutDirty_) {
-            adjustPosition();
-            layoutDirty_ = false;
-        }
-
         ensureGeometry();
         if (coverDirty)
             decodeCover();
 
-        float w = dip(pxW);
-        float h = dip(pxH);
-        // 频谱加宽的额外宽度不参与左右分区：左侧信息区与歌词区保持原宽，额外宽度全给频谱
-        float effW = w - spectrumExtraW();
-        float leftW = songInfoVisible_ ? effW * kLeftRatio
-                                       : kCoverPadding + coverSize();
-        float rightW = w - leftW;
+        LayoutMetrics layout = layoutMetrics(pxW, pxH);
+        float w = layout.w;
+        float h = layout.h;
+        float leftW = layout.leftW;
+        float rightW = layout.rightW;
 
         if (textDirty_)
             buildTextLayouts(leftW, rightW);
@@ -1455,24 +1490,26 @@ struct TaskbarHost::Impl {
         float s = coverSize();
         float coverX = kCoverPadding;
         float coverY = (h - s) * 0.5f;
-        D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-        if (coverBmp && coverClip_ && coverLayer_) {
-            rt->PushLayer(D2D1::LayerParameters(
-                              D2D1::InfiniteRect(), coverClip_,
-                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                              D2D1::Matrix3x2F::Translation(coverX, coverY)),
-                          coverLayer_);
-            rt->DrawBitmap(coverBmp, coverRect, 1.0f,
-                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-            rt->PopLayer();
-        } else {
-            D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
-            rt->FillRoundedRectangle(rr, brushDim_);
+        if (albumCoverVisible_) {
+            D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
+            if (coverBmp && coverClip_ && coverLayer_) {
+                rt->PushLayer(D2D1::LayerParameters(
+                                  D2D1::InfiniteRect(), coverClip_,
+                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                  D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                              coverLayer_);
+                rt->DrawBitmap(coverBmp, coverRect, 1.0f,
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                rt->PopLayer();
+            } else {
+                D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
+                rt->FillRoundedRectangle(rr, brushDim_);
+            }
         }
 
         if (songInfoVisible_) {
-            // 左侧歌曲信息（封面右侧垂直排列，整体垂直居中，超长自动滚动）
-            float infoX = coverX + s + kCoverPadding;
+            // 左侧歌曲信息（封面显示时位于封面右侧，整体垂直居中，超长自动滚动）
+            float infoX = infoStartX();
             float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
             float infoGap = 2.0f;
             float totalInfoH = titleHeight_ + infoGap + artistHeight_;
@@ -1630,15 +1667,15 @@ struct TaskbarHost::Impl {
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
-        float h = dip(rc.bottom - rc.top);
-        float w = dip(rc.right - rc.left);
-        if (h <= 0.0f || w <= 0.0f)
+        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        if (layout.h <= 0.0f || layout.w <= 0.0f)
             return;
 
-        float leftW = songInfoVisible_ ? (w - spectrumExtraW()) * kLeftRatio
-                                       : kCoverPadding + coverSize();
-        float rightW = w - leftW;
-        float infoX = kCoverPadding + coverSize() + kCoverPadding;
+        float w = layout.w;
+        float h = layout.h;
+        float leftW = layout.leftW;
+        float rightW = layout.rightW;
+        float infoX = infoStartX();
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
         // 与 render 一致：滚动/跟随范围不含频谱独占区
         float lyricAreaW =
@@ -1899,6 +1936,10 @@ void TaskbarHost::setSecondaryLyricMode(bool translation, bool romanization) {
 
 void TaskbarHost::setSongInfoVisible(bool on) {
     impl_->setSongInfoVisible(on);
+}
+
+void TaskbarHost::setAlbumCoverVisible(bool on) {
+    impl_->setAlbumCoverVisible(on);
 }
 
 void TaskbarHost::setSpectrumVisible(bool on) {

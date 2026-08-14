@@ -35,6 +35,7 @@ public:
     void setFontGlowColors(COLORREF glow, COLORREF outline);
     void setSecondaryLyricMode(bool translation, bool romanization) override;
     void setSongInfoVisible(bool on);
+    void setAlbumCoverVisible(bool on);
 
     // 音频频谱（任务栏独有）：on 控制显隐，bands 为每帧频段电平（0~1，固定 6 段）。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
