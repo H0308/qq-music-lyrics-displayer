@@ -140,6 +140,14 @@ const wchar_t* playerName(SmtcPlayerType player) {
     }
 }
 
+const wchar_t* spectrumProcessName(SmtcPlayerType player) {
+    switch (player) {
+    case SmtcPlayerType::QQMusic: return L"QQMusic.exe";
+    case SmtcPlayerType::NetEase: return L"cloudmusic.exe";
+    default: return L"";
+    }
+}
+
 std::wstring makeTrackKey(const SmtcSnapshot& snap) {
     if (snap.player == SmtcPlayerType::NetEase && !snap.neteaseSongId.empty())
         return L"netease|" + snap.neteaseSongId;
@@ -388,17 +396,19 @@ struct App {
             return;
         }
         lastPlayer_ = snap.player;
-        if (snap.player == SmtcPlayerType::QQMusic) {
+        const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
+        if (*spectrumProcess) {
+            spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
             if (spectrumOn_)
                 spectrum_.start();
-            std::wstring spectrumKey = LyricProvider::makeKey(snap.title, snap.artist,
-                                                               snap.durationMs);
+            // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
+            std::wstring spectrumKey = makeTrackKey(snap);
             if (!spectrumSessionAlive_ || spectrumSessionKey_ != spectrumKey)
                 spectrum_.requestReconnect();
             spectrumSessionAlive_ = true;
             spectrumSessionKey_ = spectrumKey;
         } else {
-            // 第一版网易云只消费 SMTC 元数据/时间线，不启用 QQ 进程频谱捕获。
+            // 当前会话不是已适配的播放器时，不再保留旧播放器的捕获线程。
             spectrum_.stop();
             spectrumSessionAlive_ = false;
             spectrumSessionKey_.clear();
@@ -771,6 +781,10 @@ void App::onMenuCommand(int cmd) {
     case kCmdSpectrum:
         spectrumOn_ = !spectrumOn_;
         if (spectrumOn_ && taskbarHost) {
+            SmtcSnapshot snap = monitor.snapshot();
+            const wchar_t* processName = spectrumProcessName(snap.player);
+            if (*processName)
+                spectrum_.setTargetProcessName(std::wstring(processName));
             spectrum_.start();
             taskbarHost->setSpectrumVisible(true);
         } else {

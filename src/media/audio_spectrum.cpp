@@ -25,9 +25,9 @@ constexpr float kMaxDb = -6.0f;
 constexpr float kRelease = 0.90f;              // 每个 FFT 帧的回落系数（~150ms 时间常数）
 constexpr ULONGLONG kNoDataRebuildMs = 2000;  // 连续无音频包约 2s 后重建捕获会话
 
-// 找 QQ 音乐进程树根：父进程不是 QQMusic.exe 的那个 QQMusic.exe。
+// 找目标播放器进程树根：父进程不是同名播放器进程的那个进程。
 // 进程级回环捕获 INCLUDE 模式覆盖目标进程及其子进程，从树根捕获最完整。
-DWORD findQQMusicRootPid() {
+DWORD findProcessRootPid(const std::wstring& processName) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE)
         return 0;
@@ -37,7 +37,7 @@ DWORD findQQMusicRootPid() {
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
     for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
-        if (_wcsicmp(pe.szExeFile, L"QQMusic.exe") == 0)
+        if (_wcsicmp(pe.szExeFile, processName.c_str()) == 0)
             qq.push_back({pe.th32ProcessID, pe.th32ParentProcessID});
     }
     CloseHandle(snap);
@@ -51,7 +51,7 @@ DWORD findQQMusicRootPid() {
     return qq.empty() ? 0 : qq.front().pid;
 }
 
-bool isQQMusicProcess(DWORD pid) {
+bool isTargetProcess(DWORD pid, const std::wstring& processName) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!process)
         return false;
@@ -64,12 +64,12 @@ bool isQQMusicProcess(DWORD pid) {
         return false;
 
     const wchar_t* name = wcsrchr(path, L'\\');
-    return _wcsicmp(name ? name + 1 : path, L"QQMusic.exe") == 0;
+    return _wcsicmp(name ? name + 1 : path, processName.c_str()) == 0;
 }
 
-// 从当前默认输出设备的活动音频会话中找真正产生声音的 QQMusic.exe。
-// QQ 音乐重启后可能同时存在多个同名进程，不能再依赖进程快照中的第一个根进程。
-DWORD findQQMusicAudioPid() {
+// 从当前默认输出设备的活动音频会话中找真正产生声音的目标播放器进程。
+// 播放器重启后可能同时存在多个同名进程，不能再依赖进程快照中的第一个根进程。
+DWORD findPlayerAudioPid(const std::wstring& processName) {
     IMMDeviceEnumerator* devices = nullptr;
     IMMDevice* device = nullptr;
     IAudioSessionManager2* manager = nullptr;
@@ -103,7 +103,7 @@ DWORD findQQMusicAudioPid() {
             hr = control->QueryInterface(__uuidof(IAudioSessionControl2),
                                           reinterpret_cast<void**>(&control2));
         if (SUCCEEDED(hr) && control2 && SUCCEEDED(control2->GetProcessId(&pid)) &&
-            pid != 0 && isQQMusicProcess(pid))
+            pid != 0 && isTargetProcess(pid, processName))
             result = pid;
 
         if (control2)
@@ -306,6 +306,22 @@ void AudioSpectrum::stop() {
         v.store(0.0f, std::memory_order_relaxed);
 }
 
+void AudioSpectrum::setTargetProcessName(const std::wstring& processName) {
+    if (processName.empty())
+        return;
+
+    bool changed = false;
+    {
+        std::lock_guard<std::mutex> lock(targetMutex_);
+        if (targetProcessName_ != processName) {
+            targetProcessName_ = processName;
+            changed = true;
+        }
+    }
+    if (changed)
+        requestReconnect();
+}
+
 void AudioSpectrum::requestReconnect() {
     reconnectRequested_.store(true, std::memory_order_release);
 }
@@ -328,11 +344,16 @@ void AudioSpectrum::run() {
 
     while (!stop_.load()) {
         reconnectRequested_.store(false, std::memory_order_release);
-        // 优先使用当前真正出声的 QQ 音乐音频会话，避免重启后命中同名辅助进程。
+        std::wstring processName;
+        {
+            std::lock_guard<std::mutex> lock(targetMutex_);
+            processName = targetProcessName_;
+        }
+        // 优先使用当前真正出声的目标播放器音频会话，避免重启后命中同名辅助进程。
         // 暂停或尚未开始播放时没有活动会话，再回退到进程树扫描。
-        DWORD pid = findQQMusicAudioPid();
+        DWORD pid = findPlayerAudioPid(processName);
         if (!pid)
-            pid = findQQMusicRootPid();
+            pid = findProcessRootPid(processName);
         if (!pid) {
             for (auto& v : bands_)
                 v.store(0.0f, std::memory_order_relaxed);
