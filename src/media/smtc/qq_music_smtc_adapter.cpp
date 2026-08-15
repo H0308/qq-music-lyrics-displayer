@@ -1,0 +1,234 @@
+#include "media/smtc/qq_music_smtc_adapter.h"
+
+#include "media/smtc/smtc_common.h"
+
+#include <algorithm>
+#include <cmath>
+
+namespace smtc {
+
+namespace {
+
+constexpr wchar_t kQqMusicAppId[] = L"QQMusic.exe";
+
+std::wstring positionTrackKey(const SmtcSnapshot& snapshot) {
+    return L"qq|" + snapshot.title + L'|' + snapshot.artist;
+}
+
+} // namespace
+
+SmtcPlayerType QqMusicSmtcAdapter::playerType() const noexcept {
+    return SmtcPlayerType::QQMusic;
+}
+
+SmtcSessionIdentity QqMusicSmtcAdapter::identifySession(const Session& session) const {
+    SmtcSessionIdentity identity;
+    if (!session)
+        return identity;
+    try {
+        identity.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
+        if (identity.sourceAppUserModelId == kQqMusicAppId)
+            identity.player = SmtcPlayerType::QQMusic;
+    } catch (...) {
+    }
+    return identity;
+}
+
+void QqMusicSmtcAdapter::prepareInitialSnapshot(SmtcSnapshot& snapshot) const {
+    const int64_t now = nowUtcMs();
+    if (snapshot.anchorUtcMs == 0)
+        snapshot.anchorUtcMs = now;
+    if (now - snapshot.anchorUtcMs > 2000)
+        snapshot.anchorUtcMs = now;
+}
+
+bool QqMusicSmtcAdapter::isStaleTimelineUpdate(
+    const SmtcSnapshot& snapshot, int64_t newPosMs, int64_t newAnchorMs,
+    PlaybackStatus status, int64_t eventNowMs) const {
+    if (status != PlaybackStatus::Playing || snapshot.durationMs <= 0)
+        return false;
+    int64_t current = snapshot.positionMs +
+                      std::max<int64_t>(0, eventNowMs - snapshot.anchorUtcMs);
+    int64_t incoming = newPosMs +
+                       std::max<int64_t>(0, eventNowMs - newAnchorMs);
+    int64_t backward = current - incoming;
+    return backward > 250 && backward < 2000;
+}
+
+void QqMusicSmtcAdapter::refreshTimeline(const Session& session,
+                                         SmtcSnapshot& snapshot,
+                                         int64_t eventNowMs) {
+    auto timeline = session.GetTimelineProperties();
+    if (!timeline)
+        return;
+
+    snapshot.durationMs = timeSpanMs(timeline.EndTime());
+    int64_t newPos = timeSpanMs(timeline.Position());
+    int64_t newAnchor = lastUpdatedMs(timeline.LastUpdatedTime());
+    if (newAnchor == 0)
+        newAnchor = eventNowMs;
+
+    // QQ 可能用当前时间包装旧位置，先将过旧锚点按事件时刻重新锚定。
+    if (eventNowMs - newAnchor > 2000)
+        newAnchor = eventNowMs;
+
+    int64_t currentPosNow = snapshot.positionMs +
+                            std::max<int64_t>(0, eventNowMs - snapshot.anchorUtcMs);
+    int64_t incomingPosNow = newPos +
+                             std::max<int64_t>(0, eventNowMs - newAnchor);
+    int64_t backwardMs = currentPosNow - incomingPosNow;
+    int64_t statusAge = lastStatusChangeMs_ > 0
+                            ? eventNowMs - lastStatusChangeMs_
+                            : -1;
+    bool dropResidual = snapshot.status == PlaybackStatus::Playing &&
+                        statusAge >= 0 && statusAge < 2000 && backwardMs > 250;
+    if (!dropResidual &&
+        !isStaleTimelineUpdate(snapshot, newPos, newAnchor, snapshot.status,
+                               eventNowMs)) {
+        snapshot.positionMs = newPos;
+        snapshot.anchorUtcMs = newAnchor;
+    }
+}
+
+void QqMusicSmtcAdapter::refreshPlayback(const Session& session,
+                                         SmtcSnapshot& snapshot,
+                                         int64_t eventNowMs) {
+    auto info = session.GetPlaybackInfo();
+    if (!info)
+        return;
+
+    auto newStatus = mapStatus(info.PlaybackStatus());
+    if (newStatus != snapshot.status)
+        lastStatusChangeMs_ = eventNowMs;
+    const PlaybackStatus previousStatus = snapshot.status;
+    bool resumed = newStatus == PlaybackStatus::Playing &&
+                   previousStatus != PlaybackStatus::Playing;
+
+    // 播放状态独立于时间线；时间线暂时为空时也必须提交暂停状态，
+    // 否则 snapshot() 会继续按 Playing 插值。
+    snapshot.status = newStatus;
+    bool staleUpdate = false;
+    bool smoothUsed = false;
+    int64_t newPos = 0;
+    auto timeline = session.GetTimelineProperties();
+    if (timeline) {
+        newPos = timeSpanMs(timeline.Position());
+        int64_t newAnchor = lastUpdatedMs(timeline.LastUpdatedTime());
+        if (newAnchor == 0)
+            newAnchor = eventNowMs;
+        if (eventNowMs - newAnchor > 2000)
+            newAnchor = eventNowMs;
+
+        if (resumed) {
+            std::wstring key = positionTrackKey(snapshot);
+            smoothUsed = posInit_ && posTrackKey_ == key;
+            snapshot.positionMs = smoothUsed ? (int64_t)(smoothPos_ + 0.5) : newPos;
+            if (snapshot.durationMs > 0 && snapshot.positionMs > snapshot.durationMs)
+                snapshot.positionMs = snapshot.durationMs;
+            snapshot.anchorUtcMs = eventNowMs;
+        } else {
+            staleUpdate = isStaleTimelineUpdate(snapshot, newPos, newAnchor,
+                                                previousStatus, eventNowMs);
+            if (!staleUpdate) {
+                snapshot.positionMs = newPos;
+                snapshot.anchorUtcMs = newAnchor;
+            }
+        }
+    } else if (resumed) {
+        std::wstring key = positionTrackKey(snapshot);
+        smoothUsed = posInit_ && posTrackKey_ == key;
+        if (smoothUsed)
+            snapshot.positionMs = (int64_t)(smoothPos_ + 0.5);
+        if (snapshot.durationMs > 0 && snapshot.positionMs > snapshot.durationMs)
+            snapshot.positionMs = snapshot.durationMs;
+        snapshot.anchorUtcMs = eventNowMs;
+    }
+
+    auto controls = info.Controls();
+    if (controls) {
+        snapshot.canPrev = controls.IsPreviousEnabled();
+        snapshot.canPlayPause = controls.IsPlayEnabled() || controls.IsPauseEnabled();
+        snapshot.canNext = controls.IsNextEnabled();
+    }
+}
+
+SmtcSnapshot QqMusicSmtcAdapter::snapshot(const SmtcSnapshot& source,
+                                          int64_t nowMs) const {
+    SmtcSnapshot result = source;
+    const int64_t rawPos = result.positionMs;
+    if (result.status == PlaybackStatus::Playing) {
+        int64_t elapsed = nowMs - result.anchorUtcMs;
+        if (elapsed > 0) {
+            result.positionMs += elapsed;
+            if (result.durationMs > 0 && result.positionMs > result.durationMs)
+                result.positionMs = result.durationMs;
+        }
+    }
+
+    std::wstring key = positionTrackKey(result);
+    auto now = std::chrono::steady_clock::now();
+    float dt = 16.7f;
+    if (posTick_ != std::chrono::steady_clock::time_point{})
+        dt = std::chrono::duration<float, std::milli>(now - posTick_).count();
+    posTick_ = now;
+
+    bool smoothReset = false;
+    bool seekWhilePaused = false;
+    if (result.status != PlaybackStatus::Playing) {
+        double rawJump = (double)(rawPos - prevRawMs_);
+        seekWhilePaused = prevPaused_ && std::fabs(rawJump) > 250.0;
+        if (!posInit_ || posTrackKey_ != key || seekWhilePaused)
+            smoothReset = true;
+        if (smoothReset)
+            smoothPos_ = (double)result.positionMs;
+        posTrackKey_ = key;
+        posInit_ = true;
+        prevRawMs_ = rawPos;
+        prevPaused_ = true;
+        int64_t paused = (int64_t)(smoothPos_ + 0.5);
+        if (result.durationMs > 0 && paused > result.durationMs)
+            paused = result.durationMs;
+        result.positionMs = std::max<int64_t>(paused, 0);
+        return result;
+    }
+
+    if (!posInit_ || posTrackKey_ != key) {
+        smoothReset = true;
+        smoothPos_ = (double)result.positionMs;
+        posTrackKey_ = key;
+        posInit_ = true;
+    } else {
+        double error = (double)result.positionMs - smoothPos_;
+        if (std::fabs(error) > 800.0) {
+            smoothPos_ = (double)result.positionMs;
+        } else {
+            double previous = smoothPos_;
+            smoothPos_ += dt;
+            smoothPos_ += error * (1.0 - std::exp(-dt / 2000.0));
+            if (smoothPos_ < previous)
+                smoothPos_ = previous;
+        }
+    }
+
+    int64_t smoothed = (int64_t)(smoothPos_ + 0.5);
+    if (result.durationMs > 0 && smoothed > result.durationMs)
+        smoothed = result.durationMs;
+    if (smoothed < 0)
+        smoothed = 0;
+    result.positionMs = smoothed;
+    prevRawMs_ = rawPos;
+    prevPaused_ = false;
+    return result;
+}
+
+void QqMusicSmtcAdapter::reset() {
+    smoothPos_ = 0.0;
+    posTick_ = {};
+    posInit_ = false;
+    posTrackKey_.clear();
+    prevRawMs_ = 0;
+    prevPaused_ = false;
+    lastStatusChangeMs_ = 0;
+}
+
+} // namespace smtc

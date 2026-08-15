@@ -22,6 +22,9 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 add_executable(QQMusicLyric
     src/main.cpp
     src/media/smtc_monitor.cpp
+    src/media/smtc/smtc_common.cpp
+    src/media/smtc/qq_music_smtc_adapter.cpp
+    src/media/smtc/netease_smtc_adapter.cpp
     src/media/audio_spectrum.cpp
     src/lyric/lyric_provider.cpp
     src/lyric/qrc_decoder.cpp
