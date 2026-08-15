@@ -105,7 +105,20 @@ std::wstring positionTrackKey(const SmtcSnapshot& snapshot) {
 
 bool sameSession(const GlobalSystemMediaTransportControlsSession& left,
                  const GlobalSystemMediaTransportControlsSession& right) noexcept {
-    return winrt::get_abi(left) == winrt::get_abi(right);
+    if (winrt::get_abi(left) == winrt::get_abi(right))
+        return true;
+    if (!left || !right)
+        return false;
+    try {
+        // GetCurrentSession() 和 GetSessions() 可能返回同一逻辑会话的不同
+        // WinRT 对象实例，不能只比较 ABI 地址。当前适配范围内每个平台
+        // 只有一个受支持会话，来源 AppUserModelId 足以区分 QQ/网易云。
+        auto leftSource = left.SourceAppUserModelId();
+        auto rightSource = right.SourceAppUserModelId();
+        return !leftSource.empty() && leftSource == rightSource;
+    } catch (...) {
+        return false;
+    }
 }
 
 PlaybackStatus mapStatus(GlobalSystemMediaTransportControlsSessionPlaybackStatus s) {
@@ -171,10 +184,11 @@ struct SmtcMonitor::Impl {
     std::mutex watchersMtx;
     std::vector<SessionWatcher> sessionWatchers;
 
-    // 进度平滑状态（snapshot() 内使用）。
+    // QQ 专用进度平滑状态（snapshot() 的 QQ 分支使用）。
     // QQ 的 TimelineProperties 播放中会频繁阶跃更新（Position 可能是量化值），
     // 逐字歌词对进度抖动极其敏感：本地时钟按播放速率自走，
-    // 原始位置仅作慢速校正（τ=2s 低通），大偏差（seek/切歌）立即对齐
+    // 原始位置仅作慢速校正（τ=2s 低通），大偏差（seek/切歌）立即对齐。
+    // 网易云不使用这里的任何状态，避免两个播放器互相污染恢复位置。
     mutable double smoothPos_ = 0.0;
     mutable std::chrono::steady_clock::time_point posTick_{};
     mutable bool posInit_ = false;
@@ -183,12 +197,13 @@ struct SmtcMonitor::Impl {
     mutable bool prevPaused_ = false; // 上一帧 snapshot 是否处于非播放分支
     int64_t lastStatusChangeMs_ = 0;  // 最近一次播放状态切换（UTC ms），识别过渡期残留事件
 
-    // 播放中 QQ 可能推送过期/量化的 Timeline（Position 与 LastUpdatedTime 不成对，
+    // QQ 专用：播放中 QQ 可能推送过期/量化的 Timeline（Position 与 LastUpdatedTime 不成对，
     // 或 LastUpdatedTime 缺失回退为当前时刻），换算到当前时刻后若比现有锚点
     // 落后 250ms~2s，视为噪声丢弃本次更新、保留旧锚点；
     // 落后超过 2s 才认为是真实 seek 回退，予以接受
-    bool isStaleTimelineUpdate(int64_t newPosMs, int64_t newAnchorMs) const {
-        if (snap.status != PlaybackStatus::Playing || snap.durationMs <= 0)
+    bool isStaleTimelineUpdate(int64_t newPosMs, int64_t newAnchorMs,
+                               PlaybackStatus status) const {
+        if (status != PlaybackStatus::Playing || snap.durationMs <= 0)
             return false;
         int64_t now = nowUtcMs();
         int64_t cur = snap.positionMs + std::max<int64_t>(0, now - snap.anchorUtcMs);
@@ -234,12 +249,14 @@ struct SmtcMonitor::Impl {
                 if (tl) {
                     s.durationMs = timeSpanMs(tl.EndTime());
                     s.positionMs = timeSpanMs(tl.Position());
-                    // 锚点用 QQ 采样位置的时刻（而不是我们读取的时刻），补偿事件送达延迟
+                    // 两个平台的时间线语义不同：QQ 需要按采样时刻补偿并处理过期锚点，
+                    // 网易云则保留 InfLink-rs 提供的原始锚点，不走 QQ 的校正规则。
                     s.anchorUtcMs = lastUpdatedMs(tl.LastUpdatedTime());
                     if (s.anchorUtcMs == 0)
                         s.anchorUtcMs = nowUtcMs();
-                    // 同 refreshTimeline：过旧锚点按此刻锚定，避免插值前跳
-                    if (nowUtcMs() - s.anchorUtcMs > 2000)
+                    // QQ 专用：过旧锚点按此刻锚定，避免插值前跳。
+                    if (s.player == SmtcPlayerType::QQMusic &&
+                        nowUtcMs() - s.anchorUtcMs > 2000)
                         s.anchorUtcMs = nowUtcMs();
                 }
             } catch (...) {
@@ -267,6 +284,77 @@ struct SmtcMonitor::Impl {
         notify();
     }
 
+    void refreshCurrentSession(const GlobalSystemMediaTransportControlsSession& changedSession) {
+        if (!changedSession)
+            return;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (!sameSession(session, changedSession))
+                return;
+        }
+        // MediaPropertiesChanged 表示歌曲/属性可能已经切换；保留原来 QQ 的
+        // 整体刷新路径，以同时更新标题、时长、位置和会话识别结果。
+        refreshAll();
+    }
+
+    // 网易云专用时间线处理：InfLink-rs 提供的位置就是网易云的进度源，
+    // 不经过 QQ 的残留事件过滤、过期锚点重写或 isStaleTimelineUpdate。
+    // 调用方已持有 mtx。
+    void refreshNeteaseTimelineLocked(
+        const GlobalSystemMediaTransportControlsSession& changedSession) {
+        auto tl = changedSession.GetTimelineProperties();
+        if (!tl) {
+            return;
+        }
+        int64_t eventNow = nowUtcMs();
+        snap.durationMs = timeSpanMs(tl.EndTime());
+        int64_t newPos = timeSpanMs(tl.Position());
+        int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+        bool anchorMissing = newAnchor == 0;
+        if (anchorMissing)
+            newAnchor = eventNow;
+        snap.positionMs = newPos;
+        snap.anchorUtcMs = newAnchor;
+    }
+
+    // QQ 专用时间线处理。这里保留 QQ 原有的残留时间线和量化位置过滤。
+    // 调用方已持有 mtx。
+    void refreshQqTimelineLocked(
+        const GlobalSystemMediaTransportControlsSession& changedSession) {
+        auto tl = changedSession.GetTimelineProperties();
+        if (!tl) {
+            return;
+        }
+        int64_t eventNow = nowUtcMs();
+        snap.durationMs = timeSpanMs(tl.EndTime());
+        int64_t newPos = timeSpanMs(tl.Position());
+        int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+        if (newAnchor == 0)
+            newAnchor = eventNow;
+        bool anchorStale = eventNow - newAnchor > 2000;
+        // 播放中且刚经历状态切换时，QQ 可能用“当前时间戳”包装暂停前的旧位置。
+        // 不能只看 LastUpdatedTime 是否过期，要比较换算到当前时刻后的实际位置。
+        if (anchorStale)
+            newAnchor = eventNow;
+        int64_t currentPosNow = snap.positionMs +
+                                std::max<int64_t>(0, eventNow - snap.anchorUtcMs);
+        int64_t incomingPosNow = newPos +
+                                 std::max<int64_t>(0, eventNow - newAnchor);
+        int64_t backwardMs = currentPosNow - incomingPosNow;
+        int64_t statusAge = lastStatusChangeMs_ > 0
+                                ? eventNow - lastStatusChangeMs_
+                                : -1;
+        bool dropResidual = snap.status == PlaybackStatus::Playing &&
+                            statusAge >= 0 && statusAge < 2000 &&
+                            backwardMs > 250;
+        if (!dropResidual) {
+            if (!isStaleTimelineUpdate(newPos, newAnchor, snap.status)) {
+                snap.positionMs = newPos;
+                snap.anchorUtcMs = newAnchor;
+            }
+        }
+    }
+
     void refreshTimeline(const GlobalSystemMediaTransportControlsSession& changedSession) {
         if (!changedSession) return;
         {
@@ -274,36 +362,157 @@ struct SmtcMonitor::Impl {
             try {
                 if (!sameSession(session, changedSession))
                     return;
-                auto tl = changedSession.GetTimelineProperties();
-                if (!tl)
-                    return;
-                snap.durationMs = timeSpanMs(tl.EndTime());
-                int64_t newPos = timeSpanMs(tl.Position());
-                int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
-                if (newAnchor == 0)
-                    newAnchor = nowUtcMs();
-                bool anchorStale = nowUtcMs() - newAnchor > 2000;
-                // 播放中且刚经历状态切换（2s 内）时，锚点过旧的 Timeline 是快速暂停/播放
-                // 残留的延迟事件——真实 seek 的 LastUpdatedTime 必为 seek 当下，不会过旧。
-                // 若重锚定后接受，>2s 的倒退会被当成真实 seek，造成高亮整段回退，故丢弃
-                // （只更新时长，位置/锚点保持，等下一条新鲜事件）
-                bool dropResidual = anchorStale && snap.status == PlaybackStatus::Playing &&
-                                    nowUtcMs() - lastStatusChangeMs_ < 2000;
-                if (!dropResidual) {
-                    // 锚点过旧（如恢复播放瞬间读到暂停前的残留 Timeline）：按此刻锚定，
-                    // 否则 snapshot 插值会把整段暂停时长计入，位置瞬间前跳再被真实更新拉回
-                    if (anchorStale)
-                        newAnchor = nowUtcMs();
-                    if (!isStaleTimelineUpdate(newPos, newAnchor)) {
-                        snap.positionMs = newPos;
-                        snap.anchorUtcMs = newAnchor;
-                    }
-                }
+                if (snap.player == SmtcPlayerType::NetEase)
+                    refreshNeteaseTimelineLocked(changedSession);
+                else
+                    refreshQqTimelineLocked(changedSession);
             } catch (...) {
                 return;
             }
         }
         notify();
+    }
+
+    // 网易云专用播放状态处理：状态和 InfLink-rs 的时间线一起提交，
+    // 不使用 QQ 的 resumed/smoothPos_/残留时间线修正。
+    // 调用方已持有 mtx。
+    void refreshNeteasePlaybackLocked(
+        const GlobalSystemMediaTransportControlsSession& changedSession) {
+        auto info = changedSession.GetPlaybackInfo();
+        if (!info)
+            return;
+        const PlaybackStatus previousStatus = snap.status;
+        const PlaybackStatus newStatus = mapStatus(info.PlaybackStatus());
+        int64_t eventNow = nowUtcMs();
+        const bool wasPlaying = previousStatus == PlaybackStatus::Playing;
+        const bool nowPlaying = newStatus == PlaybackStatus::Playing;
+        const bool leavingPlaying = wasPlaying && !nowPlaying;
+        const bool repeatedPlaying = wasPlaying && nowPlaying;
+        // 播放状态事件到达时，snap.positionMs 可能还是上一条时间线的采样值；
+        // 先按旧锚点换算到事件时刻，暂停才能冻结在当前实际位置而不是回退到旧采样点。
+        int64_t effectiveOldPos = snap.positionMs;
+        if (wasPlaying && snap.anchorUtcMs > 0)
+            effectiveOldPos += std::max<int64_t>(0, eventNow - snap.anchorUtcMs);
+        if (snap.durationMs > 0 && effectiveOldPos > snap.durationMs)
+            effectiveOldPos = snap.durationMs;
+        effectiveOldPos = std::max<int64_t>(effectiveOldPos, 0);
+        snap.status = newStatus;
+
+        bool anchorMissing = false;
+        bool placeholderZero = false;
+        bool stalePausedPosition = false;
+        int64_t newPos = snap.positionMs;
+        int64_t rawAnchorAge = -1;
+        auto tl = changedSession.GetTimelineProperties();
+        if (tl) {
+            snap.durationMs = timeSpanMs(tl.EndTime());
+            newPos = timeSpanMs(tl.Position());
+            int64_t reportedAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+            anchorMissing = reportedAnchor == 0;
+            rawAnchorAge = anchorMissing ? -1 : eventNow - reportedAnchor;
+            // 网易云在 PlaybackInfoChanged 的状态切换通知中会先返回一份
+            // Position=0、LastUpdatedTime=0 的占位时间线，下一条通知才是实际位置。
+            // 这份数据不是用户 seek 到 0，不能让歌词先被重置到开头。
+            placeholderZero = anchorMissing && newPos == 0 && snap.positionMs > 0;
+            // 暂停后的重复状态事件仍可能携带暂停前的旧采样值；
+            // 有效的拖动通常会带着接近当前时刻的 LastUpdatedTime，不能让过期值覆盖
+            // 刚刚冻结的实际位置。
+            stalePausedPosition = !nowPlaying && !anchorMissing &&
+                                  rawAnchorAge > 250 && newPos < snap.positionMs;
+            if (repeatedPlaying) {
+                // 播放中的重复状态事件经常带着旧的时间线；播放中的进度只由
+                // 独立 TimelinePropertiesChanged 推进，避免旧锚点让歌词前后跳动。
+            } else if (leavingPlaying) {
+                snap.positionMs = effectiveOldPos;
+                snap.anchorUtcMs = eventNow;
+            } else if (!placeholderZero && !stalePausedPosition) {
+                snap.positionMs = newPos;
+                // PlaybackInfoChanged 携带的 Position 可能早于事件到达；状态事件
+                // 只负责确定状态和当前位置，不用旧 LastUpdatedTime 继续向前插值。
+                snap.anchorUtcMs = eventNow;
+            } else if (placeholderZero) {
+                // 只提交状态，不沿用暂停期间的旧锚点继续插值。
+                // 后续真实时间线到达后会重新写入 position/anchor。
+                snap.anchorUtcMs = eventNow;
+            }
+        } else if (leavingPlaying) {
+            // 即使状态事件没有时间线，也要先冻结播放结束前的实际位置。
+            snap.positionMs = effectiveOldPos;
+            snap.anchorUtcMs = eventNow;
+        }
+        auto c = info.Controls();
+        if (c) {
+            snap.canPrev = c.IsPreviousEnabled();
+            snap.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
+            snap.canNext = c.IsNextEnabled();
+        }
+    }
+
+    // QQ 专用播放状态处理。这里保留 QQ 的暂停恢复锚点和本地平滑恢复逻辑。
+    // 调用方已持有 mtx。
+    void refreshQqPlaybackLocked(
+        const GlobalSystemMediaTransportControlsSession& changedSession) {
+        auto info = changedSession.GetPlaybackInfo();
+        if (!info)
+            return;
+        auto newStatus = mapStatus(info.PlaybackStatus());
+        int64_t eventNow = nowUtcMs();
+        if (newStatus != snap.status)
+            lastStatusChangeMs_ = eventNow;
+        const PlaybackStatus previousStatus = snap.status;
+        // 暂停->播放过渡：QQ 此刻常上报暂停前的残留 Timeline，直接采用会把滞后
+        // 位置烘焙进锚点，随后被播放分支 >800 对齐造成整段高亮回退。
+        // 而暂停期间位置本就不会移动（暂停中拖进度条已实时跟随进 smoothPos_），
+        // 本地平滑值就是最佳恢复点：以它重建锚点，不信此刻的上报值
+        bool resumed = newStatus == PlaybackStatus::Playing &&
+                       previousStatus != PlaybackStatus::Playing;
+
+        // 播放状态独立于时间线；时间线暂时为空时也必须提交暂停状态，
+        // 否则 snapshot() 会继续按 Playing 插值。
+        snap.status = newStatus;
+        bool staleUpdate = false;
+        bool smoothUsed = false;
+        int64_t newPos = 0;
+        auto tl = changedSession.GetTimelineProperties();
+        if (tl) {
+            newPos = timeSpanMs(tl.Position());
+            int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
+            if (newAnchor == 0)
+                newAnchor = eventNow;
+            // 过旧锚点按此刻锚定（残留 Timeline）
+            if (eventNow - newAnchor > 2000)
+                newAnchor = eventNow;
+            if (resumed) {
+                std::wstring key = positionTrackKey(snap);
+                smoothUsed = posInit_ && posTrackKey_ == key;
+                snap.positionMs = smoothUsed ? (int64_t)(smoothPos_ + 0.5)
+                                             : newPos; // 无平滑状态（如刚启动）才退回上报值
+                if (snap.durationMs > 0 && snap.positionMs > snap.durationMs)
+                    snap.positionMs = snap.durationMs;
+                snap.anchorUtcMs = eventNow;
+            } else {
+                staleUpdate = isStaleTimelineUpdate(newPos, newAnchor, previousStatus);
+                if (!staleUpdate) {
+                    snap.positionMs = newPos;
+                    snap.anchorUtcMs = newAnchor;
+                }
+            }
+        } else if (resumed) {
+            // 恢复事件没有时间线时，使用本地平滑位置重新建立锚点。
+            std::wstring key = positionTrackKey(snap);
+            smoothUsed = posInit_ && posTrackKey_ == key;
+            if (smoothUsed)
+                snap.positionMs = (int64_t)(smoothPos_ + 0.5);
+            if (snap.durationMs > 0 && snap.positionMs > snap.durationMs)
+                snap.positionMs = snap.durationMs;
+            snap.anchorUtcMs = eventNow;
+        }
+        auto c = info.Controls();
+        if (c) {
+            snap.canPrev = c.IsPreviousEnabled();
+            snap.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
+            snap.canNext = c.IsNextEnabled();
+        }
     }
 
     void refreshPlayback(const GlobalSystemMediaTransportControlsSession& changedSession) {
@@ -313,48 +522,10 @@ struct SmtcMonitor::Impl {
             try {
                 if (!sameSession(session, changedSession))
                     return;
-                auto info = changedSession.GetPlaybackInfo();
-                if (!info)
-                    return;
-                auto newStatus = mapStatus(info.PlaybackStatus());
-                if (newStatus != snap.status)
-                    lastStatusChangeMs_ = nowUtcMs();
-                // 暂停->播放过渡：QQ 此刻常上报暂停前的残留 Timeline，直接采用会把滞后
-                // 位置烘焙进锚点，随后被播放分支 >800 对齐造成整段高亮回退。
-                // 而暂停期间位置本就不会移动（暂停中拖进度条已实时跟随进 smoothPos_），
-                // 本地平滑值就是最佳恢复点：以它重建锚点，不信此刻的上报值
-                bool resumed = newStatus == PlaybackStatus::Playing &&
-                               snap.status != PlaybackStatus::Playing;
-
-                auto tl = changedSession.GetTimelineProperties();
-                if (!tl)
-                    return;
-                int64_t newPos = timeSpanMs(tl.Position());
-                int64_t newAnchor = lastUpdatedMs(tl.LastUpdatedTime());
-                if (newAnchor == 0)
-                    newAnchor = nowUtcMs();
-                // 过旧锚点按此刻锚定（残留 Timeline）
-                if (nowUtcMs() - newAnchor > 2000)
-                    newAnchor = nowUtcMs();
-                if (resumed) {
-                    std::wstring key = positionTrackKey(snap);
-                    snap.positionMs = (posInit_ && posTrackKey_ == key)
-                                          ? (int64_t)(smoothPos_ + 0.5)
-                                          : newPos; // 无平滑状态（如刚启动）才退回上报值
-                    if (snap.durationMs > 0 && snap.positionMs > snap.durationMs)
-                        snap.positionMs = snap.durationMs;
-                    snap.anchorUtcMs = nowUtcMs();
-                } else if (!isStaleTimelineUpdate(newPos, newAnchor)) {
-                    snap.positionMs = newPos;
-                    snap.anchorUtcMs = newAnchor;
-                }
-                snap.status = newStatus;
-                auto c = info.Controls();
-                if (c) {
-                    snap.canPrev = c.IsPreviousEnabled();
-                    snap.canPlayPause = c.IsPlayEnabled() || c.IsPauseEnabled();
-                    snap.canNext = c.IsNextEnabled();
-                }
+                if (snap.player == SmtcPlayerType::NetEase)
+                    refreshNeteasePlaybackLocked(changedSession);
+                else
+                    refreshQqPlaybackLocked(changedSession);
             } catch (...) {
                 return;
             }
@@ -368,6 +539,15 @@ struct SmtcMonitor::Impl {
         {
             std::lock_guard<std::mutex> lk(mtx);
             session = s;
+            // 选中来源变化时只清空 QQ 的平滑状态；网易云不依赖这些状态。
+            // 这样从网易云切回 QQ 时不会复用上一首 QQ 的本地进度。
+            smoothPos_ = 0.0;
+            posTick_ = {};
+            posInit_ = false;
+            posTrackKey_.clear();
+            prevRawMs_ = 0;
+            prevPaused_ = false;
+            lastStatusChangeMs_ = 0;
         }
         if (!s) return;
         timelineRevoker = s.TimelinePropertiesChanged(winrt::auto_revoke,
@@ -390,8 +570,9 @@ struct SmtcMonitor::Impl {
                     updateSession();
                 });
             watcher.propsRevoker = watched.MediaPropertiesChanged(winrt::auto_revoke,
-                [this](auto&&, auto&&) {
+                [this, watched](auto&&, auto&&) {
                     // 网易云可能先建立会话、后写入 NCM-{ID}，属性变化也要触发重新识别。
+                    refreshCurrentSession(watched);
                     updateSession();
                 });
             sessionWatchers.push_back(std::move(watcher));
@@ -459,8 +640,16 @@ struct SmtcMonitor::Impl {
             } catch (...) {
             }
         }
-        attach(found);
-        refreshAll();
+        GlobalSystemMediaTransportControlsSession currentSession{ nullptr };
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            currentSession = session;
+        }
+        bool same = sameSession(currentSession, found);
+        if (!same) {
+            attach(found);
+            refreshAll();
+        }
     }
 };
 
@@ -485,19 +674,36 @@ void SmtcMonitor::start(ChangeCallback onChange) {
 SmtcSnapshot SmtcMonitor::snapshot() const {
     std::lock_guard<std::mutex> lk(impl_->mtx);
     SmtcSnapshot s = impl_->snap;
-    const int64_t rawPos = s.positionMs; // SMTC 原始上报值（下方 Playing 分支才会插值）
-    if (s.sessionAlive && s.status == PlaybackStatus::Playing) {
+    if (!s.sessionAlive) {
+        impl_->posInit_ = false;
+        impl_->prevPaused_ = false;
+        return s;
+    }
+
+    // 网易云专用输出：只根据它自己的 SMTC Position/LastUpdatedTime 插值，
+    // 不进入 QQ 的 smoothPos_、暂停快照、跳变校正和 seek 处理。
+    if (s.player == SmtcPlayerType::NetEase) {
+        if (s.status == PlaybackStatus::Playing && s.anchorUtcMs > 0) {
+            int64_t elapsed = nowUtcMs() - s.anchorUtcMs;
+            if (elapsed > 0) {
+                s.positionMs += elapsed;
+                if (s.durationMs > 0 && s.positionMs > s.durationMs)
+                    s.positionMs = s.durationMs;
+            }
+        }
+        return s;
+    }
+
+    // QQ 专用输出：SMTC 原始上报值只在 Playing 分支下插值，随后进入 QQ 的
+    // 本地平滑和暂停冻结逻辑。
+    const int64_t rawPos = s.positionMs;
+    if (s.status == PlaybackStatus::Playing) {
         int64_t elapsed = nowUtcMs() - s.anchorUtcMs;
         if (elapsed > 0) {
             s.positionMs += elapsed;
             if (s.durationMs > 0 && s.positionMs > s.durationMs)
                 s.positionMs = s.durationMs;
         }
-    }
-    if (!s.sessionAlive) {
-        impl_->posInit_ = false;
-        impl_->prevPaused_ = false;
-        return s;
     }
     // 进度平滑：本地时钟自走 + 慢速校正，滤掉锚点阶跃
     std::wstring key = positionTrackKey(s);
@@ -506,6 +712,8 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
     if (impl_->posTick_ != std::chrono::steady_clock::time_point{})
         dt = std::chrono::duration<float, std::milli>(now - impl_->posTick_).count();
     impl_->posTick_ = now;
+    bool smoothReset = false;
+    bool seekWhilePaused = false;
     if (s.status != PlaybackStatus::Playing) {
         // 非播放态冻结在平滑值，不高亮回退也不抢跑。
         // 进入暂停的第一帧（上一帧还在播放）无条件冻结：快速连续暂停/播放时 QQ 此刻
@@ -513,8 +721,10 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         // 跟随会回退逐字高亮；只有持续暂停中原始值自身跳变（>250ms，用户拖进度条，
         // 250 与 isStaleTimelineUpdate 的噪声窗口一致）才跟随
         double rawJump = (double)(rawPos - impl_->prevRawMs_);
-        bool seekWhilePaused = impl_->prevPaused_ && std::fabs(rawJump) > 250.0;
+        seekWhilePaused = impl_->prevPaused_ && std::fabs(rawJump) > 250.0;
         if (!impl_->posInit_ || impl_->posTrackKey_ != key || seekWhilePaused)
+            smoothReset = true;
+        if (smoothReset)
             impl_->smoothPos_ = (double)s.positionMs;
         impl_->posTrackKey_ = key;
         impl_->posInit_ = true;
@@ -527,6 +737,7 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
         return s;
     }
     if (!impl_->posInit_ || impl_->posTrackKey_ != key) {
+        smoothReset = true;
         impl_->smoothPos_ = (double)s.positionMs;
         impl_->posTrackKey_ = key;
         impl_->posInit_ = true;
