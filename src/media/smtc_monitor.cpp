@@ -73,6 +73,27 @@ struct SmtcMonitor::Impl {
             onChange();
     }
 
+    // 控制按钮运行在任务栏窗口线程上，不能同步等待远程 WinRT 操作。
+    // 失败状态在完成回调中直接忽略，避免在切歌期间对已失效会话调用
+    // GetResults()，也避免阻塞任务栏消息循环。
+    template <typename StartOperation>
+    void startControlOperation(StartOperation&& start) {
+        try {
+            auto operation = start();
+            if (!operation)
+                return;
+            operation.Completed([](auto&& completedOperation, auto status) {
+                if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+                    return;
+                try {
+                    (void)completedOperation.GetResults();
+                } catch (...) {
+                }
+            });
+        } catch (...) {
+        }
+    }
+
     void refreshAll() {
         Session currentSession{ nullptr };
         {
@@ -385,28 +406,18 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
 
 void SmtcMonitor::playPause() {
     Session current{ nullptr };
+    PlaybackStatus status = PlaybackStatus::Other;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         current = impl_->session;
+        status = impl_->snap.status;
     }
     if (!current)
         return;
-    try {
-        auto info = current.GetPlaybackInfo();
-        if (!info)
-            return;
-        auto status = info.PlaybackStatus();
-        if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) {
-            auto op = current.TryPauseAsync();
-            if (op)
-                op.get();
-        } else {
-            auto op = current.TryPlayAsync();
-            if (op)
-                op.get();
-        }
-    } catch (...) {
-    }
+    if (status == PlaybackStatus::Playing)
+        impl_->startControlOperation([current] { return current.TryPauseAsync(); });
+    else
+        impl_->startControlOperation([current] { return current.TryPlayAsync(); });
 }
 
 void SmtcMonitor::skipNext() {
@@ -417,12 +428,7 @@ void SmtcMonitor::skipNext() {
     }
     if (!current)
         return;
-    try {
-        auto op = current.TrySkipNextAsync();
-        if (op)
-            op.get();
-    } catch (...) {
-    }
+    impl_->startControlOperation([current] { return current.TrySkipNextAsync(); });
 }
 
 void SmtcMonitor::skipPrevious() {
@@ -433,10 +439,5 @@ void SmtcMonitor::skipPrevious() {
     }
     if (!current)
         return;
-    try {
-        auto op = current.TrySkipPreviousAsync();
-        if (op)
-            op.get();
-    } catch (...) {
-    }
+    impl_->startControlOperation([current] { return current.TrySkipPreviousAsync(); });
 }
