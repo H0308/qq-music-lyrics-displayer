@@ -42,6 +42,7 @@ public:
     void setDoubleLineLyrics(bool on);
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
+    void setPlatformIconVisible(bool on);
     void setAlbumCoverEffect(AlbumCoverEffect effect);
 
     // 音频频谱（任务栏独有）：on 控制显隐，bands 为每帧频段电平（0~1，固定 6 段）。

@@ -17,6 +17,7 @@ enum class MediaControl { Prev = 0, PlayPause = 1, Next = 2 };
 struct OverlayMediaInfo {
     std::wstring title;
     std::wstring artist;
+    std::wstring sourceAppUserModelId; // SMTC 当前来源应用标识，用于平台图标
     std::shared_ptr<const std::vector<uint8_t>> thumbnail; // 专辑封面图片字节
     bool canPrev = false;
     bool canPlayPause = false;

@@ -6,12 +6,15 @@
 #include <gdiplus.h>
 #include <objbase.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 #include <uiautomation.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
+#include <cwchar>
 #include <functional>
 #include <memory>
 #include <string>
@@ -68,6 +71,176 @@ private:
     ULONG_PTR token_ = 0;
 };
 GdiplusInit g_gdiplusInit;
+
+std::wstring findProcessImagePath(const std::wstring& processName) {
+    if (processName.empty())
+        return {};
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return {};
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    std::wstring result;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, processName.c_str()) != 0)
+                continue;
+
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                         entry.th32ProcessID);
+            if (!process)
+                continue;
+            wchar_t path[32768]{};
+            DWORD length = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
+            if (QueryFullProcessImageNameW(process, 0, path, &length))
+                result.assign(path, length);
+            CloseHandle(process);
+            if (!result.empty())
+                break;
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+std::wstring resolveSourceIconPath(const std::wstring& sourceAppUserModelId) {
+    if (sourceAppUserModelId.empty())
+        return {};
+
+    // 网易云的增强会话可能由桥接器发布，但平台图标应优先取网易云客户端本体。
+    std::vector<std::wstring> candidates;
+    if (_wcsicmp(sourceAppUserModelId.c_str(), L"NeteaseBridge.exe") == 0) {
+        candidates.emplace_back(L"cloudmusic.exe");
+        candidates.emplace_back(L"NeteaseBridge.exe");
+    } else {
+        candidates.push_back(sourceAppUserModelId);
+    }
+    for (const auto& candidate : candidates) {
+        std::wstring path = findProcessImagePath(candidate);
+        if (!path.empty())
+            return path;
+    }
+
+    // 兼容 SMTC 直接返回本地可访问路径的来源标识。
+    DWORD attributes = GetFileAttributesW(sourceAppUserModelId.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        return sourceAppUserModelId;
+    return {};
+}
+
+void clearIconBlackMatte(std::vector<BYTE>& pixels, UINT width, UINT height) {
+    if (pixels.empty() || width == 0 || height == 0)
+        return;
+
+    const size_t pixelCount = static_cast<size_t>(width) * height;
+    std::vector<BYTE> cleared(pixelCount, 0);
+    std::vector<size_t> pending;
+    pending.reserve(pixelCount);
+
+    auto nearBlack = [&](size_t index) {
+        const BYTE* p = pixels.data() + index * 4;
+        return p[3] != 0 && p[0] <= 48 && p[1] <= 48 && p[2] <= 48;
+    };
+    auto enqueue = [&](size_t index) {
+        if (!cleared[index] && nearBlack(index)) {
+            cleared[index] = 1;
+            pending.push_back(index);
+        }
+    };
+
+    for (UINT x = 0; x < width; ++x) {
+        enqueue(x);
+        enqueue(static_cast<size_t>(height - 1) * width + x);
+    }
+    for (UINT y = 0; y < height; ++y) {
+        enqueue(static_cast<size_t>(y) * width);
+        enqueue(static_cast<size_t>(y) * width + width - 1);
+    }
+
+    while (!pending.empty()) {
+        const size_t index = pending.back();
+        pending.pop_back();
+        const UINT x = static_cast<UINT>(index % width);
+        const UINT y = static_cast<UINT>(index / width);
+        if (x > 0)
+            enqueue(index - 1);
+        if (x + 1 < width)
+            enqueue(index + 1);
+        if (y > 0)
+            enqueue(index - width);
+        if (y + 1 < height)
+            enqueue(index + width);
+    }
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        BYTE* p = pixels.data() + i * 4;
+        if (cleared[i] || p[3] == 0)
+            p[0] = p[1] = p[2] = p[3] = 0;
+    }
+}
+
+bool readIconPixels(HICON icon, std::vector<BYTE>& pixels, UINT& width, UINT& height) {
+    if (!icon)
+        return false;
+
+    std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromHICON(icon));
+    if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok)
+        return false;
+
+    width = bitmap->GetWidth();
+    height = bitmap->GetHeight();
+    if (width == 0 || height == 0)
+        return false;
+
+    Gdiplus::BitmapData data{};
+    Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
+    if (bitmap->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &data) !=
+        Gdiplus::Ok)
+        return false;
+
+    pixels.resize(static_cast<size_t>(width) * height * 4);
+    const BYTE* base = static_cast<const BYTE*>(data.Scan0);
+    const LONG stride = data.Stride;
+    const LONG rowStride = stride >= 0 ? stride : -stride;
+    for (UINT y = 0; y < height; ++y) {
+        const UINT sourceRow = stride >= 0 ? y : height - 1 - y;
+        std::memcpy(pixels.data() + static_cast<size_t>(y) * width * 4,
+                    base + static_cast<size_t>(sourceRow) * rowStride,
+                    static_cast<size_t>(width) * 4);
+    }
+    bitmap->UnlockBits(&data);
+
+    // Direct2D 使用预乘 Alpha；同时清理透明像素的残留 RGB 和黑色不透明底边。
+    clearIconBlackMatte(pixels, width, height);
+    return true;
+}
+
+bool readSourceIconPixels(const std::wstring& path, std::vector<BYTE>& pixels, UINT& width,
+                          UINT& height) {
+    HICON largeIcon = nullptr;
+    HICON smallIcon = nullptr;
+    ExtractIconExW(path.c_str(), 0, &largeIcon, &smallIcon, 1);
+    HICON icon = largeIcon ? largeIcon : smallIcon;
+    HICON shellIcon = nullptr;
+    if (!icon) {
+        SHFILEINFOW info{};
+        if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON))
+            shellIcon = info.hIcon;
+        icon = shellIcon;
+    }
+
+    const bool ok = readIconPixels(icon, pixels, width, height);
+    if (largeIcon)
+        DestroyIcon(largeIcon);
+    if (smallIcon)
+        DestroyIcon(smallIcon);
+    if (shellIcon)
+        DestroyIcon(shellIcon);
+    return ok;
+}
 
 // 读取注册表 DWORD，失败返回默认值
 template <class T>
@@ -218,6 +391,8 @@ struct TaskbarHost::Impl {
     OverlayMediaInfo media;
     ID2D1Bitmap* coverBmp = nullptr;
     bool coverDirty = true;
+    ID2D1Bitmap* platformIconBmp = nullptr;
+    bool platformIconDirty = true;
 
     // 交互
     std::function<void()> tick;
@@ -308,6 +483,7 @@ struct TaskbarHost::Impl {
     bool secondaryContentAvailable_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
+    bool platformIconVisible_ = false;
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
     bool clientAnimations_ = true;
     float vinylAngleDeg_ = 0.0f;
@@ -749,6 +925,14 @@ struct TaskbarHost::Impl {
         render();
     }
 
+    void setPlatformIconVisible(bool on) {
+        if (platformIconVisible_ == on)
+            return;
+        platformIconVisible_ = on;
+        platformIconDirty = true;
+        render();
+    }
+
     void setAlbumCoverEffect(AlbumCoverEffect effect) {
         if (albumCoverEffect_ == effect)
             return;
@@ -847,6 +1031,20 @@ struct TaskbarHost::Impl {
                                          std::max(0.8f, s * 0.025f)},
                             brushVinylBase_);
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+
+    void drawPlatformIcon(float coverX, float coverY, float s) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !platformIconVisible_ || !platformIconBmp || s <= 0.0f)
+            return;
+
+        const float iconSize = std::max(1.0f, std::min(s * 0.50f, 13.0f));
+        const float inset = std::min(1.5f, s * 0.06f);
+        D2D1_RECT_F iconRect = D2D1::RectF(
+            coverX + s - iconSize - inset, coverY + s - iconSize - inset,
+            coverX + s - inset, coverY + s - inset);
+        rt->DrawBitmap(platformIconBmp, iconRect, 1.0f,
+                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
 
     void setPositionMode(int mode) {
@@ -970,11 +1168,16 @@ struct TaskbarHost::Impl {
             coverBmp->Release();
             coverBmp = nullptr;
         }
+        if (platformIconBmp) {
+            platformIconBmp->Release();
+            platformIconBmp = nullptr;
+        }
         renderer.discard();
         textDirty_ = true;
         geomDirty_ = true;
         layoutDirty_ = true;
         coverDirty = true;
+        platformIconDirty = true;
     }
 
     void releaseAll() {
@@ -1095,6 +1298,37 @@ struct TaskbarHost::Impl {
                                 &coverBmp);
         bitmap.UnlockBits(&bitmapData);
         stream->Release();
+    }
+
+    void decodePlatformIcon() {
+        platformIconDirty = false;
+        if (platformIconBmp) {
+            platformIconBmp->Release();
+            platformIconBmp = nullptr;
+        }
+        if (!platformIconVisible_ || media.sourceAppUserModelId.empty())
+            return;
+
+        const std::wstring path = resolveSourceIconPath(media.sourceAppUserModelId);
+        if (path.empty())
+            return;
+
+        std::vector<BYTE> pixels;
+        UINT width = 0;
+        UINT height = 0;
+        if (!readSourceIconPixels(path, pixels, width, height))
+            return;
+
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        D2D1_BITMAP_PROPERTIES props{};
+        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
+        props.dpiX = static_cast<float>(dpi_);
+        props.dpiY = static_cast<float>(dpi_);
+        rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4, &props,
+                         &platformIconBmp);
     }
 
     void refreshSecondaryContent() {
@@ -1790,6 +2024,8 @@ struct TaskbarHost::Impl {
         ensureGeometry();
         if (coverDirty)
             decodeCover();
+        if (platformIconDirty)
+            decodePlatformIcon();
 
         LayoutMetrics layout = layoutMetrics(pxW, pxH);
         float w = layout.w;
@@ -1831,6 +2067,8 @@ struct TaskbarHost::Impl {
                     rt->FillRoundedRectangle(rr, brushDim_);
                 }
             }
+            // 平台图标必须在封面之后绘制，保证它位于专辑封面的最顶层。
+            drawPlatformIcon(coverX, coverY, s);
         }
 
         if (songInfoVisible_) {
@@ -2180,9 +2418,13 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
                            info.canPlayPause != impl_->media.canPlayPause ||
                            info.canNext != impl_->media.canNext;
     bool playingChanged = info.playing != impl_->media.playing;
+    bool platformChanged =
+        info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
     impl_->media = info;
     if (thumbChanged)
         impl_->coverDirty = true;
+    if (platformChanged)
+        impl_->platformIconDirty = true;
     if (thumbChanged || textChanged)
         impl_->vinylAngleDeg_ = 0.0f;
     if (textChanged)
@@ -2191,7 +2433,7 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
         impl_->vinylTickMs_ = GetTickCount64();
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
-    if (thumbChanged || textChanged || controlsChanged || playingChanged)
+    if (thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged)
         impl_->render();
 }
 
@@ -2316,6 +2558,10 @@ void TaskbarHost::setSongInfoVisible(bool on) {
 
 void TaskbarHost::setAlbumCoverVisible(bool on) {
     impl_->setAlbumCoverVisible(on);
+}
+
+void TaskbarHost::setPlatformIconVisible(bool on) {
+    impl_->setPlatformIconVisible(on);
 }
 
 void TaskbarHost::setAlbumCoverEffect(AlbumCoverEffect effect) {

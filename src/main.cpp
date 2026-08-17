@@ -55,6 +55,7 @@ constexpr UINT kCmdAlbumCover = 117;
 constexpr UINT kCmdAlbumCoverEffectDefault = 118;
 constexpr UINT kCmdAlbumCoverEffectVinyl = 119;
 constexpr UINT kCmdDoubleLineLyrics = 120;
+constexpr UINT kCmdPlatformIcon = 121;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -214,6 +215,7 @@ struct App {
     std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
+    bool platformIconVisible_ = false;
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
 
     std::wstring settingsPath_;
@@ -266,6 +268,7 @@ struct App {
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
+        taskbarHost->setPlatformIconVisible(platformIconVisible_);
         taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setSpectrumVisible(spectrumOn_);
@@ -350,6 +353,7 @@ struct App {
         OverlayMediaInfo mi;
         mi.title = snap.title;
         mi.artist = snap.artist;
+        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
         if (!snap.album.empty()) {
             mi.artist += L" · ";
             mi.artist += snap.album;
@@ -429,6 +433,7 @@ struct App {
         OverlayMediaInfo mi;
         mi.title = snap.title;
         mi.artist = snap.artist;
+        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
         if (!snap.album.empty()) {
             mi.artist += L" · ";
             mi.artist += snap.album;
@@ -539,6 +544,7 @@ struct App {
         SmtcSnapshot snap = monitor.snapshot();
         mi.title = snap.title;
         mi.artist = snap.artist;
+        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
         if (!snap.album.empty()) {
             mi.artist += L" · ";
             mi.artist += snap.album;
@@ -633,6 +639,7 @@ void App::loadSettings() {
         doubleLineLyricsEnabled_ = j.value("doubleLineLyrics", false);
         songInfoVisible_ = j.value("songInfoVisible", true);
         albumCoverVisible_ = j.value("albumCoverVisible", true);
+        platformIconVisible_ = j.value("platformIconVisible", false);
         albumCoverEffect_ = j.value("albumCoverEffect", std::string("default")) == "vinyl"
                                 ? AlbumCoverEffect::Vinyl
                                 : AlbumCoverEffect::Default;
@@ -663,6 +670,7 @@ void App::saveSettings() {
         j["doubleLineLyrics"] = doubleLineLyricsEnabled_;
         j["songInfoVisible"] = songInfoVisible_;
         j["albumCoverVisible"] = albumCoverVisible_;
+        j["platformIconVisible"] = platformIconVisible_;
         j["albumCoverEffect"] = albumCoverEffect_ == AlbumCoverEffect::Vinyl ? "vinyl" : "default";
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
@@ -754,6 +762,7 @@ void App::showTrayMenu() {
         items.push_back(std::move(pos));
         addItem(kCmdSongInfo, L"显示歌曲信息", songInfoVisible_);
         addItem(kCmdAlbumCover, L"显示专辑封面", albumCoverVisible_);
+        addItem(kCmdPlatformIcon, L"显示平台图标", platformIconVisible_);
         fluent::FluentMenuItem coverEffect;
         coverEffect.text = L"专辑封面效果";
         fluent::FluentMenuItem effectItem;
@@ -868,6 +877,12 @@ void App::onMenuCommand(int cmd) {
         albumCoverVisible_ = !albumCoverVisible_;
         if (taskbarHost)
             taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
+        saveSettings();
+        break;
+    case kCmdPlatformIcon:
+        platformIconVisible_ = !platformIconVisible_;
+        if (taskbarHost)
+            taskbarHost->setPlatformIconVisible(platformIconVisible_);
         saveSettings();
         break;
     case kCmdAlbumCoverEffectDefault:
