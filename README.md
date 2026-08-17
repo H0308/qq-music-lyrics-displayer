@@ -1,7 +1,7 @@
 <div align="center">
   <img src="asset/logo.png" width="96" alt="logo">
-  <h1>QQ 音乐/网易云（Beta）任务栏歌词</h1>
-  <p>把 QQ 音乐和网易云音乐（Beta）的歌词嵌入 Windows 11 任务栏——滚动歌词、逐字高亮、播放控制、音频频谱，程序本体为 C++ 原生实现，无 Electron。</p>
+  <h1>QQ 音乐/网易云任务栏歌词</h1>
+  <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 11 任务栏——滚动歌词、逐字高亮、播放控制、音频频谱，程序本体为 C++ 原生实现，无 Electron。</p>
 </div>
 
 ## 项目核心功能
@@ -75,14 +75,14 @@
 
 ## 网易云音乐适配（Beta）
 
-网易云音乐桌面版需要额外的 SMTC 增强插件才能提供歌曲 ID 和可靠的播放进度。本适配目前处于 Beta 公测阶段，使用网易云音乐前必须安装 BetterNCM 和 InfLink-rs：
+网易云音乐桌面版需要额外的 SMTC 增强插件才能提供歌曲 ID 和可靠的播放进度。使用网易云音乐前必须安装 BetterNCM 和 InfLink-rs：
 
 1. 从 [BetterNCM Installer](https://github.com/std-microblock/BetterNCM-Installer/releases/latest) 下载并安装 BetterNCM。
 2. 打开网易云音乐的 BetterNCM 插件商店，搜索并安装 **InfLink-rs**。
    > 如果插件商店不可用，也可以从 [InfLink-rs Releases](https://github.com/apoint123/inflink-rs/releases/latest) 下载插件后手动安装。
 3. 按提示重启网易云音乐，再运行或重启 `QQMusicLyric.exe`。
 
-> 只安装 **InfLink-rs**，不要同时安装旧版 InfLink。网易云适配的可用性受 BetterNCM、InfLink-rs 以及网易云音乐客户端版本影响，Beta 阶段不保证所有版本均可用。
+> 只安装 **InfLink-rs**，不要同时安装旧版 InfLink。网易云适配的可用性受 BetterNCM、InfLink-rs 以及网易云音乐客户端版本影响，不保证所有版本均可用。
 
 ## 适配与功能提示
 
