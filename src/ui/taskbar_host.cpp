@@ -2176,6 +2176,9 @@ void TaskbarHost::setTickCallback(std::function<void()> cb) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     bool thumbChanged = info.thumbnail != impl_->media.thumbnail;
     bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
+    bool controlsChanged = info.canPrev != impl_->media.canPrev ||
+                           info.canPlayPause != impl_->media.canPlayPause ||
+                           info.canNext != impl_->media.canNext;
     bool playingChanged = info.playing != impl_->media.playing;
     impl_->media = info;
     if (thumbChanged)
@@ -2186,7 +2189,10 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
         impl_->textDirty_ = true;
     if (thumbChanged || textChanged || playingChanged)
         impl_->vinylTickMs_ = GetTickCount64();
-    impl_->render();
+    // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
+    // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
+    if (thumbChanged || textChanged || controlsChanged || playingChanged)
+        impl_->render();
 }
 
 void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {

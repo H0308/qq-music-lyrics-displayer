@@ -249,6 +249,13 @@ struct SmtcMonitor::Impl {
 
     void updateSession(bool rebuildWatchers = false) {
         Session found{ nullptr };
+        Session selectedSession{ nullptr };
+        bool selectedSessionAlive = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            selectedSession = session;
+            selectedSessionAlive = snap.sessionAlive;
+        }
         if (manager) {
             try {
                 // Windows 已经维护了“用户当前最可能想控制”的媒体会话。
@@ -289,6 +296,29 @@ struct SmtcMonitor::Impl {
 
                 if (!found && currentIdentity.player != SmtcPlayerType::Unknown)
                     found = current;
+
+                // 网易云暂停/恢复时可能短暂上报 Changing/Opened 状态。适配器会把这类
+                // 非稳定状态映射为 Other，识别结果暂时变成 Unknown；但只要仍是此前
+                // 已选中的同一会话，就不能在这个过渡窗口把会话解绑，否则主程序会先
+                // 收到空快照并隐藏任务栏窗口，下一条 Playing 事件到达时再整体显示。
+                // Closed/Stopped 是真正的终止态，仍然允许下面的切换逻辑清理会话。
+                if (!found && selectedSessionAlive &&
+                    smtc::sameSession(selectedSession, current) && current) {
+                    bool transient = true;
+                    try {
+                        auto info = current.GetPlaybackInfo();
+                        if (info) {
+                            const auto status = info.PlaybackStatus();
+                            transient =
+                                status != GlobalSystemMediaTransportControlsSessionPlaybackStatus::Closed &&
+                                status != GlobalSystemMediaTransportControlsSessionPlaybackStatus::Stopped;
+                        }
+                    } catch (...) {
+                        // 会话正在切换时读取状态可能失败，保留原会话等待下一条事件。
+                    }
+                    if (transient)
+                        found = current;
+                }
 
                 if (!found && sessions) {
                     for (auto const& candidate : sessions) {
