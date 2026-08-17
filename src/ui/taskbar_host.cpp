@@ -40,6 +40,9 @@ constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
 constexpr float kSpectrumBarW = 7.0f;  // 频谱柱宽
 constexpr float kSpectrumGap = 6.0f;   // 频谱柱间隙
+constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
+constexpr float kVinylHaloWidth = 2.5f;
+constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
 
 // GDI+ 一次性初始化（封面解码）
 class GdiplusInit {
@@ -279,6 +282,9 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+透明度）
     ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
     ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
+    ID2D1SolidColorBrush* brushCoverHalo_ = nullptr;    // 黑胶外圈光环（复用已播放色）
+    ID2D1SolidColorBrush* brushVinylBase_ = nullptr;    // 黑胶唱片底色
+    ID2D1SolidColorBrush* brushVinylGroove_ = nullptr;  // 黑胶纹理线
     COLORREF lyricColor_ = RGB(49, 194, 124);           // 已播放颜色，默认 QQ 绿
     COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);   // 逐字未播放颜色
     int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放透明度（%）
@@ -290,12 +296,16 @@ struct TaskbarHost::Impl {
     bool romanizationEnabled_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
+    AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
     bool clientAnimations_ = true;
+    float vinylAngleDeg_ = 0.0f;
+    ULONGLONG vinylTickMs_ = 0;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
+    ID2D1EllipseGeometry* vinylCoverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
     ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
     ID2D1PathGeometry* icoPrev_ = nullptr;   // 上一首（左向三角 + 左侧竖条）
@@ -553,7 +563,31 @@ struct TaskbarHost::Impl {
         recreateFormats();
     }
 
-    // 歌词已播放/未播放/光晕/描边画刷：随用户颜色重建，与主题画刷解耦
+    // 黑胶效果画刷：光环/纹理沿用当前已播放色，保证专辑取色后两处同步变化。
+    void createAlbumCoverBrushes() {
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        auto release = [](auto*& p) {
+            if (p) {
+                p->Release();
+                p = nullptr;
+            }
+        };
+        release(brushCoverHalo_);
+        release(brushVinylBase_);
+        release(brushVinylGroove_);
+        auto rgb = [](COLORREF c, float a) {
+            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
+                                GetBValue(c) / 255.0f, a);
+        };
+        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.42f), &brushCoverHalo_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.018f, 0.018f, 0.022f, 0.96f),
+                                  &brushVinylBase_);
+        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.22f), &brushVinylGroove_);
+    }
+
+    // 歌词与黑胶画刷：随用户颜色重建，与主题画刷解耦
     void createLyricBrushes() {
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -589,6 +623,7 @@ struct TaskbarHost::Impl {
         rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
         // 频谱柱：跟随已播放色，略降透明度与歌词文字区分层次
         rt->CreateSolidColorBrush(rgb(lyricColor_, 0.60f), &brushSpectrum_);
+        createAlbumCoverBrushes();
     }
 
     void setFontGlowColors(COLORREF glow, COLORREF outline) {
@@ -669,6 +704,15 @@ struct TaskbarHost::Impl {
         render();
     }
 
+    void setAlbumCoverEffect(AlbumCoverEffect effect) {
+        if (albumCoverEffect_ == effect)
+            return;
+        albumCoverEffect_ = effect;
+        vinylAngleDeg_ = 0.0f;
+        vinylTickMs_ = GetTickCount64();
+        render();
+    }
+
     void setSpectrumBands(const std::array<float, TaskbarHost::kSpectrumBands>& bands) {
         spectrumBands_ = bands; // 无需立即 render：60fps 定时器每帧都会渲染
     }
@@ -701,6 +745,63 @@ struct TaskbarHost::Impl {
             rt->FillRoundedRectangle(rr, brushSpectrum_);
             x += kSpectrumBarW + kSpectrumGap;
         }
+    }
+
+    void drawVinylCover(float coverX, float coverY, float s) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || s <= 0.0f)
+            return;
+
+        D2D1_POINT_2F center = D2D1::Point2F(coverX + s * 0.5f, coverY + s * 0.5f);
+        float outerRadius = std::max(1.0f, s * 0.5f - 0.5f);
+        float haloWidth = std::min(kVinylHaloWidth, outerRadius * 0.25f);
+        float recordRadius = std::max(0.5f, outerRadius - haloWidth);
+        float innerRadius = vinylInnerRadius(s);
+        D2D1_ELLIPSE outer{center, outerRadius, outerRadius};
+        D2D1_ELLIPSE record{center, recordRadius, recordRadius};
+        D2D1_ELLIPSE inner{center, innerRadius, innerRadius};
+
+        // Direct2D 的正角度就是顺时针旋转；整个唱片组以中心为轴同步旋转。
+        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center));
+        if (brushCoverHalo_)
+            rt->FillEllipse(outer, brushCoverHalo_);
+        if (brushVinylBase_)
+            rt->FillEllipse(record, brushVinylBase_);
+
+        if (brushVinylGroove_) {
+            // 细密同心纹理和一条短径向高光，让纯色封面也能看出唱片正在转动。
+            for (float radius = innerRadius + 1.5f; radius < recordRadius - 0.5f;
+                 radius += 2.0f) {
+                rt->DrawEllipse(D2D1_ELLIPSE{center, radius, radius}, brushVinylGroove_, 0.55f);
+            }
+            rt->DrawLine(
+                D2D1::Point2F(center.x - recordRadius * 0.82f,
+                               center.y - recordRadius * 0.18f),
+                D2D1::Point2F(center.x - innerRadius - 1.0f,
+                               center.y - recordRadius * 0.18f),
+                brushVinylGroove_, 0.8f);
+        }
+
+        D2D1_RECT_F innerRect = D2D1::RectF(center.x - innerRadius, center.y - innerRadius,
+                                            center.x + innerRadius, center.y + innerRadius);
+        if (coverBmp && vinylCoverClip_ && coverLayer_) {
+            rt->PushLayer(D2D1::LayerParameters(
+                              D2D1::InfiniteRect(), vinylCoverClip_,
+                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                              D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                          coverLayer_);
+            rt->DrawBitmap(coverBmp, innerRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            rt->PopLayer();
+        } else if (brushDim_) {
+            rt->FillEllipse(inner, brushDim_);
+        }
+        if (brushVinylGroove_)
+            rt->DrawEllipse(inner, brushVinylGroove_, 0.8f);
+        if (brushVinylBase_)
+            rt->FillEllipse(D2D1_ELLIPSE{center, std::max(0.8f, s * 0.025f),
+                                         std::max(0.8f, s * 0.025f)},
+                            brushVinylBase_);
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
     void setPositionMode(int mode) {
@@ -803,8 +904,12 @@ struct TaskbarHost::Impl {
         r(brushLyricDim_);
         r(brushLyricGlow_);
         r(brushLyricOutline_);
+        r(brushCoverHalo_);
+        r(brushVinylBase_);
+        r(brushVinylGroove_);
         r(brushSpectrum_);
         r(coverClip_);
+        r(vinylCoverClip_);
         r(coverLayer_);
         r(icoPlay_);
         r(icoPrev_);
@@ -1199,6 +1304,13 @@ struct TaskbarHost::Impl {
         return karaokeProgX_;
     }
 
+    float vinylInnerRadius(float s) const {
+        float outerRadius = std::max(1.0f, s * 0.5f - 0.5f);
+        float recordRadius = std::max(0.5f, outerRadius -
+                                                    std::min(kVinylHaloWidth, outerRadius * 0.25f));
+        return std::min(s * kVinylInnerRatio, std::max(1.0f, recordRadius - 1.0f));
+    }
+
     // ---------- 图标几何 ----------
 
     void ensureGeometry() {
@@ -1212,6 +1324,10 @@ struct TaskbarHost::Impl {
         if (coverClip_) {
             coverClip_->Release();
             coverClip_ = nullptr;
+        }
+        if (vinylCoverClip_) {
+            vinylCoverClip_->Release();
+            vinylCoverClip_ = nullptr;
         }
         if (icoPlay_) {
             icoPlay_->Release();
@@ -1229,6 +1345,9 @@ struct TaskbarHost::Impl {
         float s = coverSize();
         D2D1_ROUNDED_RECT rr{D2D1::RectF(0, 0, s, s), 4.0f, 4.0f};
         d2d->CreateRoundedRectangleGeometry(rr, &coverClip_);
+        D2D1_ELLIPSE coverEllipse{
+            D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s), vinylInnerRadius(s)};
+        d2d->CreateEllipseGeometry(coverEllipse, &vinylCoverClip_);
 
         // 绘制带圆角的三角形：dir=1 向右，dir=-1 向左
         auto makeRoundedTriangle = [&](int dir, ID2D1PathGeometry** out) {
@@ -1491,19 +1610,23 @@ struct TaskbarHost::Impl {
         float coverX = kCoverPadding;
         float coverY = (h - s) * 0.5f;
         if (albumCoverVisible_) {
-            D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-            if (coverBmp && coverClip_ && coverLayer_) {
-                rt->PushLayer(D2D1::LayerParameters(
-                                  D2D1::InfiniteRect(), coverClip_,
-                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                  D2D1::Matrix3x2F::Translation(coverX, coverY)),
-                              coverLayer_);
-                rt->DrawBitmap(coverBmp, coverRect, 1.0f,
-                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                rt->PopLayer();
+            if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
+                drawVinylCover(coverX, coverY, s);
             } else {
-                D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
-                rt->FillRoundedRectangle(rr, brushDim_);
+                D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
+                if (coverBmp && coverClip_ && coverLayer_) {
+                    rt->PushLayer(D2D1::LayerParameters(
+                                      D2D1::InfiniteRect(), coverClip_,
+                                      D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                      D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                                  coverLayer_);
+                    rt->DrawBitmap(coverBmp, coverRect, 1.0f,
+                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    rt->PopLayer();
+                } else {
+                    D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
+                    rt->FillRoundedRectangle(rr, brushDim_);
+                }
             }
         }
 
@@ -1708,12 +1831,32 @@ struct TaskbarHost::Impl {
         marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
     }
 
+    void updateVinylRotation() {
+        ULONGLONG now = GetTickCount64();
+        if (vinylTickMs_ == 0)
+            vinylTickMs_ = now;
+        if (albumCoverEffect_ != AlbumCoverEffect::Vinyl || !media.playing ||
+            !clientAnimations_) {
+            // 暂停/切回默认效果时把时间锚点重置，恢复播放不会补算暂停期间的角度。
+            vinylTickMs_ = now;
+            return;
+        }
+        ULONGLONG elapsed = now - vinylTickMs_;
+        vinylTickMs_ = now;
+        vinylAngleDeg_ = std::fmod(
+            vinylAngleDeg_ + static_cast<float>(elapsed) * kVinylRotationDegPerSecond / 1000.0f,
+            360.0f);
+        if (vinylAngleDeg_ < 0.0f)
+            vinylAngleDeg_ += 360.0f;
+    }
+
     // ---------- 事件 ----------
 
     void onTimer() {
         if (tick)
             tick();
         frameNowMs_ = GetTickCount64();
+        updateVinylRotation();
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
@@ -1823,11 +1966,16 @@ void TaskbarHost::setTickCallback(std::function<void()> cb) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     bool thumbChanged = info.thumbnail != impl_->media.thumbnail;
     bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
+    bool playingChanged = info.playing != impl_->media.playing;
     impl_->media = info;
     if (thumbChanged)
         impl_->coverDirty = true;
+    if (thumbChanged || textChanged)
+        impl_->vinylAngleDeg_ = 0.0f;
     if (textChanged)
         impl_->textDirty_ = true;
+    if (thumbChanged || textChanged || playingChanged)
+        impl_->vinylTickMs_ = GetTickCount64();
     impl_->render();
 }
 
@@ -1940,6 +2088,10 @@ void TaskbarHost::setSongInfoVisible(bool on) {
 
 void TaskbarHost::setAlbumCoverVisible(bool on) {
     impl_->setAlbumCoverVisible(on);
+}
+
+void TaskbarHost::setAlbumCoverEffect(AlbumCoverEffect effect) {
+    impl_->setAlbumCoverEffect(effect);
 }
 
 void TaskbarHost::setSpectrumVisible(bool on) {

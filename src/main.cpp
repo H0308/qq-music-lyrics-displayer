@@ -52,6 +52,8 @@ constexpr UINT kCmdSecondaryLyric = 114;
 constexpr UINT kCmdSwitchSecondaryLyric = 115;
 constexpr UINT kCmdSongInfo = 116;
 constexpr UINT kCmdAlbumCover = 117;
+constexpr UINT kCmdAlbumCoverEffectDefault = 118;
+constexpr UINT kCmdAlbumCoverEffectVinyl = 119;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -210,6 +212,7 @@ struct App {
     std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
+    AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
 
     std::wstring settingsPath_;
 
@@ -260,6 +263,7 @@ struct App {
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
+        taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setSpectrumVisible(spectrumOn_);
         if (spectrumOn_)
@@ -620,6 +624,9 @@ void App::loadSettings() {
         }
         songInfoVisible_ = j.value("songInfoVisible", true);
         albumCoverVisible_ = j.value("albumCoverVisible", true);
+        albumCoverEffect_ = j.value("albumCoverEffect", std::string("default")) == "vinyl"
+                                ? AlbumCoverEffect::Vinyl
+                                : AlbumCoverEffect::Default;
     } catch (...) {
     }
 }
@@ -646,6 +653,7 @@ void App::saveSettings() {
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
         j["songInfoVisible"] = songInfoVisible_;
         j["albumCoverVisible"] = albumCoverVisible_;
+        j["albumCoverEffect"] = albumCoverEffect_ == AlbumCoverEffect::Vinyl ? "vinyl" : "default";
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
@@ -736,6 +744,18 @@ void App::showTrayMenu() {
         items.push_back(std::move(pos));
         addItem(kCmdSongInfo, L"显示歌曲信息", songInfoVisible_);
         addItem(kCmdAlbumCover, L"显示专辑封面", albumCoverVisible_);
+        fluent::FluentMenuItem coverEffect;
+        coverEffect.text = L"专辑封面效果";
+        fluent::FluentMenuItem effectItem;
+        effectItem.id = kCmdAlbumCoverEffectDefault;
+        effectItem.text = L"默认";
+        effectItem.checked = albumCoverEffect_ == AlbumCoverEffect::Default;
+        coverEffect.submenu.push_back(effectItem);
+        effectItem.id = kCmdAlbumCoverEffectVinyl;
+        effectItem.text = L"黑胶唱片";
+        effectItem.checked = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
+        coverEffect.submenu.push_back(effectItem);
+        items.push_back(std::move(coverEffect));
         addItem(kCmdSpectrum, L"频谱", spectrumOn_);
     }
     addSeparator();
@@ -831,6 +851,14 @@ void App::onMenuCommand(int cmd) {
         albumCoverVisible_ = !albumCoverVisible_;
         if (taskbarHost)
             taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
+        saveSettings();
+        break;
+    case kCmdAlbumCoverEffectDefault:
+    case kCmdAlbumCoverEffectVinyl:
+        albumCoverEffect_ = cmd == kCmdAlbumCoverEffectVinyl ? AlbumCoverEffect::Vinyl
+                                                               : AlbumCoverEffect::Default;
+        if (taskbarHost)
+            taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         saveSettings();
         break;
     case kCmdSwitchSecondaryLyric:

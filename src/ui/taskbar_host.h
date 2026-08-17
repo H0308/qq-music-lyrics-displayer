@@ -4,6 +4,11 @@
 
 #include <array>
 
+enum class AlbumCoverEffect {
+    Default,
+    Vinyl,
+};
+
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
 // 外观参考 Windows 11 原生媒体控制卡片：左侧显示圆角封面+歌名+歌手，
 // 右侧显示当前行歌词（超长自动滚动），鼠标悬浮时右侧叠加显示播放控制按钮。
@@ -36,6 +41,7 @@ public:
     void setSecondaryLyricMode(bool translation, bool romanization) override;
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
+    void setAlbumCoverEffect(AlbumCoverEffect effect);
 
     // 音频频谱（任务栏独有）：on 控制显隐，bands 为每帧频段电平（0~1，固定 6 段）。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
