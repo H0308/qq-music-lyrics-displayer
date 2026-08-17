@@ -13,6 +13,13 @@ namespace smtc {
 namespace {
 
 constexpr wchar_t kGenrePrefix[] = L"NCM-";
+constexpr wchar_t kCloudMusicAppId[] = L"cloudmusic.exe";
+constexpr wchar_t kNeteaseBridgeAppId[] = L"NeteaseBridge.exe";
+
+bool isNeteaseSource(const std::wstring& sourceAppUserModelId) {
+    return _wcsicmp(sourceAppUserModelId.c_str(), kCloudMusicAppId) == 0 ||
+           _wcsicmp(sourceAppUserModelId.c_str(), kNeteaseBridgeAppId) == 0;
+}
 
 } // namespace
 
@@ -42,6 +49,17 @@ SmtcSessionIdentity NeteaseSmtcAdapter::identifySession(const Session& session) 
 
     try {
         identity.sourceAppUserModelId = session.SourceAppUserModelId().c_str();
+        // 只对网易云自身/桥接器会话读取 Genres。对所有 SMTC 会话都调用
+        // TryGetMediaPropertiesAsync() 会触发 QQ、浏览器或已失效会话的
+        // HRESULT，尤其是在当前没有播放歌曲时更容易出现。
+        if (!isNeteaseSource(identity.sourceAppUserModelId))
+            return identity;
+        auto info = session.GetPlaybackInfo();
+        if (!info)
+            return identity;
+        const PlaybackStatus status = mapStatus(info.PlaybackStatus());
+        if (status == PlaybackStatus::Stopped || status == PlaybackStatus::Other)
+            return identity;
         auto propsOp = session.TryGetMediaPropertiesAsync();
         if (!propsOp)
             return identity;
