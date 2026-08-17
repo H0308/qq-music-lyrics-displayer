@@ -54,6 +54,7 @@ constexpr UINT kCmdSongInfo = 116;
 constexpr UINT kCmdAlbumCover = 117;
 constexpr UINT kCmdAlbumCoverEffectDefault = 118;
 constexpr UINT kCmdAlbumCoverEffectVinyl = 119;
+constexpr UINT kCmdDoubleLineLyrics = 120;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -196,6 +197,7 @@ struct App {
     // 总开关与类型选择独立于当前歌曲能力；缺少所选内容时暂不显示，后续自动恢复。
     bool secondaryLyricEnabled_ = true;
     bool preferRomanization_ = false;
+    bool doubleLineLyricsEnabled_ = false;
     bool currentHasTranslation_ = false;
     bool currentHasRomanization_ = false;
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
@@ -261,6 +263,7 @@ struct App {
         taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
         taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
                                            secondaryLyricEnabled_ && preferRomanization_);
+        taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
@@ -622,6 +625,7 @@ void App::loadSettings() {
             secondaryLyricEnabled_ = oldTranslation || oldRomanization;
             preferRomanization_ = oldRomanization && !oldTranslation;
         }
+        doubleLineLyricsEnabled_ = j.value("doubleLineLyrics", false);
         songInfoVisible_ = j.value("songInfoVisible", true);
         albumCoverVisible_ = j.value("albumCoverVisible", true);
         albumCoverEffect_ = j.value("albumCoverEffect", std::string("default")) == "vinyl"
@@ -651,6 +655,7 @@ void App::saveSettings() {
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
+        j["doubleLineLyrics"] = doubleLineLyricsEnabled_;
         j["songInfoVisible"] = songInfoVisible_;
         j["albumCoverVisible"] = albumCoverVisible_;
         j["albumCoverEffect"] = albumCoverEffect_ == AlbumCoverEffect::Vinyl ? "vinyl" : "default";
@@ -765,6 +770,7 @@ void App::showTrayMenu() {
         addItem(kCmdFollowAlbum, L"已播放颜色跟随专辑", lyricFollowAlbum_);
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
+    addItem(kCmdDoubleLineLyrics, L"双行歌词", doubleLineLyricsEnabled_);
     addItem(kCmdSecondaryLyric, L"开启翻译/罗马音", secondaryLyricEnabled_);
     if (lyricLoading_) {
         addItem(kCmdSwitchSecondaryLyric, L"正在检查翻译和罗马音", false, false);
@@ -839,6 +845,12 @@ void App::onMenuCommand(int cmd) {
     case kCmdSecondaryLyric:
         secondaryLyricEnabled_ = !secondaryLyricEnabled_;
         applySecondaryLyricMode();
+        saveSettings();
+        break;
+    case kCmdDoubleLineLyrics:
+        doubleLineLyricsEnabled_ = !doubleLineLyricsEnabled_;
+        if (taskbarHost)
+            taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         saveSettings();
         break;
     case kCmdSongInfo:

@@ -35,6 +35,11 @@ constexpr float kCornerRadius = 8.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
+constexpr float kLyricPreviewGap = 3.0f; // 普通双行模式的核心行与下一行间距
+constexpr float kLyricPreviewOpacity = 0.42f; // 下一行预览透明度
+constexpr float kLyricMainFontScale = 1.18f;
+constexpr float kLyricPreviewFontScale = 0.86f;
+constexpr float kLyricPreviewScale = kLyricPreviewFontScale / kLyricMainFontScale;
 constexpr float kMinFont = 9.0f;
 constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
@@ -256,18 +261,23 @@ struct TaskbarHost::Impl {
     IDWriteTextFormat* fmtTitle_ = nullptr;
     IDWriteTextFormat* fmtArtist_ = nullptr;
     IDWriteTextFormat* fmtLyric_ = nullptr;
+    IDWriteTextFormat* fmtNextLyric_ = nullptr;
     IDWriteTextFormat* fmtSecondary_ = nullptr;
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
+    IDWriteTextLayout* nextLyricLayout_ = nullptr;
     IDWriteTextLayout* secondaryLayout_ = nullptr;
     // 行切换动画保留上一帧的布局，避免新行直接替换导致文字瞬移。
     IDWriteTextLayout* outgoingLyricLayout_ = nullptr;
     IDWriteTextLayout* outgoingSecondaryLayout_ = nullptr;
     float outgoingLyricWidth_ = 0.0f;
     float outgoingLyricHeight_ = 0.0f;
+    float outgoingLyricBlockHeight_ = 0.0f;
     float outgoingSecondaryWidth_ = 0.0f;
     float outgoingSecondaryHeight_ = 0.0f;
+    float nextLyricWidth_ = 0.0f;
+    float nextLyricHeight_ = 0.0f;
     ULONGLONG lyricTransitionStartMs_ = 0;
     int lyricTransitionDirection_ = 1; // 1: 新行从下方进入，-1: 从上方进入
     bool lyricTransitionPending_ = false;
@@ -294,6 +304,8 @@ struct TaskbarHost::Impl {
     bool lyricOutline_ = false;                         // 描边开关
     bool translationEnabled_ = true;
     bool romanizationEnabled_ = false;
+    bool doubleLineLyricsEnabled_ = false;
+    bool secondaryContentAvailable_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
@@ -668,6 +680,39 @@ struct TaskbarHost::Impl {
             return;
         translationEnabled_ = translation;
         romanizationEnabled_ = romanization;
+        refreshSecondaryContent();
+        lyricTransitionPending_ = false;
+        lyricTransitionActive_ = false;
+        if (outgoingLyricLayout_) {
+            outgoingLyricLayout_->Release();
+            outgoingLyricLayout_ = nullptr;
+        }
+        if (outgoingSecondaryLayout_) {
+            outgoingSecondaryLayout_->Release();
+            outgoingSecondaryLayout_ = nullptr;
+        }
+        outgoingLyricBlockHeight_ = 0.0f;
+        textDirty_ = true;
+        render();
+    }
+
+    void setDoubleLineLyrics(bool on) {
+        if (doubleLineLyricsEnabled_ == on)
+            return;
+        doubleLineLyricsEnabled_ = on;
+        if (!secondaryContentAvailable_) {
+            lyricTransitionPending_ = false;
+            lyricTransitionActive_ = false;
+            if (outgoingLyricLayout_) {
+                outgoingLyricLayout_->Release();
+                outgoingLyricLayout_ = nullptr;
+            }
+            if (outgoingSecondaryLayout_) {
+                outgoingSecondaryLayout_->Release();
+                outgoingSecondaryLayout_ = nullptr;
+            }
+            outgoingLyricBlockHeight_ = 0.0f;
+        }
         textDirty_ = true;
         render();
     }
@@ -858,8 +903,13 @@ struct TaskbarHost::Impl {
              &fmtTitle_);
         make(kBaseFontSize * 0.92f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtArtist_);
-        make(fontSize_ * 1.18f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        make(fontSize_ * kLyricMainFontScale, DWRITE_FONT_WEIGHT_NORMAL,
+             DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtLyric_);
+        // 双行模式的下一行：比翻译字号（0.78）略大，但明显小于核心歌词（1.18）。
+        make(fontSize_ * kLyricPreviewFontScale, DWRITE_FONT_WEIGHT_NORMAL,
+             DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+             &fmtNextLyric_);
         make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtSecondary_);
         textDirty_ = true;
@@ -888,10 +938,12 @@ struct TaskbarHost::Impl {
         r(fmtTitle_);
         r(fmtArtist_);
         r(fmtLyric_);
+        r(fmtNextLyric_);
         r(fmtSecondary_);
         r(titleLayout_);
         r(artistLayout_);
         r(lyricLayout_);
+        r(nextLyricLayout_);
         r(secondaryLayout_);
         r(outgoingLyricLayout_);
         r(outgoingSecondaryLayout_);
@@ -1045,6 +1097,35 @@ struct TaskbarHost::Impl {
         stream->Release();
     }
 
+    void refreshSecondaryContent() {
+        secondaryContentAvailable_ = false;
+        for (const auto& line : lines) {
+            if ((translationEnabled_ && !line.translation.empty()) ||
+                (romanizationEnabled_ && !line.romanization.empty())) {
+                secondaryContentAvailable_ = true;
+                return;
+            }
+        }
+    }
+
+    bool useDoubleLineLyrics() const {
+        return doubleLineLyricsEnabled_ && !secondaryContentAvailable_;
+    }
+
+    int displayLyricLine() const {
+        if (currentLine >= 0 && (size_t)currentLine < lines.size())
+            return currentLine;
+        return lines.empty() ? -1 : 0;
+    }
+
+    std::wstring selectedSecondary(const LyricLine& line) const {
+        if (translationEnabled_)
+            return line.translation;
+        if (romanizationEnabled_)
+            return line.romanization;
+        return {};
+    }
+
     // ---------- 排版 ----------
 
     void buildTextLayouts(float leftW, float rightW) {
@@ -1053,6 +1134,7 @@ struct TaskbarHost::Impl {
         if (!dwrite || !fmtTitle_ || !fmtArtist_ || !fmtLyric_)
             return;
 
+        const bool doubleLineLyrics = useDoubleLineLyrics();
         if (titleLayout_) {
             titleLayout_->Release();
             titleLayout_ = nullptr;
@@ -1068,24 +1150,37 @@ struct TaskbarHost::Impl {
             lyricLayout_ = nullptr;
             outgoingLyricWidth_ = lyricWidth_;
             outgoingLyricHeight_ = lyricHeight_;
+            outgoingLyricBlockHeight_ =
+                doubleLineLyrics
+                    ? lyricHeight_ + kLyricPreviewGap +
+                          (nextLyricLayout_ ? nextLyricHeight_ : 0.0f)
+                    : 0.0f;
             if (outgoingSecondaryLayout_)
                 outgoingSecondaryLayout_->Release();
-            outgoingSecondaryLayout_ = secondaryLayout_;
-            secondaryLayout_ = nullptr;
-            outgoingSecondaryWidth_ = secondaryWidth_;
-            outgoingSecondaryHeight_ = secondaryHeight_;
+            if (doubleLineLyrics) {
+                outgoingSecondaryLayout_ = nullptr;
+                if (secondaryLayout_)
+                    secondaryLayout_->Release();
+                secondaryLayout_ = nullptr;
+                outgoingSecondaryWidth_ = 0.0f;
+                outgoingSecondaryHeight_ = 0.0f;
+            } else {
+                outgoingSecondaryLayout_ = secondaryLayout_;
+                secondaryLayout_ = nullptr;
+                outgoingSecondaryWidth_ = secondaryWidth_;
+                outgoingSecondaryHeight_ = secondaryHeight_;
+            }
             lyricTransitionStartMs_ = GetTickCount64();
             lyricTransitionActive_ = true;
         } else {
-            if (lyricTransitionPending_) {
-                if (outgoingLyricLayout_)
-                    outgoingLyricLayout_->Release();
-                if (outgoingSecondaryLayout_)
-                    outgoingSecondaryLayout_->Release();
-                outgoingLyricLayout_ = nullptr;
-                outgoingSecondaryLayout_ = nullptr;
-                lyricTransitionActive_ = false;
-            }
+            if (outgoingLyricLayout_)
+                outgoingLyricLayout_->Release();
+            if (outgoingSecondaryLayout_)
+                outgoingSecondaryLayout_->Release();
+            outgoingLyricLayout_ = nullptr;
+            outgoingSecondaryLayout_ = nullptr;
+            outgoingLyricBlockHeight_ = 0.0f;
+            lyricTransitionActive_ = false;
             if (lyricLayout_)
                 lyricLayout_->Release();
             if (secondaryLayout_)
@@ -1094,6 +1189,13 @@ struct TaskbarHost::Impl {
             secondaryLayout_ = nullptr;
         }
         lyricTransitionPending_ = false;
+
+        if (nextLyricLayout_) {
+            nextLyricLayout_->Release();
+            nextLyricLayout_ = nullptr;
+        }
+        nextLyricWidth_ = 0.0f;
+        nextLyricHeight_ = 0.0f;
 
         float infoX = infoStartX();
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
@@ -1122,20 +1224,12 @@ struct TaskbarHost::Impl {
             }
         }
 
+        int displayLine = displayLyricLine();
         std::wstring lyric;
         std::wstring secondary;
-        if (currentLine >= 0 && (size_t)currentLine < lines.size()) {
-            lyric = lines[(size_t)currentLine].text;
-            secondary = translationEnabled_ ? lines[(size_t)currentLine].translation
-                                            : (romanizationEnabled_
-                                                   ? lines[(size_t)currentLine].romanization
-                                                   : std::wstring());
-        } else if (!lines.empty()) {
-            // 进度还没到达首句时，先显示第一句，避免空白
-            lyric = lines.front().text;
-            secondary = translationEnabled_ ? lines.front().translation
-                                            : (romanizationEnabled_ ? lines.front().romanization
-                                                                    : std::wstring());
+        if (displayLine >= 0) {
+            lyric = lines[(size_t)displayLine].text;
+            secondary = selectedSecondary(lines[(size_t)displayLine]);
         } else {
             lyric = statusText;
         }
@@ -1156,7 +1250,7 @@ struct TaskbarHost::Impl {
                 lyricHeight_ = m.height;
             }
         }
-        if (!secondary.empty() && fmtSecondary_) {
+        if (!doubleLineLyrics && !secondary.empty() && fmtSecondary_) {
             dwrite->CreateTextLayout(secondary.c_str(), (UINT32)secondary.size(), fmtSecondary_,
                                      100000.0f, 100.0f, &secondaryLayout_);
             if (secondaryLayout_) {
@@ -1165,6 +1259,21 @@ struct TaskbarHost::Impl {
                 secondaryLayout_->GetMetrics(&m);
                 secondaryWidth_ = m.width;
                 secondaryHeight_ = m.height;
+            }
+        }
+        if (doubleLineLyrics && fmtNextLyric_ && displayLine >= 0 &&
+            static_cast<size_t>(displayLine + 1) < lines.size() &&
+            !lines[(size_t)displayLine + 1].text.empty()) {
+            int nextLine = displayLine + 1;
+            const std::wstring& nextText = lines[(size_t)nextLine].text;
+            dwrite->CreateTextLayout(nextText.c_str(), (UINT32)nextText.size(), fmtNextLyric_,
+                                     100000.0f, 100.0f, &nextLyricLayout_);
+            if (nextLyricLayout_) {
+                nextLyricLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                DWRITE_TEXT_METRICS m{};
+                nextLyricLayout_->GetMetrics(&m);
+                nextLyricWidth_ = m.width;
+                nextLyricHeight_ = m.height;
             }
         }
         // 动态滚动速度：让歌词在当前行时长内滚动完一圈。两句间隔越小速度越快，
@@ -1552,6 +1661,100 @@ struct TaskbarHost::Impl {
             changed[i]->SetOpacity(previousOpacity[i]);
     }
 
+    void drawScaledScrollingText(IDWriteTextLayout* layout, float textW, float textH,
+                                 float areaW, float x, float y, float offset, ID2D1Brush* brush,
+                                 float opacity, float scale) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !layout || areaW <= 0.0f)
+            return;
+        if (scale >= 0.999f) {
+            drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, nullptr, nullptr,
+                              nullptr, 0.0f, opacity);
+            return;
+        }
+
+        const D2D1_POINT_2F center = D2D1::Point2F(x + areaW * 0.5f, y + textH * 0.5f);
+        rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, center));
+        drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, nullptr, nullptr,
+                          nullptr, 0.0f, opacity);
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+
+    void drawDoubleLineLyrics(float lyricAreaX, float lyricAreaW, float h) {
+        if (!lyricLayout_)
+            return;
+
+        const float lyricBlockH = lyricHeight_ +
+                                  (nextLyricLayout_
+                                       ? kLyricPreviewGap + nextLyricHeight_
+                                       : 0.0f);
+        const float coreY = h * 0.5f - lyricBlockH * 0.5f;
+        ID2D1Brush* coreBrush = brushLyric_ ? static_cast<ID2D1Brush*>(brushLyric_)
+                                           : static_cast<ID2D1Brush*>(brushText_);
+        if (lyricTransitionActive_ && outgoingLyricLayout_) {
+            float transitionT = std::clamp(
+                static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
+                                   lyricTransitionStartMs_) /
+                    kLyricTransitionMs,
+                0.0f, 1.0f);
+            float movementT = transitionT * transitionT * (3.0f - 2.0f * transitionT);
+            auto smoothProgress = [](float t, float start, float end) {
+                float p = std::clamp((t - start) / (end - start), 0.0f, 1.0f);
+                return p * p * (3.0f - 2.0f * p);
+            };
+            float fadeOutT = smoothProgress(transitionT, 0.08f, 0.90f);
+            float fadeInT = smoothProgress(transitionT, 0.14f, 1.0f);
+            float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
+                                       ? outgoingLyricBlockHeight_
+                                       : outgoingLyricHeight_;
+            float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
+            float travel = std::max(outgoingLyricHeight_, lyricHeight_) + kLyricPreviewGap;
+            float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+            float oldShift = -direction * travel * movementT;
+            float incomingStartY = direction > 0.0f
+                                       ? outgoingY + outgoingLyricHeight_ + kLyricPreviewGap
+                                       : coreY - travel;
+            float incomingY = incomingStartY + (coreY - incomingStartY) * movementT;
+            const LyricLine* incomingLine = karaokeLine();
+            bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+            ID2D1Brush* incomingBrush =
+                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : coreBrush;
+            float incomingScale = kLyricPreviewScale +
+                                  (1.0f - kLyricPreviewScale) * movementT;
+            // y 是主字号布局的位置；缩小时校正半个缩放差，使视觉中心跟随位移而不跳动。
+            float scaledIncomingY =
+                incomingY - lyricHeight_ * (1.0f - incomingScale) * 0.5f;
+
+            // 下一行在转场前已经位于核心行下方；转场从这个位置接入核心，避免跳变。
+            drawScrollingText(outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_,
+                              lyricAreaW, lyricAreaX, outgoingY + oldShift, 0.0f, coreBrush,
+                              nullptr, nullptr, nullptr, 0.0f, 1.0f - fadeOutT);
+            drawScaledScrollingText(
+                lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, scaledIncomingY,
+                lyricScrollOffset_, incomingBrush,
+                kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * fadeInT, incomingScale);
+            return;
+        }
+
+        // 核心行仍保留原有逐字高亮；下一行只作为低透明度预览，不参与逐字填充。
+        const LyricLine* curLine = karaokeLine();
+        bool karaoke = curLine && brushLyric_ && brushLyricDim_;
+        float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
+        drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, coreY,
+                          lyricScrollOffset_,
+                          karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : coreBrush,
+                          lyricOutline_ ? brushLyricOutline_ : nullptr,
+                          lyricGlow_ ? brushLyricGlow_ : nullptr,
+                          karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr, progX);
+
+        if (nextLyricLayout_) {
+            float nextY = coreY + lyricHeight_ + kLyricPreviewGap;
+            drawScrollingText(nextLyricLayout_, nextLyricWidth_, nextLyricHeight_, lyricAreaW,
+                              lyricAreaX, nextY, 0.0f, coreBrush, nullptr, nullptr, nullptr, 0.0f,
+                              kLyricPreviewOpacity);
+        }
+    }
+
     void render() {
         if (!visible || !hwnd)
             return;
@@ -1664,77 +1867,83 @@ struct TaskbarHost::Impl {
         } else {
             if (showSpectrum)
                 drawSpectrum(lyricAreaX + lyricAreaW + kTextPadding, h);
-            float transitionT = 1.0f;
-            if (lyricTransitionActive_) {
-                transitionT = std::clamp(
-                    (static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
-                                        lyricTransitionStartMs_) /
-                     kLyricTransitionMs),
-                    0.0f, 1.0f);
-            }
-            if (lyricTransitionActive_ && outgoingLyricLayout_) {
-                // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
-                float movementT = transitionT * transitionT * (3.0f - 2.0f * transitionT);
-                // 淡出稍晚开始并留出余韵；新行略早进入，避免画面突然变空。
-                auto smoothProgress = [](float t, float start, float end) {
-                    float p = std::clamp((t - start) / (end - start), 0.0f, 1.0f);
-                    return p * p * (3.0f - 2.0f * p);
-                };
-                float fadeOutT = smoothProgress(transitionT, 0.08f, 0.90f);
-                float fadeInT = smoothProgress(transitionT, 0.14f, 1.0f);
-                const LyricLine* incomingLine = karaokeLine();
-                bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
-                ID2D1Brush* incomingBrush = incomingKaraoke
-                                                 ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                                 : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
-                                                                                         : brushText_);
-                float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
-                float outgoingBlockH = outgoingLyricHeight_ + outgoingGap +
-                                       outgoingSecondaryHeight_;
-                float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
-                float travel = std::max(lyricBlockH, outgoingBlockH);
-                float oldShift = -static_cast<float>(lyricTransitionDirection_) * travel * movementT;
-                float newShift = static_cast<float>(lyricTransitionDirection_) * travel * (1.0f - movementT);
-                drawScrollingText(
-                    outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
-                    lyricAreaX, outgoingY + oldShift, 0.0f,
-                    brushLyric_ ? brushLyric_ : brushText_, nullptr, nullptr, nullptr, 0.0f,
-                    1.0f - fadeOutT);
-                if (outgoingSecondaryLayout_)
-                    drawScrollingText(outgoingSecondaryLayout_, outgoingSecondaryWidth_,
-                                      outgoingSecondaryHeight_, lyricAreaW, lyricAreaX,
-                                      outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
-                                      0.0f, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                                      1.0f - fadeOutT);
-                // 过渡期间停用逐字填充，避免高亮进度和移动中的旧行叠加造成视觉噪声。
-                drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW,
-                                  lyricAreaX, lyricY + newShift, lyricScrollOffset_,
-                                  incomingBrush, nullptr, nullptr,
-                                  nullptr, 0.0f, fadeInT);
-                if (secondaryLayout_)
-                    drawScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
-                                      lyricAreaW, lyricAreaX,
-                                      lyricY + lyricHeight_ + secondaryGap + newShift,
-                                      secondaryScrollOffset_, brushDim_, nullptr, nullptr,
-                                      nullptr, 0.0f, fadeInT);
+            if (useDoubleLineLyrics()) {
+                drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h);
             } else {
-            // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
-            // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
-            const LyricLine* curLine = karaokeLine();
-            bool karaoke = curLine && brushLyric_ && brushLyricDim_;
-            float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
-            drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
-                              lyricY, lyricScrollOffset_,
-                              karaoke ? brushLyricDim_
-                                      : (brushLyric_ ? brushLyric_ : brushText_),
-                              lyricOutline_ ? brushLyricOutline_ : nullptr,
-                              lyricGlow_ ? brushLyricGlow_ : nullptr,
-                              karaoke ? brushLyric_ : nullptr, progX);
-            // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
-            if (secondaryLayout_)
-                drawScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_, lyricAreaW,
-                                  lyricAreaX, lyricY + lyricHeight_ + secondaryGap,
-                                  secondaryScrollOffset_, brushDim_);
+                float transitionT = 1.0f;
+                if (lyricTransitionActive_) {
+                    transitionT = std::clamp(
+                        (static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
+                                            lyricTransitionStartMs_) /
+                         kLyricTransitionMs),
+                        0.0f, 1.0f);
+                }
+                if (lyricTransitionActive_ && outgoingLyricLayout_) {
+                    // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
+                    float movementT = transitionT * transitionT * (3.0f - 2.0f * transitionT);
+                    // 淡出稍晚开始并留出余韵；新行略早进入，避免画面突然变空。
+                    auto smoothProgress = [](float t, float start, float end) {
+                        float p = std::clamp((t - start) / (end - start), 0.0f, 1.0f);
+                        return p * p * (3.0f - 2.0f * p);
+                    };
+                    float fadeOutT = smoothProgress(transitionT, 0.08f, 0.90f);
+                    float fadeInT = smoothProgress(transitionT, 0.14f, 1.0f);
+                    const LyricLine* incomingLine = karaokeLine();
+                    bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+                    ID2D1Brush* incomingBrush =
+                        incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_)
+                                        : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
+                                                                                : brushText_);
+                    float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
+                    float outgoingBlockH = outgoingLyricHeight_ + outgoingGap +
+                                           outgoingSecondaryHeight_;
+                    float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
+                    float travel = std::max(lyricBlockH, outgoingBlockH);
+                    float oldShift = -static_cast<float>(lyricTransitionDirection_) * travel *
+                                     movementT;
+                    float newShift = static_cast<float>(lyricTransitionDirection_) * travel *
+                                     (1.0f - movementT);
+                    drawScrollingText(
+                        outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
+                        lyricAreaX, outgoingY + oldShift, 0.0f,
+                        brushLyric_ ? brushLyric_ : brushText_, nullptr, nullptr, nullptr, 0.0f,
+                        1.0f - fadeOutT);
+                    if (outgoingSecondaryLayout_)
+                        drawScrollingText(outgoingSecondaryLayout_, outgoingSecondaryWidth_,
+                                          outgoingSecondaryHeight_, lyricAreaW, lyricAreaX,
+                                          outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
+                                          0.0f, brushDim_, nullptr, nullptr, nullptr, 0.0f,
+                                          1.0f - fadeOutT);
+                    // 过渡期间停用逐字填充，避免高亮进度和移动中的旧行叠加造成视觉噪声。
+                    drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW,
+                                      lyricAreaX, lyricY + newShift, lyricScrollOffset_,
+                                      incomingBrush, nullptr, nullptr,
+                                      nullptr, 0.0f, fadeInT);
+                    if (secondaryLayout_)
+                        drawScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
+                                          lyricAreaW, lyricAreaX,
+                                          lyricY + lyricHeight_ + secondaryGap + newShift,
+                                          secondaryScrollOffset_, brushDim_, nullptr, nullptr,
+                                          nullptr, 0.0f, fadeInT);
+                } else {
+                    // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
+                    // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
+                    const LyricLine* curLine = karaokeLine();
+                    bool karaoke = curLine && brushLyric_ && brushLyricDim_;
+                    float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
+                    drawScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
+                                      lyricY, lyricScrollOffset_,
+                                      karaoke ? brushLyricDim_
+                                              : (brushLyric_ ? brushLyric_ : brushText_),
+                                      lyricOutline_ ? brushLyricOutline_ : nullptr,
+                                      lyricGlow_ ? brushLyricGlow_ : nullptr,
+                                      karaoke ? brushLyric_ : nullptr, progX);
+                    // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
+                    if (secondaryLayout_)
+                        drawScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
+                                          lyricAreaW, lyricAreaX, lyricY + lyricHeight_ + secondaryGap,
+                                          secondaryScrollOffset_, brushDim_);
+                }
             }
         }
 
@@ -1767,6 +1976,7 @@ struct TaskbarHost::Impl {
                     outgoingSecondaryLayout_->Release();
                 outgoingLyricLayout_ = nullptr;
                 outgoingSecondaryLayout_ = nullptr;
+                outgoingLyricBlockHeight_ = 0.0f;
                 lyricTransitionActive_ = false;
                 // 切换阶段的新行从未播放状态开始，动画结束后再平滑追上实时进度。
                 karaokeSmoothLine_ = currentLine;
@@ -2004,6 +2214,7 @@ void TaskbarHost::hide() {
 
 void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
     impl_->lines = lines;
+    impl_->refreshSecondaryContent();
     impl_->currentLine = -1;
     impl_->lyricTransitionPending_ = false;
     impl_->lyricTransitionActive_ = false;
@@ -2015,6 +2226,13 @@ void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
         impl_->outgoingSecondaryLayout_->Release();
         impl_->outgoingSecondaryLayout_ = nullptr;
     }
+    impl_->outgoingLyricBlockHeight_ = 0.0f;
+    if (impl_->nextLyricLayout_) {
+        impl_->nextLyricLayout_->Release();
+        impl_->nextLyricLayout_ = nullptr;
+    }
+    impl_->nextLyricWidth_ = 0.0f;
+    impl_->nextLyricHeight_ = 0.0f;
     impl_->textDirty_ = true;
     if (!lines.empty())
         impl_->statusText.clear();
@@ -2080,6 +2298,10 @@ void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
 
 void TaskbarHost::setSecondaryLyricMode(bool translation, bool romanization) {
     impl_->setSecondaryLyricMode(translation, romanization);
+}
+
+void TaskbarHost::setDoubleLineLyrics(bool on) {
+    impl_->setDoubleLineLyrics(on);
 }
 
 void TaskbarHost::setSongInfoVisible(bool on) {

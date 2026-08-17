@@ -39,6 +39,7 @@ public:
     void setFontOutline(bool on);
     void setFontGlowColors(COLORREF glow, COLORREF outline);
     void setSecondaryLyricMode(bool translation, bool romanization) override;
+    void setDoubleLineLyrics(bool on);
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
     void setAlbumCoverEffect(AlbumCoverEffect effect);
