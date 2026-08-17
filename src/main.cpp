@@ -297,9 +297,14 @@ struct App {
             manualSearchDialog->show();
             return;
         }
+        const SmtcSnapshot manualTarget = monitor.snapshot();
+        const std::wstring targetNeteaseSongId =
+            manualTarget.player == SmtcPlayerType::NetEase
+                ? manualTarget.neteaseSongId
+                : L"";
         manualSearchDialog = std::make_unique<ManualSearchDialog>();
         if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist,
-                                        currentDurationMs)) {
+                                        currentDurationMs, targetNeteaseSongId)) {
             manualSearchDialog.reset();
             return;
         }

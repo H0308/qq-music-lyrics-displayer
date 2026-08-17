@@ -21,7 +21,8 @@ public:
     // provider 必须比对话框生命周期长
     bool create(HINSTANCE inst, HWND parent, LyricProvider* provider,
                 const std::wstring& targetTitle, const std::wstring& targetArtist,
-                int64_t targetDurationMs);
+                int64_t targetDurationMs,
+                const std::wstring& targetNeteaseSongId = {});
     void show();
     void destroy();
     bool isOpen() const;

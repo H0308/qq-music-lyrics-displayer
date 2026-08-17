@@ -331,6 +331,7 @@ struct ManualSearchDialog::Impl {
     std::wstring targetTitle;
     std::wstring targetArtist;
     int64_t targetDurationMs = 0;
+    std::wstring targetNeteaseSongId;
     std::vector<SearchCandidate> candidates;
     std::vector<int> itemToCand; // 列表行号 -> candidates 下标（-1 为分组标题行）
     int selectedIdx = -1;
@@ -669,8 +670,11 @@ struct ManualSearchDialog::Impl {
         if (previewLines.empty())
             return;
         if (provider) {
+            SongInfo info = previewInfo;
+            if (!targetNeteaseSongId.empty())
+                info.neteaseSongId = targetNeteaseSongId;
             provider->setManualOverride(targetTitle, targetArtist, targetDurationMs,
-                                          std::vector<LyricLine>(previewLines), previewInfo);
+                                          std::vector<LyricLine>(previewLines), info);
         }
         if (onApply)
             onApply();
@@ -715,12 +719,14 @@ ManualSearchDialog::~ManualSearchDialog() {
 bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* provider,
                                 const std::wstring& targetTitle,
                                 const std::wstring& targetArtist,
-                                int64_t targetDurationMs) {
+                                int64_t targetDurationMs,
+                                const std::wstring& targetNeteaseSongId) {
     impl_->inst = inst;
     impl_->provider = provider;
     impl_->targetTitle = targetTitle;
     impl_->targetArtist = targetArtist;
     impl_->targetDurationMs = targetDurationMs;
+    impl_->targetNeteaseSongId = targetNeteaseSongId;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
