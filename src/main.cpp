@@ -61,6 +61,7 @@ constexpr UINT kCmdAbout = 122;
 constexpr UINT kCmdLyricAlignLeft = 123;
 constexpr UINT kCmdLyricAlignCenter = 124;
 constexpr UINT kCmdLyricAlignRight = 125;
+constexpr UINT kCmdHoverPlaybackControls = 126;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -214,6 +215,7 @@ struct App {
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
+    bool hoverPlaybackControls_ = true;
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
@@ -275,6 +277,7 @@ struct App {
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setLyricAlignment(lyricAlignment_);
+        taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -634,6 +637,7 @@ void App::loadSettings() {
         // 老配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它，视觉不变
         lyricOutline_ = j.value("lyricOutline", lyricGlow_);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
+        hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
         spectrumOn_ = j.value("spectrum", false);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
@@ -682,6 +686,7 @@ void App::saveSettings() {
         j["lyricGlow"] = lyricGlow_;
         j["lyricOutline"] = lyricOutline_;
         j["taskbarPosition"] = taskbarPosition_;
+        j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["spectrum"] = spectrumOn_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
@@ -799,6 +804,7 @@ void App::showTrayMenu() {
         coverEffect.submenu.push_back(effectItem);
         items.push_back(std::move(coverEffect));
         addItem(kCmdSpectrum, L"频谱", spectrumOn_);
+        addItem(kCmdHoverPlaybackControls, L"悬浮时显示播放控件", hoverPlaybackControls_);
     }
     addSeparator();
     addItem(kCmdPickFont, L"字体…");
@@ -875,6 +881,12 @@ void App::onMenuCommand(int cmd) {
             if (taskbarHost)
                 taskbarHost->setSpectrumVisible(false);
         }
+        saveSettings();
+        break;
+    case kCmdHoverPlaybackControls:
+        hoverPlaybackControls_ = !hoverPlaybackControls_;
+        if (taskbarHost)
+            taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         saveSettings();
         break;
     case kCmdPickFont:

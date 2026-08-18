@@ -400,6 +400,7 @@ struct TaskbarHost::Impl {
     std::function<void(MediaControl)> onControl;
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
+    bool controlsOnHover_ = true;
     bool quitting = false;
 
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
@@ -901,6 +902,13 @@ struct TaskbarHost::Impl {
         lyricAlignment_ = alignment;
         lyricScrollOffset_ = 0.0f;
         secondaryScrollOffset_ = 0.0f;
+        render();
+    }
+
+    void setControlsOnHover(bool on) {
+        if (controlsOnHover_ == on)
+            return;
+        controlsOnHover_ = on;
         render();
     }
 
@@ -1800,6 +1808,8 @@ struct TaskbarHost::Impl {
     }
 
     int hitButton(float x, float y) const {
+        if (!controlsOnHover_ || !mouseOver_)
+            return -1;
         RECT rc{};
         GetClientRect(hwnd, &rc);
         // 鼠标消息使用像素坐标，而 render 使用 DIP；先统一到 DIP，
@@ -2137,10 +2147,12 @@ struct TaskbarHost::Impl {
         float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
         float lyricY = h * 0.5f - lyricBlockH * 0.5f;
 
+        // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
+        bool showControls = mouseOver_ && controlsOnHover_;
         // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
-        bool showSpectrum = spectrumVisible_ && !mouseOver_;
+        bool showSpectrum = spectrumVisible_ && !showControls;
 
-        if (mouseOver_) {
+        if (showControls) {
             float cx = leftW + rightW * 0.5f;
             float cy = h * 0.5f;
             float r = h * 0.26f;
@@ -2602,6 +2614,10 @@ void TaskbarHost::setDoubleLineLyrics(bool on) {
 
 void TaskbarHost::setLyricAlignment(LyricAlignment alignment) {
     impl_->setLyricAlignment(alignment);
+}
+
+void TaskbarHost::setControlsOnHover(bool on) {
+    impl_->setControlsOnHover(on);
 }
 
 void TaskbarHost::setSongInfoVisible(bool on) {

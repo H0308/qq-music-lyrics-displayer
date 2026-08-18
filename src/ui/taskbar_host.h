@@ -47,6 +47,8 @@ public:
     void setSecondaryLyricMode(bool translation, bool romanization) override;
     void setDoubleLineLyrics(bool on);
     void setLyricAlignment(LyricAlignment alignment);
+    // 是否在鼠标悬浮时用播放控件替换右侧歌词，默认开启。
+    void setControlsOnHover(bool on);
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
     void setPlatformIconVisible(bool on);
