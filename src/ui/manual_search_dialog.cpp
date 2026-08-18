@@ -30,6 +30,7 @@ constexpr int kIdAdvanceLyric = 110;
 constexpr int kIdDelayLyric = 111;
 constexpr int kIdTitleLabel = 112;
 constexpr int kIdSubtitleLabel = 113;
+constexpr int kIdCompatibilityLabel = 114;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
@@ -381,6 +382,7 @@ struct ManualSearchDialog::Impl {
     fluent::FluentList list;
     fluent::FluentLabel statusLabel;
     fluent::FluentLabel hintLabel;
+    fluent::FluentLabel compatibilityLabel;
     fluent::FluentButton okBtn;
     fluent::FluentButton cancelBtn;
     fluent::FluentButton advanceLyricBtn;
@@ -411,6 +413,7 @@ struct ManualSearchDialog::Impl {
         list.refreshTheme();
         statusLabel.refreshTheme();
         hintLabel.refreshTheme();
+        compatibilityLabel.refreshTheme();
         okBtn.refreshTheme();
         cancelBtn.refreshTheme();
         advanceLyricBtn.refreshTheme();
@@ -521,6 +524,10 @@ struct ManualSearchDialog::Impl {
         hintLabel.create(hwnd, kIdHint,
                          L"YRC/LRC 为网易云歌词；QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词",
                          true);
+        compatibilityLabel.create(
+            hwnd, kIdCompatibilityLabel,
+            L"提示：网易云歌词保存后不能给 QQ 音乐使用；QQ 音乐/酷狗音乐歌词保存后不能给网易云音乐使用。",
+            false, 13.0f, 600);
 
         list.create(hwnd, kIdCandidateList);
 
@@ -567,7 +574,10 @@ struct ManualSearchDialog::Impl {
         int hintY = statusY + statusH + px(4);
         hintLabel.move(pad, hintY, w - pad * 2, statusH);
 
-        int contentTop = hintY + statusH + px(fluent::metrics::sectionGap);
+        int compatibilityY = hintY + statusH + px(2);
+        compatibilityLabel.move(pad, compatibilityY, w - pad * 2, statusH);
+
+        int contentTop = compatibilityY + statusH + px(fluent::metrics::sectionGap);
         int bottomH = pad + px(fluent::metrics::controlHeight) +
                       px(fluent::metrics::sectionGap);
         int contentH = h - contentTop - bottomH;
