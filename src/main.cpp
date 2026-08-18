@@ -58,6 +58,9 @@ constexpr UINT kCmdAlbumCoverEffectVinyl = 119;
 constexpr UINT kCmdDoubleLineLyrics = 120;
 constexpr UINT kCmdPlatformIcon = 121;
 constexpr UINT kCmdAbout = 122;
+constexpr UINT kCmdLyricAlignLeft = 123;
+constexpr UINT kCmdLyricAlignCenter = 124;
+constexpr UINT kCmdLyricAlignRight = 125;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -202,6 +205,7 @@ struct App {
     bool secondaryLyricEnabled_ = true;
     bool preferRomanization_ = false;
     bool doubleLineLyricsEnabled_ = false;
+    LyricAlignment lyricAlignment_ = LyricAlignment::Left;
     bool currentHasTranslation_ = false;
     bool currentHasRomanization_ = false;
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
@@ -270,6 +274,7 @@ struct App {
         taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
+        taskbarHost->setLyricAlignment(lyricAlignment_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -644,6 +649,13 @@ void App::loadSettings() {
             preferRomanization_ = oldRomanization && !oldTranslation;
         }
         doubleLineLyricsEnabled_ = j.value("doubleLineLyrics", false);
+        const std::string lyricAlignment = j.value("lyricAlignment", std::string("left"));
+        if (lyricAlignment == "center")
+            lyricAlignment_ = LyricAlignment::Center;
+        else if (lyricAlignment == "right")
+            lyricAlignment_ = LyricAlignment::Right;
+        else
+            lyricAlignment_ = LyricAlignment::Left;
         songInfoVisible_ = j.value("songInfoVisible", true);
         albumCoverVisible_ = j.value("albumCoverVisible", true);
         platformIconVisible_ = j.value("platformIconVisible", false);
@@ -676,6 +688,9 @@ void App::saveSettings() {
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
         j["doubleLineLyrics"] = doubleLineLyricsEnabled_;
+        j["lyricAlignment"] = lyricAlignment_ == LyricAlignment::Center
+                                   ? "center"
+                               : lyricAlignment_ == LyricAlignment::Right ? "right" : "left";
         j["songInfoVisible"] = songInfoVisible_;
         j["albumCoverVisible"] = albumCoverVisible_;
         j["platformIconVisible"] = platformIconVisible_;
@@ -793,6 +808,22 @@ void App::showTrayMenu() {
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
     addItem(kCmdDoubleLineLyrics, L"双行歌词", doubleLineLyricsEnabled_);
+    fluent::FluentMenuItem lyricAlignment;
+    lyricAlignment.text = L"歌词对齐";
+    fluent::FluentMenuItem alignmentItem;
+    alignmentItem.id = kCmdLyricAlignLeft;
+    alignmentItem.text = L"左对齐";
+    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Left;
+    lyricAlignment.submenu.push_back(alignmentItem);
+    alignmentItem.id = kCmdLyricAlignCenter;
+    alignmentItem.text = L"居中对齐";
+    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Center;
+    lyricAlignment.submenu.push_back(alignmentItem);
+    alignmentItem.id = kCmdLyricAlignRight;
+    alignmentItem.text = L"右对齐";
+    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Right;
+    lyricAlignment.submenu.push_back(alignmentItem);
+    items.push_back(std::move(lyricAlignment));
     addItem(kCmdSecondaryLyric, L"开启翻译/罗马音", secondaryLyricEnabled_);
     if (lyricLoading_) {
         addItem(kCmdSwitchSecondaryLyric, L"正在检查翻译和罗马音", false, false);
@@ -874,6 +905,17 @@ void App::onMenuCommand(int cmd) {
         doubleLineLyricsEnabled_ = !doubleLineLyricsEnabled_;
         if (taskbarHost)
             taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
+        saveSettings();
+        break;
+    case kCmdLyricAlignLeft:
+    case kCmdLyricAlignCenter:
+    case kCmdLyricAlignRight:
+        lyricAlignment_ = cmd == kCmdLyricAlignCenter
+                              ? LyricAlignment::Center
+                              : cmd == kCmdLyricAlignRight ? LyricAlignment::Right
+                                                           : LyricAlignment::Left;
+        if (taskbarHost)
+            taskbarHost->setLyricAlignment(lyricAlignment_);
         saveSettings();
         break;
     case kCmdSongInfo:

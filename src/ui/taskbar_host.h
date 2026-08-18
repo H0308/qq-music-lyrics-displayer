@@ -9,6 +9,12 @@ enum class AlbumCoverEffect {
     Vinyl,
 };
 
+enum class LyricAlignment {
+    Left,
+    Center,
+    Right,
+};
+
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
 // 外观参考 Windows 11 原生媒体控制卡片：左侧显示圆角封面+歌名+歌手，
 // 右侧显示当前行歌词（超长自动滚动），鼠标悬浮时右侧叠加显示播放控制按钮。
@@ -40,6 +46,7 @@ public:
     void setFontGlowColors(COLORREF glow, COLORREF outline);
     void setSecondaryLyricMode(bool translation, bool romanization) override;
     void setDoubleLineLyrics(bool on);
+    void setLyricAlignment(LyricAlignment alignment);
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
     void setPlatformIconVisible(bool on);
