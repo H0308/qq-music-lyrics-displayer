@@ -57,6 +57,12 @@ struct SmtcMonitor::Impl {
         return nullptr;
     }
 
+    // 缩略图去重：同一首歌的属性事件会连续触发多次，曲目身份（标题|歌手|专辑）
+    // 未变时复用上次读取的字节，避免在回调线程上重复阻塞读取 MB 级图片流。
+    // 读取失败（封面晚到）不写缓存，下一次事件到达时重试。
+    std::wstring thumbCacheKey_;
+    std::shared_ptr<const std::vector<uint8_t>> thumbCache_;
+
     smtc::SmtcSessionIdentity identifySession(const Session& candidate) const {
         for (const auto& adapter : adapters) {
             if (!adapter)
@@ -136,7 +142,22 @@ struct SmtcMonitor::Impl {
                         next.title = props.Title().c_str();
                         next.artist = props.Artist().c_str();
                         next.album = props.AlbumTitle().c_str();
-                        next.thumbnail = smtc::readThumbnail(props);
+                        const std::wstring thumbKey =
+                            next.title + L'\x1f' + next.artist + L'\x1f' + next.album;
+                        {
+                            std::lock_guard<std::mutex> lk(mtx);
+                            if (thumbCache_ && thumbKey == thumbCacheKey_)
+                                next.thumbnail = thumbCache_;
+                        }
+                        if (!next.thumbnail) {
+                            auto thumb = smtc::readThumbnail(props);
+                            if (thumb) {
+                                std::lock_guard<std::mutex> lk(mtx);
+                                thumbCacheKey_ = thumbKey;
+                                thumbCache_ = thumb;
+                            }
+                            next.thumbnail = std::move(thumb);
+                        }
                     }
                 }
             } catch (...) {

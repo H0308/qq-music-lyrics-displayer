@@ -547,6 +547,20 @@ struct TaskbarHost::Impl {
     bool layoutDirty_ = true;
     int lastPxW_ = 0;
     int lastPxH_ = 0;
+    // 静止跳帧：updateScroll 每帧重算 scrollAnimating_（跑马灯/跟随滚动/转场收尾是否在动），
+    // karaokeSettled_ 表示逐字平滑已收敛；两者都静止且无脏状态时可跳过整帧重绘。
+    bool scrollAnimating_ = true;
+    bool karaokeSettled_ = true;
+    // 光晕/描边离屏缓存：glow+outline+本体三层只合成一次，滚动/淡变时做 DrawImage 平移，
+    // 避免每帧对主歌词重复 16+ 次 DrawTextLayout。布局或画刷重建时经 textFxGen_ 失效。
+    ID2D1BitmapRenderTarget* textFxCache_ = nullptr;
+    const IDWriteTextLayout* textFxKey_ = nullptr;
+    uint64_t textFxGen_ = 0;
+    uint64_t textFxCachedGen_ = 0;
+    UINT textFxDpi_ = 0;
+    float textFxW_ = 0.0f;
+    float textFxH_ = 0.0f;
+    float textFxPad_ = 0.0f;
 
     float scale() const { return static_cast<float>(dpi_) / 96.0f; }
     float dip(int px) const { return static_cast<float>(px) / scale(); }
@@ -850,6 +864,7 @@ struct TaskbarHost::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
+        ++textFxGen_; // 颜色变化使离屏缓存失效
         if (brushLyric_) {
             brushLyric_->Release();
             brushLyric_ = nullptr;
@@ -1017,10 +1032,16 @@ struct TaskbarHost::Impl {
             patch.requestGeneration != requestGeneration_)
             return;
 
-        positionMs_ = patch.actualPositionMs;
+        if (patch.actualPositionMs != positionMs_) {
+            positionMs_ = patch.actualPositionMs;
+            if (!patch.playing)
+                karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
+        }
         if (media.playing != patch.playing) {
             media.playing = patch.playing;
             vinylTickMs_ = GetTickCount64();
+            // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
+            render();
         }
 
         if (patch.currentLine == currentLine)
@@ -1056,6 +1077,8 @@ struct TaskbarHost::Impl {
         requestGeneration_ = frame.requestGeneration;
         trackKey_ = frame.trackKey;
         scene_ = frame.scene;
+        if (frame.actualPositionMs != positionMs_ && !media.playing)
+            karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
         positionMs_ = frame.actualPositionMs;
         statusText = frame.statusText;
 
@@ -1312,6 +1335,11 @@ struct TaskbarHost::Impl {
         r(brushVinylBase_);
         r(brushVinylGroove_);
         r(brushSpectrum_);
+        if (textFxCache_) {
+            textFxCache_->Release();
+            textFxCache_ = nullptr;
+        }
+        textFxKey_ = nullptr;
         r(coverClip_);
         r(vinylCoverClip_);
         r(coverLayer_);
@@ -1609,6 +1637,7 @@ struct TaskbarHost::Impl {
             textDirty_ = true;
             // 布局尚未对应新行：解绑逐字平滑状态，排版完成后直接对齐真实目标。
             karaokeSmoothLine_ = -1;
+            karaokeSettled_ = false;
             karaokeTick_ = now;
             return;
         }
@@ -1617,6 +1646,7 @@ struct TaskbarHost::Impl {
 
         karaokeTick_ = now;
         karaokeSmoothLine_ = currentLine;
+        karaokeSettled_ = true; // 平滑值直接对齐真实目标，无需继续收敛
         if (const LyricLine* line = karaokeLine()) {
             int64_t charDur = 0;
             const float target = karaokeTargetX(*line, charDur);
@@ -1632,6 +1662,7 @@ struct TaskbarHost::Impl {
 
     void buildTextLayouts(float leftW, float rightW) {
         textDirty_ = false;
+        ++textFxGen_; // 布局指针重建，离屏缓存全部失效
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite || !fmtTitle_ || !fmtArtist_ || !fmtLyric_)
             return;
@@ -1919,6 +1950,7 @@ struct TaskbarHost::Impl {
             karaokeSmoothX_ += gap * alpha;
         }
         karaokeProgX_ = karaokeSmoothX_;
+        karaokeSettled_ = std::fabs(target - karaokeSmoothX_) < 0.5f;
         return karaokeProgX_;
     }
 
@@ -2095,6 +2127,68 @@ struct TaskbarHost::Impl {
     // karaokeBrush 非空时启用逐字高亮：整行先用 brush（未播放色）画一遍，
     // 再按像素裁剪出 [文本起点, karaokeX] 区域用 karaokeBrush（已播放色）画第二遍，
     // 实现字内平滑填充（裁剪基于像素，不受滚动偏移影响）
+    // 将 glow+outline+本体三层合成到离屏位图（独立的兼容渲染目标，不嵌套主 BeginDraw）。
+    // 成功返回可绘制位图（调用方负责 Release），失败返回 nullptr 走直接绘制兜底。
+    // 必须在画刷透明度被修改之前调用，缓存内容始终是自然透明度。
+    ID2D1Bitmap* textFxBitmap(IDWriteTextLayout* layout, float textW, float textH,
+                              ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !layout)
+            return nullptr;
+        constexpr float pad = 3.0f; // 覆盖 2.4 DIP 的光晕外扩和边缘抗锯齿
+        const float wDip = textW + pad * 2.0f;
+        const float hDip = textH + pad * 2.0f;
+        if (textFxCache_ && (textFxKey_ != layout || textFxCachedGen_ != textFxGen_ ||
+                             textFxDpi_ != dpi_ || textFxW_ != wDip || textFxH_ != hDip)) {
+            textFxCache_->Release();
+            textFxCache_ = nullptr;
+            textFxKey_ = nullptr;
+        }
+        if (!textFxCache_) {
+            if (FAILED(rt->CreateCompatibleRenderTarget(D2D1::SizeF(wDip, hDip),
+                                                        &textFxCache_)))
+                return nullptr;
+            textFxCache_->SetAntialiasMode(rt->GetAntialiasMode());
+            textFxCache_->SetTextAntialiasMode(rt->GetTextAntialiasMode());
+            static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
+                                                  {0.7071f, 0.7071f},
+                                                  {0.0f, 1.0f},
+                                                  {-0.7071f, 0.7071f},
+                                                  {-1.0f, 0.0f},
+                                                  {-0.7071f, -0.7071f},
+                                                  {0.0f, -1.0f},
+                                                  {0.7071f, -0.7071f}};
+            textFxCache_->BeginDraw();
+            textFxCache_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+            if (glow) {
+                for (auto& d : kDirs)
+                    textFxCache_->DrawTextLayout(
+                        D2D1::Point2F(pad + d[0] * 2.4f, pad + d[1] * 2.4f), layout, glow);
+            }
+            if (outline) {
+                for (auto& d : kDirs)
+                    textFxCache_->DrawTextLayout(
+                        D2D1::Point2F(pad + d[0] * 1.2f, pad + d[1] * 1.2f), layout, outline);
+            }
+            textFxCache_->DrawTextLayout(D2D1::Point2F(pad, pad), layout, brush);
+            if (FAILED(textFxCache_->EndDraw())) {
+                textFxCache_->Release();
+                textFxCache_ = nullptr;
+                return nullptr;
+            }
+            textFxKey_ = layout;
+            textFxCachedGen_ = textFxGen_;
+            textFxDpi_ = dpi_;
+            textFxW_ = wDip;
+            textFxH_ = hDip;
+            textFxPad_ = pad;
+        }
+        ID2D1Bitmap* bmp = nullptr;
+        if (FAILED(textFxCache_->GetBitmap(&bmp)) || !bmp)
+            return nullptr;
+        return bmp;
+    }
+
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
                            float x, float y, float offset, ID2D1Brush* brush,
                            ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
@@ -2107,7 +2201,13 @@ struct TaskbarHost::Impl {
         opacity = std::clamp(opacity, 0.0f, 1.0f);
         if (opacity >= 0.999f)
             opacity = 1.0f;
-        ID2D1Brush* brushes[4] = {brush, outline, glow, karaokeBrush};
+        // 光晕/描边走离屏缓存：三层合成一次，之后滚动/淡变只 DrawImage；
+        // 失败时 fxBmp 为空，回落到逐层直接绘制
+        ID2D1Bitmap* fxBmp = nullptr;
+        if (glow || outline)
+            fxBmp = textFxBitmap(layout, textW, textH, brush, outline, glow);
+        ID2D1Brush* brushes[4] = {fxBmp ? nullptr : brush, fxBmp ? nullptr : outline,
+                                  fxBmp ? nullptr : glow, karaokeBrush};
         ID2D1Brush* changed[4] = {};
         float previousOpacity[4] = {};
         int changedCount = 0;
@@ -2157,22 +2257,33 @@ struct TaskbarHost::Impl {
             bases[n++] = x - offset;
             bases[n++] = x - offset + loopW;
         }
-        if (glow || outline) {
-            for (int i = 0; i < n; ++i) {
-                if (glow) {
-                    for (auto& d : kDirs)
-                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f),
-                                           layout, glow);
-                }
-                if (outline) {
-                    for (auto& d : kDirs)
-                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f),
-                                           layout, outline);
+        if (fxBmp) {
+            for (int i = 0; i < n; ++i)
+                rt->DrawBitmap(fxBmp,
+                               D2D1::RectF(bases[i] - textFxPad_, y - textFxPad_,
+                                           bases[i] - textFxPad_ + textFxW_,
+                                           y - textFxPad_ + textFxH_),
+                               opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else {
+            if (glow || outline) {
+                for (int i = 0; i < n; ++i) {
+                    if (glow) {
+                        for (auto& d : kDirs)
+                            rt->DrawTextLayout(
+                                D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f), layout,
+                                glow);
+                    }
+                    if (outline) {
+                        for (auto& d : kDirs)
+                            rt->DrawTextLayout(
+                                D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f), layout,
+                                outline);
+                    }
                 }
             }
+            for (int i = 0; i < n; ++i)
+                rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
         }
-        for (int i = 0; i < n; ++i)
-            rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
         // 逐字高亮层：裁剪到填充进度
         if (karaokeBrush && karaokeX > 0.0f) {
             rt->PushAxisAlignedClip(D2D1::RectF(bases[0], y, bases[0] + karaokeX, y + textH),
@@ -2183,6 +2294,8 @@ struct TaskbarHost::Impl {
         rt->PopAxisAlignedClip();
         for (int i = 0; i < changedCount; ++i)
             changed[i]->SetOpacity(previousOpacity[i]);
+        if (fxBmp)
+            fxBmp->Release();
     }
 
     void drawLyricScrollingText(IDWriteTextLayout* layout, float textW, float textH,
@@ -2524,27 +2637,36 @@ struct TaskbarHost::Impl {
             textDirty_ = true;
         }
 
+        const bool wasTransitioning = lyricTransitionPending_ || lyricTransitionActive_;
         if (lyricTransitionActive_ &&
             now - lyricTransitionStartMs_ >= static_cast<ULONGLONG>(kLyricTransitionMs)) {
             finalizeLyricTransition(now);
         }
 
+        // 静止跳帧判定：本帧有任何滚动/转场在动就置 animating，供 onTimer 决定是否重绘
+        bool animating = wasTransitioning;
         auto marquee = [&](float textW, float areaW, float speed, float& offset) {
             if (textW <= areaW || areaW <= 0.0f) {
-                offset = 0.0f;
+                if (offset != 0.0f) {
+                    offset = 0.0f;
+                    animating = true;
+                }
                 return;
             }
             float loopW = textW + kTextPadding * 2.0f;
             offset += speed * dt;
             if (offset >= loopW)
                 offset -= loopW;
+            animating = true;
         };
 
         RECT rc{};
         GetClientRect(hwnd, &rc);
         LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
-        if (layout.h <= 0.0f || layout.w <= 0.0f)
+        if (layout.h <= 0.0f || layout.w <= 0.0f) {
+            scrollAnimating_ = animating;
             return;
+        }
 
         float w = layout.w;
         float h = layout.h;
@@ -2561,11 +2683,14 @@ struct TaskbarHost::Impl {
             marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
             marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
         }
-        if (mouseOver_)
+        if (mouseOver_) {
+            scrollAnimating_ = animating;
             return;
+        }
         // 逐字歌词：滚动位置跟随逐字填充进度，把当前唱到的位置保持在区域 30% 处，
         // 行尾为止不再循环；非逐字歌词保持原有无缝循环滚动
         if (karaokeLine()) {
+            const float before = lyricScrollOffset_;
             if (lyricWidth_ > lyricAreaW) {
                 // karaokeProgX_ 由 render 每帧更新；行刚切换时还没对应进度，从头开始
                 float sungX = (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
@@ -2578,10 +2703,13 @@ struct TaskbarHost::Impl {
             } else {
                 lyricScrollOffset_ = 0.0f;
             }
+            if (lyricScrollOffset_ != before)
+                animating = true;
         } else {
             marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
         }
         marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
+        scrollAnimating_ = animating;
     }
 
     void updateVinylRotation() {
@@ -2621,6 +2749,32 @@ struct TaskbarHost::Impl {
         }
     }
 
+    // 静止判定：所有动画源都停止且没有待处理的布局/资源变化时，跳过整帧重绘。
+    // 跳过时屏幕上保持上一次 UpdateLayeredWindow 提交的内容，不会闪烁或丢状态。
+    bool needsFrameRender() const {
+        if (textDirty_ || geomDirty_ || layoutDirty_ || coverDirty || platformIconDirty)
+            return true;
+        if (lyricTransitionPending_ || lyricTransitionActive_)
+            return true;
+        if (scrollAnimating_)
+            return true;
+        // 逐字平滑未收敛（暂停 seek 后）时渲染到收敛为止
+        if (karaokeLine() && !karaokeSettled_)
+            return true;
+        // 播放中的逐字推进和黑胶旋转每帧都在变
+        if (media.playing &&
+            (karaokeLine() || (clientAnimations_ && albumCoverVisible_ &&
+                               albumCoverEffect_ == AlbumCoverEffect::Vinyl)))
+            return true;
+        // 频谱柱等静音衰减到阈值以下才算静止
+        if (spectrumVisible_) {
+            for (float v : spectrumBands_)
+                if (v > 0.01f)
+                    return true;
+        }
+        return false;
+    }
+
     void onTimer() {
         if (tick)
             tick();
@@ -2636,7 +2790,9 @@ struct TaskbarHost::Impl {
                 adjustPosition();
         }
         updateScroll();
-        render();
+        // 静止场景跳过整帧重绘：动画源全部停止且无脏状态时，画面保持上一帧内容
+        if (needsFrameRender())
+            render();
     }
 
     void trackMouseLeave() {
