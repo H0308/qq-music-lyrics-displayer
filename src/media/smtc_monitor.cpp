@@ -281,18 +281,34 @@ struct SmtcMonitor::Impl {
             try {
                 // Windows 已经维护了“用户当前最可能想控制”的媒体会话。
                 auto current = manager.GetCurrentSession();
-                const auto currentIdentity = identifySession(current);
-                if (currentIdentity.player != SmtcPlayerType::Unknown) {
-                    try {
-                        auto info = current.GetPlaybackInfo();
-                        if (info &&
-                            smtc::mapStatus(info.PlaybackStatus()) == PlaybackStatus::Playing)
-                            found = current;
-                    } catch (...) {
+                auto sessions = manager.GetSessions();
+                // GetCurrentSession() 在播放器退出的边界上可能短暂返回已经断开的
+                // 旧会话。先用会话列表确认它仍然存在，再读取媒体属性，避免对
+                // 已失效的网易云会话继续调用 TryGetMediaPropertiesAsync()。
+                bool currentListed = false;
+                if (current && sessions) {
+                    for (auto const& candidate : sessions) {
+                        if (smtc::sameSession(current, candidate)) {
+                            currentListed = true;
+                            break;
+                        }
                     }
                 }
 
-                auto sessions = manager.GetSessions();
+                smtc::SmtcSessionIdentity currentIdentity;
+                if (current && currentListed) {
+                    currentIdentity = identifySession(current);
+                    if (currentIdentity.player != SmtcPlayerType::Unknown) {
+                        try {
+                            auto info = current.GetPlaybackInfo();
+                            if (info &&
+                                smtc::mapStatus(info.PlaybackStatus()) == PlaybackStatus::Playing)
+                                found = current;
+                        } catch (...) {
+                        }
+                    }
+                }
+
                 if (sessions) {
                     if (rebuildWatchers)
                         watchSessions(sessions);
@@ -315,33 +331,43 @@ struct SmtcMonitor::Impl {
                     }
                 }
 
-                if (!found && currentIdentity.player != SmtcPlayerType::Unknown)
+                if (!found && currentListed &&
+                    currentIdentity.player != SmtcPlayerType::Unknown)
                     found = current;
 
                 // 网易云暂停/恢复时可能短暂上报 Changing/Opened 状态。适配器会把这类
                 // 非稳定状态映射为 Other，识别结果暂时变成 Unknown；但只要仍是此前
                 // 已选中的同一会话，就不能在这个过渡窗口把会话解绑，否则主程序会先
                 // 收到空快照并隐藏任务栏窗口，下一条 Playing 事件到达时再整体显示。
-                // Closed/Stopped 是真正的终止态，仍然允许下面的切换逻辑清理会话。
-                if (!found && selectedSessionAlive &&
+                // 保留条件必须仅限 Opened/Changing 这种真正的过渡态：Playing/Paused
+                // 是稳定态，此时识别失败只可能是属性 RPC 已随播放器退出而失败
+                // （RPC_E_SERVERUNAVAILABLE）。若把这类已失效会话保留下来，
+                // sameSession 判等会让下面跳过 attach/refreshAll，且死会话不会再
+                // 产生任何事件，歌词就永久停在网易云退出的前一刻。
+                if (!found && selectedSessionAlive && currentListed &&
                     smtc::sameSession(selectedSession, current) && current) {
-                    bool transient = true;
+                    bool transient = false;
                     try {
                         auto info = current.GetPlaybackInfo();
                         if (info) {
                             const auto status = info.PlaybackStatus();
                             transient =
-                                status != GlobalSystemMediaTransportControlsSessionPlaybackStatus::Closed &&
-                                status != GlobalSystemMediaTransportControlsSessionPlaybackStatus::Stopped;
+                                status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Opened ||
+                                status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Changing;
                         }
                     } catch (...) {
-                        // 会话正在切换时读取状态可能失败，保留原会话等待下一条事件。
+                        // 会话已经无法读取时不能继续保留旧会话；否则网易云退出后
+                        // 会一直显示退出前的最后一帧歌词。
                     }
                     if (transient)
                         found = current;
                 }
 
-                if (!found && sessions) {
+                // 已经有选中会话时，如果它在退出/切换边界上失效，不能再从
+                // 会话列表中随便挑一个同播放器的暂停会话把旧状态续回来；否则
+                // 网易云退出后会重新选中旧会话，歌词就会停在最后一刻。只有在
+                // 尚未选中过任何会话时，才用已识别的会话作为初始候选。
+                if (!found && !selectedSessionAlive && sessions) {
                     for (auto const& candidate : sessions) {
                         if (identifySession(candidate).player != SmtcPlayerType::Unknown) {
                             found = candidate;

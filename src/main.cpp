@@ -497,7 +497,7 @@ struct App {
             spectrumSessionAlive_ = false;
             spectrumSessionKey_.clear();
             if (!currentKey.empty() || lastStatus != PlaybackStatus::Stopped)
-                std::wprintf(L"[smtc] QQ Music session closed\n");
+                std::wprintf(L"[smtc] %s session closed\n", playerName(lastPlayer_));
             currentKey.clear();
             currentTitle.clear();
             currentArtist.clear();
