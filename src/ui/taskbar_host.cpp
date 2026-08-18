@@ -25,6 +25,7 @@ namespace {
 
 constexpr UINT_PTR kTimerId = 2;
 constexpr UINT kTimerMs = 16;         // ~60fps 滚动渲染（配合 timeBeginPeriod(1) 保证触发精度）
+constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
@@ -374,6 +375,7 @@ struct TaskbarHost::Impl {
     HWND hwnd = nullptr;
     bool visible = false;
     bool timerRunning_ = false;
+    UINT timerMs_ = 0; // 当前定时器实际间隔（60fps/30fps 档位切换用）
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
@@ -1371,7 +1373,9 @@ struct TaskbarHost::Impl {
 
     // ---------- 避让探测工作线程 ----------
 
-    // 每秒探测一次：TrafficMonitor 窗口矩形 + UIA 任务栏按钮矩形。
+    // 每 3 秒探测一次：TrafficMonitor 窗口矩形 + UIA 任务栏按钮矩形。
+    // UIA 属性查询由 explorer 的 UI 线程执行，探测越频繁对任务栏的周期性
+    // 打扰越明显；3 秒是避让响应速度与 explorer 负担的折中。
     // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
     void probeMain() {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -1386,7 +1390,7 @@ struct TaskbarHost::Impl {
                 queryTaskbarButtonsUia(uia, tb, p->buttons);
                 delete probeOut_.exchange(p); // 上一份未被拾取则丢弃
             }
-            for (int t = 0; t < 10 && !probeStop_.load(); ++t)
+            for (int t = 0; t < 30 && !probeStop_.load(); ++t)
                 Sleep(100);
         }
         if (uia)
@@ -2751,6 +2755,7 @@ struct TaskbarHost::Impl {
         if (!timerRunning_ && hwnd) {
             SetTimer(hwnd, kTimerId, kTimerMs, nullptr);
             timerRunning_ = true;
+            timerMs_ = kTimerMs;
         }
     }
 
@@ -2758,6 +2763,7 @@ struct TaskbarHost::Impl {
         if (timerRunning_ && hwnd) {
             KillTimer(hwnd, kTimerId);
             timerRunning_ = false;
+            timerMs_ = 0;
         }
     }
 
@@ -2791,6 +2797,17 @@ struct TaskbarHost::Impl {
     void onTimer() {
         if (tick)
             tick();
+        // 播放/行转场需要 60fps；暂停时降到 ~30fps，超长文本继续滚动，
+        // 任务栏区域的合成开销减半。状态事件（悬停、恢复播放、seek）走
+        // 同步 render 路径，不依赖定时器，低档位下也不会延迟显示。
+        const UINT wantMs =
+            (media.playing || lyricTransitionPending_ || lyricTransitionActive_)
+                ? kTimerMs
+                : kTimerPausedMs;
+        if (timerRunning_ && wantMs != timerMs_) {
+            SetTimer(hwnd, kTimerId, wantMs, nullptr);
+            timerMs_ = wantMs;
+        }
         frameNowMs_ = GetTickCount64();
         updateVinylRotation();
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
