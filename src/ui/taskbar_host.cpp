@@ -373,6 +373,7 @@ struct TaskbarHost::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
     bool visible = false;
+    bool timerRunning_ = false;
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
@@ -1081,9 +1082,11 @@ struct TaskbarHost::Impl {
                 visible = true;
                 if (hwnd)
                     ShowWindow(hwnd, SW_SHOWNA);
+                startFrameTimer();
             }
         } else if (visible) {
             visible = false;
+            stopFrameTimer();
             if (hwnd)
                 ShowWindow(hwnd, SW_HIDE);
         }
@@ -2577,6 +2580,22 @@ struct TaskbarHost::Impl {
 
     // ---------- 事件 ----------
 
+    // 帧定时器只在窗口可见时运行：隐藏后每 16ms 的 tick（进度插值、滚动、
+    // 快照读取）没有任何可见效果，可见性恢复由 SMTC 事件驱动（不依赖定时器）。
+    void startFrameTimer() {
+        if (!timerRunning_ && hwnd) {
+            SetTimer(hwnd, kTimerId, kTimerMs, nullptr);
+            timerRunning_ = true;
+        }
+    }
+
+    void stopFrameTimer() {
+        if (timerRunning_ && hwnd) {
+            KillTimer(hwnd, kTimerId);
+            timerRunning_ = false;
+        }
+    }
+
     void onTimer() {
         if (tick)
             tick();
@@ -2609,7 +2628,7 @@ struct TaskbarHost::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            SetTimer(hwnd, kTimerId, kTimerMs, nullptr);
+            // 初始不可见：帧定时器在首次可见时（applyPresentationFrame/show）启动
             return 0;
         case WM_TIMER:
             if (wp == kTimerId)
@@ -2642,7 +2661,7 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case WM_DESTROY:
-            KillTimer(hwnd, kTimerId);
+            stopFrameTimer();
             stopProbe();
             releaseAll();
             if (quitting)
@@ -2719,6 +2738,7 @@ void TaskbarHost::show() {
     if (!impl_->visible) {
         impl_->visible = true;
         ShowWindow(impl_->hwnd, SW_SHOWNA);
+        impl_->startFrameTimer();
     }
     impl_->render();
 }
@@ -2726,6 +2746,7 @@ void TaskbarHost::show() {
 void TaskbarHost::hide() {
     if (impl_->visible) {
         impl_->visible = false;
+        impl_->stopFrameTimer();
         ShowWindow(impl_->hwnd, SW_HIDE);
     }
 }
