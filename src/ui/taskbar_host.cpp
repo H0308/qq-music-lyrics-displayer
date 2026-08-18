@@ -543,6 +543,7 @@ struct TaskbarHost::Impl {
     ID2D1PathGeometry* icoPrev_ = nullptr;   // 上一首（左向三角 + 左侧竖条）
     ID2D1PathGeometry* icoNext_ = nullptr;   // 下一首（右向三角 + 右侧竖条）
     bool textDirty_ = true;
+    bool songInfoDirty_ = true; // 标题/歌手布局独立重建，换行不触碰歌曲信息
     bool geomDirty_ = true;
     bool layoutDirty_ = true;
     int lastPxW_ = 0;
@@ -581,7 +582,7 @@ struct TaskbarHost::Impl {
         if (thumbChanged || textChanged)
             vinylAngleDeg_ = 0.0f;
         if (textChanged)
-            textDirty_ = true;
+            songInfoDirty_ = true;
         if (thumbChanged || textChanged || playingChanged)
             vinylTickMs_ = GetTickCount64();
         return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged;
@@ -991,7 +992,7 @@ struct TaskbarHost::Impl {
         songInfoVisible_ = on;
         titleScrollOffset_ = 0.0f;
         artistScrollOffset_ = 0.0f;
-        textDirty_ = true;
+        songInfoDirty_ = true;
         adjustPosition();
         render();
     }
@@ -1288,6 +1289,7 @@ struct TaskbarHost::Impl {
         make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtSecondary_);
         textDirty_ = true;
+        songInfoDirty_ = true;
     }
 
     void changeFont(float delta) {
@@ -1298,7 +1300,6 @@ struct TaskbarHost::Impl {
         fontFamily_ = family;
         fontSize_ = std::clamp(size, kMinFont, kMaxFont);
         recreateFormats();
-        textDirty_ = true;
         layoutDirty_ = true;
         render();
     }
@@ -1356,6 +1357,7 @@ struct TaskbarHost::Impl {
         }
         renderer.discard();
         textDirty_ = true;
+        songInfoDirty_ = true;
         geomDirty_ = true;
         layoutDirty_ = true;
         coverDirty = true;
@@ -1661,21 +1663,68 @@ struct TaskbarHost::Impl {
     // ---------- 排版 ----------
 
     void buildTextLayouts(float leftW, float rightW) {
-        textDirty_ = false;
-        ++textFxGen_; // 布局指针重建，离屏缓存全部失效
+        // 文本布局以超宽无换行创建，度量与区域宽度无关，leftW/rightW 仅保留签名兼容
+        (void)leftW;
+        (void)rightW;
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite || !fmtTitle_ || !fmtArtist_ || !fmtLyric_)
             return;
 
+        // 歌曲信息（标题/歌手）独立重建：换行只走下面的歌词分支，
+        // 歌曲信息变化也不触碰歌词布局与行过渡状态
+        if (songInfoDirty_) {
+            songInfoDirty_ = false;
+            if (titleLayout_) {
+                titleLayout_->Release();
+                titleLayout_ = nullptr;
+            }
+            if (artistLayout_) {
+                artistLayout_->Release();
+                artistLayout_ = nullptr;
+            }
+            titleWidth_ = 0.0f;
+            titleHeight_ = 0.0f;
+            artistWidth_ = 0.0f;
+            artistHeight_ = 0.0f;
+            if (songInfoVisible_ && !media.title.empty()) {
+                dwrite->CreateTextLayout(media.title.c_str(), (UINT32)media.title.size(),
+                                         fmtTitle_, 100000.0f, 40.0f, &titleLayout_);
+                if (titleLayout_) {
+                    DWRITE_TEXT_METRICS m{};
+                    titleLayout_->GetMetrics(&m);
+                    titleWidth_ = m.width;
+                    titleHeight_ = m.height;
+                }
+            }
+            if (songInfoVisible_ && !media.artist.empty()) {
+                dwrite->CreateTextLayout(media.artist.c_str(), (UINT32)media.artist.size(),
+                                         fmtArtist_, 100000.0f, 40.0f, &artistLayout_);
+                if (artistLayout_) {
+                    DWRITE_TEXT_METRICS m{};
+                    artistLayout_->GetMetrics(&m);
+                    artistWidth_ = m.width;
+                    artistHeight_ = m.height;
+                }
+            }
+            const bool titleChanged = media.title != lastTitle_;
+            const bool artistChanged = media.artist != lastArtist_;
+            if (titleChanged) {
+                titleScrollOffset_ = 0.0f;
+                lastTitle_ = media.title;
+            }
+            if (artistChanged) {
+                artistScrollOffset_ = 0.0f;
+                lastArtist_ = media.artist;
+            }
+            if (titleChanged || artistChanged)
+                lastTickMs_ = 0;
+        }
+        if (!textDirty_)
+            return;
+        textDirty_ = false;
+        ++textFxGen_; // 布局指针重建，离屏缓存全部失效
+
         const bool doubleLineLyrics = useDoubleLineLyrics();
-        if (titleLayout_) {
-            titleLayout_->Release();
-            titleLayout_ = nullptr;
-        }
-        if (artistLayout_) {
-            artistLayout_->Release();
-            artistLayout_ = nullptr;
-        }
         // 准备阶段：先把当前布局移交为旧行，目标行布局构建完成后才记录动画起点，
         // 避免“新布局已替换但动画初始位置还没准备好”导致的文字瞬移。
         bool preparedTransition = false;
@@ -1724,33 +1773,6 @@ struct TaskbarHost::Impl {
         }
         nextLyricWidth_ = 0.0f;
         nextLyricHeight_ = 0.0f;
-
-        float infoX = infoStartX();
-        float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
-        titleWidth_ = 0.0f;
-        titleHeight_ = 0.0f;
-        artistWidth_ = 0.0f;
-        artistHeight_ = 0.0f;
-        if (songInfoVisible_ && !media.title.empty()) {
-            dwrite->CreateTextLayout(media.title.c_str(), (UINT32)media.title.size(), fmtTitle_,
-                                     100000.0f, 40.0f, &titleLayout_);
-            if (titleLayout_) {
-                DWRITE_TEXT_METRICS m{};
-                titleLayout_->GetMetrics(&m);
-                titleWidth_ = m.width;
-                titleHeight_ = m.height;
-            }
-        }
-        if (songInfoVisible_ && !media.artist.empty()) {
-            dwrite->CreateTextLayout(media.artist.c_str(), (UINT32)media.artist.size(), fmtArtist_,
-                                     100000.0f, 40.0f, &artistLayout_);
-            if (artistLayout_) {
-                DWRITE_TEXT_METRICS m{};
-                artistLayout_->GetMetrics(&m);
-                artistWidth_ = m.width;
-                artistHeight_ = m.height;
-            }
-        }
 
         int displayLine = displayLyricLine();
         std::wstring lyric;
@@ -1827,18 +1849,8 @@ struct TaskbarHost::Impl {
                     std::max(kLyricScrollSpeed, loopW / (static_cast<float>(durMs) / 1000.0f));
             }
         }
-        bool titleChanged = media.title != lastTitle_;
-        bool artistChanged = media.artist != lastArtist_;
         bool lyricChanged = lyric != lastLyric_;
         bool secondaryChanged = secondary != lastSecondary_;
-        if (titleChanged) {
-            titleScrollOffset_ = 0.0f;
-            lastTitle_ = media.title;
-        }
-        if (artistChanged) {
-            artistScrollOffset_ = 0.0f;
-            lastArtist_ = media.artist;
-        }
         if (lyricChanged) {
             lyricScrollOffset_ = 0.0f;
             lastLyric_ = lyric;
@@ -1847,7 +1859,7 @@ struct TaskbarHost::Impl {
             secondaryScrollOffset_ = 0.0f;
             lastSecondary_ = secondary;
         }
-        if (titleChanged || artistChanged || lyricChanged || secondaryChanged) {
+        if (lyricChanged || secondaryChanged) {
             lastTickMs_ = 0;
         }
     }
@@ -2430,7 +2442,7 @@ struct TaskbarHost::Impl {
             lastPxW_ = pxW;
             lastPxH_ = pxH;
             geomDirty_ = true;
-            textDirty_ = true;
+            // 文本布局以超宽无换行创建，度量与窗口尺寸无关，无需重建
         }
 
         if (!renderer.bindDC(pxW, pxH))
@@ -2452,7 +2464,7 @@ struct TaskbarHost::Impl {
         float leftW = layout.leftW;
         float rightW = layout.rightW;
 
-        if (textDirty_)
+        if (textDirty_ || songInfoDirty_)
             buildTextLayouts(leftW, rightW);
 
         rt->BeginDraw();
@@ -2752,7 +2764,8 @@ struct TaskbarHost::Impl {
     // 静止判定：所有动画源都停止且没有待处理的布局/资源变化时，跳过整帧重绘。
     // 跳过时屏幕上保持上一次 UpdateLayeredWindow 提交的内容，不会闪烁或丢状态。
     bool needsFrameRender() const {
-        if (textDirty_ || geomDirty_ || layoutDirty_ || coverDirty || platformIconDirty)
+        if (textDirty_ || songInfoDirty_ || geomDirty_ || layoutDirty_ || coverDirty ||
+            platformIconDirty)
             return true;
         if (lyricTransitionPending_ || lyricTransitionActive_)
             return true;
