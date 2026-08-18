@@ -319,7 +319,6 @@ private:
 struct ManualSearchDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    bool backdrop = false;
 
     fluent::FluentLabel titleLabel;
     fluent::FluentLabel subtitleLabel;
@@ -383,7 +382,7 @@ struct ManualSearchDialog::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            backdrop = fluent::styleDialogWindow(hwnd);
+            fluent::styleDialogWindow(hwnd);
             createControls();
             layout();
             statusLabel.setText(L"请输入歌名和歌手，点击搜索。");
@@ -396,7 +395,7 @@ struct ManualSearchDialog::Impl {
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
-            backdrop = fluent::styleDialogWindow(hwnd);
+            fluent::styleDialogWindow(hwnd);
             refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -404,12 +403,13 @@ struct ManualSearchDialog::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            fluent::paintDialogBackground(hwnd, hdc, backdrop);
+            // 分层子窗口需要一个稳定的不透明宿主底色，避免拉伸后暴露未初始化区域。
+            fluent::paintDialogBackground(hwnd, hdc, false);
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), false);
             return 1;
         case WM_MOUSEWHEEL: {
             // 滚轮消息默认发往焦点窗口，这里按光标位置转发给列表或预览面板
