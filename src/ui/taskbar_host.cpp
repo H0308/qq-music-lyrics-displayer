@@ -1925,6 +1925,8 @@ struct TaskbarHost::Impl {
         const float coreY = h * 0.5f - lyricBlockH * 0.5f;
         ID2D1Brush* coreBrush = brushLyric_ ? static_cast<ID2D1Brush*>(brushLyric_)
                                            : static_cast<ID2D1Brush*>(brushText_);
+        ID2D1Brush* previewBrush = brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
+                                                 : static_cast<ID2D1Brush*>(brushDim_);
         if (lyricTransitionActive_ && outgoingLyricLayout_) {
             float transitionT = std::clamp(
                 static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
@@ -1984,7 +1986,7 @@ struct TaskbarHost::Impl {
         if (nextLyricLayout_) {
             float nextY = coreY + lyricHeight_ + kLyricPreviewGap;
             drawScrollingText(nextLyricLayout_, nextLyricWidth_, nextLyricHeight_, lyricAreaW,
-                              lyricAreaX, nextY, 0.0f, coreBrush, nullptr, nullptr, nullptr, 0.0f,
+                              lyricAreaX, nextY, 0.0f, previewBrush, nullptr, nullptr, nullptr, 0.0f,
                               kLyricPreviewOpacity);
         }
     }
