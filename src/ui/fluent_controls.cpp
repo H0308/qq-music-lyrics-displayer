@@ -167,6 +167,7 @@ IDWriteTextFormat* LayeredChild::textFormat(float dipSize, int weight, bool cent
                                       dipSize, L"zh-cn", &fmt_);
     if (FAILED(hr) || !fmt_)
         return nullptr;
+    applyUiFontFallback(fmt_);
     fmt_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     if (center)
         fmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);

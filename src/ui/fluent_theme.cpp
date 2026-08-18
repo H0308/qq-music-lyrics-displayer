@@ -1,6 +1,7 @@
 #include "fluent_theme.h"
 
 #include <dwmapi.h>
+#include <dwrite_2.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 
 #include <cmath>
@@ -31,6 +32,61 @@ constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
 constexpr int kDwmsbtNone = 1;           // DWMSBT_NONE
 constexpr int kDwmsbtMainWindow = 2;      // DWMSBT_MAINWINDOW (Mica)
 constexpr int kDwmsbtTransientWindow = 3; // DWMSBT_TRANSIENTWINDOW (Acrylic)
+
+IDWriteFontFallback* createUiFontFallback() {
+    IDWriteFactory* factory = nullptr;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&factory))) ||
+        !factory)
+        return nullptr;
+
+    IDWriteFactory2* factory2 = nullptr;
+    IDWriteFontFallbackBuilder* builder = nullptr;
+    IDWriteFontFallback* systemFallback = nullptr;
+    IDWriteFontFallback* result = nullptr;
+
+    if (SUCCEEDED(factory->QueryInterface(__uuidof(IDWriteFactory2),
+                                          reinterpret_cast<void**>(&factory2))) &&
+        factory2 && SUCCEEDED(factory2->CreateFontFallbackBuilder(&builder)) && builder) {
+        // 只覆盖中日韩相关区段；其他字符继续沿用 Windows 的完整系统回退表，
+        // 这样不会因为自定义中文列表而影响符号、表情或其他文字脚本。
+        const DWRITE_UNICODE_RANGE ranges[] = {
+            {0x2E80, 0x2FFF}, {0x3000, 0x303F}, {0x3100, 0x312F}, {0x31C0, 0x31EF},
+            {0x3200, 0x33FF}, {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xF900, 0xFAFF},
+            {0xFE30, 0xFE4F}, {0xFF00, 0xFFEF}, {0x20000, 0x2FA1F},
+        };
+        const wchar_t* targetFamilies[] = {
+            L"Noto Sans SC",       L"Noto Sans CJK SC", L"Microsoft YaHei UI",
+            L"Microsoft YaHei",    L"DengXian",         L"SimHei", L"SimSun",
+        };
+
+        // 应用字体优先，系统字体补齐列表中未覆盖的字符。
+        builder->AddMapping(ranges, static_cast<UINT32>(_countof(ranges)), targetFamilies,
+                            static_cast<UINT32>(_countof(targetFamilies)), nullptr, L"zh-cn",
+                            uiFontFamily(), 1.0f);
+        if (SUCCEEDED(factory2->GetSystemFontFallback(&systemFallback)) && systemFallback)
+            builder->AddMappings(systemFallback);
+        builder->CreateFontFallback(&result);
+    }
+
+    if (systemFallback)
+        systemFallback->Release();
+    if (builder)
+        builder->Release();
+    if (factory2)
+        factory2->Release();
+    factory->Release();
+    return result;
+}
+
+struct UiFontFallbackCache {
+    IDWriteFontFallback* value = createUiFontFallback();
+
+    ~UiFontFallbackCache() {
+        if (value)
+            value->Release();
+    }
+};
 
 bool readLightThemeValue(const wchar_t* name, bool& light) {
     DWORD value = 1;
@@ -247,7 +303,23 @@ void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop) {
 }
 
 const wchar_t* uiFontFamily() {
-    return L"Segoe UI Variable Text";
+    return L"Noto Sans SC";
+}
+
+void applyUiFontFallback(IDWriteTextFormat* format) {
+    if (!format)
+        return;
+
+    IDWriteTextFormat1* format1 = nullptr;
+    if (FAILED(format->QueryInterface(__uuidof(IDWriteTextFormat1),
+                                      reinterpret_cast<void**>(&format1))) ||
+        !format1)
+        return;
+
+    static UiFontFallbackCache cache;
+    if (cache.value)
+        format1->SetFontFallback(cache.value);
+    format1->Release();
 }
 
 HFONT createUiFont(UINT dpi, float dipSize, int weight) {

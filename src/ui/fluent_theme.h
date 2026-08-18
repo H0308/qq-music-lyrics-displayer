@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <d2d1.h>
+#include <dwrite.h>
 
 #include <string>
 
@@ -72,6 +73,8 @@ void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop);
 // ---- 字体 ----
 // DWrite 渲染用的 UI 字体族名
 const wchar_t* uiFontFamily();
+// 为缺失字形设置 UI 专用字体回退链；调用方继续负责释放文本格式。
+void applyUiFontFallback(IDWriteTextFormat* format);
 // GDI 真控件（EDIT）用字体；调用方负责 DeleteObject
 HFONT createUiFont(UINT dpi, float dipSize = 14.0f, int weight = FW_NORMAL);
 

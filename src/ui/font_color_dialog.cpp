@@ -486,6 +486,8 @@ private:
                     family, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
                     DWRITE_FONT_STRETCH_NORMAL, state_.lyricFontSize, L"zh-cn", &fmt_)))
                 return;
+            if (state_.fontFamily.empty())
+                fluent::applyUiFontFallback(fmt_);
         }
         if (fmt_ && !layout_) {
             if (FAILED(dwrite_->CreateTextLayout(kSampleText,

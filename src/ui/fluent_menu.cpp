@@ -98,6 +98,7 @@ struct MenuWnd {
                                                  DWRITE_FONT_STYLE_NORMAL,
                                                  DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-cn", &f)) &&
             f) {
+            applyUiFontFallback(f);
             for (const auto& it : items) {
                 if (it.separator)
                     continue;
@@ -146,8 +147,10 @@ struct MenuWnd {
             renderer.dwrite()->CreateTextFormat(uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                                 13.0f, L"zh-cn", &fmt);
-            if (fmt)
+            if (fmt) {
+                applyUiFontFallback(fmt);
                 fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            }
         }
         if (!brush || !fmt)
             return;
