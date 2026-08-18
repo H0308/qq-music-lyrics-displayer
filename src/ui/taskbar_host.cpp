@@ -770,6 +770,10 @@ struct TaskbarHost::Impl {
                        !EqualRect(&rcNotify, &rcNotify_) ||
                        !EqualRect(&rcStart, &rcStart_);
         if (changed) {
+            // 封面位图按显示尺寸解码（decodeCover），DPI/任务栏高度变化时按新尺寸重解码
+            if (dpi != dpi_ ||
+                (rcTaskbar.bottom - rcTaskbar.top) != (rcTaskbar_.bottom - rcTaskbar_.top))
+                coverDirty = true;
             dpi_ = dpi;
             centerAlign_ = center;
             rcTaskbar_ = rcTaskbar;
@@ -1432,10 +1436,31 @@ struct TaskbarHost::Impl {
         }
         UINT w = bitmap.GetWidth();
         UINT h = bitmap.GetHeight();
+        // 只按显示尺寸（封面槽 DIP × DPI 缩放）生成位图：原图常达 500~1000px，
+        // 全尺寸 LockBits/CreateBitmap 会把 MB 级像素常驻显存，实际只显示约 30px。
+        const UINT targetPx =
+            std::max(1u, static_cast<UINT>(std::ceil(coverSize() * scale())));
+        Gdiplus::Bitmap* pixels = &bitmap;
+        Gdiplus::Bitmap scaled(static_cast<INT>(targetPx), static_cast<INT>(targetPx),
+                               PixelFormat32bppPARGB);
+        if ((w > targetPx || h > targetPx) && scaled.GetLastStatus() == Gdiplus::Ok) {
+            Gdiplus::Graphics g(&scaled);
+            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+            // 目标为正方形，与绘制时拉伸到方形封面槽的行为一致
+            if (g.DrawImage(&bitmap, Gdiplus::Rect(0, 0, static_cast<INT>(targetPx),
+                                                   static_cast<INT>(targetPx)),
+                            0, 0, static_cast<INT>(w), static_cast<INT>(h),
+                            Gdiplus::UnitPixel) == Gdiplus::Ok) {
+                pixels = &scaled;
+                w = targetPx;
+                h = targetPx;
+            }
+        }
         Gdiplus::BitmapData bitmapData{};
         Gdiplus::Rect rect(0, 0, static_cast<INT>(w), static_cast<INT>(h));
-        if (bitmap.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB,
-                            &bitmapData) != Gdiplus::Ok) {
+        if (pixels->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB,
+                             &bitmapData) != Gdiplus::Ok) {
             stream->Release();
             return;
         }
@@ -1446,7 +1471,7 @@ struct TaskbarHost::Impl {
         props.dpiY = static_cast<float>(dpi_);
         hr = rt->CreateBitmap(D2D1::SizeU(w, h), bitmapData.Scan0, bitmapData.Stride, &props,
                                 &coverBmp);
-        bitmap.UnlockBits(&bitmapData);
+        pixels->UnlockBits(&bitmapData);
         stream->Release();
     }
 
