@@ -492,8 +492,28 @@ constexpr float kRowH = 32.0f;
 constexpr float kHeaderH = 28.0f;
 constexpr float kScrollBarW = 3.0f;
 constexpr float kScrollBarHitW = 12.0f;
+constexpr float kScrollBarInset = 8.0f;
 constexpr UINT_PTR kTipTimerId = 1;
 constexpr UINT kTipDelayMs = 400; // 悬浮多久后弹出 tooltip
+
+struct ScrollBarGeometry {
+    float trackTop = 0.0f;
+    float thumbHeight = 0.0f;
+    float usable = 0.0f;
+};
+
+ScrollBarGeometry scrollBarGeometry(float viewHeight, float contentHeight) {
+    float trackHeight = std::max(0.0f, viewHeight - kScrollBarInset * 2.0f);
+    float thumbHeight = std::min(
+        trackHeight, std::max(20.0f, trackHeight * viewHeight / contentHeight));
+    return {kScrollBarInset, thumbHeight, std::max(0.0f, trackHeight - thumbHeight)};
+}
+
+float scrollBarThumbY(const ScrollBarGeometry& bar, float scrollY, float maxScroll) {
+    if (maxScroll <= 0.0f || bar.usable <= 0.0f)
+        return bar.trackTop;
+    return bar.trackTop + scrollY / maxScroll * bar.usable;
+}
 
 // 单行绘制文本，超宽时按字符裁剪并加省略号（不换行，避免溢出到相邻行）
 void drawTrimmedText(IDWriteFactory* dw, ID2D1DCRenderTarget* rt, const std::wstring& text,
@@ -735,11 +755,11 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
             GetClientRect(hwnd_, &rc);
             float vh = viewDipH();
             float ch = contentHeight();
-            float thumbH = std::max(20.0f, vh * vh / ch);
-            float usable = vh - thumbH;
-            if (usable > 0)
-                scrollY_ = std::clamp((y - scrollDragGrabDy_) / usable * maxScroll(), 0.0f,
-                                      maxScroll());
+            const auto bar = scrollBarGeometry(vh, ch);
+            if (bar.usable > 0.0f)
+                scrollY_ = std::clamp(
+                    (y - bar.trackTop - scrollDragGrabDy_) / bar.usable * maxScroll(), 0.0f,
+                    maxScroll());
             renderNow();
             return 0;
         }
@@ -788,10 +808,9 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
         float wDip = (rc.right - rc.left) / dipScale(GetDpiForWindow(hwnd_));
         // 命中滚动条？
         if (contentHeight() > vh && x >= wDip - kScrollBarHitW) {
-            float thumbH = std::max(20.0f, vh * vh / contentHeight());
-            float usable = vh - thumbH;
-            float thumbY = maxScroll() > 0 ? scrollY_ / maxScroll() * usable : 0;
-            if (y >= thumbY && y <= thumbY + thumbH) {
+            const auto bar = scrollBarGeometry(vh, contentHeight());
+            float thumbY = scrollBarThumbY(bar, scrollY_, maxScroll());
+            if (y >= thumbY && y <= thumbY + bar.thumbHeight) {
                 scrollDrag_ = true;
                 scrollDragGrabDy_ = y - thumbY;
             } else {
@@ -920,12 +939,12 @@ void FluentList::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     // 细滚动条
     float ch = contentHeight();
     if (ch > hDip && hDip > 0) {
-        float thumbH = std::max(20.0f, hDip * hDip / ch);
-        float usable = hDip - thumbH;
+        const auto bar = scrollBarGeometry(hDip, ch);
         float ms = std::max(0.0f, ch - hDip);
-        float thumbY = ms > 0 ? scrollY_ / ms * usable : 0;
+        float thumbY = scrollBarThumbY(bar, scrollY_, ms);
         fillRoundRect(rt, br, p.textSecondary,
-                      D2D1::RectF(wDip - kScrollBarW - 3.0f, thumbY, wDip - 3.0f, thumbY + thumbH),
+                      D2D1::RectF(wDip - kScrollBarInset - kScrollBarW, thumbY,
+                                  wDip - kScrollBarInset, thumbY + bar.thumbHeight),
                       kScrollBarW / 2.0f);
     }
 

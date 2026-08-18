@@ -33,9 +33,9 @@ constexpr int kIdSubtitleLabel = 113;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
-// 最小客户区仍需容纳两列输入框、7 行歌词候选和右侧预览。
+// 最小客户区仍需容纳两列输入框、固定行高的多行歌词候选和右侧预览。
 constexpr float kMinClientWidthDip = 520.0f;
-constexpr float kMinClientHeightDip = 444.0f;
+constexpr float kMinClientHeightDip = 504.0f;
 
 void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
     UINT dpi = GetDpiForWindow(hwnd);
@@ -53,7 +53,7 @@ void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
-// 右侧桌面歌词风格预览面板（7 行，高亮当前播放行，支持鼠标滚轮手动滚动）
+// 右侧桌面歌词风格预览面板（固定行高，行数随面板高度变化）
 class LyricPreviewPanel : public fluent::LayeredChild {
 public:
     bool create(HWND parent, HINSTANCE, int, int, int, int) {
@@ -97,11 +97,11 @@ public:
     }
 
 private:
-    static constexpr int kVisible = 7;
-    static constexpr int kMid = kVisible / 2;          // 3，当前行居中
     static constexpr UINT kTimerResume = 1;
     static constexpr DWORD kResumeDelayMs = 2000;      // 停止滚动后 2 秒恢复同步
     static constexpr int kWheelLinesPerNotch = 3;
+    static constexpr float kLyricTextWidthDip = 240.0f; // 歌词行固定布局宽度，避免随窗口拉伸
+    static constexpr float kLyricRowHeightDip = 50.0f;  // 歌词行固定高度，行数随面板高度增加
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         LyricPreviewPanel* self = nullptr;
@@ -169,8 +169,30 @@ private:
         scrollBy(-notch * kWheelLinesPerNotch);
     }
 
+    float lyricContentTop() const {
+        return capabilityLabel_.empty() ? 0.0f : 27.0f;
+    }
+
+    int visibleRowsForHeight(float hDip) const {
+        float availableHeight = std::max(0.0f, hDip - lyricContentTop());
+        return std::max(1, static_cast<int>(std::floor(availableHeight / kLyricRowHeightDip)));
+    }
+
+    int visibleRowCount() const {
+        if (!hwnd_)
+            return 1;
+        RECT rc{};
+        GetClientRect(hwnd_, &rc);
+        UINT dpi = GetDpiForWindow(hwnd_);
+        if (!dpi)
+            dpi = GetDpiForSystem();
+        return visibleRowsForHeight(
+            static_cast<float>(rc.bottom - rc.top) / fluent::dipScale(dpi));
+    }
+
     void scrollBy(int lines) {
-        int maxTop = std::max(0, static_cast<int>(lines_.size()) - kVisible);
+        int visible = visibleRowCount();
+        int maxTop = std::max(0, static_cast<int>(lines_.size()) - visible);
         topLine_ = std::clamp(topLine_ + lines, 0, maxTop);
         manualScroll_ = true;
         lastScrollTick_ = GetTickCount();
@@ -183,11 +205,12 @@ private:
             topLine_ = 0;
             return;
         }
-        int maxTop = std::max(0, total - kVisible);
+        int visible = visibleRowCount();
+        int maxTop = std::max(0, total - visible);
         if (currentLine_ < 0)
             topLine_ = 0;
         else
-            topLine_ = std::clamp(currentLine_ - kMid, 0, maxTop);
+            topLine_ = std::clamp(currentLine_ - visible / 2, 0, maxTop);
     }
 
     float karaokeProgressX(IDWriteTextLayout* layout, const LyricLine& line) const {
@@ -293,26 +316,37 @@ private:
             }
             return;
         }
-        float contentTop = 0.0f;
+        const float contentTop = lyricContentTop();
         if (!capabilityLabel_.empty()) {
             if (auto* fmt = textFormat(11.0f, 400, true)) {
                 br->SetColor(p.textSecondary);
                 rt->DrawTextW(capabilityLabel_.c_str(), static_cast<UINT32>(capabilityLabel_.size()),
                               fmt, D2D1::RectF(pad, 7.0f, wDip - pad, 27.0f), br);
             }
-            contentTop = 27.0f;
         }
         int total = static_cast<int>(lines_.size());
-        int maxTop = std::max(0, total - kVisible);
+        int visible = visibleRowsForHeight(hDip);
+        int maxTop = std::max(0, total - visible);
+        if (!manualScroll_) {
+            if (currentLine_ >= 0)
+                topLine_ = std::clamp(currentLine_ - visible / 2, 0, maxTop);
+            else
+                topLine_ = std::clamp(topLine_, 0, maxTop);
+        }
         int top = std::clamp(topLine_, 0, maxTop);
-        int count = std::min(kVisible, total - top);
-        float slotH = std::max(1.0f, (hDip - contentTop) / kVisible);
+        int count = std::min(visible, total - top);
+        const float lyricBlockHeight = visible * kLyricRowHeightDip;
+        const float availableHeight = std::max(0.0f, hDip - contentTop);
+        const float lyricTop = contentTop +
+                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
+        const float lyricLeft = (wDip - kLyricTextWidthDip) * 0.5f;
+        const float lyricRight = lyricLeft + kLyricTextWidthDip;
         for (int i = 0; i < count; ++i) {
             int lineIdx = top + i;
             bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
             const std::wstring& text = lines_[lineIdx].text;
-            D2D1_RECT_F rect = D2D1::RectF(pad, contentTop + i * slotH, wDip - pad,
-                                           contentTop + (i + 1) * slotH);
+            D2D1_RECT_F rect = D2D1::RectF(lyricLeft, lyricTop + i * kLyricRowHeightDip,
+                                           lyricRight, lyricTop + (i + 1) * kLyricRowHeightDip);
             // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
             if (cur) {
                 drawCurrentLine(rt, br, p, lines_[lineIdx], rect);
