@@ -2,6 +2,7 @@
 #include "lyric/lyric_provider.h"
 #include "ui/lyric_window.h"
 #include "ui/taskbar_host.h"
+#include "ui/about_dialog.h"
 #include "ui/manual_search_dialog.h"
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
@@ -56,6 +57,7 @@ constexpr UINT kCmdAlbumCoverEffectDefault = 118;
 constexpr UINT kCmdAlbumCoverEffectVinyl = 119;
 constexpr UINT kCmdDoubleLineLyrics = 120;
 constexpr UINT kCmdPlatformIcon = 121;
+constexpr UINT kCmdAbout = 122;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -164,6 +166,7 @@ struct App {
     LyricProvider provider;
     CoverProvider coverProvider;
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
+    std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
@@ -218,6 +221,7 @@ struct App {
     bool platformIconVisible_ = false;
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
 
+    bool autoCheckOnStartup_ = true;
     std::wstring settingsPath_;
 
     std::vector<ILyricHost*> hosts() {
@@ -586,6 +590,8 @@ struct App {
     void onMenuCommand(int cmd);
     void pickFont();
     void showFontColorDialog();
+    void showAbout();
+    void setAutoCheckOnStartup(bool enabled);
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
     void tryExtractAlbumColor();
@@ -624,6 +630,7 @@ void App::loadSettings() {
         lyricOutline_ = j.value("lyricOutline", lyricGlow_);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         spectrumOn_ = j.value("spectrum", false);
+        autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
         if (j.contains("secondaryLyricEnabled") || j.contains("secondaryLyricType")) {
             secondaryLyricEnabled_ = j.value("secondaryLyricEnabled", true);
@@ -664,6 +671,7 @@ void App::saveSettings() {
         j["lyricOutline"] = lyricOutline_;
         j["taskbarPosition"] = taskbarPosition_;
         j["spectrum"] = spectrumOn_;
+        j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
@@ -800,6 +808,7 @@ void App::showTrayMenu() {
     addSeparator();
     addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
     addSeparator();
+    addItem(kCmdAbout, L"关于");
     addItem(kCmdExit, L"退出");
 
     POINT pt{};
@@ -906,6 +915,9 @@ void App::onMenuCommand(int cmd) {
             std::wprintf(L"[autostart] failed to %s\n", enable ? L"enable" : L"disable");
         break;
     }
+    case kCmdAbout:
+        showAbout();
+        break;
     case kCmdExit:
         PostQuitMessage(0);
         break;
@@ -1003,6 +1015,26 @@ void App::showFontColorDialog() {
     fontColorDialog->show();
 }
 
+void App::setAutoCheckOnStartup(bool enabled) {
+    if (autoCheckOnStartup_ == enabled)
+        return;
+    autoCheckOnStartup_ = enabled;
+    saveSettings();
+}
+
+void App::showAbout() {
+    if (aboutDialog && aboutDialog->isOpen()) {
+        aboutDialog->show();
+        return;
+    }
+    aboutDialog = std::make_unique<AboutDialog>();
+    if (!aboutDialog->create(
+            GetModuleHandleW(nullptr), trayHwnd, autoCheckOnStartup_,
+            [this](bool enabled) { setAutoCheckOnStartup(enabled); }))
+        return;
+    aboutDialog->show();
+}
+
 LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_CREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
@@ -1077,6 +1109,12 @@ int main() {
         std::wprintf(L"failed to create tray window\n");
         return 1;
     }
+    // 关于窗口保持隐藏，用于在程序启动后自动检查更新；用户打开关于时会再次检查。
+    app.aboutDialog = std::make_unique<AboutDialog>();
+    if (!app.aboutDialog->create(
+            inst, app.trayHwnd, app.autoCheckOnStartup_,
+            [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); }))
+        app.aboutDialog.reset();
     if (wantTaskbar && !app.createTaskbar(inst)) {
         std::wprintf(L"failed to create taskbar window\n");
         return 1;
@@ -1105,6 +1143,9 @@ int main() {
             }
             continue;
         }
+        if (app.aboutDialog && app.aboutDialog->isOpen() &&
+            IsDialogMessageW(app.aboutDialog->hwnd(), &msg))
+            continue;
         if (app.manualSearchDialog && app.manualSearchDialog->isOpen() &&
             IsDialogMessageW(app.manualSearchDialog->hwnd(), &msg))
             continue;
