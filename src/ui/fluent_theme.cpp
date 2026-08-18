@@ -43,15 +43,16 @@ Palette makeLight() {
     p.text = toD2D(RGB(26, 26, 26));
     p.textSecondary = toD2D(RGB(96, 96, 96));
     p.disabled = toD2D(RGB(160, 160, 160));
-    p.cardFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.7f);
-    p.cardStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
+    // 提高表面层级对比，让 Mica 背景、卡片和控件在桌面窗口中清晰分层。
+    p.cardFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.78f);
+    p.cardStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f);
     p.windowBg = toD2D(RGB(243, 243, 243));
     p.cardFillSolid = blendOver(p.cardFill, p.windowBg);
-    p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.7f);
-    p.controlHover = D2D1::ColorF(0.976f, 0.976f, 0.976f, 0.85f);
-    p.controlPressed = D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.9f);
-    p.listHover = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.04f);
-    p.listSelected = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f);
+    p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.78f);
+    p.controlHover = D2D1::ColorF(0.976f, 0.976f, 0.976f, 0.88f);
+    p.controlPressed = D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.92f);
+    p.listHover = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
+    p.listSelected = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.12f);
     p.menuFill = D2D1::ColorF(0.976f, 0.976f, 0.976f, 1.0f);
     p.menuStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.12f);
     p.separator = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f);
@@ -64,15 +65,15 @@ Palette makeDark() {
     p.text = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
     p.textSecondary = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.6f);
     p.disabled = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.36f);
-    p.cardFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
-    p.cardStroke = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f);
+    p.cardFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f);
+    p.cardStroke = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f);
     p.windowBg = toD2D(RGB(32, 32, 32));
     p.cardFillSolid = blendOver(p.cardFill, p.windowBg);
-    p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
-    p.controlHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f);
-    p.controlPressed = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.04f);
-    p.listHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
-    p.listSelected = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.1f);
+    p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f);
+    p.controlHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f);
+    p.controlPressed = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
+    p.listHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f);
+    p.listSelected = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f);
     p.menuFill = D2D1::ColorF(0.17f, 0.17f, 0.17f, 1.0f);
     p.menuStroke = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.1f);
     p.separator = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.1f);
@@ -167,10 +168,13 @@ void suppressBorder(HWND hwnd) {
     DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &none, sizeof(none));
 }
 
-bool styleDialogWindow(HWND hwnd) {
+bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     applyRoundCorners(hwnd, false);
     applyDarkCaption(hwnd, isDarkMode());
-    return applyBackdrop(hwnd, true); // 对话框用亚克力材质
+    bool applied = applyBackdrop(hwnd, transientWindow);
+    if (applied)
+        InvalidateRect(hwnd, nullptr, FALSE);
+    return applied;
 }
 
 COLORREF fallbackBgColor() {
@@ -186,7 +190,7 @@ HFONT createUiFont(UINT dpi, float dipSize, int weight) {
     int px = -MulDiv(static_cast<int>(std::lround(dipSize)), static_cast<int>(dpi), 96);
     HFONT font = CreateFontW(px, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+                             DEFAULT_PITCH | FF_DONTCARE, uiFontFamily());
     return font;
 }
 

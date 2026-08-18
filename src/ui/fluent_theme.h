@@ -9,6 +9,18 @@
 // 系统深/浅色检测、DWM 圆角/Mica/深色标题栏、统一调色板与字体。
 namespace fluent {
 
+// 普通桌面窗口统一使用的紧凑密度尺寸（单位：DIP）。
+// 这些尺寸对应文档中的 4/8/12/16/24 间距等级，避免各窗口各自漂移。
+namespace metrics {
+inline constexpr float pagePadding = 24.0f;
+inline constexpr float sectionGap = 16.0f;
+inline constexpr float controlGap = 12.0f;
+inline constexpr float compactGap = 8.0f;
+inline constexpr float controlHeight = 32.0f;
+inline constexpr float controlRadius = 6.0f;
+inline constexpr float cardRadius = 8.0f;
+} // namespace metrics
+
 // 系统当前是否为深色模式（读注册表 AppsUseLightTheme）
 bool isDarkMode();
 
@@ -49,8 +61,9 @@ void applyDarkCaption(HWND hwnd, bool dark);
 void applyBorderColor(HWND hwnd, COLORREF color);
 // 不绘制窗口边框（用于弹出菜单等无边框窗口）
 void suppressBorder(HWND hwnd);
-// 对话框一键套用：圆角 + 背景材质 + 标题栏配色；返回背景材质是否生效
-bool styleDialogWindow(HWND hwnd);
+// 普通窗口一键套用：圆角 + 背景材质 + 标题栏配色；返回背景材质是否生效。
+// 普通窗口默认使用 Mica，短暂的取色弹窗等场景传 true 使用 Acrylic。
+bool styleDialogWindow(HWND hwnd, bool transientWindow = false);
 // 背景材质未生效时的实心回退背景色
 COLORREF fallbackBgColor();
 

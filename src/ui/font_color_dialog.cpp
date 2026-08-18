@@ -29,6 +29,9 @@ constexpr int kIdAlphaValue = 418;
 constexpr int kIdPreview = 420;
 constexpr int kIdOk = 421;
 constexpr int kIdCancel = 422;
+constexpr int kIdTitleLabel = 423;
+constexpr int kIdSubtitleLabel = 424;
+constexpr int kIdOptionsCard = 425;
 
 // 未播放透明度范围（与设置项 lyricUnplayedAlpha 的钳制一致）
 constexpr int kAlphaMin = 5;
@@ -55,7 +58,7 @@ public:
         id_ = id;
         color_ = color;
         clearAlpha_ = 1.0f / 255.0f; // 整个色块面可点（防 alpha=0 穿透）
-        return createLayered(parent, L"QQMusicLyricColorSwatch", wndProc, id);
+        return createLayered(parent, L"QQMusicLyricColorSwatch", wndProc, id, true, true);
     }
 
     void setColor(COLORREF c) {
@@ -73,13 +76,25 @@ private:
             return;
         D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
         br->SetColor(hover_ ? p.controlHover : p.controlFill);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br);
+        rt->FillRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::controlRadius, fluent::metrics::controlRadius),
+            br);
         br->SetColor(hover_ ? p.accent : p.cardStroke);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br, 1.0f);
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::controlRadius, fluent::metrics::controlRadius),
+            br, 1.0f);
         D2D1_RECT_F inner = D2D1::RectF(rect.left + 4.0f, rect.top + 4.0f, rect.right - 4.0f,
                                         rect.bottom - 4.0f);
         br->SetColor(colorOf(color_));
         rt->FillRoundedRectangle(D2D1::RoundedRect(inner, 2.5f, 2.5f), br);
+        if (focused_) {
+            br->SetColor(p.accent);
+            rt->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(1.5f, 1.5f, wDip - 1.5f, hDip - 1.5f),
+                                  fluent::metrics::controlRadius - 1.0f,
+                                  fluent::metrics::controlRadius - 1.0f),
+                br, 1.5f);
+        }
     }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -97,6 +112,8 @@ private:
         switch (msg) {
         case WM_NCHITTEST:
             return HTCLIENT;
+        case WM_GETDLGCODE:
+            return DLGC_BUTTON;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(h, &ps);
@@ -118,6 +135,24 @@ private:
             self->hover_ = false;
             self->renderNow();
             return 0;
+        case WM_SETFOCUS:
+            self->focused_ = true;
+            self->renderNow();
+            return 0;
+        case WM_KILLFOCUS:
+            self->focused_ = false;
+            self->renderNow();
+            return 0;
+        case WM_LBUTTONDOWN:
+            SetFocus(h);
+            return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_SPACE || wp == VK_RETURN) {
+                SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(self->id_, BN_CLICKED),
+                             reinterpret_cast<LPARAM>(h));
+                return 0;
+            }
+            break;
         case WM_LBUTTONUP:
             SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(self->id_, BN_CLICKED),
                          reinterpret_cast<LPARAM>(h));
@@ -132,6 +167,7 @@ private:
     int id_ = 0;
     COLORREF color_ = 0;
     bool hover_ = false;
+    bool focused_ = false;
 };
 
 // Win11 风格滑块：轨道 + 已填充段 + 圆形滑头，拖动改变取值（kAlphaMin..kAlphaMax），
@@ -142,7 +178,7 @@ public:
         id_ = id;
         pct_ = std::clamp(pct, kAlphaMin, kAlphaMax);
         clearAlpha_ = 1.0f / 255.0f; // 整个滑块面可点（防 alpha=0 穿透）
-        return createLayered(parent, L"QQMusicLyricAlphaSlider", wndProc, id);
+        return createLayered(parent, L"QQMusicLyricAlphaSlider", wndProc, id, true, true);
     }
 
     int value() const { return pct_; }
@@ -176,6 +212,12 @@ private:
         br->SetColor(p.accent);
         rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(fx, cy), kThumbR - 1.0f, kThumbR - 1.0f),
                         br, 2.0f);
+        if (focused_) {
+            br->SetColor(p.accent);
+            rt->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(1.5f, 2.0f, wDip - 1.5f, hDip - 2.0f), 6.0f, 6.0f),
+                br, 1.5f);
+        }
     }
 
     void updateFromMouse(LPARAM lp, bool notify) {
@@ -196,6 +238,16 @@ private:
                          reinterpret_cast<LPARAM>(hwnd_));
     }
 
+    void changeByKeyboard(int delta) {
+        int next = std::clamp(pct_ + delta, kAlphaMin, kAlphaMax);
+        if (next == pct_)
+            return;
+        pct_ = next;
+        renderNow();
+        SendMessageW(GetParent(hwnd_), WM_COMMAND, MAKEWPARAM(id_, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(hwnd_));
+    }
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         AlphaSlider* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -211,6 +263,8 @@ private:
         switch (msg) {
         case WM_NCHITTEST:
             return HTCLIENT;
+        case WM_GETDLGCODE:
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(h, &ps);
@@ -220,7 +274,28 @@ private:
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_SETFOCUS:
+            self->focused_ = true;
+            self->renderNow();
+            return 0;
+        case WM_KILLFOCUS:
+            self->focused_ = false;
+            self->renderNow();
+            return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_LEFT || wp == VK_DOWN)
+                self->changeByKeyboard(-1);
+            else if (wp == VK_RIGHT || wp == VK_UP)
+                self->changeByKeyboard(1);
+            else if (wp == VK_HOME)
+                self->changeByKeyboard(kAlphaMin - self->pct_);
+            else if (wp == VK_END)
+                self->changeByKeyboard(kAlphaMax - self->pct_);
+            else
+                break;
+            return 0;
         case WM_LBUTTONDOWN:
+            SetFocus(h);
             SetCapture(h);
             self->dragging_ = true;
             self->updateFromMouse(lp, true);
@@ -245,6 +320,7 @@ private:
     int id_ = 0;
     int pct_ = kAlphaMax;
     bool dragging_ = false;
+    bool focused_ = false;
 };
 
 // Win11 风格开关：药丸轨道 + 圆形滑块，点击切换并向父窗口发送 WM_COMMAND/BN_CLICKED
@@ -257,7 +333,7 @@ public:
         id_ = id;
         on_ = on;
         clearAlpha_ = 1.0f / 255.0f; // 整个开关面可点（防 alpha=0 穿透）
-        return createLayered(parent, L"QQMusicLyricToggleSwitch", wndProc, id);
+        return createLayered(parent, L"QQMusicLyricToggleSwitch", wndProc, id, true, true);
     }
 
     bool isOn() const { return on_; }
@@ -286,6 +362,13 @@ private:
         float knobX = on_ ? track.right - trackH * 0.5f : track.left + trackH * 0.5f;
         br->SetColor(on_ ? p.textOnAccent : p.textSecondary);
         rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, cy), knobR, knobR), br);
+        if (focused_) {
+            br->SetColor(p.accent);
+            D2D1_RECT_F focusRect = D2D1::RectF(0.5f, cy - trackH * 0.5f - 3.0f,
+                                                 wDip - 0.5f, cy + trackH * 0.5f + 3.0f);
+            rt->DrawRoundedRectangle(D2D1::RoundedRect(focusRect, radius + 3.0f, radius + 3.0f),
+                                     br, 1.5f);
+        }
     }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -303,6 +386,8 @@ private:
         switch (msg) {
         case WM_NCHITTEST:
             return HTCLIENT;
+        case WM_GETDLGCODE:
+            return DLGC_BUTTON;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             BeginPaint(h, &ps);
@@ -324,7 +409,25 @@ private:
             self->hover_ = false;
             self->renderNow();
             return 0;
+        case WM_SETFOCUS:
+            self->focused_ = true;
+            self->renderNow();
+            return 0;
+        case WM_KILLFOCUS:
+            self->focused_ = false;
+            self->renderNow();
+            return 0;
+        case WM_KEYDOWN:
+            if (wp == VK_SPACE || wp == VK_RETURN) {
+                self->on_ = !self->on_;
+                self->renderNow();
+                SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(self->id_, BN_CLICKED),
+                             reinterpret_cast<LPARAM>(h));
+                return 0;
+            }
+            break;
         case WM_LBUTTONUP:
+            SetFocus(h);
             self->on_ = !self->on_;
             self->renderNow();
             SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(self->id_, BN_CLICKED),
@@ -340,6 +443,7 @@ private:
     int id_ = 0;
     bool on_ = false;
     bool hover_ = false;
+    bool focused_ = false;
 };
 
 // 示例歌词预览面板：复刻任务栏渲染（8 方向光晕/描边层 + 逐字已播放/未播放双色）
@@ -403,9 +507,12 @@ private:
             return;
         D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
         br->SetColor(p.cardFill);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br);
+        rt->FillRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br);
         br->SetColor(p.cardStroke);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br, 1.0f);
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br,
+            1.0f);
 
         ensureLayout();
         if (!layout_ || textW_ <= 0.0f)
@@ -501,6 +608,9 @@ struct FontColorDialog::Impl {
     HWND hwnd = nullptr;
     bool backdrop = false;
 
+    fluent::FluentLabel titleLabel;
+    fluent::FluentLabel subtitleLabel;
+    fluent::FluentCard optionsCard;
     State state; // 工作副本：确定前的一切修改只落在这里和预览上
 
     fluent::FluentLabel labelUnplayed;
@@ -572,6 +682,10 @@ struct FontColorDialog::Impl {
     }
 
     void createControls() {
+        titleLabel.create(hwnd, kIdTitleLabel, L"字体颜色与效果", false, 20.0f, 600);
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"调整歌词颜色、透明度、光晕和描边", true, 13.0f,
+                             400);
+        optionsCard.create(hwnd, kIdOptionsCard);
         labelUnplayed.create(hwnd, kIdLabelUnplayed, L"未播放字体颜色");
         labelPlayed.create(hwnd, kIdLabelPlayed, L"已播放字体颜色");
         labelAlpha.create(hwnd, kIdLabelAlpha, L"未播放透明度");
@@ -591,6 +705,10 @@ struct FontColorDialog::Impl {
         preview.setState(state);
         okBtn.create(hwnd, kIdOk, L"确定", true);
         cancelBtn.create(hwnd, kIdCancel, L"取消", false);
+
+        // 卡片只是设置区的背景表面，必须位于所有标签和控件下方，避免把内容冲淡。
+        SetWindowPos(optionsCard.hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     void layout() {
@@ -600,9 +718,22 @@ struct FontColorDialog::Impl {
         auto px = [&](float dip) { return static_cast<int>(dip * s); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = px(20), gap = px(12);
+        int pad = px(fluent::metrics::pagePadding);
+        int gap = px(fluent::metrics::controlGap);
 
-        int rowH = px(32), rowGap = px(10);
+        int titleH = px(28.0f);
+        int subtitleH = px(20.0f);
+        titleLabel.move(pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
+        int optionsY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
+        int cardPad = px(16.0f);
+        float optionsHDip = 16.0f + 5.0f * fluent::metrics::controlHeight +
+                            4.0f * fluent::metrics::controlGap + 16.0f;
+        int optionsH = px(optionsHDip);
+        optionsCard.move(pad, optionsY, w - pad * 2, optionsH);
+
+        int rowH = px(fluent::metrics::controlHeight);
+        int rowGap = px(fluent::metrics::controlGap);
         int labelW = px(140), labelH = px(20);
         int swatchW = px(76), swatchH = px(26);
         int toggleW = px(ToggleSwitch::kWidth), toggleH = px(ToggleSwitch::kHeight);
@@ -612,34 +743,35 @@ struct FontColorDialog::Impl {
         ColorSwatch* swatches[5] = {&swatchUnplayed, &swatchPlayed, nullptr, &swatchGlow,
                                     &swatchOutline};
         for (int i = 0; i < 5; ++i) {
-            int y = pad + i * (rowH + rowGap);
-            labels[i]->move(pad, y + (rowH - labelH) / 2, labelW, labelH);
+            int y = optionsY + cardPad + i * (rowH + rowGap);
+            labels[i]->move(pad + cardPad, y + (rowH - labelH) / 2, labelW, labelH);
             if (swatches[i])
-                swatches[i]->move(w - pad - swatchW, y + (rowH - swatchH) / 2, swatchW,
+                swatches[i]->move(w - pad - cardPad - swatchW, y + (rowH - swatchH) / 2, swatchW,
                                   swatchH);
         }
         // 透明度行：滑块填满标签与百分比文本之间的区域
-        int alphaRowY = pad + 2 * (rowH + rowGap);
+        int alphaRowY = optionsY + cardPad + 2 * (rowH + rowGap);
         int valueW = px(44);
-        int sliderX = pad + labelW + px(12);
-        int sliderW = w - pad - valueW - px(12) - sliderX;
+        int sliderX = pad + cardPad + labelW + px(12);
+        int valueX = w - pad - cardPad - valueW;
+        int sliderW = valueX - px(12) - sliderX;
         alphaSlider.move(sliderX, alphaRowY, sliderW, rowH);
-        alphaValue.move(w - pad - valueW, alphaRowY + (rowH - labelH) / 2, valueW, labelH);
+        alphaValue.move(valueX, alphaRowY + (rowH - labelH) / 2, valueW, labelH);
         // 光晕/描边行：开关放在色块左侧，色块位置与其他行保持对齐
-        int glowRowY = pad + 3 * (rowH + rowGap);
-        int outlineRowY = pad + 4 * (rowH + rowGap);
-        int toggleX = w - pad - swatchW - px(10) - toggleW;
+        int glowRowY = optionsY + cardPad + 3 * (rowH + rowGap);
+        int outlineRowY = optionsY + cardPad + 4 * (rowH + rowGap);
+        int toggleX = w - pad - cardPad - swatchW - px(10) - toggleW;
         toggleGlow.move(toggleX, glowRowY + (rowH - toggleH) / 2, toggleW, toggleH);
         toggleOutline.move(toggleX, outlineRowY + (rowH - toggleH) / 2, toggleW, toggleH);
-        int previewY = pad + 5 * (rowH + rowGap);
+        int previewY = optionsY + optionsH + px(fluent::metrics::sectionGap);
 
-        int btnH = px(32);
+        int btnH = px(fluent::metrics::controlHeight);
         int okW = px(96), cancelW = px(88);
         int btnY = h - pad - btnH;
         okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
         cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
 
-        int previewH = btnY - px(16) - previewY;
+        int previewH = btnY - px(fluent::metrics::sectionGap) - previewY;
         if (previewH > 0)
             preview.move(pad, previewY, w - pad * 2, previewH);
     }
@@ -759,8 +891,13 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     UINT dpi = GetDpiForSystem();
     float s = fluent::dipScale(dpi);
     // 期望的客户区尺寸（DIP），按标题栏等边框反推整个窗口尺寸，否则底部控件被裁掉
-    float clientW = 20 + 340 + 20;
-    float clientH = 20 + 5 * (32 + 10) + 96 + 16 + 32 + 20;
+    float clientW = fluent::metrics::pagePadding + 340 + fluent::metrics::pagePadding;
+    float optionsHDip = 16.0f + 5.0f * fluent::metrics::controlHeight +
+                        4.0f * fluent::metrics::controlGap + 16.0f;
+    float clientH = fluent::metrics::pagePadding + 28.0f + 20.0f +
+                    fluent::metrics::sectionGap + optionsHDip + fluent::metrics::sectionGap + 96.0f +
+                    fluent::metrics::sectionGap + fluent::metrics::controlHeight +
+                    fluent::metrics::pagePadding;
     RECT rc{0, 0, static_cast<LONG>(std::lround(clientW * s)),
             static_cast<LONG>(std::lround(clientH * s))};
     AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU, FALSE,

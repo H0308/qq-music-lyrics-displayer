@@ -17,6 +17,8 @@ constexpr int kIdHexLabel = 302;
 constexpr int kIdHexEdit = 303;
 constexpr int kIdOk = 304;
 constexpr int kIdCancel = 305;
+constexpr int kIdTitleLabel = 306;
+constexpr int kIdSubtitleLabel = 307;
 
 // HSV(h: 0-360, s/v: 0-1) <-> RGB
 void hsvToRgb(float h, float s, float v, float& r, float& g, float& b) {
@@ -95,7 +97,7 @@ public:
 
     bool create(HWND parent, int id) {
         clearAlpha_ = 1.0f / 255.0f; // 整个画布可拖拽（防 alpha=0 穿透）
-        return createLayered(parent, L"QQMusicLyricColorCanvas", wndProc, id);
+        return createLayered(parent, L"QQMusicLyricColorCanvas", wndProc, id, true, true);
     }
 
     void setColor(COLORREF c) {
@@ -121,8 +123,6 @@ private:
     }
 
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
-        (void)wDip;
-        (void)hDip;
         auto* br = brush(rt);
         if (!br)
             return;
@@ -219,6 +219,13 @@ private:
             br->SetColor(lumText(color()));
             rt->DrawTextW(L"新颜色", 3, fmt, newText, br);
         }
+        if (focused_) {
+            br->SetColor(fluent::palette().accent);
+            rt->DrawRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(1.5f, 1.5f, wDip - 1.5f, hDip - 1.5f),
+                                  fluent::metrics::cardRadius, fluent::metrics::cardRadius),
+                br, 1.5f);
+        }
     }
 
     void onMouse(UINT msg, WPARAM wp, LPARAM lp) {
@@ -226,6 +233,7 @@ private:
         float x = GET_X_LPARAM(lp) / s;
         float y = GET_Y_LPARAM(lp) / s;
         if (msg == WM_LBUTTONDOWN) {
+            SetFocus(hwnd_);
             SetCapture(hwnd_);
             if (x >= hueRect().left - 4 && x <= hueRect().right + 4 && y >= 0 && y <= kSvSize)
                 dragTarget_ = 2;
@@ -276,6 +284,14 @@ private:
         }
         case WM_ERASEBKGND:
             return 1;
+        case WM_SETFOCUS:
+            self->focused_ = true;
+            self->renderNow();
+            return 0;
+        case WM_KILLFOCUS:
+            self->focused_ = false;
+            self->renderNow();
+            return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_MOUSEMOVE:
@@ -292,6 +308,7 @@ private:
     float hue_ = 0, sat_ = 0, val_ = 1;
     COLORREF old_ = 0;
     int dragTarget_ = 0; // 1=SV, 2=Hue
+    bool focused_ = false;
 };
 
 } // namespace
@@ -301,6 +318,8 @@ struct ColorPickerDialog::Impl {
     HWND hwnd = nullptr;
     bool backdrop = false;
 
+    fluent::FluentLabel titleLabel;
+    fluent::FluentLabel subtitleLabel;
     ColorCanvas canvas;
     fluent::FluentLabel hexLabel;
     fluent::FluentEdit hexEdit;
@@ -308,6 +327,7 @@ struct ColorPickerDialog::Impl {
     fluent::FluentButton cancelBtn;
 
     COLORREF initial = 0;
+    std::wstring titleText = L"选择颜色";
     bool updatingHex = false; // 防止画布 -> 输入框 -> 画布循环
     ApplyCallback onApply;
 
@@ -358,6 +378,8 @@ struct ColorPickerDialog::Impl {
     }
 
     void createControls() {
+        titleLabel.create(hwnd, kIdTitleLabel, titleText.c_str(), false, 20.0f, 600);
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"调整颜色后点击确定应用", true, 13.0f, 400);
         canvas.create(hwnd, kIdCanvas);
         canvas.setOldColor(initial);
         canvas.setColor(initial);
@@ -388,19 +410,26 @@ struct ColorPickerDialog::Impl {
         auto px = [&](float dip) { return static_cast<int>(dip * s); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = px(16), gap = px(12);
+        int pad = px(fluent::metrics::pagePadding);
+        int gap = px(fluent::metrics::controlGap);
+
+        int titleH = px(28.0f);
+        int subtitleH = px(20.0f);
+        titleLabel.move(pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
 
         int canvasW = px(ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kHueW);
         int canvasH = px(ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kSwatchH);
-        canvas.move(pad, pad, canvasW, canvasH);
+        int canvasY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
+        canvas.move(pad, canvasY, canvasW, canvasH);
 
-        int hexY = pad + canvasH + gap;
+        int hexY = canvasY + canvasH + gap;
         int labelW = px(36);
-        int editH = px(32);
+        int editH = px(fluent::metrics::controlHeight);
         hexLabel.move(pad, hexY + (editH - px(20)) / 2, labelW, px(20));
         hexEdit.move(pad + labelW + px(4), hexY, w - pad * 2 - labelW - px(4), editH);
 
-        int btnH = px(32);
+        int btnH = px(fluent::metrics::controlHeight);
         int okW = px(96), cancelW = px(88);
         int btnY = h - pad - btnH;
         okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
@@ -442,6 +471,7 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
     (void)parent; // 托盘窗口是消息窗口，不能作为所有者；与搜索对话框一致使用无所有者窗口
     impl_->inst = inst;
     impl_->initial = initial;
+    impl_->titleText = title ? title : L"选择颜色";
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -457,9 +487,13 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
     UINT dpi = GetDpiForSystem();
     float s = fluent::dipScale(dpi);
     // 期望的客户区尺寸（DIP），按标题栏等边框反推整个窗口尺寸，否则底部控件被裁掉
-    float clientW = 16 + ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kHueW + 16;
-    float clientH = 16 + ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kSwatchH + 12 +
-                    32 + 12 + 32 + 16;
+    float clientW = fluent::metrics::pagePadding + ColorCanvas::kSvSize + ColorCanvas::kGap +
+                    ColorCanvas::kHueW + fluent::metrics::pagePadding;
+    float clientH = fluent::metrics::pagePadding + 28.0f + 20.0f + fluent::metrics::sectionGap +
+                    ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kSwatchH +
+                    fluent::metrics::controlGap +
+                    fluent::metrics::controlHeight + fluent::metrics::controlGap +
+                    fluent::metrics::controlHeight + fluent::metrics::pagePadding;
     RECT rc{0, 0, static_cast<LONG>(std::lround(clientW * s)),
             static_cast<LONG>(std::lround(clientH * s))};
     AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU, FALSE,
@@ -478,7 +512,7 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
+    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd, true);
     return true;
 }
 

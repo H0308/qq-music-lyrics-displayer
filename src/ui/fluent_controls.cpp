@@ -38,7 +38,7 @@ T* selfFromMsg(HWND h, UINT msg, LPARAM lp) {
     return self;
 }
 
-constexpr float kCornerRadius = 4.0f;
+constexpr float kCornerRadius = metrics::controlRadius;
 
 void fillRoundRect(ID2D1DCRenderTarget* rt, ID2D1SolidColorBrush* brush, D2D1_COLOR_F color,
                    const D2D1_RECT_F& rect, float radius = kCornerRadius) {
@@ -73,10 +73,13 @@ LayeredChild::~LayeredChild() {
 }
 
 bool LayeredChild::createLayered(HWND parent, const wchar_t* className, WNDPROC proc, int id,
-                                 bool layered) {
+                                 bool layered, bool tabStop) {
     registerOnce(className, proc);
     layered_ = layered;
-    hwnd_ = CreateWindowExW(layered ? WS_EX_LAYERED : 0, className, L"", WS_CHILD, 0, 0, 10, 10,
+    DWORD style = WS_CHILD;
+    if (tabStop)
+        style |= WS_TABSTOP;
+    hwnd_ = CreateWindowExW(layered ? WS_EX_LAYERED : 0, className, L"", style, 0, 0, 10, 10,
                             parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
                             GetModuleHandleW(nullptr), this);
     return hwnd_ != nullptr;
@@ -188,7 +191,7 @@ bool FluentButton::create(HWND parent, int id, const wchar_t* text, bool accent)
     text_ = text ? text : L"";
     accent_ = accent;
     clearAlpha_ = 1.0f / 255.0f; // 整个按钮面可点击（防 alpha=0 穿透）
-    return createLayered(parent, L"QQMusicLyricFluentButton", wndProc, id);
+    return createLayered(parent, L"QQMusicLyricFluentButton", wndProc, id, true, true);
 }
 
 void FluentButton::setAccent(bool accent) {
@@ -215,6 +218,8 @@ LRESULT FluentButton::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCHITTEST:
         // 分层窗口按像素 alpha 命中测试，透明区域会穿透；按钮整个矩形都要可点
         return HTCLIENT;
+    case WM_GETDLGCODE:
+        return DLGC_BUTTON;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd_, &ps);
@@ -267,6 +272,14 @@ LRESULT FluentButton::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ENABLE:
         renderNow();
         return 0;
+    case WM_SETFOCUS:
+        focused_ = true;
+        renderNow();
+        return 0;
+    case WM_KILLFOCUS:
+        focused_ = false;
+        renderNow();
+        return 0;
     case WM_DESTROY:
         hwnd_ = nullptr;
         return 0;
@@ -298,6 +311,13 @@ void FluentButton::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     if (!accent_ || !enabled)
         strokeRoundRect(rt, br, p.cardStroke, rect);
 
+    if (focused_ && enabled) {
+        D2D1_COLOR_F focusColor = accent_ ? p.textOnAccent : p.accent;
+        strokeRoundRect(rt, br, focusColor,
+                        D2D1::RectF(1.5f, 1.5f, wDip - 1.5f, hDip - 1.5f), 1.5f,
+                        std::max(1.0f, kCornerRadius - 1.0f));
+    }
+
     if (auto* fmt = textFormat(14.0f, 400, true)) {
         br->SetColor(textColor);
         rt->DrawTextW(text_.c_str(), static_cast<UINT32>(text_.size()), fmt,
@@ -312,7 +332,8 @@ bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner) {
     // 非分层窗口：分层窗口内的真控件（EDIT）不会被系统绘制
     if (!createLayered(parent, L"QQMusicLyricFluentEdit", wndProc, id, false))
         return false;
-    hEdit_ = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+    hEdit_ = CreateWindowExW(0, L"EDIT", L"",
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
                              0, 0, 10, 10, hwnd_, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(1)),
                              GetModuleHandleW(nullptr), nullptr);
     if (!hEdit_)
@@ -480,7 +501,7 @@ void drawTrimmedText(IDWriteFactory* dw, ID2D1DCRenderTarget* rt, const std::wst
 bool FluentList::create(HWND parent, int id) {
     id_ = id;
     clearAlpha_ = 1.0f / 255.0f; // 整行（含文字旁空白）可点选（防 alpha=0 穿透）
-    return createLayered(parent, L"QQMusicLyricFluentList", wndProc, id);
+    return createLayered(parent, L"QQMusicLyricFluentList", wndProc, id, true, true);
 }
 
 void FluentList::setItems(std::vector<FluentListItem> items) {
@@ -661,6 +682,8 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_NCHITTEST:
         // 分层窗口按像素 alpha 命中测试，透明区域会穿透；列表整行都要可点
         return HTCLIENT;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS | DLGC_WANTCHARS;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         BeginPaint(hwnd_, &ps);
@@ -670,6 +693,14 @@ LRESULT FluentList::handle(UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_ERASEBKGND:
         return 1;
+    case WM_SETFOCUS:
+        focused_ = true;
+        renderNow();
+        return 0;
+    case WM_KILLFOCUS:
+        focused_ = false;
+        renderNow();
+        return 0;
     case WM_MOUSEWHEEL: {
         hideTip();
         wheelAccum_ += GET_WHEEL_DELTA_WPARAM(wp);
@@ -827,6 +858,13 @@ void FluentList::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     // 每帧按真实可视高度钳制滚动值（选中定位可能发生在窗口尚未布局完成时）
     scrollY_ = std::clamp(scrollY_, 0.0f, std::max(0.0f, contentHeight() - hDip));
 
+    D2D1_RECT_F surface = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
+    fillRoundRect(rt, br, p.cardFill, surface, metrics::cardRadius);
+    strokeRoundRect(rt, br, p.cardStroke, surface, 1.0f, metrics::cardRadius);
+    if (focused_)
+        strokeRoundRect(rt, br, p.accent, D2D1::RectF(1.5f, 1.5f, wDip - 1.5f, hDip - 1.5f),
+                        1.5f, metrics::cardRadius - 1.0f);
+
     rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, wDip, hDip),
                             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -879,11 +917,55 @@ void FluentList::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     rt->PopAxisAlignedClip();
 }
 
+// ---------------- FluentCard ----------------
+
+bool FluentCard::create(HWND parent, int id) {
+    return createLayered(parent, L"QQMusicLyricFluentCard", wndProc, id);
+}
+
+LRESULT CALLBACK FluentCard::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    FluentCard* self = selfFromMsg<FluentCard>(h, msg, lp);
+    if (msg == WM_NCCREATE)
+        self->hwnd_ = h;
+    if (!self)
+        return DefWindowProcW(h, msg, wp, lp);
+    switch (msg) {
+    case WM_NCHITTEST:
+        return HTTRANSPARENT;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(h, &ps);
+        self->renderNow();
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_DESTROY:
+        self->hwnd_ = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+void FluentCard::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
+    const Palette& p = palette();
+    auto* br = brush(rt);
+    if (!br)
+        return;
+    D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
+    fillRoundRect(rt, br, p.cardFill, rect, metrics::cardRadius);
+    strokeRoundRect(rt, br, p.cardStroke, rect, 1.0f, metrics::cardRadius);
+}
+
 // ---------------- FluentLabel ----------------
 
-bool FluentLabel::create(HWND parent, int id, const wchar_t* text, bool secondary) {
+bool FluentLabel::create(HWND parent, int id, const wchar_t* text, bool secondary, float dipSize,
+                         int weight) {
     text_ = text ? text : L"";
     secondary_ = secondary;
+    dipSize_ = dipSize;
+    weight_ = weight;
     return createLayered(parent, L"QQMusicLyricFluentLabel", wndProc, id);
 }
 
@@ -920,7 +1002,7 @@ LRESULT CALLBACK FluentLabel::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 void FluentLabel::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     const Palette& p = palette();
     auto* br = brush(rt);
-    auto* fmt = textFormat(13.0f);
+    auto* fmt = textFormat(dipSize_, weight_);
     if (!br || !fmt)
         return;
     br->SetColor(secondary_ ? p.textSecondary : p.text);

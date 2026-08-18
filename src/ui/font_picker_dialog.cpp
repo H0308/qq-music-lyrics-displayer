@@ -21,6 +21,8 @@ constexpr int kIdSizeList = 204;
 constexpr int kIdPreview = 205;
 constexpr int kIdOk = 206;
 constexpr int kIdCancel = 207;
+constexpr int kIdTitleLabel = 208;
+constexpr int kIdSubtitleLabel = 209;
 
 constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40, 48};
 
@@ -58,9 +60,12 @@ private:
             return;
         D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
         br->SetColor(p.cardFill);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br);
+        rt->FillRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br);
         br->SetColor(p.cardStroke);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(rect, 4.0f, 4.0f), br, 1.0f);
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(rect, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br,
+            1.0f);
 
         if (family_.empty() || size_ <= 0)
             return;
@@ -130,7 +135,10 @@ private:
 struct FontPickerDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    bool backdrop = false;
 
+    fluent::FluentLabel titleLabel;
+    fluent::FluentLabel subtitleLabel;
     fluent::FluentEdit filterEdit;
     fluent::FluentList familyList;
     fluent::FluentEdit sizeEdit;
@@ -193,8 +201,8 @@ struct FontPickerDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            // DWM 材质只负责窗口效果，拉伸新增客户区仍需由应用明确擦除。
-            {
+            // 只有材质不可用时才铺回退色，否则会把 Mica 擦成不透明底色。
+            if (!backdrop) {
                 HDC hdc = reinterpret_cast<HDC>(wp);
                 RECT rc;
                 GetClientRect(hwnd, &rc);
@@ -256,6 +264,8 @@ struct FontPickerDialog::Impl {
     }
 
     void createControls() {
+        titleLabel.create(hwnd, kIdTitleLabel, L"选择字体", false, 20.0f, 600);
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"搜索字体并实时预览字号", true, 13.0f, 400);
         filterEdit.create(hwnd, kIdFilterEdit, L"输入以筛选字体");
         familyList.create(hwnd, kIdFamilyList);
         familyList.setRowDraw([this](ID2D1DCRenderTarget* rt, const D2D1_RECT_F& rect, int row,
@@ -390,31 +400,40 @@ struct FontPickerDialog::Impl {
         auto px = [&](float dip) { return static_cast<int>(dip * s); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = px(16), gap = px(12);
+        int pad = px(fluent::metrics::pagePadding);
+        int gap = px(fluent::metrics::controlGap);
 
-        int filterH = px(32);
-        filterEdit.move(pad, pad, w - pad * 2, filterH);
+        int titleH = px(28.0f);
+        int subtitleH = px(20.0f);
+        titleLabel.move(pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
 
-        int btnH = px(32);
+        int filterH = px(fluent::metrics::controlHeight);
+        int filterY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
+        filterEdit.move(pad, filterY, w - pad * 2, filterH);
+
+        int btnH = px(fluent::metrics::controlHeight);
         int okW = px(96), cancelW = px(88);
         int btnY = h - pad - btnH;
         okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
         cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
 
-        int previewH = px(88);
+        int previewH = px(96);
         int previewY = btnY - gap - previewH;
         preview.move(pad, previewY, w - pad * 2, previewH);
 
-        int listTop = pad + filterH + gap;
+        int listTop = filterY + filterH + gap;
         int listH = previewY - gap - listTop;
         int familyW = static_cast<int>((w - pad * 2 - gap) * 0.58f);
         familyList.move(pad, listTop, familyW, listH);
 
         int rightX = pad + familyW + gap;
         int rightW = w - pad - rightX;
-        int sizeEditH = px(32);
+        int sizeEditH = px(fluent::metrics::controlHeight);
         sizeEdit.move(rightX, listTop, rightW, sizeEditH);
-        sizeList.move(rightX, listTop + sizeEditH + px(8), rightW, listH - sizeEditH - px(8));
+        int sizeGap = px(fluent::metrics::compactGap);
+        sizeList.move(rightX, listTop + sizeEditH + sizeGap, rightW,
+                      listH - sizeEditH - sizeGap);
     }
 
     void onCommand(int id, int code) {
@@ -480,8 +499,8 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
     UINT dpi = GetDpiForSystem();
     float s = fluent::dipScale(dpi);
     // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
-    RECT rc{0, 0, static_cast<LONG>(std::lround(560 * s)),
-            static_cast<LONG>(std::lround(480 * s))};
+    RECT rc{0, 0, static_cast<LONG>(std::lround(600 * s)),
+            static_cast<LONG>(std::lround(560 * s))};
     AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
                              WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
     int w = rc.right - rc.left;
@@ -495,7 +514,7 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    fluent::styleDialogWindow(impl_->hwnd);
+    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

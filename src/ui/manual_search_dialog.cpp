@@ -28,6 +28,8 @@ constexpr int kIdStatus = 108;
 constexpr int kIdHint = 109;
 constexpr int kIdAdvanceLyric = 110;
 constexpr int kIdDelayLyric = 111;
+constexpr int kIdTitleLabel = 112;
+constexpr int kIdSubtitleLabel = 113;
 
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
@@ -252,12 +254,15 @@ private:
         auto* br = brush(rt);
         if (!br)
             return;
-        // 半透明圆角卡片，叠在亚克力背景上
+        // 半透明圆角卡片，叠在 Mica 背景上
         D2D1_RECT_F card = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
         br->SetColor(p.cardFill);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(card, 4.0f, 4.0f), br);
+        rt->FillRoundedRectangle(
+            D2D1::RoundedRect(card, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br);
         br->SetColor(p.cardStroke);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(card, 4.0f, 4.0f), br, 1.0f);
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(card, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br,
+            1.0f);
 
         float pad = 12.0f;
         if (lines_.empty()) {
@@ -314,7 +319,10 @@ private:
 struct ManualSearchDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    bool backdrop = false;
 
+    fluent::FluentLabel titleLabel;
+    fluent::FluentLabel subtitleLabel;
     fluent::FluentEdit titleEdit;
     fluent::FluentEdit artistEdit;
     fluent::FluentButton searchBtn;
@@ -370,8 +378,8 @@ struct ManualSearchDialog::Impl {
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
         case WM_ERASEBKGND:
-            // 即使 DWM 材质已启用，也要为拉伸新增区域提供确定的底色；否则会暴露黑色表面。
-            {
+            // 材质不可用时才铺回退色，避免覆盖可见的 Mica。
+            if (!backdrop) {
                 HDC hdc = reinterpret_cast<HDC>(wp);
                 RECT rc;
                 GetClientRect(hwnd, &rc);
@@ -422,6 +430,8 @@ struct ManualSearchDialog::Impl {
     }
 
     void createControls() {
+        titleLabel.create(hwnd, kIdTitleLabel, L"手动搜索歌词", false, 20.0f, 600);
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"从多个来源选择并预览歌词", true, 13.0f, 400);
         titleEdit.create(hwnd, kIdTitleEdit, L"歌名");
         titleEdit.setText(targetTitle);
         artistEdit.create(hwnd, kIdArtistEdit, L"歌手");
@@ -453,29 +463,37 @@ struct ManualSearchDialog::Impl {
         auto px = [&](float dip) { return static_cast<int>(dip * s); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = px(16);
-        int gap = px(12);
-        int editH = px(32);
+        int pad = px(fluent::metrics::pagePadding);
+        int gap = px(fluent::metrics::controlGap);
+        int editH = px(fluent::metrics::controlHeight);
         int btnW = px(88);
         int statusH = px(22);
+
+        int titleH = px(28.0f);
+        int subtitleH = px(20.0f);
+        titleLabel.move(pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
 
         // 顶部输入区：歌名 [编辑框] 歌手 [编辑框] [搜索]
         int topRowW = w - pad * 2;
         int editW = (topRowW - gap * 2 - btnW) / 2;
-        titleEdit.move(pad, pad, editW, editH);
-        artistEdit.move(pad + editW + gap, pad, editW, editH);
-        searchBtn.move(w - pad - btnW, pad, btnW, editH);
+        int inputY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
+        titleEdit.move(pad, inputY, editW, editH);
+        artistEdit.move(pad + editW + gap, inputY, editW, editH);
+        searchBtn.move(w - pad - btnW, inputY, btnW, editH);
 
-        int statusY = pad + editH + px(10);
+        int statusY = inputY + editH + px(fluent::metrics::compactGap);
         statusLabel.move(pad, statusY, w - pad * 2, statusH);
 
-        int hintY = statusY + statusH + px(2);
+        int hintY = statusY + statusH + px(4);
         hintLabel.move(pad, hintY, w - pad * 2, statusH);
 
-        int contentTop = hintY + statusH + px(12);
-        int bottomH = px(60); // 内容区与底部按钮之间留出 12 间隙
+        int contentTop = hintY + statusH + px(fluent::metrics::sectionGap);
+        int bottomH = pad + px(fluent::metrics::controlHeight) +
+                      px(fluent::metrics::sectionGap);
         int contentH = h - contentTop - bottomH;
-        int listW = w * 2 / 5;
+        int availableW = w - pad * 2 - gap;
+        int listW = availableW * 2 / 5;
         int rightX = pad + listW + gap;
         int rightW = w - rightX - pad;
 
@@ -487,7 +505,7 @@ struct ManualSearchDialog::Impl {
         // 底部按钮
         int okW = px(120);
         int cancelW = px(88);
-        int btnH = px(32);
+        int btnH = px(fluent::metrics::controlHeight);
         int btnY = h - pad - btnH;
         int timingW = px(100);
         advanceLyricBtn.move(pad, btnY, timingW, btnH);
@@ -742,8 +760,8 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     UINT dpi = GetDpiForSystem();
     float s = fluent::dipScale(dpi);
     // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
-    RECT rc{0, 0, static_cast<LONG>(std::lround(900 * s)),
-            static_cast<LONG>(std::lround(560 * s))};
+    RECT rc{0, 0, static_cast<LONG>(std::lround(920 * s)),
+            static_cast<LONG>(std::lround(640 * s))};
     AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
                              WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
     int w = rc.right - rc.left;
@@ -757,7 +775,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
                         w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    fluent::styleDialogWindow(impl_->hwnd);
+    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

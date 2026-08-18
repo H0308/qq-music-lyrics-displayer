@@ -26,7 +26,7 @@ protected:
     // layered=false 时创建普通子窗口，帧用 BitBlt 提交（用于内含真控件的 FluentEdit：
     // 分层窗口的子控件不会被系统绘制）
     bool createLayered(HWND parent, const wchar_t* className, WNDPROC proc, int id,
-                       bool layered = true);
+                       bool layered = true, bool tabStop = false);
     // 开始一帧：返回渲染目标（坐标单位为 DIP），wDip/hDip 输出客户区 DIP 尺寸
     ID2D1DCRenderTarget* beginFrame(float* wDip, float* hDip);
     void endFrame(); // EndDraw + UpdateLayeredWindow
@@ -72,6 +72,7 @@ private:
     bool accent_ = false;
     bool hover_ = false;
     bool pressed_ = false;
+    bool focused_ = false;
 };
 
 // 圆角输入框卡片，内嵌无边框真 EDIT（保留 IME/选中/剪贴板）。
@@ -142,16 +143,28 @@ private:
     bool scrollDrag_ = false;
     float scrollDragGrabDy_ = 0;
     int wheelAccum_ = 0;
+    bool focused_ = false;
     RowDrawFn rowDraw_;
     HWND tooltip_ = nullptr;
     int tipRow_ = -1;     // tooltip 正显示的行
     bool tipArmed_ = false; // 悬浮计时中（尚未弹出）
 };
 
+// 非交互的半透明卡片表面，用于把一组相关设置从 Mica 背景中分离出来。
+class FluentCard : public LayeredChild {
+public:
+    bool create(HWND parent, int id);
+
+private:
+    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
+    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+};
+
 // 透明文本标签，直接绘制在 Mica 背景上
 class FluentLabel : public LayeredChild {
 public:
-    bool create(HWND parent, int id, const wchar_t* text, bool secondary = false);
+    bool create(HWND parent, int id, const wchar_t* text, bool secondary = false,
+                float dipSize = 13.0f, int weight = 400);
     void setText(const std::wstring& text);
 
 private:
@@ -160,6 +173,8 @@ private:
 
     std::wstring text_;
     bool secondary_ = false;
+    float dipSize_ = 13.0f;
+    int weight_ = 400;
 };
 
 } // namespace fluent
