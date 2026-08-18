@@ -24,6 +24,25 @@ constexpr int kIdCancel = 207;
 constexpr int kIdTitleLabel = 208;
 constexpr int kIdSubtitleLabel = 209;
 
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
+// 最小客户区仍需容纳字体列表、字号列表和底部预览。
+constexpr float kMinClientWidthDip = 520.0f;
+constexpr float kMinClientHeightDip = 468.0f;
+
+void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!dpi)
+        dpi = GetDpiForSystem();
+    float s = fluent::dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * s)),
+            static_cast<LONG>(std::lround(kMinClientHeightDip * s))};
+    if (!AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi))
+        return;
+    info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
+    info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
+}
+
 constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 32, 36, 40, 48};
 
 std::wstring lowerOf(const std::wstring& s) {
@@ -200,6 +219,9 @@ struct FontPickerDialog::Impl {
             // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        case WM_GETMINMAXINFO:
+            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
@@ -520,17 +542,14 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
     // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
     RECT rc{0, 0, static_cast<LONG>(std::lround(600 * s)),
             static_cast<LONG>(std::lround(560 * s))};
-    AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
-                             WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
+    AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     int x = work.left + ((work.right - work.left) - w) / 2;
     int y = work.top + ((work.bottom - work.top) - h) / 2;
 
-    impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
-                                  L"QQMusicLyricFontPicker", L"选择字体",
-                                  WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, x, y, w, h, nullptr,
-                                  nullptr, inst, impl_.get());
+    impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontPicker", L"选择字体",
+                                  kDialogStyle, x, y, w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
     return true;

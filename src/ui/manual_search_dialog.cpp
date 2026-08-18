@@ -31,6 +31,25 @@ constexpr int kIdDelayLyric = 111;
 constexpr int kIdTitleLabel = 112;
 constexpr int kIdSubtitleLabel = 113;
 
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
+// 最小客户区仍需容纳两列输入框、7 行歌词候选和右侧预览。
+constexpr float kMinClientWidthDip = 520.0f;
+constexpr float kMinClientHeightDip = 444.0f;
+
+void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!dpi)
+        dpi = GetDpiForSystem();
+    float s = fluent::dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * s)),
+            static_cast<LONG>(std::lround(kMinClientHeightDip * s))};
+    if (!AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi))
+        return;
+    info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
+    info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
+}
+
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
@@ -392,6 +411,9 @@ struct ManualSearchDialog::Impl {
             // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        case WM_GETMINMAXINFO:
+            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
@@ -785,17 +807,14 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
     RECT rc{0, 0, static_cast<LONG>(std::lround(920 * s)),
             static_cast<LONG>(std::lround(640 * s))};
-    AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, FALSE,
-                             WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
+    AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     int x = work.left + ((work.right - work.left) - w) / 2;
     int y = work.top + ((work.bottom - work.top) - h) / 2;
 
-    impl_->hwnd =
-        CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, L"QQMusicLyricManualSearch",
-                        L"手动搜索歌词", WS_CAPTION | WS_SYSMENU | WS_THICKFRAME, x, y,
-                        w, h, nullptr, nullptr, inst, impl_.get());
+    impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricManualSearch", L"手动搜索歌词",
+                                  kDialogStyle, x, y, w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
     return true;
