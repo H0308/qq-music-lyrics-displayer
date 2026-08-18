@@ -96,13 +96,31 @@ struct SmtcMonitor::Impl {
 
     void refreshAll() {
         Session currentSession{ nullptr };
+        SmtcSnapshot previous;
         {
             std::lock_guard<std::mutex> lk(mtx);
             currentSession = session;
+            previous = snap;
         }
 
         SmtcSnapshot next;
-        const smtc::SmtcSessionIdentity identity = identifySession(currentSession);
+        smtc::SmtcSessionIdentity identity = identifySession(currentSession);
+        if (identity.player == SmtcPlayerType::Unknown && previous.sessionAlive &&
+            currentSession) {
+            try {
+                // 网易云的身份来自 Genres 中的 NCM-{ID}，播放/暂停/切歌的过渡窗口里
+                // 状态或属性会暂时读不全。只要仍是同一来源的会话，就保留上一份身份，
+                // 避免 sessionAlive 短暂翻转为 false 让任务栏窗口整体闪隐。
+                const std::wstring source = currentSession.SourceAppUserModelId().c_str();
+                if (!source.empty() && source == previous.sourceAppUserModelId) {
+                    identity.player = previous.player;
+                    identity.neteaseSongId = previous.neteaseSongId;
+                    identity.sourceAppUserModelId = previous.sourceAppUserModelId;
+                    identity.enhancedSmtc = previous.enhancedSmtc;
+                }
+            } catch (...) {
+            }
+        }
         next.player = identity.player;
         next.neteaseSongId = identity.neteaseSongId;
         next.sourceAppUserModelId = identity.sourceAppUserModelId;
@@ -327,6 +345,18 @@ struct SmtcMonitor::Impl {
                                 }
                             } catch (...) {
                             }
+                        }
+                    }
+                }
+
+                // 暂停不是切换理由：已选中的会话仍存在时保持选中。否则网易云暂停后，
+                // Windows 当前会话若指向另一个暂停的播放器（如 QQ 音乐），显示会跳走，
+                // 后续控制按钮也会作用到错误的会话上。
+                if (!found && selectedSessionAlive && sessions) {
+                    for (auto const& candidate : sessions) {
+                        if (smtc::sameSession(selectedSession, candidate)) {
+                            found = candidate;
+                            break;
                         }
                     }
                 }
