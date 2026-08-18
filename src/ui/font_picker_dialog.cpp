@@ -179,6 +179,7 @@ struct FontPickerDialog::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
+            backdrop = fluent::styleDialogWindow(hwnd);
             enumerateFonts();
             createControls();
             layout();
@@ -186,6 +187,12 @@ struct FontPickerDialog::Impl {
         case WM_SIZE:
             layout();
             // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            backdrop = fluent::styleDialogWindow(hwnd);
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
@@ -200,16 +207,15 @@ struct FontPickerDialog::Impl {
                 SendMessageW(sizeList.hwnd(), WM_MOUSEWHEEL, wp, lp);
             return 0;
         }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            fluent::paintDialogBackground(hwnd, hdc, backdrop);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_ERASEBKGND:
-            // 只有材质不可用时才铺回退色，否则会把 Mica 擦成不透明底色。
-            if (!backdrop) {
-                HDC hdc = reinterpret_cast<HDC>(wp);
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                HBRUSH br = CreateSolidBrush(fluent::fallbackBgColor());
-                FillRect(hdc, &rc, br);
-                DeleteObject(br);
-            }
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_COMMAND:
             onCommand(LOWORD(wp), HIWORD(wp));
@@ -514,7 +520,6 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

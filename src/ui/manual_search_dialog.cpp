@@ -367,6 +367,7 @@ struct ManualSearchDialog::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
+            backdrop = fluent::styleDialogWindow(hwnd);
             createControls();
             layout();
             statusLabel.setText(L"请输入歌名和歌手，点击搜索。");
@@ -377,16 +378,21 @@ struct ManualSearchDialog::Impl {
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            backdrop = fluent::styleDialogWindow(hwnd);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            fluent::paintDialogBackground(hwnd, hdc, backdrop);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_ERASEBKGND:
-            // 材质不可用时才铺回退色，避免覆盖可见的 Mica。
-            if (!backdrop) {
-                HDC hdc = reinterpret_cast<HDC>(wp);
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                HBRUSH br = CreateSolidBrush(fluent::fallbackBgColor());
-                FillRect(hdc, &rc, br);
-                DeleteObject(br);
-            }
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_MOUSEWHEEL: {
             // 滚轮消息默认发往焦点窗口，这里按光标位置转发给列表或预览面板
@@ -775,7 +781,6 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
                         w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd);
     return true;
 }
 

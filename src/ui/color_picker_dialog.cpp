@@ -348,21 +348,28 @@ struct ColorPickerDialog::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
+            backdrop = fluent::styleDialogWindow(hwnd, true);
             createControls();
             layout();
             return 0;
         case WM_SIZE:
             layout();
             return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            backdrop = fluent::styleDialogWindow(hwnd, true);
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            fluent::paintDialogBackground(hwnd, hdc, backdrop);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
         case WM_ERASEBKGND:
-            if (!backdrop) {
-                HDC hdc = reinterpret_cast<HDC>(wp);
-                RECT rc;
-                GetClientRect(hwnd, &rc);
-                HBRUSH br = CreateSolidBrush(fluent::fallbackBgColor());
-                FillRect(hdc, &rc, br);
-                DeleteObject(br);
-            }
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_COMMAND:
             onCommand(LOWORD(wp), HIWORD(wp));
@@ -512,7 +519,6 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
-    impl_->backdrop = fluent::styleDialogWindow(impl_->hwnd, true);
     return true;
 }
 

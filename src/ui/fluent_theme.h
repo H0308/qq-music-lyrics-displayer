@@ -21,7 +21,7 @@ inline constexpr float controlRadius = 6.0f;
 inline constexpr float cardRadius = 8.0f;
 } // namespace metrics
 
-// 系统当前是否为深色模式（读注册表 AppsUseLightTheme）
+// 系统当前是否为深色模式（优先读取 UISettings 前景色，注册表仅作回退）
 bool isDarkMode();
 
 // 系统强调色（取不到时回退 Win11 默认蓝）
@@ -66,6 +66,8 @@ void suppressBorder(HWND hwnd);
 bool styleDialogWindow(HWND hwnd, bool transientWindow = false);
 // 背景材质未生效时的实心回退背景色
 COLORREF fallbackBgColor();
+// 绘制普通对话框根背景；深色模式不依赖 DWM 材质。
+void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop);
 
 // ---- 字体 ----
 // DWrite 渲染用的 UI 字体族名
