@@ -2,10 +2,11 @@
 
 #include "lyric/lyric_provider.h"
 
+#include <array>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
-#include <vector>
 #include <vector>
 
 #include <windows.h>
@@ -25,6 +26,56 @@ struct OverlayMediaInfo {
     bool playing = false;
 };
 
+// 任务栏正式展示的语义场景。频谱柱值不放进完整帧，仍通过任务栏的高频接口更新。
+enum class DisplayScene {
+    NoPlayback,
+    Searching,
+    Lyrics,
+    Message,
+    Spectrum,
+};
+
+// 频谱属于高频展示数据，不进入完整展示帧；TaskbarHost 与 AudioSpectrum 共用 6 段。
+constexpr int kPresentationSpectrumBands = 6;
+
+// 高频播放补丁只携带逐字高亮和行过渡所需的字段。
+// frameRevision 用于阻止旧完整帧之后产生的补丁回写当前宿主。
+struct PlaybackPatch {
+    uint64_t frameRevision = 0;
+    uint64_t requestGeneration = 0;
+    int64_t actualPositionMs = 0;
+    int64_t lineSelectionPositionMs = 0;
+    int currentLine = -1;
+    bool playing = false;
+};
+
+// 高频频谱补丁不复制歌词、媒体信息或状态文字。
+struct SpectrumPatch {
+    uint64_t frameRevision = 0;
+    uint64_t requestGeneration = 0;
+    std::array<float, kPresentationSpectrumBands> bands{};
+};
+
+// 一次低频展示提交所需的完整状态。它只描述 UI 状态，不持有播放器、网络或 provider 对象。
+struct PresentationFrame {
+    uint64_t frameRevision = 0;
+    uint64_t requestGeneration = 0;
+    std::wstring trackKey;
+
+    DisplayScene scene = DisplayScene::NoPlayback;
+    OverlayMediaInfo media;
+    std::vector<LyricLine> lyrics;
+    std::wstring statusText;
+
+    // 真实播放位置用于逐字高亮；行选择位置单独包含提前量。
+    int64_t actualPositionMs = 0;
+    int64_t lineSelectionPositionMs = 0;
+    int currentLine = -1;
+
+    bool visible = false;
+    bool animateTransition = true;
+};
+
 // 窗口宿主抽象：TaskbarHost（任务栏内嵌歌词）实现此接口
 class ILyricHost {
 public:
@@ -33,6 +84,9 @@ public:
     virtual HWND hwnd() const = 0;
 
     virtual void setTickCallback(std::function<void()> cb) = 0;
+    virtual void applyPresentationFrame(const PresentationFrame& frame) = 0;
+    virtual void applyPlaybackPatch(const PlaybackPatch& patch) = 0;
+    virtual void applySpectrumPatch(const SpectrumPatch& patch) = 0;
     virtual void setMediaInfo(const OverlayMediaInfo& info) = 0;
     virtual void setControlCallback(std::function<void(MediaControl)> cb) = 0;
 
@@ -50,8 +104,8 @@ public:
     virtual void show() = 0;
     virtual void hide() = 0;
     virtual void setLyrics(const std::vector<LyricLine>& lines) = 0;
-    virtual void setCurrentLine(int index) = 0;
-    virtual void setPosition(int64_t positionMs) = 0; // 每帧下发播放进度，驱动逐字高亮
+    virtual void setCurrentLine(int index) = 0; // 兼容入口；正式播放链路使用 PlaybackPatch
+    virtual void setPosition(int64_t positionMs) = 0; // 兼容入口；正式播放链路使用 PlaybackPatch
     virtual void setStatusText(const std::wstring& text) = 0;
     // 翻译与罗马音互斥；两者均 false 时只显示原文。
     virtual void setSecondaryLyricMode(bool translation, bool romanization) = 0;

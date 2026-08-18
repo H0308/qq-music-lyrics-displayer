@@ -27,6 +27,9 @@ public:
     HWND hwnd() const override;
 
     void setTickCallback(std::function<void()> cb) override;
+    void applyPresentationFrame(const PresentationFrame& frame) override;
+    void applyPlaybackPatch(const PlaybackPatch& patch) override;
+    void applySpectrumPatch(const SpectrumPatch& patch) override;
     void setMediaInfo(const OverlayMediaInfo& info) override;
     void setControlCallback(std::function<void(MediaControl)> cb) override;
 
@@ -54,9 +57,9 @@ public:
     void setPlatformIconVisible(bool on);
     void setAlbumCoverEffect(AlbumCoverEffect effect);
 
-    // 音频频谱（任务栏独有）：on 控制显隐，bands 为每帧频段电平（0~1，固定 6 段）。
+    // 音频频谱（任务栏独有）：on 控制显隐，bands 为兼容入口；正式播放链路使用 SpectrumPatch。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
-    static constexpr int kSpectrumBands = 6;
+    static constexpr int kSpectrumBands = kPresentationSpectrumBands;
     void setSpectrumVisible(bool on);
     void setSpectrumBands(const std::array<float, kSpectrumBands>& bands);
 

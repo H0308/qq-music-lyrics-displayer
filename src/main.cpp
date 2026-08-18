@@ -66,7 +66,14 @@ constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示�
 
 struct CoverPayload {
     std::wstring key;
+    uint64_t requestGeneration = 0;
     std::shared_ptr<const std::vector<uint8_t>> cover;
+};
+
+struct LyricPayload {
+    std::wstring key;
+    uint64_t requestGeneration = 0;
+    bool ok = false;
 };
 
 std::string utf8Of(const std::wstring& w) {
@@ -164,6 +171,16 @@ std::wstring makeTrackKey(const SmtcSnapshot& snap) {
     return L"qq|" + LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
 }
 
+bool snapshotMatchesTrackKey(const SmtcSnapshot& snap, const std::wstring& key) {
+    if (!snap.sessionAlive)
+        return false;
+    // SMTC 的 Changing/Opened 过渡可能暂时没有完整文案；此时保留当前会话，
+    // 待下一份完整快照再做曲目身份判断。
+    if (snap.title.empty() && snap.neteaseSongId.empty())
+        return true;
+    return key.empty() || makeTrackKey(snap) == key;
+}
+
 struct App {
     DWORD mainThread = GetCurrentThreadId();
     SmtcMonitor monitor;
@@ -181,6 +198,10 @@ struct App {
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
     SmtcPlayerType lastPlayer_ = SmtcPlayerType::Unknown;
     bool lyricLoading_ = false;
+    std::vector<LyricLine> currentLyrics_;
+    uint64_t requestGeneration_ = 0;
+    uint64_t frameRevision_ = 0;
+    PresentationFrame currentFrame_;
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
     HWND trayHwnd = nullptr;
@@ -256,6 +277,97 @@ struct App {
             h->setSecondaryLyricMode(showTranslation, showRomanization);
     }
 
+    OverlayMediaInfo makeMediaInfo(const SmtcSnapshot& snap) const {
+        OverlayMediaInfo mi;
+        const bool retainPrevious = snap.title.empty() && snap.artist.empty() &&
+                                    currentFrame_.frameRevision != 0 &&
+                                    currentFrame_.trackKey == currentKey;
+        if (retainPrevious) {
+            // SMTC 的过渡事件可能暂时没有完整文案，保留当前曲目的媒体字段，
+            // 避免用一份不完整快照拼出“旧歌词 + 空标题”的中间画面。
+            mi = currentFrame_.media;
+        } else {
+            mi.title = snap.title.empty() ? currentTitle : snap.title;
+            mi.artist = snap.artist.empty() ? currentArtist : snap.artist;
+            if (!snap.album.empty()) {
+                mi.artist += L" · ";
+                mi.artist += snap.album;
+            }
+            mi.sourceAppUserModelId = snap.sourceAppUserModelId;
+        }
+        if (snap.thumbnail && !snap.thumbnail->empty())
+            mi.thumbnail = snap.thumbnail;
+        else if (lastSmtcThumbnail && !lastSmtcThumbnail->empty())
+            mi.thumbnail = lastSmtcThumbnail;
+        else
+            mi.thumbnail = lastCover_;
+        mi.canPrev = snap.canPrev;
+        mi.canPlayPause = snap.canPlayPause;
+        mi.canNext = snap.canNext;
+        mi.playing = snap.status == PlaybackStatus::Playing;
+        return mi;
+    }
+
+    DisplayScene displaySceneFor(const SmtcSnapshot& snap) const {
+        if (!snap.sessionAlive)
+            return DisplayScene::NoPlayback;
+        if (lyricLoading_)
+            return DisplayScene::Searching;
+        if (!currentLyrics_.empty())
+            return DisplayScene::Lyrics;
+        return spectrumOn_ ? DisplayScene::Spectrum : DisplayScene::Message;
+    }
+
+    PresentationFrame buildPresentationFrame(const SmtcSnapshot& snap,
+                                              bool animateTransition) const {
+        PresentationFrame frame;
+        frame.requestGeneration = requestGeneration_;
+        frame.trackKey = currentKey;
+        frame.scene = displaySceneFor(snap);
+        frame.media = makeMediaInfo(snap);
+        frame.lyrics = currentLyrics_;
+        frame.actualPositionMs = snap.positionMs;
+        frame.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
+        frame.currentLine = LyricProvider::findLine(frame.lyrics, frame.lineSelectionPositionMs);
+        frame.visible = snap.sessionAlive;
+        frame.animateTransition = animateTransition;
+        if (!snap.sessionAlive)
+            frame.statusText = notRunningStatus();
+        else if (lyricLoading_)
+            frame.statusText = L"歌词加载中…";
+        else if (currentLyrics_.empty())
+            frame.statusText = currentKey.empty() ? L"等待播放…" : L"暂无歌词";
+        return frame;
+    }
+
+    void publishPresentationFrame(const SmtcSnapshot& snap, bool animateTransition,
+                                  bool lyricsChanged = false) {
+        // SMTC 状态/控制/封面事件只刷新帧字段；完整歌词仅在内容事务变化时复制。
+        if (frameRevision_ == 0 || lyricsChanged)
+            currentFrame_.lyrics = currentLyrics_;
+        currentFrame_.requestGeneration = requestGeneration_;
+        currentFrame_.trackKey = currentKey;
+        currentFrame_.scene = displaySceneFor(snap);
+        currentFrame_.media = makeMediaInfo(snap);
+        currentFrame_.actualPositionMs = snap.positionMs;
+        currentFrame_.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
+        currentFrame_.currentLine =
+            LyricProvider::findLine(currentFrame_.lyrics, currentFrame_.lineSelectionPositionMs);
+        currentFrame_.visible = snap.sessionAlive;
+        currentFrame_.animateTransition = animateTransition;
+        if (!snap.sessionAlive)
+            currentFrame_.statusText = notRunningStatus();
+        else if (lyricLoading_)
+            currentFrame_.statusText = L"歌词加载中…";
+        else if (currentLyrics_.empty())
+            currentFrame_.statusText = currentKey.empty() ? L"等待播放…" : L"暂无歌词";
+        else
+            currentFrame_.statusText.clear();
+        currentFrame_.frameRevision = ++frameRevision_;
+        for (auto* h : hosts())
+            h->applyPresentationFrame(currentFrame_);
+    }
+
     bool createTaskbar(HINSTANCE inst) {
         if (taskbarHost) return true;
         auto host = std::make_unique<TaskbarHost>();
@@ -317,31 +429,39 @@ struct App {
             manualTarget.player == SmtcPlayerType::NetEase
                 ? manualTarget.neteaseSongId
                 : L"";
+        const std::wstring manualKey = currentKey;
         manualSearchDialog = std::make_unique<ManualSearchDialog>();
         if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist,
                                         currentDurationMs, targetNeteaseSongId)) {
             manualSearchDialog.reset();
             return;
         }
-        manualSearchDialog->setApplyCallback([this] {
-            updateLyricCapabilities(provider.lines());
-            auto hs = hosts();
-            for (auto* h : hs) {
-                h->setLyrics(provider.lines());
-                h->setStatusText(L"");
-            }
+        manualSearchDialog->setApplyCallback([this, manualKey] {
+            SmtcSnapshot snap = monitor.snapshot();
+            if (manualKey.empty() || !snap.sessionAlive || currentKey != manualKey ||
+                makeTrackKey(snap) != manualKey)
+                return;
+
+            // 手动覆盖是新的内容事务，使仍在队列中的自动歌词/封面结果失效。
+            ++requestGeneration_;
+            currentLyrics_ = provider.lines();
+            lyricLoading_ = false;
+            updateLyricCapabilities(currentLyrics_);
+            publishPresentationFrame(snap, true, true);
             std::wprintf(L"[lyric] manual override applied: %s\n", currentKey.c_str());
             // 手动选择后同样兜底封面
             if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
                 const std::wstring albummid = provider.songInfo().albummid;
                 if (!albummid.empty()) {
                     const std::wstring key = currentKey;
+                    const uint64_t generation = requestGeneration_;
                     coverProvider.requestAsync(albummid,
-                        [this, key](std::shared_ptr<const std::vector<uint8_t>> cover) {
+                        [this, key, generation](std::shared_ptr<const std::vector<uint8_t>> cover) {
                             if (!cover || cover->empty()) return;
-                            auto* payload = new CoverPayload{key, std::move(cover)};
-                            PostThreadMessageW(mainThread, kMsgCoverReady, 1,
-                                               reinterpret_cast<LPARAM>(payload));
+                            auto* payload = new CoverPayload{key, generation, std::move(cover)};
+                            if (!PostThreadMessageW(mainThread, kMsgCoverReady, 1,
+                                                    reinterpret_cast<LPARAM>(payload)))
+                                delete payload;
                         });
                 }
             }
@@ -353,41 +473,11 @@ struct App {
     void syncHost(ILyricHost* host) {
         if (!host)
             return;
-        SmtcSnapshot snap = monitor.snapshot();
-        if (!snap.sessionAlive) {
-            host->setLyrics({});
-            host->setMediaInfo({});
-            host->setStatusText(notRunningStatus());
-            host->hide();
-            return;
+        if (currentFrame_.frameRevision == 0) {
+            currentFrame_ = buildPresentationFrame(monitor.snapshot(), false);
+            currentFrame_.frameRevision = ++frameRevision_;
         }
-        host->show();
-        OverlayMediaInfo mi;
-        mi.title = snap.title;
-        mi.artist = snap.artist;
-        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
-        if (!snap.album.empty()) {
-            mi.artist += L" · ";
-            mi.artist += snap.album;
-        }
-        mi.thumbnail = snap.thumbnail;
-        mi.canPrev = snap.canPrev;
-        mi.canPlayPause = snap.canPlayPause;
-        mi.canNext = snap.canNext;
-        mi.playing = snap.status == PlaybackStatus::Playing;
-        host->setMediaInfo(mi);
-        host->setLyrics(provider.lines());
-        if (provider.lines().empty()) {
-            if (lyricLoading_)
-                host->setStatusText(L"歌词加载中…");
-            else
-                host->setStatusText(currentKey.empty() ? L"等待播放…" : L"暂无歌词");
-        } else {
-            host->setStatusText(L"");
-        }
-        int idx = LyricProvider::findLine(host->lyrics(),
-                                          snap.positionMs + kLyricTransitionLeadMs);
-        host->setCurrentLine(idx);
+        host->applyPresentationFrame(currentFrame_);
     }
 
     void onControl(MediaControl c) {
@@ -400,7 +490,6 @@ struct App {
 
     // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
     void onSmtcChanged() {
-        auto hs = hosts();
         SmtcSnapshot snap = monitor.snapshot();
         if (!snap.sessionAlive) {
             if (spectrumSessionAlive_)
@@ -410,17 +499,18 @@ struct App {
             if (!currentKey.empty() || lastStatus != PlaybackStatus::Stopped)
                 std::wprintf(L"[smtc] QQ Music session closed\n");
             currentKey.clear();
+            currentTitle.clear();
+            currentArtist.clear();
+            currentDurationMs = 0;
             lastStatus = PlaybackStatus::Stopped;
             lyricLoading_ = false;
+            ++requestGeneration_;
+            currentLyrics_.clear();
             updateLyricCapabilities({});
             lastCover_.reset();
+            lastSmtcThumbnail.reset();
             hasAlbumColor_ = false;
-            for (auto* h : hs) {
-                h->setLyrics({});
-                h->setMediaInfo({});
-                h->setStatusText(notRunningStatus());
-                h->hide();
-            }
+            publishPresentationFrame(snap, false, true);
             return;
         }
         lastPlayer_ = snap.player;
@@ -441,29 +531,16 @@ struct App {
             spectrumSessionAlive_ = false;
             spectrumSessionKey_.clear();
         }
-        for (auto* h : hs) h->show();
-        OverlayMediaInfo mi;
-        mi.title = snap.title;
-        mi.artist = snap.artist;
-        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
-        if (!snap.album.empty()) {
-            mi.artist += L" · ";
-            mi.artist += snap.album;
-        }
-        mi.thumbnail = snap.thumbnail;
-        mi.canPrev = snap.canPrev;
-        mi.canPlayPause = snap.canPlayPause;
-        mi.canNext = snap.canNext;
-        mi.playing = snap.status == PlaybackStatus::Playing;
-        for (auto* h : hs) h->setMediaInfo(mi);
+
         lastSmtcThumbnail = snap.thumbnail;
+        const std::wstring key = makeTrackKey(snap);
+        const bool trackChanged = key != currentKey && !snap.title.empty();
         if (snap.status != lastStatus) {
             std::wprintf(L"[smtc] %s status: %s\n", playerName(snap.player),
                          statusName(snap.status));
             lastStatus = snap.status;
         }
-        std::wstring key = makeTrackKey(snap);
-        if (key != currentKey && !snap.title.empty()) {
+        if (trackChanged) {
             currentKey = key;
             currentTitle = snap.title;
             currentArtist = snap.artist;
@@ -478,96 +555,90 @@ struct App {
                              snap.durationMs);
             }
             lastCover_.reset();
+            if (snap.thumbnail && !snap.thumbnail->empty())
+                lastCover_ = snap.thumbnail;
             hasAlbumColor_ = false;
+            currentLyrics_.clear();
             updateLyricCapabilities({});
             if (lyricFollowAlbum_)
                 applyFontColors(); // 新封面就绪前先回到配置色
-            for (auto* h : hs) {
-                h->setLyrics({});
-                h->setStatusText(L"歌词加载中…");
-            }
             lyricLoading_ = true;
+            ++requestGeneration_;
+            const std::wstring requestKey = currentKey;
+            const uint64_t generation = requestGeneration_;
+            auto postLyricResult = [this, requestKey, generation](bool ok) {
+                auto* payload = new LyricPayload{requestKey, generation, ok};
+                if (!PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0,
+                                        reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
+            };
             if (snap.player == SmtcPlayerType::NetEase) {
-                provider.requestNeteaseAsync(
-                    snap.neteaseSongId,
-                    snap.title,
-                    snap.artist,
-                    snap.durationMs,
-                    [this](bool ok) {
-                        PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0, 0);
-                    });
+                provider.requestNeteaseAsync(snap.neteaseSongId, snap.title, snap.artist,
+                                             snap.durationMs, postLyricResult);
             } else {
                 provider.requestAsync(snap.title, snap.artist, snap.durationMs,
-                                      [this](bool ok) {
-                                          PostThreadMessageW(mainThread, kMsgLyricReady,
-                                                             ok ? 1 : 0, 0);
-                                      });
+                                      postLyricResult);
             }
-        }
-        if (snap.thumbnail && !snap.thumbnail->empty())
+        } else if (snap.thumbnail && !snap.thumbnail->empty()) {
             lastCover_ = snap.thumbnail;
+        }
+        publishPresentationFrame(snap, !trackChanged, trackChanged);
         tryExtractAlbumColor();
     }
 
-    void onLyricReady(bool ok) {
+    void onLyricReady(std::unique_ptr<LyricPayload> payload) {
+        if (!payload || payload->key != currentKey ||
+            payload->requestGeneration != requestGeneration_)
+            return;
+        SmtcSnapshot snap = monitor.snapshot();
+        if (!snapshotMatchesTrackKey(snap, currentKey))
+            return;
+
         lyricLoading_ = false;
-        auto hs = hosts();
-        if (ok) {
-            updateLyricCapabilities(provider.lines());
-            for (auto* h : hs) {
-                h->setLyrics(provider.lines());
-                std::wprintf(L"[lyric] loaded %zu lines: %s\n", h->lyrics().size(),
-                    currentKey.c_str());
-            }
+        if (payload->ok) {
+            currentLyrics_ = provider.lines();
+            updateLyricCapabilities(currentLyrics_);
+            std::wprintf(L"[lyric] loaded %zu lines: %s\n", currentLyrics_.size(),
+                         currentKey.c_str());
 
             // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
-            if (monitor.snapshot().player == SmtcPlayerType::QQMusic &&
+            if (snap.player == SmtcPlayerType::QQMusic &&
                 (!lastSmtcThumbnail || lastSmtcThumbnail->empty())) {
                 const std::wstring albummid = provider.songInfo().albummid;
                 if (albummid.empty()) {
                     std::wprintf(L"[cover] no albummid from search: %s\n", currentKey.c_str());
                 } else {
                     const std::wstring key = currentKey;
-                    coverProvider.requestAsync(albummid, [this, key](std::shared_ptr<const std::vector<uint8_t>> cover) {
+                    const uint64_t generation = requestGeneration_;
+                    coverProvider.requestAsync(albummid, [this, key, generation](
+                                                   std::shared_ptr<const std::vector<uint8_t>> cover) {
                         if (!cover || cover->empty()) return;
-                        auto* payload = new CoverPayload{key, std::move(cover)};
-                        PostThreadMessageW(mainThread, kMsgCoverReady, 1,
-                                           reinterpret_cast<LPARAM>(payload));
+                        auto* payload = new CoverPayload{key, generation, std::move(cover)};
+                        if (!PostThreadMessageW(mainThread, kMsgCoverReady, 1,
+                                                reinterpret_cast<LPARAM>(payload)))
+                            delete payload;
                     });
                 }
             }
-        }
-        else {
+        } else {
+            currentLyrics_.clear();
             updateLyricCapabilities({});
-            for (auto* h : hs) {
-                h->setLyrics({});
-                h->setStatusText(L"暂无歌词");
-            }
             std::wprintf(L"[lyric] not found: %s\n", currentKey.c_str());
         }
+        publishPresentationFrame(snap, true, true);
     }
 
     void onCoverReady(std::unique_ptr<CoverPayload> payload) {
-        if (!payload || !payload->cover) return;
-        if (payload->key != currentKey) return; // 已切歌，丢弃过期封面
+        if (!payload || !payload->cover || payload->key != currentKey ||
+            payload->requestGeneration != requestGeneration_)
+            return; // 已切歌或重新加载，丢弃过期封面
+        SmtcSnapshot snap = monitor.snapshot();
+        if (!snapshotMatchesTrackKey(snap, currentKey))
+            return;
         if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
         std::wprintf(L"[cover] loaded from API: %s\n", currentKey.c_str());
-        OverlayMediaInfo mi;
-        SmtcSnapshot snap = monitor.snapshot();
-        mi.title = snap.title;
-        mi.artist = snap.artist;
-        mi.sourceAppUserModelId = snap.sourceAppUserModelId;
-        if (!snap.album.empty()) {
-            mi.artist += L" · ";
-            mi.artist += snap.album;
-        }
-        mi.thumbnail = payload->cover;
-        mi.canPrev = snap.canPrev;
-        mi.canPlayPause = snap.canPlayPause;
-        mi.canNext = snap.canNext;
-        mi.playing = snap.status == PlaybackStatus::Playing;
-        for (auto* h : hosts()) h->setMediaInfo(mi);
         lastCover_ = payload->cover;
+        publishPresentationFrame(snap, true);
         tryExtractAlbumColor();
     }
 
@@ -575,16 +646,34 @@ struct App {
     void onFrame() {
         SmtcSnapshot snap = monitor.snapshot();
         if (!snap.sessionAlive) return;
+        if (!snapshotMatchesTrackKey(snap, currentKey))
+            return;
+        const int64_t lineSelectionPositionMs =
+            snap.positionMs + kLyricTransitionLeadMs;
+        const int idx = LyricProvider::findLine(currentLyrics_, lineSelectionPositionMs);
+        currentFrame_.actualPositionMs = snap.positionMs;
+        currentFrame_.lineSelectionPositionMs = lineSelectionPositionMs;
+        currentFrame_.currentLine = idx;
+        currentFrame_.media.playing = snap.status == PlaybackStatus::Playing;
+        PlaybackPatch playback;
+        playback.frameRevision = currentFrame_.frameRevision;
+        playback.requestGeneration = currentFrame_.requestGeneration;
+        playback.actualPositionMs = snap.positionMs;
+        playback.lineSelectionPositionMs = lineSelectionPositionMs;
+        playback.currentLine = idx;
+        playback.playing = currentFrame_.media.playing;
         for (auto* h : hosts()) {
             // 提前切换显示行，让上下滚动动画在下一句真正开始前完成；
-            // setPosition 仍传真实播放时间，避免逐字高亮跟着提前。
-            int idx = LyricProvider::findLine(h->lyrics(),
-                                              snap.positionMs + kLyricTransitionLeadMs);
-            h->setCurrentLine(idx);
-            h->setPosition(snap.positionMs);
+            // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
+            h->applyPlaybackPatch(playback);
         }
-        if (spectrumOn_ && taskbarHost)
-            taskbarHost->setSpectrumBands(spectrum_.bands());
+        if (spectrumOn_ && taskbarHost) {
+            SpectrumPatch spectrumPatch;
+            spectrumPatch.frameRevision = currentFrame_.frameRevision;
+            spectrumPatch.requestGeneration = currentFrame_.requestGeneration;
+            spectrumPatch.bands = spectrum_.bands();
+            taskbarHost->applySpectrumPatch(spectrumPatch);
+        }
         if (manualSearchDialog && manualSearchDialog->isOpen()) {
             manualSearchDialog->setPlaybackPosition(snap.positionMs);
         }
@@ -1189,7 +1278,8 @@ int main() {
                 app.onSmtcChanged();
             }
             else if (msg.message == kMsgLyricReady) {
-                app.onLyricReady(msg.wParam != 0);
+                app.onLyricReady(std::unique_ptr<LyricPayload>(
+                    reinterpret_cast<LyricPayload*>(msg.lParam)));
             }
             else if (msg.message == kMsgCoverReady) {
                 app.onCoverReady(std::unique_ptr<CoverPayload>(
