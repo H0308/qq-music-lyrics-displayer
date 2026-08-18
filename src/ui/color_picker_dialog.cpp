@@ -331,6 +331,16 @@ struct ColorPickerDialog::Impl {
     bool updatingHex = false; // 防止画布 -> 输入框 -> 画布循环
     ApplyCallback onApply;
 
+    void refreshTheme() {
+        titleLabel.refreshTheme();
+        subtitleLabel.refreshTheme();
+        canvas.refreshTheme();
+        hexLabel.refreshTheme();
+        hexEdit.refreshTheme();
+        okBtn.refreshTheme();
+        cancelBtn.refreshTheme();
+    }
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -358,6 +368,7 @@ struct ColorPickerDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::styleDialogWindow(hwnd, true);
+            refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;

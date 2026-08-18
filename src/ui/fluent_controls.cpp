@@ -92,6 +92,11 @@ void LayeredChild::move(int x, int y, int w, int h) {
     renderNow();
 }
 
+void LayeredChild::refreshTheme() {
+    if (hwnd_)
+        renderNow();
+}
+
 ID2D1DCRenderTarget* LayeredChild::beginFrame(float* wDip, float* hDip) {
     RECT rc;
     GetClientRect(hwnd_, &rc);
@@ -361,6 +366,15 @@ void FluentEdit::setText(const std::wstring& text) {
 
 void FluentEdit::focus() {
     SetFocus(hEdit_);
+}
+
+void FluentEdit::refreshTheme() {
+    LayeredChild::refreshTheme();
+    if (hEdit_) {
+        // 内嵌 EDIT 的文字/背景色通过 WM_CTLCOLOREDIT 在它自己重绘时更新。
+        InvalidateRect(hEdit_, nullptr, TRUE);
+        UpdateWindow(hEdit_);
+    }
 }
 
 LRESULT CALLBACK FluentEdit::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {

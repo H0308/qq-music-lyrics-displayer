@@ -162,6 +162,18 @@ struct FontPickerDialog::Impl {
                 f->Release();
     }
 
+    void refreshTheme() {
+        titleLabel.refreshTheme();
+        subtitleLabel.refreshTheme();
+        filterEdit.refreshTheme();
+        familyList.refreshTheme();
+        sizeEdit.refreshTheme();
+        sizeList.refreshTheme();
+        preview.refreshTheme();
+        okBtn.refreshTheme();
+        cancelBtn.refreshTheme();
+    }
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -193,6 +205,7 @@ struct FontPickerDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::styleDialogWindow(hwnd);
+            refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;

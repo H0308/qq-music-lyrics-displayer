@@ -350,6 +350,22 @@ struct ManualSearchDialog::Impl {
 
     ManualSearchDialog::ApplyCallback onApply;
 
+    void refreshTheme() {
+        titleLabel.refreshTheme();
+        subtitleLabel.refreshTheme();
+        titleEdit.refreshTheme();
+        artistEdit.refreshTheme();
+        searchBtn.refreshTheme();
+        list.refreshTheme();
+        statusLabel.refreshTheme();
+        hintLabel.refreshTheme();
+        okBtn.refreshTheme();
+        cancelBtn.refreshTheme();
+        advanceLyricBtn.refreshTheme();
+        delayLyricBtn.refreshTheme();
+        preview.refreshTheme();
+    }
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -381,6 +397,7 @@ struct ManualSearchDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::styleDialogWindow(hwnd);
+            refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;

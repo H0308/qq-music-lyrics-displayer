@@ -21,6 +21,8 @@ public:
 
     HWND hwnd() const { return hwnd_; }
     void move(int x, int y, int w, int h);
+    // 主题切换时直接提交一帧，不能只依赖父窗口的 WM_PAINT。
+    void refreshTheme();
 
 protected:
     // layered=false 时创建普通子窗口，帧用 BitBlt 提交（用于内含真控件的 FluentEdit：
@@ -83,6 +85,7 @@ public:
     std::wstring text() const;
     void setText(const std::wstring& text);
     void focus();
+    void refreshTheme();
 
 private:
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;

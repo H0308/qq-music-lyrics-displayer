@@ -635,6 +635,28 @@ struct FontColorDialog::Impl {
 
     ApplyCallback onApply;
 
+    void refreshTheme() {
+        titleLabel.refreshTheme();
+        subtitleLabel.refreshTheme();
+        optionsCard.refreshTheme();
+        labelUnplayed.refreshTheme();
+        labelPlayed.refreshTheme();
+        labelAlpha.refreshTheme();
+        labelGlow.refreshTheme();
+        labelOutline.refreshTheme();
+        swatchUnplayed.refreshTheme();
+        swatchPlayed.refreshTheme();
+        swatchGlow.refreshTheme();
+        swatchOutline.refreshTheme();
+        toggleGlow.refreshTheme();
+        toggleOutline.refreshTheme();
+        alphaSlider.refreshTheme();
+        alphaValue.refreshTheme();
+        preview.refreshTheme();
+        okBtn.refreshTheme();
+        cancelBtn.refreshTheme();
+    }
+
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -662,6 +684,7 @@ struct FontColorDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::styleDialogWindow(hwnd);
+            refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
             return 0;
