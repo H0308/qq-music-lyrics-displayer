@@ -2557,7 +2557,9 @@ struct TaskbarHost::Impl {
             return false;
         if (!renderer.animateLyricLayer(1, direction * travel, 0.0f, 0.0f, 1.0f, durationSec))
             return false;
-        renderer.commit();
+        // 不在此单独 Commit：图层上线随 render() 末尾 present() 的 Commit 与底层新帧
+        // 同批生效，避免「图层已上屏、底层旧歌词未撤」的双画帧。动画以提交时刻为起点，
+        // 延迟到 present 提交仅差一次绘制耗时，不影响时长。
         lyricTransitionDCompActive_ = true;
         lyricTransitionDCompEnd_ = false;
         return true;
@@ -2565,27 +2567,21 @@ struct TaskbarHost::Impl {
 
     void syncLyricTransitionDComp(bool showControls, float lyricAreaX, float lyricAreaW, float h,
                                   float lyricBlockH) {
-        bool cleared = false;
+        // 图层增删不单独 Commit：改动挂起到 render() 末尾 present() 的 Commit，与承载
+        // 歌词的底层新帧同批上屏，避免「图层已撤、底层新帧未上屏」的空窗闪烁。
         if (lyricTransitionDCompEnd_ || (showControls && lyricTransitionDCompActive_)) {
             renderer.clearLyricTransitionLayers();
             lyricTransitionDCompActive_ = false;
             lyricTransitionDCompEnd_ = false;
-            cleared = true;
         }
-        if (showControls) {
-            if (cleared)
-                renderer.commit();
+        if (showControls)
             return;
-        }
         if (!lyricTransitionDCompActive_ && lyricTransitionActive_ && !useDoubleLineLyrics() &&
             outgoingLyricLayout_ && lyricLayout_) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
                 renderer.clearLyricTransitionLayers();
                 lyricTransitionDCompActive_ = false;
-                renderer.commit();
             }
-        } else if (cleared) {
-            renderer.commit();
         }
     }
 
