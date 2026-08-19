@@ -714,8 +714,8 @@ struct App {
             hasAlbumColor_ = false;
             currentLyrics_.clear();
             updateLyricCapabilities({});
-            if (lyricFollowAlbum_)
-                applyFontColors(); // 新封面就绪前先回到配置色
+            // 跟随专辑开启时不回退配置色：沿用上一首的专辑色直到新封面取色完成，
+            // 避免歌词加载窗口期配置色闪一下再切回专辑色
             lyricLoading_ = true;
             if (snap.player == SmtcPlayerType::NetEase) {
                 cancelLyricDebounce();
