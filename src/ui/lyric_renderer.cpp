@@ -17,19 +17,28 @@ void LyricRenderer::setDpi(UINT dpi) {
 }
 
 bool LyricRenderer::createFactories() {
-    if (!d2d_) {
+    // D2D/DWrite 工厂创建昂贵（DWrite 要初始化字体子系统，单个可达数十毫秒），
+    // 对话框里每个分层控件各持一个 LyricRenderer，逐个创建会拖慢窗口打开。
+    // 工厂对象不可变，进程内共享同一份，退出时随系统回收。
+    static ID2D1Factory* sharedD2d = [] {
         D2D1_FACTORY_OPTIONS opts{};
-        HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory),
-                                       &opts, reinterpret_cast<void**>(&d2d_));
-        if (FAILED(hr))
-            return false;
-    }
-    if (!dwrite_) {
-        HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                         reinterpret_cast<IUnknown**>(&dwrite_));
-        if (FAILED(hr))
-            return false;
-    }
+        ID2D1Factory* f = nullptr;
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory),
+                                     &opts, reinterpret_cast<void**>(&f))))
+            return static_cast<ID2D1Factory*>(nullptr);
+        return f;
+    }();
+    static IDWriteFactory* sharedDwrite = [] {
+        IDWriteFactory* f = nullptr;
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                       reinterpret_cast<IUnknown**>(&f))))
+            return static_cast<IDWriteFactory*>(nullptr);
+        return f;
+    }();
+    if (!sharedD2d || !sharedDwrite)
+        return false;
+    d2d_ = sharedD2d;
+    dwrite_ = sharedDwrite;
     return true;
 }
 
@@ -156,14 +165,9 @@ void LyricRenderer::releaseAll() {
     }
     bmpW_ = 0;
     bmpH_ = 0;
-    if (dwrite_) {
-        dwrite_->Release();
-        dwrite_ = nullptr;
-    }
-    if (d2d_) {
-        d2d_->Release();
-        d2d_ = nullptr;
-    }
+    // 工厂是进程级共享的，不随实例释放
+    dwrite_ = nullptr;
+    d2d_ = nullptr;
 }
 
 ID2D1Factory* LyricRenderer::d2d() const {
