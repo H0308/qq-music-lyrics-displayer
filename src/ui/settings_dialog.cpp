@@ -433,6 +433,12 @@ struct SettingsDialog::Impl {
         radioSecondaryType->setEnabled(s.secondaryEnabled && s.secondaryAvailability == 0);
         layout();
     }
+
+    void updateFontDescription(const std::wstring& description) {
+        state.fontDesc = description;
+        if (hintFont)
+            hintFont->setText(description);
+    }
 };
 
 SettingsDialog::SettingsDialog() : impl_(std::make_unique<Impl>()) {}
@@ -479,6 +485,11 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
 void SettingsDialog::updateState(const SettingsState& state) {
     if (impl_->hwnd)
         impl_->updateState(state);
+}
+
+void SettingsDialog::updateFontDescription(const std::wstring& description) {
+    if (impl_->hwnd)
+        impl_->updateFontDescription(description);
 }
 
 void SettingsDialog::show() {

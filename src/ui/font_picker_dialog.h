@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/font_style.h"
+
 #include <windows.h>
 
 #include <functional>
@@ -7,10 +9,11 @@
 #include <string>
 
 // Win11 风格字体选择对话框（替代系统 ChooseFont）：
-// 字体族筛选/列表（各行以该字体渲染预览）、字号、示例预览。
+// 字体族筛选/列表（各行以该字体渲染预览）、字号、样式、示例预览。
 class FontPickerDialog {
 public:
-    using ApplyCallback = std::function<void(const std::wstring& family, float sizePt)>;
+    using ApplyCallback =
+        std::function<void(const std::wstring& family, float sizePt, LyricFontStyle style)>;
 
     FontPickerDialog();
     ~FontPickerDialog();
@@ -18,7 +21,8 @@ public:
     FontPickerDialog(const FontPickerDialog&) = delete;
     FontPickerDialog& operator=(const FontPickerDialog&) = delete;
 
-    bool create(HINSTANCE inst, HWND parent, const std::wstring& family, float sizePt);
+    bool create(HINSTANCE inst, HWND parent, const std::wstring& family, float sizePt,
+                LyricFontStyle style);
     void show();
     void destroy();
     bool isOpen() const;

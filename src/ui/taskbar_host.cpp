@@ -433,6 +433,7 @@ struct TaskbarHost::Impl {
     // 字体：默认字体族与软件普通窗口一致（fluent::uiFontFamily）
     float fontSize_ = kBaseFontSize;
     std::wstring fontFamily_ = fluent::uiFontFamily();
+    LyricFontStyle fontStyle_ = LyricFontStyle::Normal;
 
     // 媒体信息
     OverlayMediaInfo media;
@@ -1295,8 +1296,11 @@ struct TaskbarHost::Impl {
                 (*out)->Release();
                 *out = nullptr;
             }
-            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
-                                     DWRITE_FONT_STRETCH_NORMAL, size, L"zh-cn", out);
+            DWRITE_FONT_WEIGHT effectiveWeight =
+                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight;
+            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
+                                     dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, size,
+                                     L"zh-cn", out);
             if (*out) {
                 (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
                 (*out)->SetParagraphAlignment(pa);
@@ -1324,12 +1328,13 @@ struct TaskbarHost::Impl {
     }
 
     void changeFont(float delta) {
-        setFont(fontFamily_, fontSize_ + delta);
+        setFont(fontFamily_, fontSize_ + delta, fontStyle_);
     }
 
-    void setFont(const std::wstring& family, float size) {
+    void setFont(const std::wstring& family, float size, LyricFontStyle style) {
         fontFamily_ = family;
         fontSize_ = std::clamp(size, kMinFont, kMaxFont);
+        fontStyle_ = style;
         recreateFormats();
         layoutDirty_ = true;
         render();
@@ -3207,8 +3212,8 @@ void TaskbarHost::changeFont(float delta) {
     impl_->changeFont(delta);
 }
 
-void TaskbarHost::setFont(const std::wstring& family, float size) {
-    impl_->setFont(family, size);
+void TaskbarHost::setFont(const std::wstring& family, float size, LyricFontStyle style) {
+    impl_->setFont(family, size, style);
 }
 
 void TaskbarHost::setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {

@@ -24,6 +24,8 @@ constexpr int kIdOk = 206;
 constexpr int kIdCancel = 207;
 constexpr int kIdTitleLabel = 208;
 constexpr int kIdSubtitleLabel = 209;
+constexpr int kIdStyleLabel = 210;
+constexpr int kIdStyleGroup = 211;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
@@ -60,11 +62,12 @@ public:
         return createLayered(parent, L"QQMusicLyricFontPreview", wndProc, id);
     }
 
-    void setFont(const std::wstring& family, float sizePt) {
-        if (family == family_ && sizePt == size_)
+    void setFont(const std::wstring& family, float sizePt, LyricFontStyle style) {
+        if (family == family_ && sizePt == size_ && style == style_)
             return;
         family_ = family;
         size_ = sizePt;
+        style_ = style;
         if (fmt_) {
             fmt_->Release();
             fmt_ = nullptr;
@@ -95,9 +98,9 @@ private:
                                            reinterpret_cast<IUnknown**>(&dw))) ||
                 !dw)
                 return;
-            dw->CreateTextFormat(family_.c_str(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size_,
-                                 L"zh-cn", &fmt_);
+            dw->CreateTextFormat(family_.c_str(), nullptr, dwriteWeightOf(style_),
+                                 dwriteStyleOf(style_), DWRITE_FONT_STRETCH_NORMAL, size_, L"zh-cn",
+                                 &fmt_);
             dw->Release();
             if (fmt_) {
                 fmt_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -147,6 +150,7 @@ private:
 
     std::wstring family_;
     float size_ = 0;
+    LyricFontStyle style_ = LyricFontStyle::Normal;
     IDWriteTextFormat* fmt_ = nullptr;
 };
 
@@ -161,6 +165,8 @@ struct FontPickerDialog::Impl {
     fluent::FluentLabel subtitleLabel;
     fluent::FluentEdit filterEdit;
     fluent::FluentList familyList;
+    fluent::FluentLabel styleLabel;
+    fluent::FluentRadioGroup styleGroup;
     fluent::FluentEdit sizeEdit;
     fluent::FluentList sizeList;
     FontPreviewPanel preview;
@@ -169,6 +175,7 @@ struct FontPickerDialog::Impl {
 
     std::wstring initFamily;
     float initSize = 16.0f;
+    LyricFontStyle initStyle = LyricFontStyle::Normal;
 
     std::vector<std::wstring> families;         // 全部字体族
     std::vector<int> filtered;                  // 当前列表行 -> families 下标
@@ -187,6 +194,8 @@ struct FontPickerDialog::Impl {
         subtitleLabel.refreshTheme();
         filterEdit.refreshTheme();
         familyList.refreshTheme();
+        styleLabel.refreshTheme();
+        styleGroup.refreshTheme();
         sizeEdit.refreshTheme();
         sizeList.refreshTheme();
         preview.refreshTheme();
@@ -311,11 +320,15 @@ struct FontPickerDialog::Impl {
 
     void createControls() {
         titleLabel.create(hwnd, kIdTitleLabel, L"选择字体", false, 20.0f, 600);
-        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"搜索字体并实时预览字号", true, 13.0f, 400);
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"搜索字体、字号和样式并实时预览", true, 13.0f, 400);
         filterEdit.create(hwnd, kIdFilterEdit, L"输入以筛选字体");
         familyList.create(hwnd, kIdFamilyList);
         familyList.setRowDraw([this](ID2D1DCRenderTarget* rt, const D2D1_RECT_F& rect, int row,
                                      bool, bool) { drawFamilyRow(rt, rect, row); });
+        styleLabel.create(hwnd, kIdStyleLabel, L"样式", true, 13.0f, 400);
+        styleGroup.create(hwnd, kIdStyleGroup);
+        styleGroup.setOptions({L"常规", L"加粗", L"斜体", L"粗斜体"});
+        styleGroup.setSelectedIndex(static_cast<int>(initStyle));
         sizeEdit.create(hwnd, kIdSizeEdit, L"字号");
         sizeList.create(hwnd, kIdSizeList);
         preview.create(hwnd, kIdPreview);
@@ -381,8 +394,15 @@ struct FontPickerDialog::Impl {
         }
     }
 
+    LyricFontStyle currentStyle() const {
+        int index = styleGroup.selectedIndex();
+        if (index < 0 || index > static_cast<int>(LyricFontStyle::BoldItalic))
+            return initStyle;
+        return static_cast<LyricFontStyle>(index);
+    }
+
     void updatePreview() {
-        preview.setFont(currentFamily(), currentSize());
+        preview.setFont(currentFamily(), currentSize(), currentStyle());
     }
 
     void syncSizeListSelection() {
@@ -469,6 +489,13 @@ struct FontPickerDialog::Impl {
         preview.move(pad, previewY, w - pad * 2, previewH);
 
         int listTop = filterY + filterH + gap;
+        int styleH = px(fluent::metrics::controlHeight);
+        int styleLabelW = px(48.0f);
+        styleLabel.move(pad, listTop, styleLabelW, styleH);
+        styleGroup.move(pad + styleLabelW + gap, listTop,
+                        w - pad * 2 - styleLabelW - gap, styleH);
+
+        listTop += styleH + gap;
         int listH = previewY - gap - listTop;
         int familyW = static_cast<int>((w - pad * 2 - gap) * 0.58f);
         familyList.move(pad, listTop, familyW, listH);
@@ -491,6 +518,8 @@ struct FontPickerDialog::Impl {
             updatePreview();
         } else if (id == kIdFamilyList && code == LBN_DBLCLK) {
             applyAndClose();
+        } else if (id == kIdStyleGroup && code == BN_CLICKED) {
+            updatePreview();
         } else if (id == kIdSizeList && code == LBN_SELCHANGE) {
             int row = sizeList.selectedIndex();
             if (row >= 0)
@@ -506,7 +535,7 @@ struct FontPickerDialog::Impl {
 
     void applyAndClose() {
         if (onApply)
-            onApply(currentFamily(), currentSize());
+            onApply(currentFamily(), currentSize(), currentStyle());
         destroy();
     }
 
@@ -525,11 +554,12 @@ FontPickerDialog::~FontPickerDialog() {
 }
 
 bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& family,
-                              float sizePt) {
+                              float sizePt, LyricFontStyle style) {
     impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口是消息窗口，不能作为所有者
     impl_->inst = inst;
     impl_->initFamily = family;
     impl_->initSize = sizePt;
+    impl_->initStyle = style;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

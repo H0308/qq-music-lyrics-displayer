@@ -1,5 +1,6 @@
 #pragma once
 
+#include "ui/font_style.h"
 #include "lyric/lyric_provider.h"
 
 #include <array>
@@ -97,7 +98,7 @@ public:
     virtual const std::wstring& statusText() const = 0;
 
     virtual void changeFont(float delta) = 0;
-    virtual void setFont(const std::wstring& family, float size) = 0;
+    virtual void setFont(const std::wstring& family, float size, LyricFontStyle style) = 0;
     // 歌词颜色：已播放色 + 逐字未播放色（含不透明度，单位 %）。LRC 单行歌词只用已播放色
     virtual void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) = 0;
 

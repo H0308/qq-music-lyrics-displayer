@@ -458,6 +458,7 @@ public:
 
     void setState(const FontColorDialog::State& s) {
         bool fontChanged = s.fontFamily != state_.fontFamily ||
+                           s.fontStyle != state_.fontStyle ||
                            s.lyricFontSize != state_.lyricFontSize;
         state_ = s;
         if (fontChanged)
@@ -484,7 +485,7 @@ private:
             const wchar_t* family =
                 state_.fontFamily.empty() ? fluent::uiFontFamily() : state_.fontFamily.c_str();
             if (FAILED(dwrite_->CreateTextFormat(
-                    family, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                    family, nullptr, dwriteWeightOf(state_.fontStyle), dwriteStyleOf(state_.fontStyle),
                     DWRITE_FONT_STRETCH_NORMAL, state_.lyricFontSize, L"zh-cn", &fmt_)))
                 return;
             if (state_.fontFamily.empty())

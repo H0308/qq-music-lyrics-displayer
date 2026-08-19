@@ -40,7 +40,7 @@ public:
     const std::wstring& statusText() const override;
 
     void changeFont(float delta) override;
-    void setFont(const std::wstring& family, float size) override;
+    void setFont(const std::wstring& family, float size, LyricFontStyle style) override;
     void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) override;
 
     // 歌词外观：光晕 / 描边（任务栏独有，桌面歌词有自己的配色），开关和颜色分别独立

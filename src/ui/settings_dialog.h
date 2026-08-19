@@ -20,7 +20,7 @@ struct SettingsState {
     bool secondaryEnabled = true;
     bool preferRomanization = false;
     int secondaryAvailability = 0; // 0 可用 1 检查中 2 当前歌曲无翻译/罗马音
-    std::wstring fontDesc;         // 字体页提示文字（如 "Microsoft YaHei UI, 16px"）
+    std::wstring fontDesc;         // 字体页提示文字（如 "Microsoft YaHei UI, 16px, 常规"）
 };
 
 // 设置变更回调：用户操作即时生效（与右键菜单语义一致）
@@ -53,6 +53,7 @@ public:
                 SettingsActions actions);
     // 窗口复用（关闭仅隐藏）时，打开前同步最新状态快照
     void updateState(const SettingsState& state);
+    void updateFontDescription(const std::wstring& description);
     void show();
     void destroy();
     bool isOpen() const;

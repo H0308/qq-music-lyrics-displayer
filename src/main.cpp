@@ -1,5 +1,6 @@
 #include "lyric/cover_provider.h"
 #include "lyric/lyric_provider.h"
+#include "ui/font_style.h"
 #include "ui/lyric_window.h"
 #include "ui/taskbar_host.h"
 #include "ui/about_dialog.h"
@@ -98,6 +99,34 @@ std::wstring wideOf(const std::string& s) {
     std::wstring w(n, L'\0');
     MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
     return w;
+}
+
+LyricFontStyle fontStyleOf(const std::string& value) {
+    if (value == "bold")
+        return LyricFontStyle::Bold;
+    if (value == "italic")
+        return LyricFontStyle::Italic;
+    if (value == "boldItalic")
+        return LyricFontStyle::BoldItalic;
+    return LyricFontStyle::Normal;
+}
+
+const char* fontStyleName(LyricFontStyle style) {
+    switch (style) {
+    case LyricFontStyle::Bold: return "bold";
+    case LyricFontStyle::Italic: return "italic";
+    case LyricFontStyle::BoldItalic: return "boldItalic";
+    default: return "normal";
+    }
+}
+
+const wchar_t* fontStyleLabel(LyricFontStyle style) {
+    switch (style) {
+    case LyricFontStyle::Bold: return L"加粗";
+    case LyricFontStyle::Italic: return L"斜体";
+    case LyricFontStyle::BoldItalic: return L"粗斜体";
+    default: return L"常规";
+    }
 }
 
 // %APPDATA%\QQMusicLyric（不存在则创建）
@@ -223,6 +252,7 @@ struct App {
     bool hasUserFont_ = false;
     std::wstring fontFamily_ = fluent::uiFontFamily(); // 与普通窗口默认字体族一致
     float fontSize_ = 16.0f;
+    LyricFontStyle fontStyle_ = LyricFontStyle::Normal;
 
     // 歌词外观（两宿主通用，新建宿主时应用）
     COLORREF lyricColor_ = RGB(49, 194, 124);        // 已播放颜色，默认 QQ 绿
@@ -484,7 +514,7 @@ struct App {
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)
-            taskbarHost->setFont(fontFamily_, fontSize_);
+            taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
         taskbarHost->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
         taskbarHost->setFontGlow(lyricGlow_);
         taskbarHost->setFontOutline(lyricOutline_);
@@ -890,6 +920,7 @@ void App::loadSettings() {
         if (!fam.empty())
             fontFamily_ = fam;
         fontSize_ = (float)j.value("fontSize", 16.0);
+        fontStyle_ = fontStyleOf(j.value("fontStyle", std::string("normal")));
         lyricColor_ = (COLORREF)j.value("lyricColor", (unsigned)RGB(49, 194, 124));
         // 未播放色默认跟随已播放色：老配置升级后视觉与之前完全一致
         lyricUnplayedColor_ = (COLORREF)j.value("lyricUnplayedColor", (unsigned)lyricColor_);
@@ -942,6 +973,7 @@ void App::saveSettings() {
         j["hasUserFont"] = hasUserFont_;
         j["fontFamily"] = utf8Of(fontFamily_);
         j["fontSize"] = fontSize_;
+        j["fontStyle"] = fontStyleName(fontStyle_);
         j["lyricColor"] = (unsigned)lyricColor_;
         j["lyricUnplayedColor"] = (unsigned)lyricUnplayedColor_;
         j["lyricUnplayedAlpha"] = lyricUnplayedAlphaPct_;
@@ -1154,18 +1186,23 @@ void App::pickFont() {
         return;
     }
     fontPickerDialog = std::make_unique<FontPickerDialog>();
-    if (!fontPickerDialog->create(GetModuleHandleW(nullptr), trayHwnd, fontFamily_, fontSize_)) {
+    if (!fontPickerDialog->create(GetModuleHandleW(nullptr), trayHwnd, fontFamily_, fontSize_,
+                                  fontStyle_)) {
         fontPickerDialog.reset();
         return;
     }
-    fontPickerDialog->setApplyCallback([this](const std::wstring& family, float size) {
-        fontFamily_ = family;
-        fontSize_ = std::clamp(size, 4.0f, 96.0f);
-        hasUserFont_ = true;
-        if (taskbarHost)
-            taskbarHost->setFont(fontFamily_, fontSize_);
-        saveSettings();
-    });
+    fontPickerDialog->setApplyCallback(
+        [this](const std::wstring& family, float size, LyricFontStyle style) {
+            fontFamily_ = family;
+            fontSize_ = std::clamp(size, 4.0f, 96.0f);
+            fontStyle_ = style;
+            hasUserFont_ = true;
+            if (taskbarHost)
+                taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
+            saveSettings();
+            if (settingsDialog)
+                settingsDialog->updateFontDescription(currentSettingsState().fontDesc);
+        });
     fontPickerDialog->show();
 }
 
@@ -1211,6 +1248,7 @@ void App::showFontColorDialog() {
     st.glowOn = lyricGlow_;
     st.outlineOn = lyricOutline_;
     st.fontFamily = fontFamily_;
+    st.fontStyle = fontStyle_;
     // 与任务栏实际渲染字号一致：setFont 钳制 9..18，绘制时放大 1.18 倍
     float baseSize = hasUserFont_ ? fontSize_ : 12.0f;
     st.lyricFontSize = std::clamp(baseSize, 9.0f, 18.0f) * 1.18f;
@@ -1262,7 +1300,8 @@ SettingsState App::currentSettingsState() const {
     st.secondaryAvailability = lyricLoading_ ? 1
                                : (!currentHasTranslation_ && !currentHasRomanization_) ? 2 : 0;
     st.fontDesc = fontFamily_ + L", " +
-                  std::to_wstring(static_cast<int>(std::lround(fontSize_))) + L"px";
+                  std::to_wstring(static_cast<int>(std::lround(fontSize_))) + L"px, " +
+                  fontStyleLabel(fontStyle_);
     return st;
 }
 

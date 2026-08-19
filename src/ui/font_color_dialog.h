@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/font_style.h"
+
 #include <windows.h>
 
 #include <functional>
@@ -23,6 +25,7 @@ public:
         bool glowOn = false;
         bool outlineOn = false;
         std::wstring fontFamily;   // 预览用字体族，空则用 UI 默认字体
+        LyricFontStyle fontStyle = LyricFontStyle::Normal; // 预览用字体样式
         float lyricFontSize = 14.0f; // 预览用歌词字号（与实际任务栏渲染字号一致）
     };
 
