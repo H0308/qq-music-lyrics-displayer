@@ -180,4 +180,57 @@ private:
     int weight_ = 400;
 };
 
+// Win11 风格开关：点击/空格切换状态，向父窗口发送 WM_COMMAND/BN_CLICKED。
+// 建议尺寸 40x20 DIP（kWidth/kHeight）。
+class FluentToggle : public LayeredChild {
+public:
+    static constexpr float kWidth = 40.0f;
+    static constexpr float kHeight = 20.0f;
+
+    bool create(HWND parent, int id, bool checked);
+    bool checked() const { return checked_; }
+    void setChecked(bool checked);
+    void setEnabled(bool enabled);
+
+private:
+    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
+    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
+
+    int id_ = 0;
+    bool checked_ = false;
+    bool hover_ = false;
+    bool focused_ = false;
+    bool mouseFocus_ = false;
+    bool focusVisible_ = false;
+};
+
+// 横向单选组：圆形选项 + 文本，选中变化向父窗口发送 WM_COMMAND/BN_CLICKED，
+// 父窗口随后用 selectedIndex() 读取新选中项。选项文本宽度在渲染时用 DWrite 实测。
+class FluentRadioGroup : public LayeredChild {
+public:
+    bool create(HWND parent, int id);
+    void setOptions(std::vector<std::wstring> options);
+    int selectedIndex() const { return selected_; }
+    void setSelectedIndex(int idx);
+    void setEnabled(bool enabled);
+    // 内容宽度（DIP）：在选项文本实测后有效，用于布局期右对齐
+    float contentWidth() const { return contentW_; }
+
+private:
+    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
+    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
+    int optionAt(float xDip) const;
+    void notifyChange();
+
+    int id_ = 0;
+    std::vector<std::wstring> options_;
+    std::vector<D2D1_RECT_F> optionRects_; // DIP，render 时缓存供命中测试
+    float contentW_ = 0.0f;
+    int selected_ = -1;
+    int hover_ = -1;
+    int pressed_ = -1;
+};
+
 } // namespace fluent

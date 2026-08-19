@@ -6,6 +6,7 @@
 #include "ui/manual_search_dialog.h"
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
+#include "ui/settings_dialog.h"
 #include "ui/fluent_menu.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
@@ -62,6 +63,7 @@ constexpr UINT kCmdLyricAlignLeft = 123;
 constexpr UINT kCmdLyricAlignCenter = 124;
 constexpr UINT kCmdLyricAlignRight = 125;
 constexpr UINT kCmdHoverPlaybackControls = 126;
+constexpr UINT kCmdSettings = 127;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 
 struct CoverPayload {
@@ -191,6 +193,7 @@ struct App {
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
+    std::unique_ptr<SettingsDialog> settingsDialog;
     std::wstring currentKey;
     std::wstring currentTitle;
     std::wstring currentArtist;
@@ -275,6 +278,98 @@ struct App {
         const bool showRomanization = secondaryLyricEnabled_ && preferRomanization_;
         for (auto* h : hosts())
             h->setSecondaryLyricMode(showTranslation, showRomanization);
+    }
+
+    // 设置项统一直接生效入口：右键菜单与设置页共用同一套应用逻辑
+    void applySongInfoVisible(bool on) {
+        songInfoVisible_ = on;
+        if (taskbarHost)
+            taskbarHost->setSongInfoVisible(on);
+        saveSettings();
+    }
+
+    void applyAlbumCoverVisible(bool on) {
+        albumCoverVisible_ = on;
+        if (taskbarHost)
+            taskbarHost->setAlbumCoverVisible(on);
+        saveSettings();
+    }
+
+    void applyPlatformIconVisible(bool on) {
+        platformIconVisible_ = on;
+        if (taskbarHost)
+            taskbarHost->setPlatformIconVisible(on);
+        saveSettings();
+    }
+
+    void applyCoverEffect(bool vinyl) {
+        albumCoverEffect_ = vinyl ? AlbumCoverEffect::Vinyl : AlbumCoverEffect::Default;
+        if (taskbarHost)
+            taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
+        saveSettings();
+    }
+
+    void applySpectrumOn(bool on) {
+        spectrumOn_ = on;
+        if (on && taskbarHost) {
+            SmtcSnapshot snap = monitor.snapshot();
+            const wchar_t* processName = spectrumProcessName(snap.player);
+            if (*processName)
+                spectrum_.setTargetProcessName(std::wstring(processName));
+            spectrum_.start();
+            taskbarHost->setSpectrumVisible(true);
+        } else {
+            spectrum_.stop();
+            if (taskbarHost)
+                taskbarHost->setSpectrumVisible(false);
+        }
+        saveSettings();
+    }
+
+    void applyHoverControls(bool on) {
+        hoverPlaybackControls_ = on;
+        if (taskbarHost)
+            taskbarHost->setControlsOnHover(on);
+        saveSettings();
+    }
+
+    void applyFollowAlbum(bool on) {
+        lyricFollowAlbum_ = on;
+        if (on) {
+            tryExtractAlbumColor(); // 立即用当前封面取色
+        } else {
+            hasAlbumColor_ = false; // 下次开启时重新提取
+            applyFontColors();      // 恢复配置色
+        }
+        saveSettings();
+    }
+
+    void applyDoubleLineLyrics(bool on) {
+        doubleLineLyricsEnabled_ = on;
+        if (taskbarHost)
+            taskbarHost->setDoubleLineLyrics(on);
+        saveSettings();
+    }
+
+    void applyLyricAlignment(int alignment) {
+        lyricAlignment_ = alignment == 1 ? LyricAlignment::Center
+                          : alignment == 2 ? LyricAlignment::Right
+                                           : LyricAlignment::Left;
+        if (taskbarHost)
+            taskbarHost->setLyricAlignment(lyricAlignment_);
+        saveSettings();
+    }
+
+    void applySecondaryEnabled(bool on) {
+        secondaryLyricEnabled_ = on;
+        applySecondaryLyricMode();
+        saveSettings();
+    }
+
+    void applyPreferRomanization(bool on) {
+        preferRomanization_ = on;
+        applySecondaryLyricMode();
+        saveSettings();
     }
 
     OverlayMediaInfo makeMediaInfo(const SmtcSnapshot& snap) const {
@@ -685,6 +780,7 @@ struct App {
     void updateTrayIcon();
     void showTrayMenu();
     void onMenuCommand(int cmd);
+    void showSettings();
     void pickFont();
     void showFontColorDialog();
     void showAbout();
@@ -877,61 +973,11 @@ void App::showTrayMenu() {
         sub.checked = taskbarPosition_ == 1;
         pos.submenu.push_back(sub);
         items.push_back(std::move(pos));
-        addItem(kCmdSongInfo, L"显示歌曲信息", songInfoVisible_);
-        addItem(kCmdAlbumCover, L"显示专辑封面", albumCoverVisible_);
-        addItem(kCmdPlatformIcon, L"显示平台图标", platformIconVisible_);
-        fluent::FluentMenuItem coverEffect;
-        coverEffect.text = L"专辑封面效果";
-        fluent::FluentMenuItem effectItem;
-        effectItem.id = kCmdAlbumCoverEffectDefault;
-        effectItem.text = L"默认";
-        effectItem.checked = albumCoverEffect_ == AlbumCoverEffect::Default;
-        coverEffect.submenu.push_back(effectItem);
-        effectItem.id = kCmdAlbumCoverEffectVinyl;
-        effectItem.text = L"黑胶唱片";
-        effectItem.checked = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
-        coverEffect.submenu.push_back(effectItem);
-        items.push_back(std::move(coverEffect));
-        addItem(kCmdSpectrum, L"频谱", spectrumOn_);
-        addItem(kCmdHoverPlaybackControls, L"悬浮时显示播放控件", hoverPlaybackControls_);
-    }
-    addSeparator();
-    addItem(kCmdPickFont, L"字体…");
-    if (taskbarHost) {
-        addItem(kCmdFontColorEffect, L"字体颜色与效果…");
-        addItem(kCmdFollowAlbum, L"已播放颜色跟随专辑", lyricFollowAlbum_);
     }
     addItem(kCmdManualSearch, L"手动搜索歌词");
-    addItem(kCmdDoubleLineLyrics, L"双行歌词", doubleLineLyricsEnabled_);
-    fluent::FluentMenuItem lyricAlignment;
-    lyricAlignment.text = L"歌词对齐";
-    fluent::FluentMenuItem alignmentItem;
-    alignmentItem.id = kCmdLyricAlignLeft;
-    alignmentItem.text = L"左对齐";
-    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Left;
-    lyricAlignment.submenu.push_back(alignmentItem);
-    alignmentItem.id = kCmdLyricAlignCenter;
-    alignmentItem.text = L"居中对齐";
-    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Center;
-    lyricAlignment.submenu.push_back(alignmentItem);
-    alignmentItem.id = kCmdLyricAlignRight;
-    alignmentItem.text = L"右对齐";
-    alignmentItem.checked = lyricAlignment_ == LyricAlignment::Right;
-    lyricAlignment.submenu.push_back(alignmentItem);
-    items.push_back(std::move(lyricAlignment));
-    addItem(kCmdSecondaryLyric, L"开启翻译/罗马音", secondaryLyricEnabled_);
-    if (lyricLoading_) {
-        addItem(kCmdSwitchSecondaryLyric, L"正在检查翻译和罗马音", false, false);
-    } else if (!currentHasTranslation_ && !currentHasRomanization_) {
-        addItem(kCmdSwitchSecondaryLyric, L"无罗马音和翻译", false, false);
-    } else if (preferRomanization_) {
-        // 只要当前歌曲存在任意一种辅助歌词，切换按钮就保持可用。
-        // 目标类型不存在时由歌词渲染层显示空的辅助行，保留原文歌词。
-        addItem(kCmdSwitchSecondaryLyric, L"切换到翻译", false, true);
-    } else {
-        addItem(kCmdSwitchSecondaryLyric, L"切换到罗马音", false, true);
-    }
     addSeparator();
+    // 其余设置项集中到设置页
+    addItem(kCmdSettings, L"设置…");
     addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
     addSeparator();
     addItem(kCmdAbout, L"关于");
@@ -957,26 +1003,10 @@ void App::onMenuCommand(int cmd) {
         saveSettings();
         break;
     case kCmdSpectrum:
-        spectrumOn_ = !spectrumOn_;
-        if (spectrumOn_ && taskbarHost) {
-            SmtcSnapshot snap = monitor.snapshot();
-            const wchar_t* processName = spectrumProcessName(snap.player);
-            if (*processName)
-                spectrum_.setTargetProcessName(std::wstring(processName));
-            spectrum_.start();
-            taskbarHost->setSpectrumVisible(true);
-        } else {
-            spectrum_.stop();
-            if (taskbarHost)
-                taskbarHost->setSpectrumVisible(false);
-        }
-        saveSettings();
+        applySpectrumOn(!spectrumOn_);
         break;
     case kCmdHoverPlaybackControls:
-        hoverPlaybackControls_ = !hoverPlaybackControls_;
-        if (taskbarHost)
-            taskbarHost->setControlsOnHover(hoverPlaybackControls_);
-        saveSettings();
+        applyHoverControls(!hoverPlaybackControls_);
         break;
     case kCmdPickFont:
         pickFont();
@@ -985,70 +1015,40 @@ void App::onMenuCommand(int cmd) {
         showFontColorDialog();
         break;
     case kCmdFollowAlbum:
-        lyricFollowAlbum_ = !lyricFollowAlbum_;
-        if (lyricFollowAlbum_) {
-            tryExtractAlbumColor(); // 立即用当前封面取色
-        } else {
-            hasAlbumColor_ = false; // 下次开启时重新提取
-            applyFontColors();      // 恢复配置色
-        }
-        saveSettings();
+        applyFollowAlbum(!lyricFollowAlbum_);
         break;
     case kCmdManualSearch:
         showManualSearch(GetModuleHandleW(nullptr));
         break;
     case kCmdSecondaryLyric:
-        secondaryLyricEnabled_ = !secondaryLyricEnabled_;
-        applySecondaryLyricMode();
-        saveSettings();
+        applySecondaryEnabled(!secondaryLyricEnabled_);
         break;
     case kCmdDoubleLineLyrics:
-        doubleLineLyricsEnabled_ = !doubleLineLyricsEnabled_;
-        if (taskbarHost)
-            taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
-        saveSettings();
+        applyDoubleLineLyrics(!doubleLineLyricsEnabled_);
         break;
     case kCmdLyricAlignLeft:
     case kCmdLyricAlignCenter:
     case kCmdLyricAlignRight:
-        lyricAlignment_ = cmd == kCmdLyricAlignCenter
-                              ? LyricAlignment::Center
-                              : cmd == kCmdLyricAlignRight ? LyricAlignment::Right
-                                                           : LyricAlignment::Left;
-        if (taskbarHost)
-            taskbarHost->setLyricAlignment(lyricAlignment_);
-        saveSettings();
+        applyLyricAlignment(cmd == kCmdLyricAlignCenter ? 1 : cmd == kCmdLyricAlignRight ? 2 : 0);
         break;
     case kCmdSongInfo:
-        songInfoVisible_ = !songInfoVisible_;
-        if (taskbarHost)
-            taskbarHost->setSongInfoVisible(songInfoVisible_);
-        saveSettings();
+        applySongInfoVisible(!songInfoVisible_);
         break;
     case kCmdAlbumCover:
-        albumCoverVisible_ = !albumCoverVisible_;
-        if (taskbarHost)
-            taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
-        saveSettings();
+        applyAlbumCoverVisible(!albumCoverVisible_);
         break;
     case kCmdPlatformIcon:
-        platformIconVisible_ = !platformIconVisible_;
-        if (taskbarHost)
-            taskbarHost->setPlatformIconVisible(platformIconVisible_);
-        saveSettings();
+        applyPlatformIconVisible(!platformIconVisible_);
         break;
     case kCmdAlbumCoverEffectDefault:
     case kCmdAlbumCoverEffectVinyl:
-        albumCoverEffect_ = cmd == kCmdAlbumCoverEffectVinyl ? AlbumCoverEffect::Vinyl
-                                                               : AlbumCoverEffect::Default;
-        if (taskbarHost)
-            taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
-        saveSettings();
+        applyCoverEffect(cmd == kCmdAlbumCoverEffectVinyl);
         break;
     case kCmdSwitchSecondaryLyric:
-        preferRomanization_ = !preferRomanization_;
-        applySecondaryLyricMode();
-        saveSettings();
+        applyPreferRomanization(!preferRomanization_);
+        break;
+    case kCmdSettings:
+        showSettings();
         break;
     case kCmdAutoStart: {
         bool enable = !autoStartEnabled();
@@ -1163,6 +1163,53 @@ void App::setAutoCheckOnStartup(bool enabled) {
         return;
     autoCheckOnStartup_ = enabled;
     saveSettings();
+}
+
+void App::showSettings() {
+    if (settingsDialog && settingsDialog->isOpen()) {
+        settingsDialog->show();
+        return;
+    }
+    SettingsState st;
+    st.songInfoVisible = songInfoVisible_;
+    st.albumCoverVisible = albumCoverVisible_;
+    st.platformIconVisible = platformIconVisible_;
+    st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
+    st.spectrumOn = spectrumOn_;
+    st.hoverControls = hoverPlaybackControls_;
+    st.followAlbum = lyricFollowAlbum_;
+    st.doubleLineLyrics = doubleLineLyricsEnabled_;
+    st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
+                            ? 1
+                            : lyricAlignment_ == LyricAlignment::Right ? 2 : 0;
+    st.secondaryEnabled = secondaryLyricEnabled_;
+    st.preferRomanization = preferRomanization_;
+    st.secondaryAvailability = lyricLoading_ ? 1
+                               : (!currentHasTranslation_ && !currentHasRomanization_) ? 2 : 0;
+    st.fontDesc = fontFamily_ + L", " +
+                  std::to_wstring(static_cast<int>(std::lround(fontSize_))) + L"px";
+
+    SettingsActions act;
+    act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
+    act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
+    act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
+    act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
+    act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
+    act.onHoverControls = [this](bool on) { applyHoverControls(on); };
+    act.onPickFont = [this] { pickFont(); };
+    act.onFontColorEffect = [this] { showFontColorDialog(); };
+    act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };
+    act.onDoubleLineLyrics = [this](bool on) { applyDoubleLineLyrics(on); };
+    act.onLyricAlignment = [this](int a) { applyLyricAlignment(a); };
+    act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
+    act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
+
+    settingsDialog = std::make_unique<SettingsDialog>();
+    if (!settingsDialog->create(GetModuleHandleW(nullptr), trayHwnd, st, std::move(act))) {
+        settingsDialog.reset();
+        return;
+    }
+    settingsDialog->show();
 }
 
 void App::showAbout() {
@@ -1289,6 +1336,9 @@ int main() {
         }
         if (app.aboutDialog && app.aboutDialog->isOpen() &&
             IsDialogMessageW(app.aboutDialog->hwnd(), &msg))
+            continue;
+        if (app.settingsDialog && app.settingsDialog->isOpen() &&
+            IsDialogMessageW(app.settingsDialog->hwnd(), &msg))
             continue;
         if (app.manualSearchDialog && app.manualSearchDialog->isOpen() &&
             IsDialogMessageW(app.manualSearchDialog->hwnd(), &msg))

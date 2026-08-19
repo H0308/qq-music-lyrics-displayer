@@ -596,144 +596,6 @@ std::vector<MarkdownBlock> parseMarkdown(const std::wstring& markdown) {
 }
 
 // 关于页的 Win11 风格开关：点击后向父窗口发送 WM_COMMAND/BN_CLICKED。
-class AboutToggleSwitch : public fluent::LayeredChild {
-public:
-    static constexpr float kWidth = 40.0f;
-    static constexpr float kHeight = 20.0f;
-
-    bool create(HWND parent, int id, bool on) {
-        id_ = id;
-        on_ = on;
-        clearAlpha_ = 1.0f / 255.0f;
-        return createLayered(parent, L"QQMusicLyricAboutToggleSwitch", wndProc, id, true, true);
-    }
-
-    bool isOn() const { return on_; }
-
-private:
-    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
-        const auto& palette = fluent::palette();
-        auto* br = brush(rt);
-        if (!br)
-            return;
-
-        float trackH = std::min(kHeight, hDip);
-        float centerY = hDip * 0.5f;
-        D2D1_RECT_F track = D2D1::RectF(0.5f, centerY - trackH * 0.5f,
-                                         wDip - 0.5f, centerY + trackH * 0.5f);
-        float radius = trackH * 0.5f;
-        if (on_) {
-            br->SetColor(hover_ ? palette.accentHover : palette.accent);
-            rt->FillRoundedRectangle(D2D1::RoundedRect(track, radius, radius), br);
-        } else {
-            br->SetColor(hover_ ? palette.controlHover : palette.controlFill);
-            rt->FillRoundedRectangle(D2D1::RoundedRect(track, radius, radius), br);
-            br->SetColor(palette.cardStroke);
-            rt->DrawRoundedRectangle(D2D1::RoundedRect(track, radius, radius), br, 1.0f);
-        }
-
-        float knobRadius = trackH * 0.5f - 3.5f;
-        float knobX = on_ ? track.right - trackH * 0.5f : track.left + trackH * 0.5f;
-        br->SetColor(on_ ? palette.textOnAccent : palette.textSecondary);
-        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobRadius, knobRadius), br);
-        if (focusVisible_) {
-            br->SetColor(palette.accent);
-            D2D1_RECT_F focusRect = D2D1::RectF(
-                0.5f, centerY - trackH * 0.5f - 3.0f, wDip - 0.5f,
-                centerY + trackH * 0.5f + 3.0f);
-            rt->DrawRoundedRectangle(
-                D2D1::RoundedRect(focusRect, radius + 3.0f, radius + 3.0f), br, 1.5f);
-        }
-    }
-
-    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-        AboutToggleSwitch* self = nullptr;
-        if (msg == WM_NCCREATE) {
-            self = static_cast<AboutToggleSwitch*>(
-                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            self->hwnd_ = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        } else {
-            self = reinterpret_cast<AboutToggleSwitch*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-        }
-        if (!self)
-            return DefWindowProcW(h, msg, wp, lp);
-
-        switch (msg) {
-        case WM_NCHITTEST:
-            return HTCLIENT;
-        case WM_GETDLGCODE:
-            return DLGC_BUTTON;
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            BeginPaint(h, &ps);
-            self->renderNow();
-            EndPaint(h, &ps);
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_MOUSEMOVE:
-            if (!self->hover_) {
-                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
-                TrackMouseEvent(&tme);
-                self->hover_ = true;
-                self->renderNow();
-            }
-            return 0;
-        case WM_MOUSELEAVE:
-            self->hover_ = false;
-            self->renderNow();
-            return 0;
-        case WM_LBUTTONDOWN:
-            self->mouseFocus_ = true;
-            self->focusVisible_ = false;
-            SetFocus(h);
-            self->renderNow();
-            return 0;
-        case WM_SETFOCUS:
-            self->focused_ = true;
-            self->focusVisible_ = !self->mouseFocus_;
-            self->renderNow();
-            return 0;
-        case WM_KILLFOCUS:
-            self->focused_ = false;
-            self->focusVisible_ = false;
-            self->mouseFocus_ = false;
-            self->renderNow();
-            return 0;
-        case WM_KEYDOWN:
-            if (wp == VK_SPACE || wp == VK_RETURN) {
-                self->focusVisible_ = true;
-                self->on_ = !self->on_;
-                self->renderNow();
-                SendMessageW(GetParent(h), WM_COMMAND,
-                             MAKEWPARAM(self->id_, BN_CLICKED), reinterpret_cast<LPARAM>(h));
-                return 0;
-            }
-            break;
-        case WM_LBUTTONUP:
-            SetFocus(h);
-            self->on_ = !self->on_;
-            self->renderNow();
-            SendMessageW(GetParent(h), WM_COMMAND,
-                         MAKEWPARAM(self->id_, BN_CLICKED), reinterpret_cast<LPARAM>(h));
-            return 0;
-        case WM_DESTROY:
-            self->hwnd_ = nullptr;
-            return 0;
-        }
-        return DefWindowProcW(h, msg, wp, lp);
-    }
-
-    int id_ = 0;
-    bool on_ = false;
-    bool hover_ = false;
-    bool focused_ = false;
-    bool mouseFocus_ = false;
-    bool focusVisible_ = false;
-};
-
 class ReleaseNotesPanel : public fluent::LayeredChild {
 public:
     bool create(HWND parent, int id) {
@@ -1108,7 +970,7 @@ struct AboutDialog::Impl {
     fluent::FluentCard infoCard;
     fluent::FluentLabel versionLabel;
     fluent::FluentLabel autoCheckLabel;
-    AboutToggleSwitch autoCheckSwitch;
+    fluent::FluentToggle autoCheckSwitch;
     fluent::FluentLabel releaseTitleLabel;
     ReleaseNotesPanel releaseNotes;
     fluent::FluentButton projectButton;
@@ -1163,7 +1025,7 @@ struct AboutDialog::Impl {
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
-            backdrop = fluent::styleDialogWindow(hwnd);
+            backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -1269,8 +1131,8 @@ struct AboutDialog::Impl {
         int contentW = w - contentX - pad - px(16.0f);
         versionLabel.move(contentX, cardY + px(14.0f), contentW, px(22.0f));
         projectButton.move(contentX, cardY + px(54.0f), px(148.0f), px(32.0f));
-        int switchW = px(AboutToggleSwitch::kWidth);
-        int switchH = px(AboutToggleSwitch::kHeight);
+        int switchW = px(fluent::FluentToggle::kWidth);
+        int switchH = px(fluent::FluentToggle::kHeight);
         int switchX = w - pad - px(16.0f) - switchW;
         autoCheckLabel.move(contentX + px(164.0f), cardY + px(60.0f),
                             std::max(px(20.0f), switchX - px(8.0f) - contentX - px(164.0f)),
@@ -1323,7 +1185,7 @@ struct AboutDialog::Impl {
             openUrl(app_info::kProjectUrl);
             break;
         case kIdAutoCheckSwitch:
-            autoCheckOnStartup = autoCheckSwitch.isOn();
+            autoCheckOnStartup = autoCheckSwitch.checked();
             if (onAutoCheckChanged)
                 onAutoCheckChanged(autoCheckOnStartup);
             break;

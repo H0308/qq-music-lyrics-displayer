@@ -286,6 +286,17 @@ bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     return applied;
 }
 
+bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow) {
+    bool applied = styleDialogWindow(hwnd, transientWindow);
+    // 从不透明自绘切换到 DWM 材质：GDI 画过的像素不会因不再绘制而消失，
+    // 隐藏再显示让 DWM 重建透明表面，材质才能透出。
+    if (applied && !oldBackdrop && IsWindowVisible(hwnd)) {
+        ShowWindow(hwnd, SW_HIDE);
+        ShowWindow(hwnd, SW_SHOW);
+    }
+    return applied;
+}
+
 COLORREF fallbackBgColor() {
     return isDarkMode() ? RGB(32, 32, 32) : RGB(243, 243, 243);
 }

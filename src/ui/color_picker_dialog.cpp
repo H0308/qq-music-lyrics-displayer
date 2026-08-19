@@ -367,7 +367,7 @@ struct ColorPickerDialog::Impl {
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
-            backdrop = fluent::styleDialogWindow(hwnd, true);
+            backdrop = fluent::restyleDialogWindow(hwnd, backdrop, true);
             refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);

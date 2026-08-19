@@ -40,6 +40,7 @@ add_executable(QQMusicLyric
     src/ui/font_picker_dialog.cpp
     src/ui/color_picker_dialog.cpp
     src/ui/font_color_dialog.cpp
+    src/ui/settings_dialog.cpp
     src/util/base64.cpp
     src/util/dominant_color.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/resource.rc

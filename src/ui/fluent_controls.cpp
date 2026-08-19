@@ -1045,4 +1045,343 @@ void FluentLabel::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
                   D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
 }
 
+// ---------------- FluentToggle ----------------
+
+bool FluentToggle::create(HWND parent, int id, bool checked) {
+    id_ = id;
+    checked_ = checked;
+    clearAlpha_ = 1.0f / 255.0f; // 整个开关面可点击（防 alpha=0 穿透）
+    return createLayered(parent, L"QQMusicLyricFluentToggle", wndProc, id, true, true);
+}
+
+void FluentToggle::setChecked(bool checked) {
+    if (checked_ == checked)
+        return;
+    checked_ = checked;
+    renderNow();
+}
+
+void FluentToggle::setEnabled(bool enabled) {
+    EnableWindow(hwnd_, enabled ? TRUE : FALSE);
+    renderNow();
+}
+
+LRESULT CALLBACK FluentToggle::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    FluentToggle* self = selfFromMsg<FluentToggle>(h, msg, lp);
+    if (msg == WM_NCCREATE)
+        self->hwnd_ = h;
+    if (self)
+        return self->handle(msg, wp, lp);
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+LRESULT FluentToggle::handle(UINT msg, WPARAM wp, LPARAM lp) {
+    auto click = [this] {
+        checked_ = !checked_;
+        renderNow();
+        SendMessageW(GetParent(hwnd_), WM_COMMAND, MAKEWPARAM(id_, BN_CLICKED),
+                     reinterpret_cast<LPARAM>(hwnd_));
+    };
+    switch (msg) {
+    case WM_NCHITTEST:
+        return HTCLIENT;
+    case WM_GETDLGCODE:
+        return DLGC_BUTTON;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd_, &ps);
+        renderNow();
+        EndPaint(hwnd_, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE:
+        if (!hover_) {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
+            TrackMouseEvent(&tme);
+            hover_ = true;
+            renderNow();
+        }
+        return 0;
+    case WM_MOUSELEAVE:
+        hover_ = false;
+        renderNow();
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (!IsWindowEnabled(hwnd_))
+            return 0;
+        mouseFocus_ = true;
+        focusVisible_ = false;
+        SetFocus(hwnd_);
+        renderNow();
+        return 0;
+    case WM_SETFOCUS:
+        focused_ = true;
+        focusVisible_ = !mouseFocus_;
+        renderNow();
+        return 0;
+    case WM_KILLFOCUS:
+        focused_ = false;
+        focusVisible_ = false;
+        mouseFocus_ = false;
+        renderNow();
+        return 0;
+    case WM_LBUTTONUP:
+        if (IsWindowEnabled(hwnd_))
+            click();
+        return 0;
+    case WM_KEYDOWN:
+        if ((wp == VK_SPACE || wp == VK_RETURN) && IsWindowEnabled(hwnd_)) {
+            focusVisible_ = true;
+            click();
+            return 0;
+        }
+        break;
+    case WM_ENABLE:
+        renderNow();
+        return 0;
+    case WM_DESTROY:
+        hwnd_ = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd_, msg, wp, lp);
+}
+
+void FluentToggle::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
+    const Palette& p = palette();
+    auto* br = brush(rt);
+    if (!br)
+        return;
+    const bool enabled = IsWindowEnabled(hwnd_) != FALSE;
+
+    // 轨道：整个控件区域的内切圆角长条
+    const float trackH = std::min(kHeight, hDip);
+    const float centerY = hDip * 0.5f;
+    D2D1_RECT_F track =
+        D2D1::RectF(0.5f, centerY - trackH * 0.5f, wDip - 0.5f, centerY + trackH * 0.5f);
+    const float radius = trackH * 0.5f;
+    const float knobR = trackH * 0.5f - 3.5f;
+    const float knobX = checked_ ? track.right - trackH * 0.5f : track.left + trackH * 0.5f;
+
+    if (!enabled) {
+        fillRoundRect(rt, br, p.listHover, track, radius);
+        strokeRoundRect(rt, br, p.cardStroke, track, 1.0f, radius);
+        br->SetColor(p.disabled);
+    } else if (checked_) {
+        fillRoundRect(rt, br, hover_ ? p.accentHover : p.accent, track, radius);
+        br->SetColor(p.textOnAccent);
+    } else {
+        fillRoundRect(rt, br, hover_ ? p.controlHover : p.controlFill, track, radius);
+        strokeRoundRect(rt, br, p.cardStroke, track, 1.0f, radius);
+        br->SetColor(p.textSecondary);
+    }
+    rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
+    if (focusVisible_ && enabled) {
+        br->SetColor(p.accent);
+        D2D1_RECT_F focusRect = D2D1::RectF(0.5f, centerY - trackH * 0.5f - 3.0f, wDip - 0.5f,
+                                            centerY + trackH * 0.5f + 3.0f);
+        strokeRoundRect(rt, br, p.accent, focusRect, 1.5f, radius + 3.0f);
+    }
+}
+
+// ---------------- FluentRadioGroup ----------------
+
+bool FluentRadioGroup::create(HWND parent, int id) {
+    id_ = id;
+    clearAlpha_ = 1.0f / 255.0f;
+    return createLayered(parent, L"QQMusicLyricFluentRadioGroup", wndProc, id, true, true);
+}
+
+void FluentRadioGroup::setOptions(std::vector<std::wstring> options) {
+    options_ = std::move(options);
+    optionRects_.clear();
+    contentW_ = 0.0f;
+    if (selected_ >= static_cast<int>(options_.size()))
+        selected_ = static_cast<int>(options_.size()) - 1;
+    renderNow();
+}
+
+void FluentRadioGroup::setSelectedIndex(int idx) {
+    if (idx == selected_ || idx < 0 || idx >= static_cast<int>(options_.size()))
+        return;
+    selected_ = idx;
+    renderNow();
+}
+
+void FluentRadioGroup::setEnabled(bool enabled) {
+    EnableWindow(hwnd_, enabled ? TRUE : FALSE);
+    renderNow();
+}
+
+void FluentRadioGroup::notifyChange() {
+    SendMessageW(GetParent(hwnd_), WM_COMMAND, MAKEWPARAM(id_, BN_CLICKED),
+                 reinterpret_cast<LPARAM>(hwnd_));
+}
+
+int FluentRadioGroup::optionAt(float xDip) const {
+    for (size_t i = 0; i < optionRects_.size(); ++i) {
+        if (xDip >= optionRects_[i].left && xDip <= optionRects_[i].right)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+LRESULT CALLBACK FluentRadioGroup::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    FluentRadioGroup* self = selfFromMsg<FluentRadioGroup>(h, msg, lp);
+    if (msg == WM_NCCREATE)
+        self->hwnd_ = h;
+    if (self)
+        return self->handle(msg, wp, lp);
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+LRESULT FluentRadioGroup::handle(UINT msg, WPARAM wp, LPARAM lp) {
+    auto dipX = [this](LPARAM lp) {
+        return static_cast<float>(GET_X_LPARAM(lp)) / dipScale(GetDpiForWindow(hwnd_));
+    };
+    switch (msg) {
+    case WM_NCHITTEST:
+        return HTCLIENT;
+    case WM_GETDLGCODE:
+        return DLGC_BUTTON;
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        BeginPaint(hwnd_, &ps);
+        renderNow();
+        EndPaint(hwnd_, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_MOUSEMOVE: {
+        if (hover_ < 0) {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd_, 0};
+            TrackMouseEvent(&tme);
+        }
+        int idx = optionAt(dipX(lp));
+        if (idx != hover_) {
+            hover_ = idx;
+            renderNow();
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        hover_ = -1;
+        pressed_ = -1;
+        renderNow();
+        return 0;
+    case WM_LBUTTONDOWN:
+        if (!IsWindowEnabled(hwnd_))
+            return 0;
+        SetCapture(hwnd_);
+        SetFocus(hwnd_);
+        pressed_ = optionAt(dipX(lp));
+        renderNow();
+        return 0;
+    case WM_LBUTTONUP:
+        if (pressed_ >= 0) {
+            int hit = optionAt(dipX(lp));
+            int chosen = pressed_;
+            pressed_ = -1;
+            ReleaseCapture();
+            renderNow();
+            if (hit == chosen && IsWindowEnabled(hwnd_) && chosen != selected_) {
+                selected_ = chosen;
+                renderNow();
+                notifyChange();
+            }
+        }
+        return 0;
+    case WM_KEYDOWN:
+        // 左右方向键在选项间移动，空格/回车确认当前悬浮项由鼠标路径处理
+        if ((wp == VK_LEFT || wp == VK_RIGHT) && options_.size() > 1 && IsWindowEnabled(hwnd_)) {
+            int dir = wp == VK_LEFT ? -1 : 1;
+            int next = (selected_ + dir + static_cast<int>(options_.size())) %
+                       static_cast<int>(options_.size());
+            selected_ = next;
+            renderNow();
+            notifyChange();
+        }
+        return 0;
+    case WM_ENABLE:
+        renderNow();
+        return 0;
+    case WM_DESTROY:
+        hwnd_ = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd_, msg, wp, lp);
+}
+
+void FluentRadioGroup::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
+    (void)wDip;
+    const Palette& p = palette();
+    auto* br = brush(rt);
+    auto* fmt = textFormat(13.0f);
+    if (!br || !fmt)
+        return;
+    const bool enabled = IsWindowEnabled(hwnd_) != FALSE;
+
+    constexpr float kCircle = 16.0f;
+    constexpr float kTextGap = 8.0f;
+    constexpr float kOptionGap = 20.0f;
+    const float cy = hDip * 0.5f;
+
+    optionRects_.clear();
+    float x = 0.0f;
+    for (size_t i = 0; i < options_.size(); ++i) {
+        const bool selected = static_cast<int>(i) == selected_;
+        const bool hovered = static_cast<int>(i) == hover_ && enabled;
+        const bool pressed = static_cast<int>(i) == pressed_ && enabled;
+
+        // 文本实测宽度，用于命中区域和内容总宽
+        float textW = 0.0f;
+        if (auto* dw = dwrite()) {
+            IDWriteTextLayout* layout = nullptr;
+            if (SUCCEEDED(dw->CreateTextLayout(options_[i].c_str(),
+                                               static_cast<UINT32>(options_[i].size()), fmt,
+                                               1000.0f, hDip, &layout)) &&
+                layout) {
+                DWRITE_TEXT_METRICS m{};
+                layout->GetMetrics(&m);
+                textW = m.width;
+                layout->Release();
+            }
+        }
+
+        D2D1_ELLIPSE circle{D2D1::Point2F(x + kCircle * 0.5f, cy), kCircle * 0.5f,
+                            kCircle * 0.5f};
+        if (!enabled) {
+            br->SetColor(p.disabled);
+            rt->DrawEllipse(circle, br, 1.0f);
+            if (selected)
+                rt->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+        } else if (selected) {
+            br->SetColor(hovered || pressed ? p.accentHover : p.accent);
+            rt->FillEllipse(circle, br);
+            br->SetColor(p.textOnAccent);
+            rt->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+        } else {
+            if (hovered) {
+                br->SetColor(p.listHover);
+                rt->FillEllipse(circle, br);
+            }
+            br->SetColor(p.textSecondary);
+            rt->DrawEllipse(circle, br, pressed ? 1.5f : 1.0f);
+        }
+
+        br->SetColor(enabled ? p.text : p.disabled);
+        rt->DrawTextW(options_[i].c_str(), static_cast<UINT32>(options_[i].size()), fmt,
+                      D2D1::RectF(x + kCircle + kTextGap, 0.0f,
+                                  x + kCircle + kTextGap + textW + 1.0f, hDip),
+                      br);
+
+        optionRects_.push_back(
+            D2D1::RectF(x, 0.0f, x + kCircle + kTextGap + textW, hDip));
+        x += kCircle + kTextGap + textW + kOptionGap;
+    }
+    contentW_ = x > 0.0f ? x - kOptionGap : 0.0f;
+}
+
 } // namespace fluent

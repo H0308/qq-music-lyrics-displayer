@@ -65,6 +65,10 @@ void suppressBorder(HWND hwnd);
 // 普通窗口一键套用：圆角 + 背景材质 + 标题栏配色；返回背景材质是否生效。
 // 普通窗口默认使用 Mica，短暂的取色弹窗等场景传 true 使用 Acrylic。
 bool styleDialogWindow(HWND hwnd, bool transientWindow = false);
+// 主题变化时重新套用窗口样式，oldBackdrop 传调用方保存的 styleDialogWindow 旧返回值。
+// 旧状态在客户区画过不透明底色（oldBackdrop=false）而新状态启用了 DWM 材质时，
+// 残留像素会盖住材质（深色→浅色切换后背景残留深色），通过隐藏再显示强制 DWM 丢弃旧表面。
+bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow = false);
 // 背景材质未生效时的实心回退背景色
 COLORREF fallbackBgColor();
 // 绘制普通对话框根背景；深色模式不依赖 DWM 材质。
