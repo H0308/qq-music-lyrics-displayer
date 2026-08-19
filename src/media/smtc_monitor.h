@@ -22,6 +22,10 @@ struct SmtcSnapshot {
     int64_t durationMs = 0;
     int64_t positionMs = 0;   // 锚点进度（snapshot() 返回时已按播放状态插值）
     int64_t anchorUtcMs = 0;  // 锚点对应的本机系统时间
+    // QQ 切歌窗口内时间线仍是旧歌残留：durationMs/positionMs 不可信，
+    // 此时不应按它们发起歌词请求（时长过滤会把正确候选全部淘汰）。
+    // 仅 QQ 适配器会置位；网易云路径恒为 false。
+    bool timelineStale = false;
     PlaybackStatus status = PlaybackStatus::Stopped;
     bool sessionAlive = false; // 当前是否存在可消费的 QQ/网易云会话
     std::shared_ptr<const std::vector<uint8_t>> thumbnail; // 专辑封面图片字节（共享避免快照拷贝）

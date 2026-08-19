@@ -39,6 +39,10 @@ namespace {
 constexpr UINT kMsgSmtcChanged = WM_APP + 1;
 constexpr UINT kMsgLyricReady = WM_APP + 2;
 constexpr UINT kMsgCoverReady = WM_APP + 3;
+// QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
+// 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
+constexpr UINT_PTR kTimerLyricDebounce = 3;
+constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kCmdToggleTaskbar = 101;
@@ -202,6 +206,8 @@ struct App {
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
     SmtcPlayerType lastPlayer_ = SmtcPlayerType::Unknown;
     bool lyricLoading_ = false;
+    bool lyricDebounceArmed_ = false; // QQ 切歌请求防抖定时器已挂起
+    ULONGLONG lyricDebounceDeadline_ = 0; // 等待新时间线的截止时刻（超时则按现有快照请求）
     std::vector<LyricLine> currentLyrics_;
     uint64_t requestGeneration_ = 0;
     uint64_t frameRevision_ = 0;
@@ -540,6 +546,7 @@ struct App {
 
             // 手动覆盖是新的内容事务，使仍在队列中的自动歌词/封面结果失效。
             ++requestGeneration_;
+            cancelLyricDebounce(); // 防止挂起的切歌防抖请求到点后覆盖手动选择
             currentLyrics_ = provider.lines();
             lyricLoading_ = false;
             updateLyricCapabilities(currentLyrics_);
@@ -584,6 +591,56 @@ struct App {
         }
     }
 
+    // 发起一次歌词请求：网易云逻辑保持不变（事件完整、可直接请求）；
+    // QQ 由防抖定时器在切歌事件合并完成后调用。
+    void startLyricRequest(const SmtcSnapshot& snap) {
+        lyricLoading_ = true;
+        ++requestGeneration_;
+        const std::wstring requestKey = currentKey;
+        const uint64_t generation = requestGeneration_;
+        auto postLyricResult = [this, requestKey, generation](bool ok) {
+            auto* payload = new LyricPayload{requestKey, generation, ok};
+            if (!PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0,
+                                    reinterpret_cast<LPARAM>(payload)))
+                delete payload;
+        };
+        if (snap.player == SmtcPlayerType::NetEase) {
+            provider.requestNeteaseAsync(snap.neteaseSongId, snap.title, snap.artist,
+                                         snap.durationMs, postLyricResult);
+        } else {
+            provider.requestAsync(snap.title, snap.artist, snap.durationMs,
+                                  postLyricResult);
+        }
+    }
+
+    void cancelLyricDebounce() {
+        if (lyricDebounceArmed_ && trayHwnd)
+            KillTimer(trayHwnd, kTimerLyricDebounce);
+        lyricDebounceArmed_ = false;
+    }
+
+    // 防抖到点：此时切歌事件批已处理完（线程消息优先于 WM_TIMER 派发），
+    // 快照身份必然已等于 currentKey；不等说明还有未处理事件，直接放弃本轮，
+    // 由该事件的 onSmtcChanged 重新武装。
+    void onLyricDebounce() {
+        lyricDebounceArmed_ = false;
+        SmtcSnapshot snap = monitor.snapshot();
+        if (!snap.sessionAlive || snap.player != SmtcPlayerType::QQMusic ||
+            snap.title.empty())
+            return;
+        if (makeTrackKey(snap) != currentKey)
+            return;
+        if (snap.timelineStale && GetTickCount64() < lyricDebounceDeadline_) {
+            // 时间线仍是旧歌残留：durationMs 不可信， lyric 请求的时长过滤会
+            // 把正确候选全部淘汰（失败会先闪「暂无歌词」）。继续等新时间线。
+            if (trayHwnd)
+                lyricDebounceArmed_ =
+                    SetTimer(trayHwnd, kTimerLyricDebounce, kLyricDebounceMs, nullptr) != 0;
+            return;
+        }
+        startLyricRequest(snap);
+    }
+
     // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
     void onSmtcChanged() {
         SmtcSnapshot snap = monitor.snapshot();
@@ -600,6 +657,7 @@ struct App {
             currentDurationMs = 0;
             lastStatus = PlaybackStatus::Stopped;
             lyricLoading_ = false;
+            cancelLyricDebounce();
             ++requestGeneration_;
             currentLyrics_.clear();
             updateLyricCapabilities({});
@@ -659,21 +717,21 @@ struct App {
             if (lyricFollowAlbum_)
                 applyFontColors(); // 新封面就绪前先回到配置色
             lyricLoading_ = true;
-            ++requestGeneration_;
-            const std::wstring requestKey = currentKey;
-            const uint64_t generation = requestGeneration_;
-            auto postLyricResult = [this, requestKey, generation](bool ok) {
-                auto* payload = new LyricPayload{requestKey, generation, ok};
-                if (!PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0,
-                                        reinterpret_cast<LPARAM>(payload)))
-                    delete payload;
-            };
             if (snap.player == SmtcPlayerType::NetEase) {
-                provider.requestNeteaseAsync(snap.neteaseSongId, snap.title, snap.artist,
-                                             snap.durationMs, postLyricResult);
+                cancelLyricDebounce();
+                startLyricRequest(snap);
+            } else if (trayHwnd) {
+                // QQ：等 SMTC 切歌事件批合并后再请求；期间 lyricLoading_ 保持 true，
+                // 界面停留在「歌词加载中…」而不是闪「暂无歌词」。
+                if (lyricDebounceArmed_)
+                    KillTimer(trayHwnd, kTimerLyricDebounce);
+                lyricDebounceDeadline_ = GetTickCount64() + 2000;
+                lyricDebounceArmed_ =
+                    SetTimer(trayHwnd, kTimerLyricDebounce, kLyricDebounceMs, nullptr) != 0;
+                if (!lyricDebounceArmed_)
+                    startLyricRequest(snap); // 定时器创建失败时按原逻辑立即请求
             } else {
-                provider.requestAsync(snap.title, snap.artist, snap.durationMs,
-                                      postLyricResult);
+                startLyricRequest(snap);
             }
         } else if (snap.thumbnail && !snap.thumbnail->empty()) {
             lastCover_ = snap.thumbnail;
@@ -1266,6 +1324,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (!app)
         return DefWindowProcW(h, msg, wp, lp);
+    if (msg == WM_TIMER && wp == kTimerLyricDebounce) {
+        KillTimer(h, kTimerLyricDebounce);
+        app->onLyricDebounce();
+        return 0;
+    }
     if (msg == kMsgDialogClosed) {
         app->onDialogClosed(static_cast<DialogKind>(wp));
         return 0;
