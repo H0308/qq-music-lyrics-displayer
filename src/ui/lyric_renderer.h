@@ -2,6 +2,10 @@
 
 #include <windows.h>
 #include <d2d1.h>
+#include <d2d1_1.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <dcomp.h>
 #include <dwrite.h>
 
 // TaskbarHost 使用的 D2D/DWrite 基础设施：
@@ -47,4 +51,56 @@ private:
     int bmpH_ = 0;
     UINT dpi_ = 96;
     bool rtBound_ = false;
+};
+
+// TaskbarHost 的 GPU 渲染管线：D2D 画到 DXGI 组合交换链，
+// 由 DirectComposition 直接交给 DWM 合成，替代 DIB + UpdateLayeredWindow 的
+// 每帧整图拷贝。对外接口与 LyricRenderer 对齐（renderTarget/bind/present/discard），
+// 绘制代码无需感知差异。
+class DCompRenderer {
+public:
+    DCompRenderer();
+    ~DCompRenderer();
+
+    bool initialize();
+    void setDpi(UINT dpi);
+
+    // 设备上下文，作为 ID2D1RenderTarget 使用；调用前必须先 bind()。
+    ID2D1DeviceContext* renderTarget();
+    ID2D1Factory* d2d() const;
+    IDWriteFactory* dwrite() const;
+
+    // 确保交换链/Visual 与窗口尺寸匹配并绑定后备缓冲（BeginDraw 前调用）。
+    bool bind(HWND hwnd, int width, int height);
+
+    // 提交交换链并经 DComposition 上屏；设备丢失返回 false，调用方走 discard。
+    bool present();
+
+    // 设备丢失：释放设备链全部对象，下次 bind() 惰性重建；保留工厂。
+    void discard();
+
+    // 释放全部资源。
+    void releaseAll();
+
+private:
+    bool createFactories();
+    bool createDevice();
+    bool ensureSwapchain(HWND hwnd, int width, int height);
+    void releaseBackBuffer();
+
+    ID2D1Factory1* d2d1_ = nullptr;
+    IDWriteFactory* dwrite_ = nullptr;
+    ID3D11Device* d3d_ = nullptr;
+    IDXGIDevice* dxgiDevice_ = nullptr;
+    ID2D1Device* d2dDevice_ = nullptr;
+    ID2D1DeviceContext* dc_ = nullptr;
+    IDXGISwapChain1* swapchain_ = nullptr;
+    IDCompositionDevice* dcomp_ = nullptr;
+    IDCompositionTarget* target_ = nullptr;
+    IDCompositionVisual* visual_ = nullptr;
+    ID2D1Bitmap1* backBmp_ = nullptr;
+    HWND hwnd_ = nullptr;
+    int width_ = 0;
+    int height_ = 0;
+    UINT dpi_ = 96;
 };

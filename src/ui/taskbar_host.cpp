@@ -463,7 +463,7 @@ struct TaskbarHost::Impl {
     int slowTick_ = 0; // 慢速分支计数器
 
     // 渲染
-    LyricRenderer renderer;
+    DCompRenderer renderer;
     IDWriteTextFormat* fmtTitle_ = nullptr;
     IDWriteTextFormat* fmtArtist_ = nullptr;
     IDWriteTextFormat* fmtLyric_ = nullptr;
@@ -632,7 +632,8 @@ struct TaskbarHost::Impl {
         if (!findTaskbar())
             return false;
 
-        DWORD ex = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        // 内容完全由 DirectComposition visual 提供，不再是分层窗口
+        DWORD ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         HWND h = CreateWindowExW(ex, kWndClassName, L"QQMusicLyricTaskbar", WS_POPUP, 0, 0, 1, 1,
                                  nullptr, nullptr, inst, this);
         if (!h)
@@ -1194,7 +1195,7 @@ struct TaskbarHost::Impl {
         D2D1_RECT_F innerRect = D2D1::RectF(center.x - innerRadius, center.y - innerRadius,
                                             center.x + innerRadius, center.y + innerRadius);
         if (coverBmp && vinylCoverClip_ && coverLayer_) {
-            rt->PushLayer(D2D1::LayerParameters(
+            rt->PushLayer(D2D1::LayerParameters1(
                               D2D1::InfiniteRect(), vinylCoverClip_,
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                               D2D1::Matrix3x2F::Translation(coverX, coverY)),
@@ -1240,6 +1241,9 @@ struct TaskbarHost::Impl {
     // 此时只剩野句柄，必须整体重建；若幸存（崩溃非正常退出）则重新附着即可。
     // 歌词/媒体/字体等状态都保存在 Impl 成员里，重建窗口后原样恢复
     void onTaskbarCreated() {
+        std::wprintf(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d\n",
+                     hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, visible ? 1 : 0,
+                     timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
                 SetParent(hwnd, taskbar_);
@@ -1253,6 +1257,12 @@ struct TaskbarHost::Impl {
         hwnd = nullptr;
         if (createWindow(inst) && visible) {
             ShowWindow(hwnd, SW_SHOWNA);
+            // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
+            // timerRunning_ 会残留为 true，但定时器已随旧窗口消失；
+            // 必须清掉标志再启动，否则 startFrameTimer 因标志位跳过、新窗口没有定时器
+            timerRunning_ = false;
+            timerMs_ = 0;
+            startFrameTimer();
             render();
         }
     }
@@ -1498,13 +1508,14 @@ struct TaskbarHost::Impl {
             stream->Release();
             return;
         }
-        D2D1_BITMAP_PROPERTIES props{};
-        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-        props.dpiX = static_cast<float>(dpi_);
-        props.dpiY = static_cast<float>(dpi_);
+        D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            static_cast<float>(dpi_), static_cast<float>(dpi_));
+        ID2D1Bitmap1* decoded = nullptr;
         hr = rt->CreateBitmap(D2D1::SizeU(w, h), bitmapData.Scan0, bitmapData.Stride, &props,
-                                &coverBmp);
+                              &decoded);
+        coverBmp = decoded; // ID2D1Bitmap1 派生自 ID2D1Bitmap
         pixels->UnlockBits(&bitmapData);
         stream->Release();
     }
@@ -1531,13 +1542,14 @@ struct TaskbarHost::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
-        D2D1_BITMAP_PROPERTIES props{};
-        props.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        props.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-        props.dpiX = static_cast<float>(dpi_);
-        props.dpiY = static_cast<float>(dpi_);
+        D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            static_cast<float>(dpi_), static_cast<float>(dpi_));
+        ID2D1Bitmap1* decoded = nullptr;
         rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4, &props,
-                         &platformIconBmp);
+                         &decoded);
+        platformIconBmp = decoded;
     }
 
     void refreshSecondaryContent() {
@@ -2427,7 +2439,6 @@ struct TaskbarHost::Impl {
     void render() {
         if (!visible || !hwnd)
             return;
-        createDeviceResources();
 
         // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
         // 把刚刚收缩/扩展的窗口尺寸恢复回去。
@@ -2449,12 +2460,14 @@ struct TaskbarHost::Impl {
             // 文本布局以超宽无换行创建，度量与窗口尺寸无关，无需重建
         }
 
-        if (!renderer.bindDC(pxW, pxH))
+        if (!renderer.bind(hwnd, pxW, pxH))
             return;
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
         renderer.setDpi(dpi_);
+        // DComp 设备上下文在首次 bind 后才存在，画刷/图层创建必须排在 bind 之后
+        createDeviceResources();
 
         ensureGeometry();
         if (coverDirty)
@@ -2489,7 +2502,7 @@ struct TaskbarHost::Impl {
             } else {
                 D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
                 if (coverBmp && coverClip_ && coverLayer_) {
-                    rt->PushLayer(D2D1::LayerParameters(
+                    rt->PushLayer(D2D1::LayerParameters1(
                                       D2D1::InfiniteRect(), coverClip_,
                                       D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                       D2D1::Matrix3x2F::Translation(coverX, coverY)),
@@ -2630,10 +2643,13 @@ struct TaskbarHost::Impl {
             discardDeviceResources();
             return;
         }
-        if (SUCCEEDED(hr))
-            renderer.present(hwnd);
-        else
+        if (SUCCEEDED(hr)) {
+            // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
+            if (!renderer.present())
+                discardDeviceResources();
+        } else {
             std::wprintf(L"[taskbar] EndDraw failed: 0x%08X\n", hr);
+        }
     }
 
     // ---------- 滚动字幕 ----------
@@ -2872,6 +2888,7 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case WM_DESTROY:
+            std::wprintf(L"[taskbar] WM_DESTROY (visible=%d)\n", visible ? 1 : 0);
             stopFrameTimer();
             stopProbe();
             releaseAll();

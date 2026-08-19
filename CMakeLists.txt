@@ -63,6 +63,9 @@ target_link_libraries(QQMusicLyric PRIVATE
     ZLIB::ZLIB
     windowsapp
     d2d1
+    d3d11
+    dxgi
+    dcomp
     dwrite
     gdiplus
     user32
