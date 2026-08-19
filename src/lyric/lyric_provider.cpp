@@ -564,6 +564,24 @@ void replaceAllW(std::wstring& s, const std::wstring& from, const std::wstring& 
     }
 }
 
+// 在原始文本上拆分歌手（normalizeTitle 会把 / 、 等分隔符转为空格，必须先拆分再规范化），
+// 并对每个拆分结果展开 feat./ft./with/vs 等合作标注；返回的每个 token 均已规范化。
+std::vector<std::wstring> splitArtists(const std::wstring& s) {
+    std::vector<std::wstring> out;
+    for (const auto& part : splitSingers(s)) {
+        std::wstring n = L' ' + normalizeTitle(part) + L' ';
+        for (const wchar_t* kw : {L" feat. ", L" feat ", L" ft. ", L" ft ", L" featuring ",
+                                  L" with ", L" vs ", L" vs. "})
+            replaceAllW(n, kw, L" / ");
+        for (const auto& p : splitSingers(n)) {
+            auto t = trimW(p);
+            if (!t.empty())
+                out.push_back(t);
+        }
+    }
+    return out;
+}
+
 int singerSimilarity(const std::wstring& a, const std::wstring& b) {
     if (a.empty() || b.empty())
         return 0;
@@ -583,8 +601,8 @@ int singerSimilarity(const std::wstring& a, const std::wstring& b) {
         return 100;
     if (na.find(nb) != std::wstring::npos || nb.find(na) != std::wstring::npos)
         return 90;
-    auto pa = splitSingers(na);
-    auto pb = splitSingers(nb);
+    auto pa = splitArtists(a);
+    auto pb = splitArtists(b);
     if (pa.empty() || pb.empty())
         return 0;
     int matches = 0;
@@ -650,11 +668,19 @@ void addSearchVariant(std::vector<SearchVariant>& variants, std::wstring title,
 }
 
 std::wstring primaryArtist(const std::wstring& artist) {
+    // 合作标注统一为分隔符后先尝试拆分（normalizeTitle 会保留替换进来的 /）
     std::wstring normalized = normalizeTitle(artist);
     for (const wchar_t* kw : {L" feat ", L" ft ", L" featuring ", L" with ", L" vs "})
         replaceAllW(normalized, kw, L"/");
-    const auto singers = splitSingers(normalized);
-    return singers.empty() ? trimW(artist) : singers.front();
+    const auto collab = splitSingers(normalized);
+    if (collab.size() > 1)
+        return collab.front();
+    // 原始文本上的 / 、 等分隔（如酷狗 "S.H.E、飞轮海"、QQ "S.H.E/飞轮海"），
+    // 取第一个歌手并保留原始写法（如 "S.H.E" 中的点号）
+    const auto raw = splitSingers(artist);
+    if (!raw.empty())
+        return trimW(raw.front());
+    return trimW(artist);
 }
 
 std::vector<SearchVariant> buildSearchVariants(const MatchQuery& q) {
