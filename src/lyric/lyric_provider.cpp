@@ -41,6 +41,15 @@ struct DoneFlag {
     ~DoneFlag() { done->store(true); }
 };
 
+// 进程退出标志：LyricProvider 析构前置位，curl 进度回调据此立即中断在途请求，
+// 候选循环在请求之间检查并提前退出，避免退出时主线程被 join 堵在串行请求链上
+//（单个请求最坏吃满 10s 超时，变体×来源×候选的串行链可达数分钟）。
+std::atomic<bool> g_shutdown{false};
+
+int curlXferAbort(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return g_shutdown.load() ? 1 : 0; // 返回非 0：curl 以 CURLE_ABORTED_BY_CALLBACK 立即返回
+}
+
 std::string toUtf8(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
@@ -73,6 +82,8 @@ bool httpGet(CURL* curl, const std::string& url, const char* referer, std::strin
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 10000L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L); // 进度回调用于退出时立即中断
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlXferAbort);
     out.clear();
     CURLcode rc = curl_easy_perform(curl);
     long code = 0;
@@ -1607,6 +1618,8 @@ struct LyricProvider::Impl {
     std::vector<Worker> workers;
 
     ~Impl() {
+        // 先置退出标志：在途 curl 请求经进度回调立即中断，候选循环提前退出
+        g_shutdown.store(true);
         for (auto& w : workers)
             if (w.thread.joinable()) w.thread.join();
     }
@@ -1782,6 +1795,8 @@ struct LyricProvider::Impl {
         const std::vector<SearchVariant> variants = buildSearchVariants(q);
         auto tryKugou = [&]() -> bool {
             for (const auto& variant : variants) {
+                if (g_shutdown.load())
+                    return false;
                 std::vector<KugouSong> songs;
                 if (!kugouSearchSongs(curl, variant.title, variant.artist, 10, songs))
                     continue;
@@ -1789,6 +1804,8 @@ struct LyricProvider::Impl {
                 if (ranked.empty())
                     continue;
                 for (const auto& [score, song] : ranked) {
+                    if (g_shutdown.load())
+                        return false;
                     out.clear();
                     const int64_t lyricDuration = q.durationMs > 0 ? q.durationMs
                                                                     : song->durationMs;
@@ -1805,6 +1822,8 @@ struct LyricProvider::Impl {
 
         auto tryQq = [&](LyricSource source) -> bool {
             for (const auto& variant : variants) {
+                if (g_shutdown.load())
+                    return false;
                 std::vector<Candidate> cands;
                 if (!searchSongs(curl, makeSearchQuery(variant), cands))
                     continue;
@@ -1812,6 +1831,8 @@ struct LyricProvider::Impl {
                 if (ranked.empty())
                     continue;
                 for (const auto& [score, candidate] : ranked) {
+                    if (g_shutdown.load())
+                        return false;
                     if (source == LyricSource::Qrc && candidate->songid.empty())
                         continue;
                     if (source == LyricSource::Lrc && candidate->songmid.empty())
@@ -1857,6 +1878,7 @@ struct LyricProvider::Impl {
 };
 
 LyricProvider::LyricProvider() : impl_(std::make_unique<Impl>()) {
+    g_shutdown.store(false); // 防御性复位：退出流程只会置位一次
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 

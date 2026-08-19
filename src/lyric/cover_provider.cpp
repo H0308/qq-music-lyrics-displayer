@@ -36,6 +36,14 @@ size_t curlWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
     return total;
 }
 
+// 进程退出标志：CoverProvider 析构前置位，curl 进度回调据此立即中断在途下载，
+// 避免退出时主线程被 join 堵在最长 10s 的超时上
+std::atomic<bool> g_shutdown{false};
+
+int curlXferAbort(void*, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return g_shutdown.load() ? 1 : 0; // 返回非 0：curl 以 CURLE_ABORTED_BY_CALLBACK 立即返回
+}
+
 } // namespace
 
 struct CoverProvider::Impl {
@@ -49,6 +57,8 @@ struct CoverProvider::Impl {
     std::vector<Worker> workers;
 
     ~Impl() {
+        // 先置退出标志：在途 curl 下载经进度回调立即中断
+        g_shutdown.store(true);
         for (auto& w : workers)
             if (w.thread.joinable()) w.thread.join();
     }
@@ -66,6 +76,7 @@ struct CoverProvider::Impl {
 };
 
 CoverProvider::CoverProvider() : impl_(std::make_unique<Impl>()) {
+    g_shutdown.store(false); // 防御性复位：退出流程只会置位一次
     curl_global_init(CURL_GLOBAL_DEFAULT);
 }
 
@@ -108,6 +119,8 @@ void CoverProvider::requestAsync(const std::wstring& albummid, ReadyCallback cb)
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 5000L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 10000L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L); // 进度回调用于退出时立即中断
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlXferAbort);
 
         CURLcode rc = curl_easy_perform(curl);
         long code = 0;
