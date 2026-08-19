@@ -1,5 +1,6 @@
 #include "font_picker_dialog.h"
 
+#include "ui/dialog_notify.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
@@ -154,6 +155,7 @@ private:
 struct FontPickerDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
 
     fluent::FluentLabel titleLabel;
     fluent::FluentLabel subtitleLabel;
@@ -260,6 +262,9 @@ struct FontPickerDialog::Impl {
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::FontPicker), 0);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -521,7 +526,7 @@ FontPickerDialog::~FontPickerDialog() {
 
 bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& family,
                               float sizePt) {
-    (void)parent; // 托盘窗口是消息窗口，不能作为所有者；与搜索对话框一致使用无所有者窗口
+    impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口是消息窗口，不能作为所有者
     impl_->inst = inst;
     impl_->initFamily = family;
     impl_->initSize = sizePt;

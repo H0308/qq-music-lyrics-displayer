@@ -1,5 +1,6 @@
 #include "ui/manual_search_dialog.h"
 
+#include "ui/dialog_notify.h"
 #include "ui/lyric_renderer.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_theme.h"
@@ -373,6 +374,7 @@ private:
 struct ManualSearchDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
 
     fluent::FluentLabel titleLabel;
     fluent::FluentLabel subtitleLabel;
@@ -506,6 +508,9 @@ struct ManualSearchDialog::Impl {
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::ManualSearch), 0);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -829,6 +834,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
                                 int64_t targetDurationMs,
                                 const std::wstring& targetNeteaseSongId) {
     impl_->inst = inst;
+    impl_->notifyHwnd = parent; // 仅用于关闭通知
     impl_->provider = provider;
     impl_->targetTitle = targetTitle;
     impl_->targetArtist = targetArtist;

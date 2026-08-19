@@ -1,5 +1,6 @@
 #include "settings_dialog.h"
 
+#include "ui/dialog_notify.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
@@ -51,6 +52,7 @@ float estimateRadioWidth(const std::vector<std::wstring>& options) {
 struct SettingsDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
     bool backdrop = false;
     SettingsState state;
     SettingsActions actions;
@@ -376,6 +378,9 @@ struct SettingsDialog::Impl {
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::Settings), 0);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -398,7 +403,7 @@ SettingsDialog::~SettingsDialog() {
 
 bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& state,
                             SettingsActions actions) {
-    (void)parent; // 托盘窗口不能作为普通窗口的可见所有者
+    impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者
     impl_->inst = inst;
     impl_->state = state;
     impl_->actions = std::move(actions);

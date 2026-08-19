@@ -1,6 +1,7 @@
 #include "font_color_dialog.h"
 
 #include "ui/color_picker_dialog.h"
+#include "ui/dialog_notify.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
@@ -608,6 +609,7 @@ private:
 struct FontColorDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
     bool backdrop = false;
 
     fluent::FluentLabel titleLabel;
@@ -708,6 +710,9 @@ struct FontColorDialog::Impl {
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::FontColor), 0);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -905,7 +910,7 @@ FontColorDialog::~FontColorDialog() {
 }
 
 bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) {
-    (void)parent; // 托盘窗口是消息窗口，不能作为所有者；与其他对话框一致使用无所有者窗口
+    impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口是消息窗口，不能作为所有者
     impl_->inst = inst;
     impl_->state = initial;
 

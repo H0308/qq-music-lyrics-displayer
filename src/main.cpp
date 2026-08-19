@@ -7,6 +7,7 @@
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
 #include "ui/settings_dialog.h"
+#include "ui/dialog_notify.h"
 #include "ui/fluent_menu.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
@@ -784,6 +785,7 @@ struct App {
     void pickFont();
     void showFontColorDialog();
     void showAbout();
+    void onDialogClosed(DialogKind kind);
     void setAutoCheckOnStartup(bool enabled);
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
@@ -1212,6 +1214,26 @@ void App::showSettings() {
     settingsDialog->show();
 }
 
+void App::onDialogClosed(DialogKind kind) {
+    switch (kind) {
+    case DialogKind::Settings:
+        settingsDialog.reset();
+        break;
+    case DialogKind::About:
+        aboutDialog.reset();
+        break;
+    case DialogKind::ManualSearch:
+        manualSearchDialog.reset();
+        break;
+    case DialogKind::FontPicker:
+        fontPickerDialog.reset();
+        break;
+    case DialogKind::FontColor:
+        fontColorDialog.reset();
+        break;
+    }
+}
+
 void App::showAbout() {
     if (aboutDialog && aboutDialog->isOpen()) {
         aboutDialog->show();
@@ -1234,6 +1256,10 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (!app)
         return DefWindowProcW(h, msg, wp, lp);
+    if (msg == kMsgDialogClosed) {
+        app->onDialogClosed(static_cast<DialogKind>(wp));
+        return 0;
+    }
     if (msg == kTrayMsg && LOWORD(lp) == WM_RBUTTONUP) {
         app->showTrayMenu();
         return 0;

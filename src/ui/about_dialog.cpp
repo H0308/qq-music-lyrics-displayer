@@ -1,6 +1,7 @@
 #include "about_dialog.h"
 
 #include "app_info.h"
+#include "ui/dialog_notify.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
@@ -958,6 +959,7 @@ private:
 struct AboutDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
     bool backdrop = false;
     bool checking = false;
     bool autoCheckOnStartup = true;
@@ -1080,6 +1082,9 @@ struct AboutDialog::Impl {
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::About), 0);
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1217,7 +1222,7 @@ AboutDialog::~AboutDialog() {
 
 bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
                          std::function<void(bool)> onAutoCheckChanged) {
-    (void)parent; // 托盘窗口不能作为普通窗口的可见所有者。
+    impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者。
     impl_->inst = inst;
     impl_->autoCheckOnStartup = autoCheckOnStartup;
     impl_->onAutoCheckChanged = std::move(onAutoCheckChanged);
