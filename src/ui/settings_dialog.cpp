@@ -181,6 +181,10 @@ struct SettingsDialog::Impl {
         }
     }
 
+    // 只布置活动页。非活动页的分层子控件一旦被 move（内部带 SWP_SHOWWINDOW +
+    // UpdateLayeredWindow）再立刻隐藏，窗口第一次显示时 DWM 可能把刚更新的
+    // 表面合成出一帧过期内容（首开时“字体与颜色”页闪一下的根因）。非活动页
+    // 保持从未显示的状态，在 showPage 激活时再通过 layout 布置渲染。
     void layout() {
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -195,44 +199,42 @@ struct SettingsDialog::Impl {
         int contentW = w - contentX - px(24.0f);
 
         int titleH = px(28.0f);
-        int rowY = px(14.0f) + titleH + px(16.0f);
-        for (int page = 0; page < 3; ++page) {
-            pageTitles[page]->move(contentX, px(14.0f), contentW, titleH);
-            int y = rowY;
-            for (auto& row : rows[page]) {
-                int rowH = px(row.height);
-                row.card->move(contentX, y, contentW, rowH);
-                int innerX = contentX + px(16.0f);
-                int controlW = px(row.controlW);
-                int controlX = contentX + contentW - px(16.0f) - controlW;
-                int labelW = controlX - innerX - px(12.0f);
-                if (row.hint && row.showHint) {
-                    row.label->move(innerX, y + px(12.0f), labelW, px(22.0f));
-                    row.hint->move(innerX, y + rowH - px(26.0f), labelW, px(18.0f));
-                } else {
-                    row.label->move(innerX, y + (rowH - px(22.0f)) / 2, labelW, px(22.0f));
-                }
-                // 控件垂直居中：开关/单选 20-24 DIP，按钮 32 DIP
-                float controlH = dynamic_cast<fluent::FluentButton*>(row.control.get())
-                                     ? fluent::metrics::controlHeight
-                                     : 24.0f;
-                int ctrlH = px(controlH);
-                row.control->move(controlX, y + (rowH - ctrlH) / 2, controlW, ctrlH);
-                y += rowH + px(kRowGap);
+        int y = px(14.0f) + titleH + px(16.0f);
+        const int page = activePage;
+        pageTitles[page]->move(contentX, px(14.0f), contentW, titleH);
+        for (auto& row : rows[page]) {
+            int rowH = px(row.height);
+            row.card->move(contentX, y, contentW, rowH);
+            int innerX = contentX + px(16.0f);
+            int controlW = px(row.controlW);
+            int controlX = contentX + contentW - px(16.0f) - controlW;
+            int labelW = controlX - innerX - px(12.0f);
+            if (row.hint && row.showHint) {
+                row.label->move(innerX, y + px(12.0f), labelW, px(22.0f));
+                row.hint->move(innerX, y + rowH - px(26.0f), labelW, px(18.0f));
+            } else {
+                row.label->move(innerX, y + (rowH - px(22.0f)) / 2, labelW, px(22.0f));
             }
+            // 控件垂直居中：开关/单选 20-24 DIP，按钮 32 DIP
+            float controlH = dynamic_cast<fluent::FluentButton*>(row.control.get())
+                                 ? fluent::metrics::controlHeight
+                                 : 24.0f;
+            int ctrlH = px(controlH);
+            row.control->move(controlX, y + (rowH - ctrlH) / 2, controlW, ctrlH);
+            y += rowH + px(kRowGap);
         }
         // 分层子窗口按 Z-order 合成：卡片必须压到最底，否则半透明卡片填充
         // 会盖在文字和控件上面，看起来雾蒙蒙（与 about_dialog 的 infoCard 同理）
-        for (int page = 0; page < 3; ++page) {
-            for (auto& row : rows[page])
-                SetWindowPos(row.card->hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        showPage(activePage);
+        for (auto& row : rows[page])
+            SetWindowPos(row.card->hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     void showPage(int page) {
-        activePage = page;
+        if (page != activePage) {
+            activePage = page;
+            layout(); // 新激活页可能从未布置过，补齐定位与渲染
+        }
         for (int i = 0; i < 3; ++i) {
             const int cmd = i == activePage ? SW_SHOW : SW_HIDE;
             ShowWindow(pageTitles[i]->hwnd(), cmd);

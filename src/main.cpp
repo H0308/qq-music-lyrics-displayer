@@ -1291,6 +1291,13 @@ void App::showSettings() {
             settingsDialog.reset();
             return;
         }
+    } else if (IsWindowVisible(settingsDialog->hwnd())) {
+        // 窗口已打开：仅激活到前台。再走 updateState 会触发全量 layout 重排，
+        // 十几个分层子控件同时 SetWindowPos/Z-order 调整会造成可见闪烁。
+        if (IsIconic(settingsDialog->hwnd()))
+            ShowWindow(settingsDialog->hwnd(), SW_RESTORE);
+        SetForegroundWindow(settingsDialog->hwnd());
+        return;
     } else {
         // 窗口复用后，托盘菜单等途径可能已改动状态，打开前同步一次快照
         settingsDialog->updateState(currentSettingsState());
