@@ -18,6 +18,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <list>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <thread>
@@ -33,6 +34,12 @@ constexpr char kUserAgent[] =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36";
 constexpr size_t kCacheCapacity = 32;
+
+// 线程退出置位守卫：保证工作线程任何 return 路径都能被 sweepFinished 回收
+struct DoneFlag {
+    std::shared_ptr<std::atomic<bool>> done;
+    ~DoneFlag() { done->store(true); }
+};
 
 std::string toUtf8(const std::wstring& w) {
     if (w.empty()) return {};
@@ -1566,11 +1573,27 @@ struct LyricProvider::Impl {
     std::list<std::wstring> lru; // 前 = 最近使用
     std::unordered_map<std::wstring, std::list<std::wstring>::iterator> lruIt;
     std::atomic<uint64_t> generation{0};
-    std::vector<std::thread> workers;
+
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done = std::make_shared<std::atomic<bool>>(false);
+    };
+    std::vector<Worker> workers;
 
     ~Impl() {
-        for (auto& t : workers)
-            if (t.joinable()) t.join();
+        for (auto& w : workers)
+            if (w.thread.joinable()) w.thread.join();
+    }
+
+    // 回收已结束的线程：在每次新请求入口顺手清理，向量规模稳定在并发中的请求数
+    void sweepFinished() {
+        std::erase_if(workers, [](Worker& w) {
+            if (w.done->load()) {
+                w.thread.join();
+                return true;
+            }
+            return false;
+        });
     }
 
     bool cacheGet(const std::wstring& key, CacheEntry& out) {
@@ -1837,7 +1860,11 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
         }
     }
     Impl* impl = impl_.get();
-    std::thread t([impl, gen, key, title, artist, durationMs, cb = std::move(cb)]() mutable {
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, gen, key, title, artist, durationMs, cb = std::move(cb),
+                                 done]() mutable {
+        DoneFlag flag{done};
         std::vector<LyricLine> result;
         SongInfo info;
         bool ok = impl->fetch(title, artist, durationMs, result, info);
@@ -1854,7 +1881,8 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
         }
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->workers.push_back(std::move(t));
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
 }
 
 void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
@@ -1892,7 +1920,10 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
     }
 
     Impl* impl = impl_.get();
-    std::thread t([impl, gen, key, songId, cb = std::move(cb)]() mutable {
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, gen, key, songId, cb = std::move(cb), done]() mutable {
+        DoneFlag flag{done};
         std::vector<LyricLine> result;
         SongInfo info;
         bool ok = impl->fetchNetease(songId, result, info);
@@ -1910,7 +1941,8 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
         }
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->workers.push_back(std::move(t));
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
 }
 
 const std::vector<LyricLine>& LyricProvider::lines() const {
@@ -1945,7 +1977,10 @@ int LyricProvider::findLine(const std::vector<LyricLine>& lines, int64_t positio
 void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                           SearchCallback cb) {
     Impl* impl = impl_.get();
-    std::thread t([impl, title, artist, cb = std::move(cb)]() mutable {
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, title, artist, cb = std::move(cb), done]() mutable {
+        DoneFlag flag{done};
         CURL* curl = curl_easy_init();
         std::vector<SearchCandidate> result;
         if (curl) {
@@ -1996,12 +2031,16 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
             cb(std::move(result));
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->workers.push_back(std::move(t));
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
 }
 
 void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback cb) {
     Impl* impl = impl_.get();
-    std::thread t([impl, cand, cb = std::move(cb)]() mutable {
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, cand, cb = std::move(cb), done]() mutable {
+        DoneFlag flag{done};
         CURL* curl = curl_easy_init();
         std::vector<LyricLine> lines;
         bool ok = false;
@@ -2023,7 +2062,8 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
             cb(ok, std::move(lines), info);
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->workers.push_back(std::move(t));
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
 }
 
 void LyricProvider::setManualOverride(const std::wstring& title, const std::wstring& artist,

@@ -39,13 +39,29 @@ size_t curlWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
 } // namespace
 
 struct CoverProvider::Impl {
+    struct Worker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done = std::make_shared<std::atomic<bool>>(false);
+    };
+
     std::atomic<uint64_t> generation{0};
     std::mutex mtx;
-    std::vector<std::thread> workers;
+    std::vector<Worker> workers;
 
     ~Impl() {
-        for (auto& t : workers)
-            if (t.joinable()) t.join();
+        for (auto& w : workers)
+            if (w.thread.joinable()) w.thread.join();
+    }
+
+    // 回收已结束的线程：在每次新请求入口顺手清理，向量规模稳定在并发中的请求数
+    void sweepFinished() {
+        std::erase_if(workers, [](Worker& w) {
+            if (w.done->load()) {
+                w.thread.join();
+                return true;
+            }
+            return false;
+        });
     }
 };
 
@@ -63,7 +79,15 @@ void CoverProvider::requestAsync(const std::wstring& albummid, ReadyCallback cb)
 
     uint64_t gen = ++impl_->generation;
     Impl* impl = impl_.get();
-    std::thread t([impl, gen, albummid, cb = std::move(cb)]() mutable {
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, gen, albummid, cb = std::move(cb), done]() mutable {
+        // 任何 return 路径都置位，保证 sweepFinished 能回收本线程
+        struct Flag {
+            std::shared_ptr<std::atomic<bool>> d;
+            ~Flag() { d->store(true); }
+        } flag{done};
+
         CURL* curl = curl_easy_init();
         if (!curl) {
             if (cb) cb(nullptr);
@@ -124,5 +148,6 @@ void CoverProvider::requestAsync(const std::wstring& albummid, ReadyCallback cb)
     });
 
     std::lock_guard<std::mutex> lk(impl_->mtx);
-    impl_->workers.push_back(std::move(t));
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
 }
