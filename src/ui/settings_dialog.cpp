@@ -63,6 +63,7 @@ struct SettingsDialog::Impl {
         std::unique_ptr<fluent::FluentCard> card;
         std::unique_ptr<fluent::FluentLabel> label;
         std::unique_ptr<fluent::FluentLabel> hint; // 可空：次要说明
+        bool showHint = false; // hint 有文本时才参与布局
         std::unique_ptr<fluent::LayeredChild> control;
         float controlW = 0.0f; // 控件宽度（DIP），右对齐布局用
         float height = kRowH;
@@ -71,6 +72,11 @@ struct SettingsDialog::Impl {
     fluent::FluentList nav;
     std::unique_ptr<fluent::FluentLabel> pageTitles[3];
     std::vector<Row> rows[3];
+
+    // 窗口复用时需要更新内容的控件
+    fluent::FluentLabel* hintFont = nullptr;
+    fluent::FluentLabel* hintSecondary = nullptr;
+    Row* rowSecondary = nullptr;
 
     // 需要在命令处理里读状态的控件
     fluent::FluentToggle* tglSongInfo = nullptr;
@@ -93,9 +99,10 @@ struct SettingsDialog::Impl {
         row.card->create(hwnd, 0);
         row.label = std::make_unique<fluent::FluentLabel>();
         row.label->create(hwnd, 0, text, false, 14.0f, 400);
-        if (hint && *hint) {
+        if (hint) {
             row.hint = std::make_unique<fluent::FluentLabel>();
             row.hint->create(hwnd, 0, hint, true, 12.0f, 400);
+            row.showHint = *hint != L'\0';
         }
         auto control = std::make_unique<T>();
         control->create(hwnd, std::forward<Args>(args)...);
@@ -138,9 +145,9 @@ struct SettingsDialog::Impl {
             fluent::FluentToggle::kWidth, kRowH, kIdHoverControls, state.hoverControls);
 
         // ---- 字体与颜色 ----
-        addRowControl<fluent::FluentButton>(1, L"字体",
-            state.fontDesc.empty() ? nullptr : state.fontDesc.c_str(), 132.0f, kRowH,
-            kIdPickFont, L"选择字体…");
+        addRowControl<fluent::FluentButton>(1, L"字体", state.fontDesc.c_str(), 132.0f, kRowH,
+                                            kIdPickFont, L"选择字体…");
+        hintFont = rows[1].back().hint.get();
         addRowControl<fluent::FluentButton>(1, L"字体颜色与效果", nullptr, 132.0f, kRowH,
                                             kIdFontColor, L"打开…");
         tglFollowAlbum = &addRowControl<fluent::FluentToggle>(1, L"已播放颜色跟随专辑", nullptr,
@@ -161,14 +168,16 @@ struct SettingsDialog::Impl {
         {
             const wchar_t* hint = state.secondaryAvailability == 1 ? L"正在检查翻译和罗马音…"
                                   : state.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音"
-                                                                     : nullptr;
+                                                                     : L"";
             auto& radio = addRowControl<fluent::FluentRadioGroup>(2, L"辅助歌词类型", hint,
-                estimateRadioWidth({L"翻译", L"罗马音"}), hint ? kRowTallH : kRowH,
+                estimateRadioWidth({L"翻译", L"罗马音"}), *hint ? kRowTallH : kRowH,
                 kIdSecondaryType);
             radio.setOptions({L"翻译", L"罗马音"});
             radio.setSelectedIndex(state.preferRomanization ? 1 : 0);
             radio.setEnabled(state.secondaryEnabled && state.secondaryAvailability == 0);
             radioSecondaryType = &radio;
+            rowSecondary = &rows[2].back();
+            hintSecondary = rowSecondary->hint.get();
         }
     }
 
@@ -197,7 +206,7 @@ struct SettingsDialog::Impl {
                 int controlW = px(row.controlW);
                 int controlX = contentX + contentW - px(16.0f) - controlW;
                 int labelW = controlX - innerX - px(12.0f);
-                if (row.hint) {
+                if (row.hint && row.showHint) {
                     row.label->move(innerX, y + px(12.0f), labelW, px(22.0f));
                     row.hint->move(innerX, y + rowH - px(26.0f), labelW, px(18.0f));
                 } else {
@@ -374,7 +383,10 @@ struct SettingsDialog::Impl {
             onCommand(LOWORD(wp), HIWORD(wp));
             return 0;
         case WM_CLOSE:
-            destroy();
+            // 只隐藏不销毁：窗口与全部控件复用，再次打开无需重建
+            //（同步重建十几个分层子控件会阻塞 UI 线程，导致任务栏歌词动画掉帧）。
+            // 窗口随 App 退出由 ~SettingsDialog 销毁。
+            ShowWindow(hwnd, SW_HIDE);
             return 0;
         case WM_DESTROY:
             hwnd = nullptr;
@@ -391,6 +403,33 @@ struct SettingsDialog::Impl {
             DestroyWindow(hwnd);
             hwnd = nullptr;
         }
+    }
+
+    // 窗口隐藏期间状态可能经托盘菜单等途径变更，再次打开前同步快照。
+    // 各 setter 都有相同值早退，未变化的控件不会触发重绘。
+    void updateState(const SettingsState& s) {
+        state = s;
+        tglSongInfo->setChecked(s.songInfoVisible);
+        tglAlbumCover->setChecked(s.albumCoverVisible);
+        tglPlatformIcon->setChecked(s.platformIconVisible);
+        radioCoverEffect->setSelectedIndex(s.coverEffectVinyl ? 1 : 0);
+        radioCoverEffect->setEnabled(s.albumCoverVisible);
+        tglSpectrum->setChecked(s.spectrumOn);
+        tglHoverControls->setChecked(s.hoverControls);
+        tglFollowAlbum->setChecked(s.followAlbum);
+        if (hintFont)
+            hintFont->setText(s.fontDesc);
+        tglDoubleLine->setChecked(s.doubleLineLyrics);
+        radioAlign->setSelectedIndex(s.lyricAlignment);
+        tglSecondaryOn->setChecked(s.secondaryEnabled);
+        const wchar_t* hint = s.secondaryAvailability == 1 ? L"正在检查翻译和罗马音…"
+                              : s.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音" : L"";
+        hintSecondary->setText(hint);
+        rowSecondary->showHint = *hint != L'\0';
+        rowSecondary->height = rowSecondary->showHint ? kRowTallH : kRowH;
+        radioSecondaryType->setSelectedIndex(s.preferRomanization ? 1 : 0);
+        radioSecondaryType->setEnabled(s.secondaryEnabled && s.secondaryAvailability == 0);
+        layout();
     }
 };
 
@@ -433,6 +472,11 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
                                   kDialogStyle, x, y, w, h, nullptr, nullptr, inst,
                                   impl_.get());
     return impl_->hwnd != nullptr;
+}
+
+void SettingsDialog::updateState(const SettingsState& state) {
+    if (impl_->hwnd)
+        impl_->updateState(state);
 }
 
 void SettingsDialog::show() {

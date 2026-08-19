@@ -1174,11 +1174,10 @@ struct AboutDialog::Impl {
         checking = true;
         activeRequest = nextRequestId();
         releaseUrl = app_info::kLatestReleasePage;
-        releaseButton.setAccent(false);
+        // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
+        // 留到 kMsgUpdateReady 统一刷新，避免 show() 时串行触发多次 D2D 重绘
         checkButton.setEnabled(false);
         statusLabel.setText(L"正在检查更新…");
-        latestLabel.setText(L"");
-        releaseNotes.setMessage(L"正在加载更新日志…");
         requestLatestRelease(hwnd, activeRequest);
     }
 

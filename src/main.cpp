@@ -782,6 +782,8 @@ struct App {
     void showTrayMenu();
     void onMenuCommand(int cmd);
     void showSettings();
+    SettingsState currentSettingsState() const;
+    SettingsActions buildSettingsActions();
     void pickFont();
     void showFontColorDialog();
     void showAbout();
@@ -1167,11 +1169,7 @@ void App::setAutoCheckOnStartup(bool enabled) {
     saveSettings();
 }
 
-void App::showSettings() {
-    if (settingsDialog && settingsDialog->isOpen()) {
-        settingsDialog->show();
-        return;
-    }
+SettingsState App::currentSettingsState() const {
     SettingsState st;
     st.songInfoVisible = songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -1190,7 +1188,10 @@ void App::showSettings() {
                                : (!currentHasTranslation_ && !currentHasRomanization_) ? 2 : 0;
     st.fontDesc = fontFamily_ + L", " +
                   std::to_wstring(static_cast<int>(std::lround(fontSize_))) + L"px";
+    return st;
+}
 
+SettingsActions App::buildSettingsActions() {
     SettingsActions act;
     act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
@@ -1205,11 +1206,20 @@ void App::showSettings() {
     act.onLyricAlignment = [this](int a) { applyLyricAlignment(a); };
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
+    return act;
+}
 
-    settingsDialog = std::make_unique<SettingsDialog>();
-    if (!settingsDialog->create(GetModuleHandleW(nullptr), trayHwnd, st, std::move(act))) {
-        settingsDialog.reset();
-        return;
+void App::showSettings() {
+    if (!settingsDialog) {
+        settingsDialog = std::make_unique<SettingsDialog>();
+        if (!settingsDialog->create(GetModuleHandleW(nullptr), trayHwnd,
+                                    currentSettingsState(), buildSettingsActions())) {
+            settingsDialog.reset();
+            return;
+        }
+    } else {
+        // 窗口复用后，托盘菜单等途径可能已改动状态，打开前同步一次快照
+        settingsDialog->updateState(currentSettingsState());
     }
     settingsDialog->show();
 }
@@ -1331,6 +1341,12 @@ int main() {
             inst, app.trayHwnd, app.autoCheckOnStartup_,
             [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); }))
         app.aboutDialog.reset();
+    // 设置窗口预创建（保持隐藏）：把控件构建成本挪到启动阶段，之后关闭仅隐藏复用，
+    // 避免打开时同步创建十几个分层子控件阻塞 UI 线程、导致歌词动画掉帧
+    app.settingsDialog = std::make_unique<SettingsDialog>();
+    if (!app.settingsDialog->create(inst, app.trayHwnd, app.currentSettingsState(),
+                                    app.buildSettingsActions()))
+        app.settingsDialog.reset();
     if (wantTaskbar && !app.createTaskbar(inst)) {
         std::wprintf(L"failed to create taskbar window\n");
         return 1;

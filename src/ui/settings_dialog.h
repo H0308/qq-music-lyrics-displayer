@@ -51,6 +51,8 @@ public:
 
     bool create(HINSTANCE inst, HWND parent, const SettingsState& state,
                 SettingsActions actions);
+    // 窗口复用（关闭仅隐藏）时，打开前同步最新状态快照
+    void updateState(const SettingsState& state);
     void show();
     void destroy();
     bool isOpen() const;

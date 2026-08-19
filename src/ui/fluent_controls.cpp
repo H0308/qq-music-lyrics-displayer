@@ -201,11 +201,15 @@ bool FluentButton::create(HWND parent, int id, const wchar_t* text, bool accent)
 }
 
 void FluentButton::setAccent(bool accent) {
+    if (accent_ == accent)
+        return;
     accent_ = accent;
     renderNow();
 }
 
 void FluentButton::setEnabled(bool enabled) {
+    if (IsWindowEnabled(hwnd_) == (enabled ? TRUE : FALSE))
+        return;
     EnableWindow(hwnd_, enabled ? TRUE : FALSE);
     renderNow();
 }
@@ -1210,6 +1214,8 @@ void FluentRadioGroup::setSelectedIndex(int idx) {
 }
 
 void FluentRadioGroup::setEnabled(bool enabled) {
+    if (IsWindowEnabled(hwnd_) == (enabled ? TRUE : FALSE))
+        return;
     EnableWindow(hwnd_, enabled ? TRUE : FALSE);
     renderNow();
 }
