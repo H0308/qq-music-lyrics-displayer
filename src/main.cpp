@@ -9,6 +9,7 @@
 #include "ui/settings_dialog.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_menu.h"
+#include "ui/fluent_theme.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
 #include "util/dominant_color.h"
@@ -220,13 +221,13 @@ struct App {
 
     // 字体状态（作为字体选择器的记忆源）。hasUserFont_ 为 false 时各宿主使用各自的默认字体。
     bool hasUserFont_ = false;
-    std::wstring fontFamily_ = L"Microsoft YaHei UI";
+    std::wstring fontFamily_ = fluent::uiFontFamily(); // 与普通窗口默认字体族一致
     float fontSize_ = 16.0f;
 
     // 歌词外观（两宿主通用，新建宿主时应用）
     COLORREF lyricColor_ = RGB(49, 194, 124);        // 已播放颜色，默认 QQ 绿
     COLORREF lyricUnplayedColor_ = RGB(49, 194, 124); // 逐字未播放颜色
-    int lyricUnplayedAlphaPct_ = 45;                  // 逐字未播放透明度（%）
+    int lyricUnplayedAlphaPct_ = 45;                  // 逐字未播放不透明度（%）
     bool lyricGlow_ = false;                          // 光晕开关（任务栏独有）
     bool lyricOutline_ = false;                       // 描边开关（任务栏独有）
     COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色

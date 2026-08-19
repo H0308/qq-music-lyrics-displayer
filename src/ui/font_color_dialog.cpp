@@ -34,7 +34,7 @@ constexpr int kIdTitleLabel = 423;
 constexpr int kIdSubtitleLabel = 424;
 constexpr int kIdOptionsCard = 425;
 
-// 未播放透明度范围（与设置项 lyricUnplayedAlpha 的钳制一致）
+// 未播放不透明度范围（与设置项 lyricUnplayedAlpha 的钳制一致）
 constexpr int kAlphaMin = 5;
 constexpr int kAlphaMax = 100;
 
@@ -720,12 +720,12 @@ struct FontColorDialog::Impl {
 
     void createControls() {
         titleLabel.create(hwnd, kIdTitleLabel, L"字体颜色与效果", false, 20.0f, 600);
-        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"调整歌词颜色、透明度、光晕和描边", true, 13.0f,
+        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"调整歌词颜色、不透明度、光晕和描边", true, 13.0f,
                              400);
         optionsCard.create(hwnd, kIdOptionsCard);
         labelUnplayed.create(hwnd, kIdLabelUnplayed, L"未播放字体颜色");
         labelPlayed.create(hwnd, kIdLabelPlayed, L"已播放字体颜色");
-        labelAlpha.create(hwnd, kIdLabelAlpha, L"未播放透明度");
+        labelAlpha.create(hwnd, kIdLabelAlpha, L"未播放不透明度");
         labelGlow.create(hwnd, kIdLabelGlow, L"光晕颜色");
         labelOutline.create(hwnd, kIdLabelOutline, L"描边颜色");
         swatchUnplayed.create(hwnd, kIdSwatchUnplayed, state.unplayed);
@@ -774,7 +774,7 @@ struct FontColorDialog::Impl {
         int labelW = px(140), labelH = px(20);
         int swatchW = px(76), swatchH = px(26);
         int toggleW = px(ToggleSwitch::kWidth), toggleH = px(ToggleSwitch::kHeight);
-        // 行序：0 未播放颜色 / 1 已播放颜色 / 2 未播放透明度 / 3 光晕 / 4 描边
+        // 行序：0 未播放颜色 / 1 已播放颜色 / 2 未播放不透明度 / 3 光晕 / 4 描边
         fluent::FluentLabel* labels[5] = {&labelUnplayed, &labelPlayed, &labelAlpha,
                                           &labelGlow, &labelOutline};
         ColorSwatch* swatches[5] = {&swatchUnplayed, &swatchPlayed, nullptr, &swatchGlow,
@@ -786,7 +786,7 @@ struct FontColorDialog::Impl {
                 swatches[i]->move(w - pad - cardPad - swatchW, y + (rowH - swatchH) / 2, swatchW,
                                   swatchH);
         }
-        // 透明度行：滑块填满标签与百分比文本之间的区域
+        // 不透明度行：滑块填满标签与百分比文本之间的区域
         int alphaRowY = optionsY + cardPad + 2 * (rowH + rowGap);
         int valueW = px(44);
         int sliderX = pad + cardPad + labelW + px(12);

@@ -98,7 +98,7 @@ public:
 
     virtual void changeFont(float delta) = 0;
     virtual void setFont(const std::wstring& family, float size) = 0;
-    // 歌词颜色：已播放色 + 逐字未播放色（含透明度，单位 %）。LRC 单行歌词只用已播放色
+    // 歌词颜色：已播放色 + 逐字未播放色（含不透明度，单位 %）。LRC 单行歌词只用已播放色
     virtual void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) = 0;
 
     virtual void show() = 0;

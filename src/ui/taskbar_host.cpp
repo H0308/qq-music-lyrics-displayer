@@ -1,4 +1,5 @@
 #include "taskbar_host.h"
+#include "fluent_theme.h"
 #include "lyric_renderer.h"
 
 #include <d2d1.h>
@@ -29,7 +30,6 @@ constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~1
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
-constexpr wchar_t kFontFamily[] = L"Microsoft YaHei UI";
 
 constexpr float kMinWidthDip = 160.0f;
 constexpr float kMaxWidthDip = 280.0f;
@@ -42,7 +42,7 @@ constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s�
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
 constexpr float kLyricPreviewGap = 3.0f; // 普通双行模式的核心行与下一行间距
-constexpr float kLyricPreviewOpacity = 0.42f; // 下一行预览透明度
+constexpr float kLyricPreviewOpacity = 0.90f; // 下一行预览透明度
 constexpr float kLyricMainFontScale = 1.18f;
 constexpr float kLyricPreviewFontScale = 0.86f;
 constexpr float kLyricPreviewScale = kLyricPreviewFontScale / kLyricMainFontScale;
@@ -430,9 +430,9 @@ struct TaskbarHost::Impl {
     uint64_t requestGeneration_ = 0;
     uint64_t frameRevision_ = 0;
 
-    // 字体
+    // 字体：默认字体族与软件普通窗口一致（fluent::uiFontFamily）
     float fontSize_ = kBaseFontSize;
-    std::wstring fontFamily_ = kFontFamily;
+    std::wstring fontFamily_ = fluent::uiFontFamily();
 
     // 媒体信息
     OverlayMediaInfo media;
@@ -527,7 +527,7 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
     ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
     ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 已播放歌词颜色（用户可配）
-    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+透明度）
+    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+不透明度）
     ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
     ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
     ID2D1SolidColorBrush* brushCoverHalo_ = nullptr;    // 黑胶外圈光环（复用已播放色）
@@ -535,7 +535,7 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushVinylGroove_ = nullptr;  // 黑胶纹理线
     COLORREF lyricColor_ = RGB(49, 194, 124);           // 已播放颜色，默认 QQ 绿
     COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);   // 逐字未播放颜色
-    int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放透明度（%）
+    int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放不透明度（%）
     COLORREF lyricGlowColor_ = RGB(49, 194, 124);       // 光晕颜色
     COLORREF lyricOutlineColor_ = RGB(0, 0, 0);         // 描边颜色
     bool lyricGlow_ = false;                            // 光晕开关
@@ -1302,6 +1302,7 @@ struct TaskbarHost::Impl {
                 (*out)->SetParagraphAlignment(pa);
                 (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
                 // 不裁剪，超长时由 drawScrollingText 滚动显示
+                fluent::applyUiFontFallback(*out);
             }
         };
         // 歌名/歌手固定字号，不随歌词字号调整；只有歌词跟随 fontSize_
