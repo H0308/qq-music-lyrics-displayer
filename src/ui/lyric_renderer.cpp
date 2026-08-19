@@ -249,8 +249,8 @@ bool DCompRenderer::createDevice() {
         hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
     if (SUCCEEDED(hr)) {
         dc_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
-        hr = DCompositionCreateDevice(dxgiDevice_, __uuidof(IDCompositionDevice),
-                                      reinterpret_cast<void**>(&dcomp_));
+        hr = DCompositionCreateDevice2(d2dDevice_, __uuidof(IDCompositionDevice),
+                                       reinterpret_cast<void**>(&dcomp_));
     }
     if (FAILED(hr)) {
         discard();
@@ -273,6 +273,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
     }
     if (swapchain_ && hwnd != hwnd_) {
         // 窗口重建（Explorer 重启后 createWindow）：DComp 目标绑在原 HWND 上，必须重建
+        releaseLyricTransitionLayers();
         if (visual_) {
             visual_->Release();
             visual_ = nullptr;
@@ -376,8 +377,174 @@ bool DCompRenderer::present() {
     return true;
 }
 
+void DCompRenderer::releaseLyricTransitionLayers() {
+    for (auto& layer : lyricLayers_) {
+        if (visual_ && layer.visual)
+            visual_->RemoveVisual(layer.visual);
+        if (layer.visual) {
+            layer.visual->SetContent(nullptr);
+            layer.visual->SetEffect(nullptr);
+            layer.visual->Release();
+            layer.visual = nullptr;
+        }
+        if (layer.opacity) {
+            layer.opacity->Release();
+            layer.opacity = nullptr;
+        }
+        if (layer.surface) {
+            layer.surface->Release();
+            layer.surface = nullptr;
+        }
+        layer.width = 0;
+        layer.height = 0;
+    }
+}
+
+bool DCompRenderer::ensureLyricTransitionLayers(int width, int height) {
+    if (!dcomp_ || !visual_ || width <= 0 || height <= 0)
+        return false;
+    if (lyricLayers_[0].surface && lyricLayers_[1].surface &&
+        lyricLayers_[0].width == width && lyricLayers_[0].height == height)
+        return true;
+
+    releaseLyricTransitionLayers();
+    for (int i = 0; i < 2; ++i) {
+        auto& layer = lyricLayers_[i];
+        HRESULT hr = dcomp_->CreateVisual(&layer.visual);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateSurface(static_cast<UINT>(width), static_cast<UINT>(height),
+                                       DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED,
+                                       &layer.surface);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateEffectGroup(&layer.opacity);
+        if (SUCCEEDED(hr))
+            hr = layer.opacity->SetOpacity(0.0f);
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetContent(layer.surface);
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetEffect(layer.opacity);
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetOffsetX(0.0f);
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetOffsetY(0.0f);
+        if (SUCCEEDED(hr))
+            hr = visual_->AddVisual(layer.visual, TRUE, nullptr);
+        if (FAILED(hr)) {
+            releaseLyricTransitionLayers();
+            return false;
+        }
+        layer.width = width;
+        layer.height = height;
+    }
+    return true;
+}
+
+ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
+    if (index < 0 || index >= 2 || !lyricLayers_[index].surface)
+        return nullptr;
+    POINT offset{};
+    ID2D1DeviceContext* dc = nullptr;
+    HRESULT hr = lyricLayers_[index].surface->BeginDraw(
+        nullptr, __uuidof(ID2D1DeviceContext), reinterpret_cast<void**>(&dc), &offset);
+    if (FAILED(hr) || !dc) {
+        if (dc)
+            dc->Release();
+        return nullptr;
+    }
+    const float dipX = static_cast<float>(offset.x) * 96.0f / static_cast<float>(dpi_);
+    const float dipY = static_cast<float>(offset.y) * 96.0f / static_cast<float>(dpi_);
+    dc->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    dc->SetTransform(D2D1::Matrix3x2F::Translation(dipX, dipY));
+    dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    return dc;
+}
+
+bool DCompRenderer::endLyricLayerDraw(int index, ID2D1DeviceContext* dc) {
+    if (index < 0 || index >= 2 || !lyricLayers_[index].surface || !dc)
+        return false;
+    HRESULT hr = lyricLayers_[index].surface->EndDraw();
+    dc->Release();
+    return SUCCEEDED(hr);
+}
+
+bool DCompRenderer::addSmoothStep(IDCompositionAnimation* animation, double begin, double end,
+                                  float from, float to) {
+    if (!animation || end <= begin)
+        return false;
+    if (from == to)
+        return SUCCEEDED(animation->AddCubic(begin, from, 0.0f, 0.0f, 0.0f));
+
+    const double a = begin;
+    const double d = end - begin;
+    const double delta = static_cast<double>(to) - from;
+    const double cubic = -2.0 * delta / (d * d * d);
+    const double quadratic = delta * (3.0 / (d * d) + 6.0 * a / (d * d * d));
+    const double linear = delta * (-6.0 * a / (d * d) - 6.0 * a * a / (d * d * d));
+    const double constant =
+        static_cast<double>(from) + delta * (3.0 * a * a / (d * d) + 2.0 * a * a * a / (d * d * d));
+    return SUCCEEDED(animation->AddCubic(begin, static_cast<float>(constant),
+                                         static_cast<float>(linear), static_cast<float>(quadratic),
+                                         static_cast<float>(cubic)));
+}
+
+bool DCompRenderer::animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
+                                      float toOpacity, float durationSec) {
+    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+        !lyricLayers_[index].opacity || durationSec <= 0.0f)
+        return false;
+
+    const double duration = static_cast<double>(durationSec);
+    IDCompositionAnimation* offsetAnim = nullptr;
+    IDCompositionAnimation* opacityAnim = nullptr;
+    HRESULT hr = dcomp_->CreateAnimation(&offsetAnim);
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateAnimation(&opacityAnim);
+    if (SUCCEEDED(hr))
+        hr = addSmoothStep(offsetAnim, 0.0, duration, fromY, toY) ? S_OK : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = offsetAnim->End(duration, toY);
+    if (SUCCEEDED(hr)) {
+        if (fromOpacity > toOpacity) {
+            if (!addSmoothStep(opacityAnim, 0.0, duration * 0.08, fromOpacity, fromOpacity) ||
+                !addSmoothStep(opacityAnim, duration * 0.08, duration * 0.90, fromOpacity,
+                               toOpacity))
+                hr = E_FAIL;
+        } else if (fromOpacity < toOpacity) {
+            if (!addSmoothStep(opacityAnim, 0.0, duration * 0.14, fromOpacity, fromOpacity) ||
+                !addSmoothStep(opacityAnim, duration * 0.14, duration, fromOpacity, toOpacity))
+                hr = E_FAIL;
+        } else if (!addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity)) {
+            hr = E_FAIL;
+        }
+    }
+    if (SUCCEEDED(hr))
+        hr = opacityAnim->End(duration, toOpacity);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].visual->SetOffsetX(0.0f);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].visual->SetOffsetY(offsetAnim);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].opacity->SetOpacity(opacityAnim);
+
+    if (offsetAnim)
+        offsetAnim->Release();
+    if (opacityAnim)
+        opacityAnim->Release();
+    return SUCCEEDED(hr);
+}
+
+void DCompRenderer::clearLyricTransitionLayers() {
+    releaseLyricTransitionLayers();
+}
+
+void DCompRenderer::commit() {
+    if (dcomp_)
+        dcomp_->Commit();
+}
+
 void DCompRenderer::discard() {
     releaseBackBuffer();
+    releaseLyricTransitionLayers();
     auto release = [](auto*& p) {
         if (p) {
             p->Release();

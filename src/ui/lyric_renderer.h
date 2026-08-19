@@ -79,14 +79,35 @@ public:
     // 设备丢失：释放设备链全部对象，下次 bind() 惰性重建；保留工厂。
     void discard();
 
+    // 单行歌词转场用的两个临时合成层（旧行/新行），内容只在转场开始时绘制一次，
+    // 位移和透明度由 DirectComposition 按刷新率执行。
+    bool ensureLyricTransitionLayers(int width, int height);
+    ID2D1DeviceContext* beginLyricLayerDraw(int index);
+    bool endLyricLayerDraw(int index, ID2D1DeviceContext* dc);
+    bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
+                           float toOpacity, float durationSec);
+    void clearLyricTransitionLayers();
+    void commit();
+
     // 释放全部资源。
     void releaseAll();
 
 private:
+    struct LyricLayer {
+        IDCompositionVisual* visual = nullptr;
+        IDCompositionSurface* surface = nullptr;
+        IDCompositionEffectGroup* opacity = nullptr;
+        int width = 0;
+        int height = 0;
+    };
+
     bool createFactories();
     bool createDevice();
     bool ensureSwapchain(HWND hwnd, int width, int height);
     void releaseBackBuffer();
+    void releaseLyricTransitionLayers();
+    bool addSmoothStep(IDCompositionAnimation* animation, double begin, double end, float from,
+                       float to);
 
     ID2D1Factory1* d2d1_ = nullptr;
     IDWriteFactory* dwrite_ = nullptr;
@@ -98,6 +119,7 @@ private:
     IDCompositionDevice* dcomp_ = nullptr;
     IDCompositionTarget* target_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
+    LyricLayer lyricLayers_[2];
     ID2D1Bitmap1* backBmp_ = nullptr;
     HWND hwnd_ = nullptr;
     int width_ = 0;

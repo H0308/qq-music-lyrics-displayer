@@ -24,7 +24,8 @@
 namespace {
 
 constexpr UINT_PTR kTimerId = 2;
-constexpr UINT kTimerMs = 16;         // ~60fps 滚动渲染（配合 timeBeginPeriod(1) 保证触发精度）
+constexpr UINT kTimerMs = 16;         // 活动帧最大间隔：60Hz 基准
+constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~125Hz，避免过度唤醒
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
@@ -53,6 +54,20 @@ constexpr float kSpectrumGap = 6.0f;   // 频谱柱间隙
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylHaloWidth = 2.5f;
 constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
+
+ULONGLONG monotonicNowMs() {
+    static const LARGE_INTEGER frequency = [] {
+        LARGE_INTEGER value{};
+        QueryPerformanceFrequency(&value);
+        return value;
+    }();
+    LARGE_INTEGER counter{};
+    QueryPerformanceCounter(&counter);
+    const LONGLONG wholeMs = counter.QuadPart / frequency.QuadPart * 1000;
+    const LONGLONG remainderMs =
+        (counter.QuadPart % frequency.QuadPart) * 1000 / frequency.QuadPart;
+    return static_cast<ULONGLONG>(wholeMs + remainderMs);
+}
 
 // GDI+ 一次性初始化（封面解码）
 class GdiplusInit {
@@ -375,7 +390,8 @@ struct TaskbarHost::Impl {
     HWND hwnd = nullptr;
     bool visible = false;
     bool timerRunning_ = false;
-    UINT timerMs_ = 0; // 当前定时器实际间隔（60fps/30fps 档位切换用）
+    UINT timerMs_ = 0; // 当前定时器实际间隔（活动/暂停档位切换用）
+    UINT displayRefreshHz_ = 60;
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
@@ -502,6 +518,8 @@ struct TaskbarHost::Impl {
     LyricTransitionTarget pendingTarget_{};
     bool transitionTargetValid_ = false;
     bool pendingTargetValid_ = false;
+    bool lyricTransitionDCompActive_ = false;
+    bool lyricTransitionDCompEnd_ = false;
     ULONGLONG frameNowMs_ = 0;
     ID2D1SolidColorBrush* brushBg_ = nullptr;
     ID2D1SolidColorBrush* brushText_ = nullptr;
@@ -586,7 +604,7 @@ struct TaskbarHost::Impl {
         if (textChanged)
             songInfoDirty_ = true;
         if (thumbChanged || textChanged || playingChanged)
-            vinylTickMs_ = GetTickCount64();
+            vinylTickMs_ = monotonicNowMs();
         return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged;
     }
 
@@ -1022,7 +1040,7 @@ struct TaskbarHost::Impl {
             return;
         albumCoverEffect_ = effect;
         vinylAngleDeg_ = 0.0f;
-        vinylTickMs_ = GetTickCount64();
+        vinylTickMs_ = monotonicNowMs();
         render();
     }
 
@@ -1043,7 +1061,7 @@ struct TaskbarHost::Impl {
         }
         if (media.playing != patch.playing) {
             media.playing = patch.playing;
-            vinylTickMs_ = GetTickCount64();
+            vinylTickMs_ = monotonicNowMs();
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
             render();
         }
@@ -1368,6 +1386,8 @@ struct TaskbarHost::Impl {
             platformIconBmp = nullptr;
         }
         renderer.discard();
+        lyricTransitionDCompActive_ = false;
+        lyricTransitionDCompEnd_ = false;
         textDirty_ = true;
         songInfoDirty_ = true;
         geomDirty_ = true;
@@ -1605,6 +1625,8 @@ struct TaskbarHost::Impl {
         lyricTransitionRevision_ = 0;
         transitionTargetValid_ = false;
         pendingTargetValid_ = false;
+        if (lyricTransitionDCompActive_)
+            lyricTransitionDCompEnd_ = true;
         releaseOutgoingLyricLayouts();
     }
 
@@ -1639,6 +1661,8 @@ struct TaskbarHost::Impl {
     // 行过渡收尾：先冻结动画再交换状态。释放旧布局、消费动画期间记录的最新目标；
     // 新行逐字进度直接对齐真实播放位置，不再无条件从零追赶。
     void finalizeLyricTransition(ULONGLONG now) {
+        if (lyricTransitionDCompActive_)
+            lyricTransitionDCompEnd_ = true;
         releaseOutgoingLyricLayouts();
         lyricTransitionActive_ = false;
         lyricTransitionStartMs_ = 0;
@@ -1845,7 +1869,7 @@ struct TaskbarHost::Impl {
         if (preparedTransition) {
             if (lyricLayout_) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
-                lyricTransitionStartMs_ = GetTickCount64();
+                lyricTransitionStartMs_ = monotonicNowMs();
                 lyricTransitionActive_ = true;
                 lyricTransitionRevision_ = frameRevision_;
             } else {
@@ -1965,7 +1989,7 @@ struct TaskbarHost::Impl {
     float karaokeSmoothStep(const LyricLine& line) {
         int64_t charDur = 0;
         float target = karaokeTargetX(line, charDur);
-        ULONGLONG now = GetTickCount64();
+        ULONGLONG now = monotonicNowMs();
         float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
         karaokeTick_ = now;
         float gap = target - karaokeSmoothX_;
@@ -2374,7 +2398,7 @@ struct TaskbarHost::Impl {
                                                  : static_cast<ID2D1Brush*>(brushDim_);
         if (lyricTransitionActive_ && outgoingLyricLayout_) {
             float transitionT = std::clamp(
-                static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
+                static_cast<float>((frameNowMs_ ? frameNowMs_ : monotonicNowMs()) -
                                    lyricTransitionStartMs_) /
                     kLyricTransitionMs,
                 0.0f, 1.0f);
@@ -2436,6 +2460,135 @@ struct TaskbarHost::Impl {
         }
     }
 
+    void drawTransitionTextTo(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textW,
+                              float textH, float areaW, float x, float y, float offset,
+                              ID2D1Brush* brush) {
+        if (!rt || !layout || !brush || areaW <= 0.0f)
+            return;
+        D2D1_RECT_F clip{x, y, x + areaW, y + textH};
+        rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        float bases[2];
+        int n = 0;
+        auto alignedBase = [&]() {
+            float freeW = std::max(0.0f, areaW - textW);
+            switch (lyricAlignment_) {
+            case LyricAlignment::Left:
+                return x;
+            case LyricAlignment::Right:
+                return x + freeW;
+            case LyricAlignment::Center:
+            default:
+                return x + freeW * 0.5f;
+            }
+        };
+        if (textW <= areaW) {
+            bases[n++] = alignedBase();
+        } else {
+            float loopW = textW + kTextPadding * 2.0f;
+            bases[n++] = x - offset;
+            bases[n++] = x - offset + loopW;
+        }
+        for (int i = 0; i < n; ++i)
+            rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
+        rt->PopAxisAlignedClip();
+    }
+
+    void drawLyricBlockSnapshot(ID2D1DeviceContext* dc, bool outgoing, float lyricAreaX,
+                                float lyricAreaW, float h) {
+        IDWriteTextLayout* main = outgoing ? outgoingLyricLayout_ : lyricLayout_;
+        IDWriteTextLayout* secondary = outgoing ? outgoingSecondaryLayout_ : secondaryLayout_;
+        if (!main)
+            return;
+        const float mainW = outgoing ? outgoingLyricWidth_ : lyricWidth_;
+        const float mainH = outgoing ? outgoingLyricHeight_ : lyricHeight_;
+        const float secondaryW = outgoing ? outgoingSecondaryWidth_ : secondaryWidth_;
+        const float secondaryH = outgoing ? outgoingSecondaryHeight_ : secondaryHeight_;
+        const float gap = secondary ? 1.0f : 0.0f;
+        const float blockH = mainH + gap + secondaryH;
+        const float y = h * 0.5f - blockH * 0.5f;
+        ID2D1Brush* mainBrush = brushLyric_ ? static_cast<ID2D1Brush*>(brushLyric_)
+                                            : static_cast<ID2D1Brush*>(brushText_);
+        float mainOffset = 0.0f;
+        float secondaryOffset = 0.0f;
+        if (!outgoing) {
+            const LyricLine* incomingLine = karaokeLine();
+            const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+            mainBrush = incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : mainBrush;
+            mainOffset = lyricScrollOffset_;
+            secondaryOffset = secondaryScrollOffset_;
+        }
+        drawTransitionTextTo(dc, main, mainW, mainH, lyricAreaW, lyricAreaX, y, mainOffset,
+                             mainBrush);
+        if (secondary)
+            drawTransitionTextTo(dc, secondary, secondaryW, secondaryH, lyricAreaW, lyricAreaX,
+                                 y + mainH + gap, secondaryOffset, brushDim_);
+    }
+
+    bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
+                                     float lyricBlockH) {
+        if (useDoubleLineLyrics() || !lyricTransitionActive_ || !outgoingLyricLayout_ ||
+            !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
+            return false;
+        if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_))
+            return false;
+
+        if (ID2D1DeviceContext* dc = renderer.beginLyricLayerDraw(0)) {
+            drawLyricBlockSnapshot(dc, true, lyricAreaX, lyricAreaW, h);
+            if (!renderer.endLyricLayerDraw(0, dc))
+                return false;
+        } else {
+            return false;
+        }
+        if (ID2D1DeviceContext* dc = renderer.beginLyricLayerDraw(1)) {
+            drawLyricBlockSnapshot(dc, false, lyricAreaX, lyricAreaW, h);
+            if (!renderer.endLyricLayerDraw(1, dc))
+                return false;
+        } else {
+            return false;
+        }
+
+        const float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
+        const float outgoingBlockH =
+            outgoingLyricHeight_ + outgoingGap + outgoingSecondaryHeight_;
+        const float travel = std::max(lyricBlockH, outgoingBlockH) * scale();
+        const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+        const float durationSec = kLyricTransitionMs / 1000.0f;
+        if (!renderer.animateLyricLayer(0, 0.0f, -direction * travel, 1.0f, 0.0f, durationSec))
+            return false;
+        if (!renderer.animateLyricLayer(1, direction * travel, 0.0f, 0.0f, 1.0f, durationSec))
+            return false;
+        renderer.commit();
+        lyricTransitionDCompActive_ = true;
+        lyricTransitionDCompEnd_ = false;
+        return true;
+    }
+
+    void syncLyricTransitionDComp(bool showControls, float lyricAreaX, float lyricAreaW, float h,
+                                  float lyricBlockH) {
+        bool cleared = false;
+        if (lyricTransitionDCompEnd_ || (showControls && lyricTransitionDCompActive_)) {
+            renderer.clearLyricTransitionLayers();
+            lyricTransitionDCompActive_ = false;
+            lyricTransitionDCompEnd_ = false;
+            cleared = true;
+        }
+        if (showControls) {
+            if (cleared)
+                renderer.commit();
+            return;
+        }
+        if (!lyricTransitionDCompActive_ && lyricTransitionActive_ && !useDoubleLineLyrics() &&
+            outgoingLyricLayout_ && lyricLayout_) {
+            if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
+                renderer.clearLyricTransitionLayers();
+                lyricTransitionDCompActive_ = false;
+                renderer.commit();
+            }
+        } else if (cleared) {
+            renderer.commit();
+        }
+    }
+
     void render() {
         if (!visible || !hwnd)
             return;
@@ -2454,6 +2607,8 @@ struct TaskbarHost::Impl {
         if (pxW <= 0 || pxH <= 0)
             return;
         if (pxW != lastPxW_ || pxH != lastPxH_) {
+            if (lyricTransitionDCompActive_)
+                lyricTransitionDCompEnd_ = true;
             lastPxW_ = pxW;
             lastPxH_ = pxH;
             geomDirty_ = true;
@@ -2483,6 +2638,19 @@ struct TaskbarHost::Impl {
 
         if (textDirty_ || songInfoDirty_)
             buildTextLayouts(leftW, rightW);
+
+        float lyricStart = lyricStartPadding();
+        float lyricAreaX = leftW + lyricStart;
+        float lyricAreaW =
+            std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
+        float secondaryGap = secondaryLayout_ ? 1.0f : 0.0f;
+        float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
+        float lyricY = h * 0.5f - lyricBlockH * 0.5f;
+        // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
+        bool showControls = mouseOver_ && controlsOnHover_;
+        // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
+        bool showSpectrum = spectrumVisible_ && !showControls;
+        syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -2532,20 +2700,6 @@ struct TaskbarHost::Impl {
                               infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_);
         }
 
-        // 右侧歌词区：未悬浮时滚动显示歌词，悬浮时显示控制按钮
-        float lyricStart = lyricStartPadding();
-        float lyricAreaX = leftW + lyricStart;
-        float lyricAreaW =
-            std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
-        float secondaryGap = secondaryLayout_ ? 1.0f : 0.0f;
-        float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
-        float lyricY = h * 0.5f - lyricBlockH * 0.5f;
-
-        // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
-        bool showControls = mouseOver_ && controlsOnHover_;
-        // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
-        bool showSpectrum = spectrumVisible_ && !showControls;
-
         if (showControls) {
             float cx = leftW + rightW * 0.5f;
             float cy = h * 0.5f;
@@ -2558,11 +2712,11 @@ struct TaskbarHost::Impl {
                 drawSpectrum(lyricAreaX + lyricAreaW + kTextPadding, h);
             if (useDoubleLineLyrics()) {
                 drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h);
-            } else {
+            } else if (!lyricTransitionDCompActive_) {
                 float transitionT = 1.0f;
                 if (lyricTransitionActive_) {
                     transitionT = std::clamp(
-                        (static_cast<float>((frameNowMs_ ? frameNowMs_ : GetTickCount64()) -
+                        (static_cast<float>((frameNowMs_ ? frameNowMs_ : monotonicNowMs()) -
                                             lyricTransitionStartMs_) /
                          kLyricTransitionMs),
                         0.0f, 1.0f);
@@ -2655,7 +2809,7 @@ struct TaskbarHost::Impl {
     // ---------- 滚动字幕 ----------
 
     void updateScroll() {
-        ULONGLONG now = GetTickCount64();
+        ULONGLONG now = monotonicNowMs();
         frameNowMs_ = now;
         if (lastTickMs_ == 0)
             lastTickMs_ = now;
@@ -2745,7 +2899,7 @@ struct TaskbarHost::Impl {
     }
 
     void updateVinylRotation() {
-        ULONGLONG now = GetTickCount64();
+        ULONGLONG now = monotonicNowMs();
         if (vinylTickMs_ == 0)
             vinylTickMs_ = now;
         if (albumCoverEffect_ != AlbumCoverEffect::Vinyl || !media.playing ||
@@ -2765,13 +2919,33 @@ struct TaskbarHost::Impl {
 
     // ---------- 事件 ----------
 
-    // 帧定时器只在窗口可见时运行：隐藏后每 16ms 的 tick（进度插值、滚动、
+    void updateDisplayRefresh() {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(monitor, &info))
+            return;
+        DEVMODEW mode{};
+        mode.dmSize = sizeof(mode);
+        if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) &&
+            (mode.dmFields & DM_DISPLAYFREQUENCY) && mode.dmDisplayFrequency >= 24)
+            displayRefreshHz_ = mode.dmDisplayFrequency;
+    }
+
+    UINT activeFrameMs() const {
+        const UINT hz = displayRefreshHz_ ? displayRefreshHz_ : 60;
+        return std::clamp(1000 / hz, kTimerMinMs, kTimerMs);
+    }
+
+    // 帧定时器只在窗口可见时运行：隐藏后的固定间隔 tick（进度插值、滚动、
     // 快照读取）没有任何可见效果，可见性恢复由 SMTC 事件驱动（不依赖定时器）。
     void startFrameTimer() {
         if (!timerRunning_ && hwnd) {
-            SetTimer(hwnd, kTimerId, kTimerMs, nullptr);
+            updateDisplayRefresh();
+            const UINT initialMs = activeFrameMs();
+            SetTimer(hwnd, kTimerId, initialMs, nullptr);
             timerRunning_ = true;
-            timerMs_ = kTimerMs;
+            timerMs_ = initialMs;
         }
     }
 
@@ -2784,7 +2958,7 @@ struct TaskbarHost::Impl {
     }
 
     // 静止判定：所有动画源都停止且没有待处理的布局/资源变化时，跳过整帧重绘。
-    // 跳过时屏幕上保持上一次 UpdateLayeredWindow 提交的内容，不会闪烁或丢状态。
+    // 跳过时屏幕上保持上一次 DirectComposition 提交的内容，不会闪烁或丢状态。
     bool needsFrameRender() const {
         if (textDirty_ || songInfoDirty_ || geomDirty_ || layoutDirty_ || coverDirty ||
             platformIconDirty)
@@ -2813,22 +2987,23 @@ struct TaskbarHost::Impl {
     void onTimer() {
         if (tick)
             tick();
-        // 播放/行转场需要 60fps；暂停时降到 ~30fps，超长文本继续滚动，
-        // 任务栏区域的合成开销减半。状态事件（悬停、恢复播放、seek）走
+        // 播放/行转场跟随当前显示器刷新率（封顶 ~125fps）；暂停时降到 ~30fps，
+        // 超长文本继续滚动，任务栏区域的合成开销减半。状态事件（悬停、恢复播放、seek）走
         // 同步 render 路径，不依赖定时器，低档位下也不会延迟显示。
         const UINT wantMs =
             (media.playing || lyricTransitionPending_ || lyricTransitionActive_)
-                ? kTimerMs
+                ? activeFrameMs()
                 : kTimerPausedMs;
         if (timerRunning_ && wantMs != timerMs_) {
             SetTimer(hwnd, kTimerId, wantMs, nullptr);
             timerMs_ = wantMs;
         }
-        frameNowMs_ = GetTickCount64();
+        frameNowMs_ = monotonicNowMs();
         updateVinylRotation();
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
+            updateDisplayRefresh();
             bool changed = detectChanges();
             if (pickProbeResult())
                 changed = true;
@@ -2860,6 +3035,9 @@ struct TaskbarHost::Impl {
         case WM_TIMER:
             if (wp == kTimerId)
                 onTimer();
+            return 0;
+        case WM_DISPLAYCHANGE:
+            updateDisplayRefresh();
             return 0;
         case WM_ERASEBKGND:
             return 1;
