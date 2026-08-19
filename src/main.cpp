@@ -208,6 +208,7 @@ struct App {
     bool lyricLoading_ = false;
     bool lyricDebounceArmed_ = false; // QQ 切歌请求防抖定时器已挂起
     ULONGLONG lyricDebounceDeadline_ = 0; // 等待新时间线的截止时刻（超时则按现有快照请求）
+    bool lyricRequestStale_ = false; // 当前在途/最近一次歌词请求是否发于时间线不可信期间
     std::vector<LyricLine> currentLyrics_;
     uint64_t requestGeneration_ = 0;
     uint64_t frameRevision_ = 0;
@@ -595,6 +596,7 @@ struct App {
     // QQ 由防抖定时器在切歌事件合并完成后调用。
     void startLyricRequest(const SmtcSnapshot& snap) {
         lyricLoading_ = true;
+        lyricRequestStale_ = snap.timelineStale;
         ++requestGeneration_;
         const std::wstring requestKey = currentKey;
         const uint64_t generation = requestGeneration_;
@@ -725,7 +727,7 @@ struct App {
                 // 界面停留在「歌词加载中…」而不是闪「暂无歌词」。
                 if (lyricDebounceArmed_)
                     KillTimer(trayHwnd, kTimerLyricDebounce);
-                lyricDebounceDeadline_ = GetTickCount64() + 2000;
+                lyricDebounceDeadline_ = GetTickCount64() + 8000;
                 lyricDebounceArmed_ =
                     SetTimer(trayHwnd, kTimerLyricDebounce, kLyricDebounceMs, nullptr) != 0;
                 if (!lyricDebounceArmed_)
@@ -735,6 +737,13 @@ struct App {
             }
         } else if (snap.thumbnail && !snap.thumbnail->empty()) {
             lastCover_ = snap.thumbnail;
+        }
+        // 时间线从残留恢复可信（stale 1→0）：若当前歌词请求是在不可信期间发出的
+        // （等待超时被迫发出），用可信时长立即重发，覆盖可能已被时长过滤淘汰的结果。
+        if (!trackChanged && snap.player == SmtcPlayerType::QQMusic &&
+            lyricRequestStale_ && !snap.timelineStale && !lyricDebounceArmed_ &&
+            lyricLoading_ && currentLyrics_.empty()) {
+            startLyricRequest(snap);
         }
         publishPresentationFrame(snap, !trackChanged, trackChanged);
         tryExtractAlbumColor();
@@ -754,7 +763,6 @@ struct App {
             updateLyricCapabilities(currentLyrics_);
             std::wprintf(L"[lyric] loaded %zu lines: %s\n", currentLyrics_.size(),
                          currentKey.c_str());
-
             // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
             if (snap.player == SmtcPlayerType::QQMusic &&
                 (!lastSmtcThumbnail || lastSmtcThumbnail->empty())) {
@@ -775,6 +783,14 @@ struct App {
                 }
             }
         } else {
+            if (lyricRequestStale_) {
+                // 时间线不可信期间发出的请求：失败大概率是旧时长触发候选的 15 秒
+                // 时长过滤，不能据此判定「暂无歌词」。保持「加载中」，等新时间线
+                // 可信后由 onSmtcChanged 的重试分支用正确时长重发。
+                lyricLoading_ = true;
+                publishPresentationFrame(snap, false);
+                return;
+            }
             currentLyrics_.clear();
             updateLyricCapabilities({});
             std::wprintf(L"[lyric] not found: %s\n", currentKey.c_str());
