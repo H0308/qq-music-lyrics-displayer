@@ -4,10 +4,7 @@
 #include <commctrl.h>
 
 #include <algorithm>
-#include <cstdarg>
 #include <cmath>
-#include <cwchar>
-#include <cstdio>
 
 namespace fluent {
 
@@ -17,21 +14,6 @@ COLORREF toColorRef(const D2D1_COLOR_F& c) {
     return RGB(static_cast<BYTE>(std::clamp(c.r, 0.0f, 1.0f) * 255.0f),
                static_cast<BYTE>(std::clamp(c.g, 0.0f, 1.0f) * 255.0f),
                static_cast<BYTE>(std::clamp(c.b, 0.0f, 1.0f) * 255.0f));
-}
-
-void debugLog(const wchar_t* format, ...) {
-    wchar_t message[768]{};
-    va_list args;
-    va_start(args, format);
-    _vsnwprintf_s(message, _countof(message), _TRUNCATE, format, args);
-    va_end(args);
-
-    OutputDebugStringW(L"[QQMusicLyric][FluentEdit] ");
-    OutputDebugStringW(message);
-    OutputDebugStringW(L"\n");
-    // 项目现有诊断通过 stdout 输出；同时写入，避免用户只查看控制台时丢失信息。
-    std::wprintf(L"[QQMusicLyric][FluentEdit] %ls\n", message);
-    std::fflush(stdout);
 }
 
 void registerOnce(const wchar_t* className, WNDPROC proc) {
@@ -99,23 +81,15 @@ bool LayeredChild::createLayered(HWND parent, const wchar_t* className, WNDPROC 
         style |= WS_CLIPCHILDREN;
     if (tabStop)
         style |= WS_TABSTOP;
-    SetLastError(ERROR_SUCCESS);
     hwnd_ = CreateWindowExW(layered ? WS_EX_LAYERED : 0, className, L"", style, 0, 0, 10, 10,
                             parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
                             GetModuleHandleW(nullptr), this);
-    if (className && wcscmp(className, L"QQMusicLyricFluentEdit") == 0) {
-        debugLog(L"host create: id=%d host=%p layered=%d style=0x%08lX result=%p error=%lu", id,
-                 static_cast<void*>(hwnd_), layered ? 1 : 0, style, static_cast<void*>(hwnd_),
-                 hwnd_ ? ERROR_SUCCESS : GetLastError());
-    }
     return hwnd_ != nullptr;
 }
 
 void LayeredChild::move(int x, int y, int w, int h) {
     if (!hwnd_)
         return;
-    if (!layered_)
-        debugLog(L"host move: host=%p x=%d y=%d w=%d h=%d", static_cast<void*>(hwnd_), x, y, w, h);
     SetWindowPos(hwnd_, nullptr, x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     renderNow();
 }
@@ -384,46 +358,27 @@ bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool dire
     id_ = id;
     directEdit_ = directEdit;
     editParent_ = nullptr;
-    debugHostPaintLogged_ = false;
-    debugColorLogged_ = false;
-    debugFocusLogged_ = false;
-    debugChangeLogged_ = false;
 
     // 非分层窗口：分层窗口内的真控件（EDIT）不会被系统绘制
     int hostId = directEdit_ ? 0x7000 + id : id;
     if (!createLayered(parent, L"QQMusicLyricFluentEdit", wndProc, hostId, false)) {
-        debugLog(L"create failed before EDIT: id=%d parent=%p", id, static_cast<void*>(parent));
         return false;
     }
 
-    SetLastError(ERROR_SUCCESS);
     editParent_ = directEdit_ ? parent : hwnd_;
     hEdit_ = CreateWindowExW(0, L"EDIT", L"",
                              WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
                              0, 0, 10, 10, editParent_,
                              reinterpret_cast<HMENU>(static_cast<UINT_PTR>(directEdit_ ? id_ : 1)),
                              GetModuleHandleW(nullptr), nullptr);
-    LONG_PTR editStyle = hEdit_ ? GetWindowLongPtrW(hEdit_, GWL_STYLE) : 0;
-    DWORD editError = hEdit_ ? ERROR_SUCCESS : GetLastError();
-    debugLog(L"EDIT create: id=%d host=%p edit=%p style=0x%08lX error=%lu", id,
-             static_cast<void*>(hwnd_), static_cast<void*>(hEdit_),
-             static_cast<unsigned long>(editStyle), editError);
     if (!hEdit_)
         return false;
 
     editFont_ = createUiFont(GetDpiForWindow(hwnd_));
     SendMessageW(hEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(editFont_), TRUE);
-    debugLog(L"EDIT font: host=%p edit=%p font=%p dpi=%u", static_cast<void*>(hwnd_),
-             static_cast<void*>(hEdit_), static_cast<void*>(editFont_), GetDpiForWindow(hwnd_));
     if (cueBanner) {
-        LRESULT cueResult = SendMessageW(hEdit_, EM_SETCUEBANNER, TRUE,
-                                         reinterpret_cast<LPARAM>(cueBanner));
-        debugLog(L"EDIT cue: host=%p edit=%p result=%lld", static_cast<void*>(hwnd_),
-                 static_cast<void*>(hEdit_), static_cast<long long>(cueResult));
+        SendMessageW(hEdit_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cueBanner));
     }
-    debugLog(L"create complete: id=%d host=%p edit=%p visible=%d enabled=%d", id,
-             static_cast<void*>(hwnd_), static_cast<void*>(hEdit_), IsWindowVisible(hEdit_) ? 1 : 0,
-             IsWindowEnabled(hEdit_) ? 1 : 0);
     return true;
 }
 
@@ -438,18 +393,9 @@ std::wstring FluentEdit::text() const {
 }
 
 void FluentEdit::setText(const std::wstring& text) {
-    if (!hEdit_) {
-        debugLog(L"setText skipped: id=%d host=%p edit=null textLength=%zu", id_,
-                 static_cast<void*>(hwnd_), text.size());
+    if (!hEdit_)
         return;
-    }
-    SetLastError(ERROR_SUCCESS);
-    BOOL result = SetWindowTextW(hEdit_, text.c_str());
-    DWORD error = result ? ERROR_SUCCESS : GetLastError();
-    int actualLength = GetWindowTextLengthW(hEdit_);
-    debugLog(L"setText: id=%d host=%p edit=%p inputLength=%zu actualLength=%d result=%d error=%lu",
-             id_, static_cast<void*>(hwnd_), static_cast<void*>(hEdit_), text.size(), actualLength,
-             result ? 1 : 0, error);
+    SetWindowTextW(hEdit_, text.c_str());
 }
 
 void FluentEdit::move(int x, int y, int w, int h) {
@@ -482,15 +428,6 @@ LRESULT CALLBACK FluentEdit::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 LRESULT FluentEdit::handle(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_PAINT: {
-        if (!debugHostPaintLogged_) {
-            RECT rc{};
-            GetClientRect(hwnd_, &rc);
-            debugLog(L"host first WM_PAINT: id=%d host=%p edit=%p client=%ldx%ld visible=%d",
-                     id_, static_cast<void*>(hwnd_), static_cast<void*>(hEdit_),
-                     rc.right - rc.left, rc.bottom - rc.top,
-                     IsWindowVisible(hwnd_) ? 1 : 0);
-            debugHostPaintLogged_ = true;
-        }
         PAINTSTRUCT ps;
         BeginPaint(hwnd_, &ps);
         renderNow();
@@ -564,12 +501,6 @@ void FluentEdit::layoutEdit() {
     } else {
         SetWindowPos(hEdit_, nullptr, padX, padY, editW, editH, SWP_NOZORDER);
     }
-    RECT editRc{};
-    GetClientRect(hEdit_, &editRc);
-    debugLog(L"EDIT layout: id=%d host=%p edit=%p hostClient=%dx%d editClient=%ldx%ld visible=%d",
-             id_, static_cast<void*>(hwnd_), static_cast<void*>(hEdit_), w, h,
-             editRc.right - editRc.left, editRc.bottom - editRc.top,
-             IsWindowVisible(hEdit_) ? 1 : 0);
 }
 
 void FluentEdit::repaintEdit() {
@@ -578,31 +509,15 @@ void FluentEdit::repaintEdit() {
     // 宿主每次提交背景帧后都让原生 EDIT 最后重绘，确保文字/插入符不被宿主帧覆盖。
     ShowWindow(hEdit_, SW_SHOWNA);
     RedrawWindow(hEdit_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-    debugLog(L"EDIT repaint: id=%d host=%p edit=%p visible=%d styleVisible=%d focused=%d", id_,
-             static_cast<void*>(hwnd_), static_cast<void*>(hEdit_), IsWindowVisible(hEdit_) ? 1 : 0,
-             (GetWindowLongPtrW(hEdit_, GWL_STYLE) & WS_VISIBLE) != 0 ? 1 : 0,
-             GetFocus() == hEdit_ ? 1 : 0);
 }
 
 void FluentEdit::onEditNotification(UINT code) {
     if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
         focused_ = code == EN_SETFOCUS;
-        if (!debugFocusLogged_) {
-            debugLog(L"EDIT focus: id=%d host=%p edit=%p code=%u focused=%d", id_,
-                     static_cast<void*>(hwnd_), static_cast<void*>(hEdit_), code,
-                     focused_ ? 1 : 0);
-            debugFocusLogged_ = true;
-        }
         renderNow();
         repaintEdit();
     }
     if (code == EN_CHANGE) {
-        if (!debugChangeLogged_) {
-            debugLog(L"EDIT first EN_CHANGE: id=%d host=%p edit=%p textLength=%d", id_,
-                     static_cast<void*>(hwnd_), static_cast<void*>(hEdit_),
-                     GetWindowTextLengthW(hEdit_));
-            debugChangeLogged_ = true;
-        }
         repaintEdit();
     }
 }
@@ -619,13 +534,6 @@ LRESULT FluentEdit::colorEdit(HDC hdc) {
     }
     SetTextColor(hdc, toColorRef(p.editText));
     SetBkColor(hdc, bg);
-    if (!debugColorLogged_) {
-        debugLog(L"WM_CTLCOLOREDIT: id=%d host=%p edit=%p textColor=0x%06lX bg=0x%06lX brush=%p",
-                 id_, static_cast<void*>(hwnd_), static_cast<void*>(hEdit_),
-                 static_cast<unsigned long>(toColorRef(p.editText)),
-                 static_cast<unsigned long>(bg), static_cast<void*>(editBrush_));
-        debugColorLogged_ = true;
-    }
     return reinterpret_cast<LRESULT>(editBrush_);
 }
 

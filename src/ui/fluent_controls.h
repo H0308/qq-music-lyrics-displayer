@@ -111,10 +111,6 @@ private:
     bool directEdit_ = false;
     int hostX_ = 0;
     int hostY_ = 0;
-    bool debugHostPaintLogged_ = false;
-    bool debugColorLogged_ = false;
-    bool debugFocusLogged_ = false;
-    bool debugChangeLogged_ = false;
 };
 
 // 列表（分组标题、圆角选中、悬停高亮、滚轮/键盘/拖动滚动条）。
