@@ -10,12 +10,16 @@
 #include <nlohmann/json.hpp>
 
 #include <windowsx.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cwchar>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <optional>
 #include <shellapi.h>
 #include <string>
@@ -42,6 +46,8 @@ constexpr int kIdAutoCheckLabel = 313;
 constexpr int kIdAutoCheckSwitch = 314;
 
 constexpr UINT kMsgUpdateReady = WM_APP + 30;
+constexpr UINT kMsgDownloadProgress = WM_APP + 31;
+constexpr UINT kMsgDownloadFinished = WM_APP + 32;
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
@@ -59,6 +65,8 @@ struct ReleaseInfo {
     std::wstring publishedAt;
     std::wstring body;
     std::wstring releaseUrl;
+    std::wstring installerUrl;
+    int64_t installerSize = 0;
 };
 
 struct UpdatePayload {
@@ -70,12 +78,39 @@ struct UpdatePayload {
     std::optional<ReleaseInfo> release;
 };
 
+struct DownloadProgressPayload {
+    uint64_t requestId = 0;
+    int percent = 0;
+};
+
+struct DownloadFinishedPayload {
+    uint64_t requestId = 0;
+    bool success = false;
+    bool cancelled = false;
+    std::wstring path;
+    std::wstring detail;
+};
+
 void discardPendingUpdateResults(HWND hwnd) {
     if (!hwnd)
         return;
     MSG msg{};
     while (PeekMessageW(&msg, hwnd, kMsgUpdateReady, kMsgUpdateReady, PM_REMOVE))
         delete reinterpret_cast<UpdatePayload*>(msg.lParam);
+}
+
+void discardPendingDownloadMessages(HWND hwnd) {
+    if (!hwnd)
+        return;
+    MSG msg{};
+    while (PeekMessageW(&msg, hwnd, kMsgDownloadProgress, kMsgDownloadProgress, PM_REMOVE))
+        delete reinterpret_cast<DownloadProgressPayload*>(msg.lParam);
+    while (PeekMessageW(&msg, hwnd, kMsgDownloadFinished, kMsgDownloadFinished, PM_REMOVE)) {
+        auto* payload = reinterpret_cast<DownloadFinishedPayload*>(msg.lParam);
+        if (payload && payload->success && !payload->path.empty())
+            DeleteFileW(payload->path.c_str());
+        delete payload;
+    }
 }
 
 std::wstring wideOf(const std::string& s) {
@@ -89,6 +124,129 @@ std::wstring wideOf(const std::string& s) {
     return w;
 }
 
+std::string utf8Of(const std::wstring& w) {
+    if (w.empty())
+        return {};
+    const int size = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()),
+                                         nullptr, 0, nullptr, nullptr);
+    if (size <= 0)
+        return {};
+    std::string s(size, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), size,
+                        nullptr, nullptr);
+    return s;
+}
+
+std::wstring trimProxyValue(std::wstring value) {
+    const size_t begin = value.find_first_not_of(L" \t");
+    if (begin == std::wstring::npos)
+        return {};
+    const size_t end = value.find_last_not_of(L" \t");
+    return value.substr(begin, end - begin + 1);
+}
+
+std::wstring selectHttpsProxy(const std::wstring& proxyList) {
+    std::wstring fallback;
+    size_t begin = 0;
+    while (begin <= proxyList.size()) {
+        const size_t separator = proxyList.find(L';', begin);
+        const size_t length = separator == std::wstring::npos
+                                  ? proxyList.size() - begin
+                                  : separator - begin;
+        const std::wstring item = trimProxyValue(proxyList.substr(begin, length));
+        if (!item.empty()) {
+            const size_t equals = item.find(L'=');
+            if (equals == std::wstring::npos) {
+                if (fallback.empty())
+                    fallback = item;
+            } else {
+                const std::wstring scheme = trimProxyValue(item.substr(0, equals));
+                const std::wstring value = trimProxyValue(item.substr(equals + 1));
+                if (_wcsicmp(scheme.c_str(), L"https") == 0 && !value.empty())
+                    return value;
+                if (_wcsicmp(scheme.c_str(), L"http") == 0 && fallback.empty())
+                    fallback = value;
+                if (_wcsicmp(scheme.c_str(), L"socks") == 0 && fallback.empty() &&
+                    !value.empty())
+                    fallback = L"socks5h://" + value;
+            }
+        }
+        if (separator == std::wstring::npos)
+            break;
+        begin = separator + 1;
+    }
+    return fallback;
+}
+
+std::string proxyUrlForCurl(const std::wstring& value) {
+    const std::wstring proxy = trimProxyValue(value);
+    if (proxy.empty())
+        return {};
+    if (proxy.find(L"://") != std::wstring::npos)
+        return utf8Of(proxy);
+    return "http://" + utf8Of(proxy);
+}
+
+void freeProxyConfig(WINHTTP_CURRENT_USER_IE_PROXY_CONFIG& config) {
+    if (config.lpszAutoConfigUrl)
+        GlobalFree(config.lpszAutoConfigUrl);
+    if (config.lpszProxy)
+        GlobalFree(config.lpszProxy);
+    if (config.lpszProxyBypass)
+        GlobalFree(config.lpszProxyBypass);
+    config = {};
+}
+
+void freeProxyInfo(WINHTTP_PROXY_INFO& info) {
+    if (info.lpszProxy)
+        GlobalFree(info.lpszProxy);
+    if (info.lpszProxyBypass)
+        GlobalFree(info.lpszProxyBypass);
+    info = {};
+}
+
+std::string systemProxyForUrl(const std::wstring& url) {
+    WINHTTP_CURRENT_USER_IE_PROXY_CONFIG config{};
+    if (!WinHttpGetIEProxyConfigForCurrentUser(&config))
+        return {};
+
+    std::wstring selectedProxy;
+    const bool hasAutoProxy = config.fAutoDetect || config.lpszAutoConfigUrl != nullptr;
+    if (hasAutoProxy) {
+        HINTERNET session = WinHttpOpen(L"QQMusicLyric", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                         WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (session) {
+            WinHttpSetTimeouts(session, 3000, 3000, 3000, 3000);
+            WINHTTP_AUTOPROXY_OPTIONS options{};
+            if (config.fAutoDetect) {
+                options.dwFlags |= WINHTTP_AUTOPROXY_AUTO_DETECT;
+                options.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP |
+                                            WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+            }
+            if (config.lpszAutoConfigUrl) {
+                options.dwFlags |= WINHTTP_AUTOPROXY_CONFIG_URL;
+                options.lpszAutoConfigUrl = config.lpszAutoConfigUrl;
+            }
+
+            WINHTTP_PROXY_INFO info{};
+            if (WinHttpGetProxyForUrl(session, url.c_str(), &options, &info)) {
+                if (info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY && info.lpszProxy)
+                    selectedProxy = selectHttpsProxy(info.lpszProxy);
+                freeProxyInfo(info);
+                WinHttpCloseHandle(session);
+                freeProxyConfig(config);
+                return proxyUrlForCurl(selectedProxy);
+            }
+            WinHttpCloseHandle(session);
+        }
+    }
+
+    if (config.lpszProxy)
+        selectedProxy = selectHttpsProxy(config.lpszProxy);
+    freeProxyConfig(config);
+    return proxyUrlForCurl(selectedProxy);
+}
+
 size_t curlWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
     auto* out = static_cast<std::string*>(userdata);
     size_t total = size * nmemb;
@@ -97,6 +255,163 @@ size_t curlWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
         return 0;
     out->append(ptr, total);
     return total;
+}
+
+size_t curlFileWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    auto* out = static_cast<std::ofstream*>(userdata);
+    const size_t total = size * nmemb;
+    out->write(ptr, static_cast<std::streamsize>(total));
+    return out->good() ? total : 0;
+}
+
+struct DownloadContext {
+    HWND hwnd = nullptr;
+    uint64_t requestId = 0;
+    int64_t expectedBytes = 0;
+    std::shared_ptr<std::atomic_bool> cancelled;
+    std::atomic<int> lastPercent{-1};
+};
+
+void postDownloadProgress(HWND hwnd, uint64_t requestId, int percent) {
+    auto* payload = new DownloadProgressPayload{requestId, percent};
+    if (!PostMessageW(hwnd, kMsgDownloadProgress, 0, reinterpret_cast<LPARAM>(payload)))
+        delete payload;
+}
+
+void postDownloadFinished(HWND hwnd, uint64_t requestId, bool success, bool cancelled,
+                          std::wstring path, std::wstring detail) {
+    auto* payload = new DownloadFinishedPayload{requestId, success, cancelled, std::move(path),
+                                                std::move(detail)};
+    if (!PostMessageW(hwnd, kMsgDownloadFinished, 0, reinterpret_cast<LPARAM>(payload))) {
+        if (payload->success && !payload->path.empty())
+            DeleteFileW(payload->path.c_str());
+        delete payload;
+    }
+}
+
+int downloadProgress(void* userdata, curl_off_t dltotal, curl_off_t dlnow,
+                     curl_off_t, curl_off_t) {
+    auto* context = static_cast<DownloadContext*>(userdata);
+    if (context->cancelled && context->cancelled->load(std::memory_order_relaxed))
+        return 1;
+
+    const curl_off_t total = dltotal > 0 ? dltotal : context->expectedBytes;
+    if (total <= 0)
+        return 0;
+
+    const int percent = static_cast<int>(std::clamp<curl_off_t>(
+        dlnow * 100 / total, 0, 100));
+    if (context->lastPercent.exchange(percent, std::memory_order_relaxed) != percent)
+        postDownloadProgress(context->hwnd, context->requestId, percent);
+    return 0;
+}
+
+std::wstring makeTempInstallerPath() {
+    wchar_t tempDir[MAX_PATH]{};
+    DWORD length = GetTempPathW(static_cast<DWORD>(std::size(tempDir)), tempDir);
+    if (length == 0 || length >= std::size(tempDir))
+        return {};
+
+    wchar_t tempFile[MAX_PATH]{};
+    if (!GetTempFileNameW(tempDir, L"QML", 0, tempFile))
+        return {};
+    DeleteFileW(tempFile);
+
+    std::wstring path = tempFile;
+    const size_t dot = path.find_last_of(L'.');
+    if (dot != std::wstring::npos)
+        path.resize(dot);
+    path += L".exe";
+    DeleteFileW(path.c_str());
+    return path;
+}
+
+void downloadInstaller(HWND hwnd, uint64_t requestId, std::wstring url,
+                       std::wstring outputPath, int64_t expectedBytes,
+                       std::shared_ptr<std::atomic_bool> cancelled) {
+    std::thread([hwnd, requestId, url = std::move(url), outputPath = std::move(outputPath),
+                 expectedBytes, cancelled = std::move(cancelled)]() mutable {
+        const std::string urlUtf8 = utf8Of(url);
+        if (urlUtf8.empty()) {
+            DeleteFileW(outputPath.c_str());
+            postDownloadFinished(hwnd, requestId, false, false, {}, L"更新安装器下载地址无效");
+            return;
+        }
+        const std::string proxy = systemProxyForUrl(url);
+
+        std::ofstream output(std::filesystem::path(outputPath),
+                             std::ios::binary | std::ios::trunc);
+        if (!output) {
+            postDownloadFinished(hwnd, requestId, false, false, {}, L"无法创建临时安装器文件");
+            return;
+        }
+
+        CURL* curl = curl_easy_init();
+        if (!curl) {
+            output.close();
+            DeleteFileW(outputPath.c_str());
+            postDownloadFinished(hwnd, requestId, false, false, {}, L"无法初始化下载请求");
+            return;
+        }
+
+        DownloadContext context{hwnd, requestId, expectedBytes, cancelled};
+        constexpr char kUserAgent[] = "QQMusicLyric";
+        curl_slist* headers = nullptr;
+        headers = curl_slist_append(headers, "Accept: application/octet-stream");
+
+        curl_easy_setopt(curl, CURLOPT_URL, urlUtf8.c_str());
+        curl_easy_setopt(curl, CURLOPT_PROXY, proxy.c_str());
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlFileWrite);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &output);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, downloadProgress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &context);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 10000L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 60L);
+
+        CURLcode rc = curl_easy_perform(curl);
+        long responseCode = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+        if (headers)
+            curl_slist_free_all(headers);
+        curl_easy_cleanup(curl);
+        output.close();
+
+        const bool wasCancelled = cancelled && cancelled->load(std::memory_order_relaxed);
+        if (wasCancelled || rc == CURLE_ABORTED_BY_CALLBACK) {
+            DeleteFileW(outputPath.c_str());
+            return;
+        }
+        if (rc != CURLE_OK) {
+            DeleteFileW(outputPath.c_str());
+            postDownloadFinished(hwnd, requestId, false, false, {},
+                                 L"下载失败：" + wideOf(curl_easy_strerror(rc)));
+            return;
+        }
+        if (responseCode < 200 || responseCode >= 300) {
+            DeleteFileW(outputPath.c_str());
+            postDownloadFinished(hwnd, requestId, false, false, {},
+                                 L"下载失败：GitHub 返回 HTTP " + std::to_wstring(responseCode));
+            return;
+        }
+
+        std::error_code ec;
+        const auto actualBytes = std::filesystem::file_size(std::filesystem::path(outputPath), ec);
+        if (ec || actualBytes == 0 ||
+            (expectedBytes > 0 && actualBytes != static_cast<uintmax_t>(expectedBytes))) {
+            DeleteFileW(outputPath.c_str());
+            postDownloadFinished(hwnd, requestId, false, false, {}, L"下载文件大小校验失败");
+            return;
+        }
+
+        postDownloadProgress(hwnd, requestId, 100);
+        postDownloadFinished(hwnd, requestId, true, false, std::move(outputPath), {});
+    }).detach();
 }
 
 std::optional<std::vector<int>> parseVersion(const std::wstring& value) {
@@ -182,6 +497,9 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId) {
         headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
 
         curl_easy_setopt(curl, CURLOPT_URL, app_info::kLatestReleaseApi);
+        // 版本 API 保持直连；只让体积较大的安装器下载读取系统代理，避免代理节点对
+        // api.github.com 返回 403。空字符串会显式禁用环境变量代理。
+        curl_easy_setopt(curl, CURLOPT_PROXY, "");
         curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWrite);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
@@ -228,13 +546,35 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId) {
             return;
         }
 
+        const std::string versionTag = json["tag_name"].get<std::string>();
         ReleaseInfo latestRelease;
-        latestRelease.version = wideOf(json["tag_name"].get<std::string>());
+        latestRelease.version = wideOf(versionTag);
         latestRelease.releaseUrl = wideOf(json["html_url"].get<std::string>());
         if (json.contains("published_at") && json["published_at"].is_string())
             latestRelease.publishedAt = wideOf(json["published_at"].get<std::string>());
         if (json.contains("body") && json["body"].is_string())
             latestRelease.body = wideOf(json["body"].get<std::string>());
+
+        std::string installerVersion = versionTag;
+        if (!installerVersion.empty() &&
+            (installerVersion.front() == 'v' || installerVersion.front() == 'V'))
+            installerVersion.erase(installerVersion.begin());
+        const std::string expectedInstaller =
+            "QQMusicLyric-" + installerVersion + "-Setup.exe";
+        if (json.contains("assets") && json["assets"].is_array()) {
+            for (const auto& asset : json["assets"]) {
+                if (!asset.is_object() || !asset.contains("name") ||
+                    !asset["name"].is_string() || asset["name"].get<std::string>() != expectedInstaller ||
+                    !asset.contains("browser_download_url") ||
+                    !asset["browser_download_url"].is_string())
+                    continue;
+                latestRelease.installerUrl =
+                    wideOf(asset["browser_download_url"].get<std::string>());
+                if (asset.contains("size") && asset["size"].is_number_integer())
+                    latestRelease.installerSize = asset["size"].get<int64_t>();
+                break;
+            }
+        }
 
         std::wstring version = latestRelease.version;
         std::wstring releaseUrl = latestRelease.releaseUrl;
@@ -858,10 +1198,16 @@ struct AboutDialog::Impl {
     HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
     bool backdrop = false;
     bool checking = false;
+    bool downloading = false;
+    bool installingUpdate = false;
     bool autoCheckOnStartup = true;
     uint64_t activeRequest = 0;
     std::wstring releaseUrl = app_info::kLatestReleasePage;
     std::function<void(bool)> onAutoCheckChanged;
+    std::function<bool(const std::wstring&)> onInstallUpdate;
+    std::optional<ReleaseInfo> latestRelease;
+    std::shared_ptr<std::atomic_bool> downloadCancel;
+    std::wstring downloadedInstallerPath;
 
     fluent::FluentDialogSurface surface;
     ReleaseNotesModel releaseNotes;
@@ -869,6 +1215,8 @@ struct AboutDialog::Impl {
     std::wstring statusText;
     std::wstring latestText;
     bool releaseButtonAccent = false;
+    bool releaseButtonEnabled = false;
+    std::wstring releaseButtonText = L"打开发布页";
 
     D2D1_RECT_F autoSwitchRect{};
     D2D1_RECT_F titleRect{};
@@ -909,7 +1257,11 @@ struct AboutDialog::Impl {
     }
 
     bool isEnabled(int id) const {
-        return id != kIdCheckButton || !checking;
+        if (id == kIdCheckButton)
+            return !checking && !downloading && !installingUpdate && downloadedInstallerPath.empty();
+        if (id == kIdReleaseButton)
+            return releaseButtonEnabled && !checking && !downloading && !installingUpdate;
+        return true;
     }
 
     void drawButton(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
@@ -1003,7 +1355,7 @@ struct AboutDialog::Impl {
         painter.drawText(latestText, painter.textFormat(13.0f, 400), latestRect, p.textSecondary);
 
         drawButton(painter, checkRect, L"检查更新", true, kIdCheckButton);
-        drawButton(painter, releaseRect, L"打开发布页", releaseButtonAccent, kIdReleaseButton);
+        drawButton(painter, releaseRect, releaseButtonText, releaseButtonAccent, kIdReleaseButton);
         drawButton(painter, closeRect, L"关闭", false, kIdCloseButton);
     }
 
@@ -1059,7 +1411,10 @@ struct AboutDialog::Impl {
             startCheck();
             break;
         case kIdReleaseButton:
-            openUrl(releaseUrl);
+            if (!downloadedInstallerPath.empty())
+                startInstall();
+            else
+                startDownload();
             break;
         case kIdCloseButton:
             destroy();
@@ -1203,28 +1558,70 @@ struct AboutDialog::Impl {
             if (!result || result->requestId != activeRequest)
                 return 0;
             checking = false;
+            latestRelease.reset();
+            releaseButtonEnabled = false;
+            releaseButtonAccent = false;
+            releaseButtonText = L"无可用更新";
             if (result->release)
+            {
+                latestRelease = *result->release;
                 releaseNotes.setRelease(std::move(*result->release));
+            }
             else
                 releaseNotes.setMessage(result->detail.empty() ? L"暂无更新日志" : result->detail);
             std::wstring visibleVersion = displayVersion(result->version);
             if (result->state == UpdateState::Available) {
                 releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
                                                         : result->releaseUrl;
-                statusText = L"发现新版本：" + visibleVersion + L"，请点击“打开发布页”";
+                if (latestRelease && !latestRelease->installerUrl.empty()) {
+                    statusText = L"发现新版本：" + visibleVersion + L"，点击“下载更新”";
+                    releaseButtonText = L"下载更新";
+                    releaseButtonEnabled = true;
+                    releaseButtonAccent = true;
+                } else {
+                    statusText = L"发现新版本，但该 Release 没有对应安装器";
+                }
                 latestText = L"最新版本：" + visibleVersion;
-                releaseButtonAccent = true;
             } else if (result->state == UpdateState::Current) {
                 releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
                                                         : result->releaseUrl;
                 statusText = L"当前已是最新版本";
                 latestText = L"当前正式版本：" + visibleVersion;
-                releaseButtonAccent = false;
             } else {
                 releaseUrl = app_info::kLatestReleasePage;
                 statusText = result->detail;
                 latestText.clear();
-                releaseButtonAccent = false;
+            }
+            surface.invalidate();
+            return 0;
+        }
+        case kMsgDownloadProgress: {
+            std::unique_ptr<DownloadProgressPayload> result(
+                reinterpret_cast<DownloadProgressPayload*>(lp));
+            if (!result || result->requestId != activeRequest || !downloading)
+                return 0;
+            statusText = L"正在下载更新安装器：" + std::to_wstring(result->percent) + L"%";
+            surface.invalidate();
+            return 0;
+        }
+        case kMsgDownloadFinished: {
+            std::unique_ptr<DownloadFinishedPayload> result(
+                reinterpret_cast<DownloadFinishedPayload*>(lp));
+            if (!result || result->requestId != activeRequest)
+                return 0;
+            downloading = false;
+            downloadCancel.reset();
+            if (result->success) {
+                downloadedInstallerPath = std::move(result->path);
+                releaseButtonText = L"安装更新";
+                releaseButtonEnabled = true;
+                releaseButtonAccent = true;
+                statusText = L"安装器下载完成，点击“安装更新”";
+            } else if (!result->cancelled) {
+                releaseButtonText = L"重试下载";
+                releaseButtonEnabled = latestRelease && !latestRelease->installerUrl.empty();
+                releaseButtonAccent = releaseButtonEnabled;
+                statusText = result->detail.empty() ? L"更新安装器下载失败" : result->detail;
             }
             surface.invalidate();
             return 0;
@@ -1234,6 +1631,7 @@ struct AboutDialog::Impl {
             return 0;
         case WM_DESTROY:
             discardPendingUpdateResults(hwnd);
+            discardPendingDownloadMessages(hwnd);
             surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)
@@ -1312,10 +1710,65 @@ struct AboutDialog::Impl {
         latestRect = D2D1::RectF(pad, latestY, std::max(pad, w - pad), latestY + latestH);
     }
 
+    void clearDownloadedInstaller() {
+        if (!downloadedInstallerPath.empty()) {
+            DeleteFileW(downloadedInstallerPath.c_str());
+            downloadedInstallerPath.clear();
+        }
+    }
+
+    void startDownload() {
+        if (!hwnd || checking || downloading || installingUpdate || !latestRelease ||
+            latestRelease->installerUrl.empty())
+            return;
+
+        clearDownloadedInstaller();
+        const std::wstring outputPath = makeTempInstallerPath();
+        if (outputPath.empty()) {
+            statusText = L"无法创建下载临时文件";
+            surface.invalidate();
+            return;
+        }
+
+        downloading = true;
+        releaseButtonEnabled = false;
+        releaseButtonAccent = false;
+        releaseButtonText = L"下载中…";
+        statusText = L"正在准备下载更新安装器…";
+        activeRequest = nextRequestId();
+        downloadCancel = std::make_shared<std::atomic_bool>(false);
+        downloadInstaller(hwnd, activeRequest, latestRelease->installerUrl, outputPath,
+                          latestRelease->installerSize, downloadCancel);
+        surface.invalidate();
+    }
+
+    void startInstall() {
+        if (!hwnd || installingUpdate || downloadedInstallerPath.empty() || !onInstallUpdate)
+            return;
+
+        const std::wstring installerPath = downloadedInstallerPath;
+        installingUpdate = true;
+        if (!onInstallUpdate(installerPath)) {
+            installingUpdate = false;
+            statusText = L"无法启动更新安装器";
+            surface.invalidate();
+            return;
+        }
+
+        releaseButtonEnabled = false;
+        statusText = L"安装器已启动，正在退出当前程序…";
+        destroy();
+    }
+
     void startCheck() {
-        if (checking || !hwnd)
+        if (checking || downloading || installingUpdate || !hwnd ||
+            !downloadedInstallerPath.empty())
             return;
         checking = true;
+        latestRelease.reset();
+        releaseButtonEnabled = false;
+        releaseButtonAccent = false;
+        releaseButtonText = L"无可用更新";
         activeRequest = nextRequestId();
         releaseUrl = app_info::kLatestReleasePage;
         // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
@@ -1325,12 +1778,18 @@ struct AboutDialog::Impl {
     }
 
     void destroy() {
+        if (downloadCancel)
+            downloadCancel->store(true, std::memory_order_relaxed);
         if (hwnd) {
             HWND target = hwnd;
             DestroyWindow(target);
             discardPendingUpdateResults(target);
+            discardPendingDownloadMessages(target);
             hwnd = nullptr;
         }
+        downloadCancel.reset();
+        if (!installingUpdate)
+            clearDownloadedInstaller();
     }
 };
 
@@ -1341,12 +1800,22 @@ AboutDialog::~AboutDialog() {
 }
 
 bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
-                         std::function<void(bool)> onAutoCheckChanged) {
+                         std::function<void(bool)> onAutoCheckChanged,
+                         std::function<bool(const std::wstring&)> onInstallUpdate) {
     impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者。
     impl_->inst = inst;
     impl_->autoCheckOnStartup = autoCheckOnStartup;
     impl_->onAutoCheckChanged = std::move(onAutoCheckChanged);
+    impl_->onInstallUpdate = std::move(onInstallUpdate);
     impl_->checking = false;
+    impl_->downloading = false;
+    impl_->installingUpdate = false;
+    impl_->downloadCancel.reset();
+    impl_->downloadedInstallerPath.clear();
+    impl_->latestRelease.reset();
+    impl_->releaseButtonEnabled = false;
+    impl_->releaseButtonAccent = false;
+    impl_->releaseButtonText = L"无可用更新";
     impl_->activeRequest = nextRequestId();
     impl_->releaseUrl = app_info::kLatestReleasePage;
 

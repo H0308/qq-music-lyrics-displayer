@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <memory>
+#include <string>
 
 // 软件关于窗口：显示应用信息，并从 GitHub Releases 检查正式版本更新。
 class AboutDialog {
@@ -15,7 +16,8 @@ public:
     AboutDialog& operator=(const AboutDialog&) = delete;
 
     bool create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup = true,
-                std::function<void(bool)> onAutoCheckChanged = {});
+                std::function<void(bool)> onAutoCheckChanged = {},
+                std::function<bool(const std::wstring&)> onInstallUpdate = {});
     void show();
     void destroy();
     bool isOpen() const;

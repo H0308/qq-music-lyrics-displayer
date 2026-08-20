@@ -910,6 +910,7 @@ struct App {
     void pickFont();
     void showFontColorDialog();
     void showAbout();
+    bool launchUpdateInstaller(const std::wstring& path);
     void onDialogClosed(DialogKind kind);
     void setAutoCheckOnStartup(bool enabled);
     void applyFontColors();
@@ -1403,11 +1404,23 @@ void App::showAbout() {
     aboutDialog = std::make_unique<AboutDialog>();
     if (!aboutDialog->create(
             GetModuleHandleW(nullptr), trayHwnd, autoCheckOnStartup_,
-            [this](bool enabled) { setAutoCheckOnStartup(enabled); })) {
+            [this](bool enabled) { setAutoCheckOnStartup(enabled); },
+            [this](const std::wstring& path) { return launchUpdateInstaller(path); })) {
         aboutDialog.reset();
         return;
     }
     aboutDialog->show();
+}
+
+bool App::launchUpdateInstaller(const std::wstring& path) {
+    if (path.empty())
+        return false;
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr,
+                                     SW_SHOWNORMAL);
+    if (reinterpret_cast<INT_PTR>(result) <= 32)
+        return false;
+    PostQuitMessage(0);
+    return true;
 }
 
 LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1450,6 +1463,28 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 } // namespace
 
 int main() {
+    // 安装脚本用这个无界面参数确认候选文件确实来自 Release 配置；
+    // 必须在单实例检查之前处理，否则已有程序运行时会掩盖构建类型。
+    int verifyArgc = 0;
+    LPWSTR* verifyArgv = CommandLineToArgvW(GetCommandLineW(), &verifyArgc);
+    bool verifyRelease = false;
+    if (verifyArgv) {
+        for (int i = 1; i < verifyArgc; ++i) {
+            if (wcscmp(verifyArgv[i], L"--verify-release") == 0) {
+                verifyRelease = true;
+                break;
+            }
+        }
+        LocalFree(verifyArgv);
+    }
+    if (verifyRelease) {
+#if defined(QQMUSICLYRIC_RELEASE_BUILD) && QQMUSICLYRIC_RELEASE_BUILD
+        return 0;
+#else
+        return 1;
+#endif
+    }
+
     // 单实例限制：命名互斥体（Local\ 会话级）。进程退出（含崩溃）时内核自动销毁，
     // 无需手动释放；句柄保持到进程结束即可
     HANDLE singleInstance = CreateMutexW(nullptr, TRUE,
@@ -1497,7 +1532,8 @@ int main() {
     app.aboutDialog = std::make_unique<AboutDialog>();
     if (!app.aboutDialog->create(
             inst, app.trayHwnd, app.autoCheckOnStartup_,
-            [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); }))
+            [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); },
+            [&app](const std::wstring& path) { return app.launchUpdateInstaller(path); }))
         app.aboutDialog.reset();
     // 设置窗口预创建（保持隐藏）：把首次打开时的控件构建成本挪到启动阶段；
     // 关闭后仍会销毁，下一次打开重新创建。

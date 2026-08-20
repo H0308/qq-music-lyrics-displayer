@@ -55,7 +55,9 @@ target_include_directories(QQMusicLyric PRIVATE src)
 target_link_options(QQMusicLyric PRIVATE /MANIFEST:NO
     $<$<CONFIG:Release>:/SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup>)
 
-target_compile_definitions(QQMusicLyric PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+target_compile_definitions(QQMusicLyric PRIVATE
+    UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00
+    $<$<CONFIG:Release>:QQMUSICLYRIC_RELEASE_BUILD=1>)
 target_compile_options(QQMusicLyric PRIVATE /utf-8 /EHsc)
 
 target_link_libraries(QQMusicLyric PRIVATE
@@ -63,6 +65,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     nlohmann_json::nlohmann_json
     ZLIB::ZLIB
     windowsapp
+    winhttp
     d2d1
     d3d11
     dxgi
