@@ -977,7 +977,7 @@ struct FontPickerDialog::Impl {
         switch (msg) {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
-            surface.initialize(hwnd);
+            surface.initialize(hwnd, backdrop);
             enumerateFonts();
             createControls();
             layout();
@@ -1001,6 +1001,7 @@ struct FontPickerDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
+            surface.setBackdrop(backdrop);
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -1014,7 +1015,7 @@ struct FontPickerDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            // 顶层表面由 FluentDialogSurface 在 WM_PAINT 内统一绘制，避免 GDI 与 D2D 重叠。
             return 1;
         case WM_MOUSEMOVE: {
             const float s = surface.dipScale();

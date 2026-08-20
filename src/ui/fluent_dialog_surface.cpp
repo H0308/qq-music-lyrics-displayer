@@ -173,18 +173,27 @@ FluentDialogSurface::~FluentDialogSurface() {
     hwnd_ = nullptr;
 }
 
-bool FluentDialogSurface::initialize(HWND hwnd) {
+bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop) {
     hwnd_ = hwnd;
     dpi_ = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
     if (dpi_ == 0)
         dpi_ = 96;
     alphaRedirection_ = false;
     if (hwnd_) {
-        BOOL enabled = TRUE;
-        alphaRedirection_ = SUCCEEDED(DwmSetWindowAttribute(
+        BOOL enabled = backdrop ? TRUE : FALSE;
+        alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
             hwnd_, DWMWA_REDIRECTIONBITMAP_ALPHA, &enabled, sizeof(enabled)));
     }
     return hwnd_ != nullptr;
+}
+
+void FluentDialogSurface::setBackdrop(bool backdrop) {
+    if (!hwnd_)
+        return;
+
+    BOOL enabled = backdrop ? TRUE : FALSE;
+    alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
+        hwnd_, DWMWA_REDIRECTIONBITMAP_ALPHA, &enabled, sizeof(enabled)));
 }
 
 bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& callback) {
@@ -215,8 +224,7 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     if (FAILED(target->BindDC(hdc, &renderRect)))
         return false;
 
-    // 回退背景必须在 D2D 开始绘制前准备；支持重定向 Alpha 时则让 Mica 透出。
-    paintDialogBackground(hwnd_, hdc, backdrop);
+    // 根背景由 D2D 在当前 WM_PAINT 内统一绘制；支持重定向 Alpha 时让 Mica 透出。
     target->BeginDraw();
     target->SetTransform(D2D1::Matrix3x2F::Identity());
     if (backdrop && alphaRedirection_)

@@ -632,7 +632,7 @@ struct SettingsDialog::Impl {
         switch (msg) {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd, false);
-            surface.initialize(hwnd);
+            surface.initialize(hwnd, backdrop);
             createControls();
             layout();
             return 0;
@@ -652,6 +652,7 @@ struct SettingsDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
+            surface.setBackdrop(backdrop);
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -665,7 +666,7 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            // 顶层表面由 FluentDialogSurface 在 WM_PAINT 内统一绘制，避免 GDI 与 D2D 重叠。
             return 1;
         case WM_MOUSEMOVE: {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};

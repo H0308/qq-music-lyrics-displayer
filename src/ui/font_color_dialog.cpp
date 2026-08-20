@@ -498,7 +498,7 @@ struct FontColorDialog::Impl {
         switch (msg) {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
-            surface.initialize(hwnd);
+            surface.initialize(hwnd, backdrop);
             layout();
             return 0;
         case WM_SIZE:
@@ -511,7 +511,7 @@ struct FontColorDialog::Impl {
                          suggested->right - suggested->left,
                          suggested->bottom - suggested->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-            surface.initialize(hwnd);
+            surface.initialize(hwnd, backdrop);
             layout();
             surface.invalidate();
             return 0;
@@ -519,6 +519,7 @@ struct FontColorDialog::Impl {
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
+            surface.setBackdrop(backdrop);
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -532,7 +533,7 @@ struct FontColorDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            // 顶层表面由 FluentDialogSurface 在 WM_PAINT 内统一绘制，避免 GDI 与 D2D 重叠。
             return 1;
         case WM_MOUSEMOVE: {
             const float s = surface.dipScale();
