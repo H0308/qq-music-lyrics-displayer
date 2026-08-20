@@ -533,7 +533,7 @@ struct FontColorDialog::Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            // 顶层表面由 FluentDialogSurface 在 WM_PAINT 内统一绘制，避免 GDI 与 D2D 重叠。
+            surface.eraseBackground(reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_MOUSEMOVE: {
             const float s = surface.dipScale();

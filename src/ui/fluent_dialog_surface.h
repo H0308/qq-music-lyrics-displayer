@@ -72,6 +72,7 @@ public:
 
     bool initialize(HWND hwnd, bool backdrop);
     void setBackdrop(bool backdrop);
+    void eraseBackground(HDC hdc, bool backdrop);
     // 在一次 WM_PAINT 内完成背景准备、D2D 绘制和当前 DC 提交。
     bool paint(HDC hdc, bool backdrop, const PaintCallback& callback);
     void invalidate(const RECT* rect = nullptr) const;
@@ -85,6 +86,7 @@ private:
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
     bool alphaRedirection_ = false;
+    bool hasPainted_ = false;
     LyricRenderer renderer_;
 };
 

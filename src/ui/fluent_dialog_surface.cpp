@@ -179,6 +179,7 @@ bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop) {
     if (dpi_ == 0)
         dpi_ = 96;
     alphaRedirection_ = false;
+    hasPainted_ = false;
     if (hwnd_) {
         BOOL enabled = backdrop ? TRUE : FALSE;
         alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
@@ -194,6 +195,12 @@ void FluentDialogSurface::setBackdrop(bool backdrop) {
     BOOL enabled = backdrop ? TRUE : FALSE;
     alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
         hwnd_, DWMWA_REDIRECTIONBITMAP_ALPHA, &enabled, sizeof(enabled)));
+    hasPainted_ = false;
+}
+
+void FluentDialogSurface::eraseBackground(HDC hdc, bool backdrop) {
+    if (!hasPainted_)
+        paintDialogBackground(hwnd_, hdc, backdrop);
 }
 
 bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& callback) {
@@ -245,6 +252,7 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     if (FAILED(hr))
         return false;
 
+    hasPainted_ = true;
     return true;
 }
 
