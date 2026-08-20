@@ -3,9 +3,12 @@
 #include "lyric/lyric_provider.h"
 
 #include <windows.h>
+
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // 手动搜索/选择歌词对话框
 class ManualSearchDialog {

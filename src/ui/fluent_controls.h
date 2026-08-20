@@ -79,28 +79,42 @@ private:
     bool focused_ = false;
 };
 
-// 圆角输入框卡片，内嵌无边框真 EDIT（保留 IME/选中/剪贴板）。
+// 圆角输入框卡片，使用无边框真 EDIT（保留 IME/选中/剪贴板）；
+// 默认 EDIT 作为宿主子窗口，必要时可直接挂到对话框父窗口。
 // EDIT 通知（EN_CHANGE 等）原样转发给对话框父窗口。
 class FluentEdit : public LayeredChild {
 public:
-    bool create(HWND parent, int id, const wchar_t* cueBanner);
+    bool create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit = false);
     std::wstring text() const;
     void setText(const std::wstring& text);
+    void move(int x, int y, int w, int h);
     void focus();
     void refreshTheme();
+    HWND editHwnd() const { return hEdit_; }
+    void onEditNotification(UINT code);
+    LRESULT colorEdit(HDC hdc);
 
 private:
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     void layoutEdit();
+    void repaintEdit();
 
     int id_ = 0;
     HWND hEdit_ = nullptr;
+    HWND editParent_ = nullptr;
     HFONT editFont_ = nullptr;
     HBRUSH editBrush_ = nullptr;
     COLORREF editBrushColor_ = 0;
     bool focused_ = false;
+    bool directEdit_ = false;
+    int hostX_ = 0;
+    int hostY_ = 0;
+    bool debugHostPaintLogged_ = false;
+    bool debugColorLogged_ = false;
+    bool debugFocusLogged_ = false;
+    bool debugChangeLogged_ = false;
 };
 
 // 列表（分组标题、圆角选中、悬停高亮、滚轮/键盘/拖动滚动条）。

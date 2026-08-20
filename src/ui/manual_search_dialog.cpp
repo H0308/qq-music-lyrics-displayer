@@ -1,427 +1,164 @@
 #include "ui/manual_search_dialog.h"
 
-#include "ui/dialog_notify.h"
-#include "ui/lyric_renderer.h"
-#include "ui/fluent_controls.h"
-#include "ui/fluent_theme.h"
 #include "resource.h"
+#include "ui/dialog_notify.h"
+#include "ui/fluent_dialog_surface.h"
+#include "ui/fluent_theme.h"
 
-#include <windows.h>
 #include <windowsx.h>
-#include <d2d1.h>
-#include <dwrite.h>
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <string>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace {
 
 constexpr int kIdTitleEdit = 101;
 constexpr int kIdArtistEdit = 102;
-constexpr int kIdSearchBtn = 103;
+constexpr int kIdSearchButton = 103;
 constexpr int kIdCandidateList = 104;
-constexpr int kIdOkBtn = 105;
-constexpr int kIdCancelBtn = 106;
-constexpr int kIdPreviewPanel = 107;
-constexpr int kIdStatus = 108;
-constexpr int kIdHint = 109;
-constexpr int kIdAdvanceLyric = 110;
-constexpr int kIdDelayLyric = 111;
-constexpr int kIdTitleLabel = 112;
-constexpr int kIdSubtitleLabel = 113;
-constexpr int kIdCompatibilityLabel = 114;
+constexpr int kIdApplyButton = 105;
+constexpr int kIdCancelButton = 106;
+constexpr int kIdPreview = 107;
+constexpr int kIdAdvanceButton = 110;
+constexpr int kIdDelayButton = 111;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
-// 最小客户区仍需容纳两列输入框、固定行高的多行歌词候选和右侧预览。
+
 constexpr float kMinClientWidthDip = 520.0f;
 constexpr float kMinClientHeightDip = 504.0f;
+
+constexpr float kCandidateHeaderHeight = 28.0f;
+constexpr float kCandidateRowHeight = 40.0f;
+constexpr float kScrollBarWidth = 3.0f;
+constexpr float kScrollBarHitWidth = 12.0f;
+constexpr float kScrollBarInset = 8.0f;
+
+constexpr UINT kPreviewTimerId = 1;
+constexpr DWORD kPreviewResumeDelayMs = 2000;
+constexpr int kPreviewWheelLinesPerNotch = 3;
+constexpr float kLyricTextWidthDip = 240.0f;
+constexpr float kLyricRowHeightDip = 50.0f;
+
+constexpr UINT kMsgCandidatesReady = WM_APP + 10;
+constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
 void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
     UINT dpi = GetDpiForWindow(hwnd);
     if (!dpi)
         dpi = GetDpiForSystem();
-    float s = fluent::dipScale(dpi);
-    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * s)),
-            static_cast<LONG>(std::lround(kMinClientHeightDip * s))};
+    const float scale = fluent::dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * scale)),
+            static_cast<LONG>(std::lround(kMinClientHeightDip * scale))};
     if (!AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi))
         return;
     info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
     info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
 }
 
-constexpr UINT kMsgCandidatesReady = WM_APP + 10;
-constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
-
-// 右侧桌面歌词风格预览面板（固定行高，行数随面板高度变化）
-class LyricPreviewPanel : public fluent::LayeredChild {
-public:
-    bool create(HWND parent, HINSTANCE, int, int, int, int) {
-        return createLayered(parent, L"QQMusicLyricPreviewPanel", wndProc, kIdPreviewPanel);
-    }
-
-    void setLyrics(const std::vector<LyricLine>& lines) {
-        lines_ = lines;
-        bool hasTranslation = false;
-        bool hasRomanization = false;
-        for (const auto& line : lines_) {
-            hasTranslation = hasTranslation || !line.translation.empty();
-            hasRomanization = hasRomanization || !line.romanization.empty();
-        }
-        if (hasTranslation && hasRomanization)
-            capabilityLabel_ = L"[支持翻译+罗马音]";
-        else if (hasTranslation)
-            capabilityLabel_ = L"[支持翻译]";
-        else if (hasRomanization)
-            capabilityLabel_ = L"[支持罗马音]";
-        else
-            capabilityLabel_.clear();
-        positionMs_ = 0;
-        topLine_ = 0;
-        currentLine_ = -1;
-        manualScroll_ = false;
-        wheelAccum_ = 0;
-        syncToCurrentLine();
-        if (hwnd_)
-            renderNow();
-    }
-
-    void setPosition(int64_t positionMs) {
-        positionMs_ = positionMs;
-        currentLine_ = LyricProvider::findLine(lines_, positionMs);
-        if (!manualScroll_) {
-            syncToCurrentLine();
-            if (hwnd_)
-                renderNow();
-        }
-    }
-
-private:
-    static constexpr UINT kTimerResume = 1;
-    static constexpr DWORD kResumeDelayMs = 2000;      // 停止滚动后 2 秒恢复同步
-    static constexpr int kWheelLinesPerNotch = 3;
-    static constexpr float kLyricTextWidthDip = 240.0f; // 歌词行固定布局宽度，避免随窗口拉伸
-    static constexpr float kLyricRowHeightDip = 50.0f;  // 歌词行固定高度，行数随面板高度增加
-
-    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-        LyricPreviewPanel* self = nullptr;
-        if (msg == WM_NCCREATE) {
-            self = static_cast<LyricPreviewPanel*>(
-                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            self->hwnd_ = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        } else {
-            self = reinterpret_cast<LyricPreviewPanel*>(GetWindowLongPtrW(h, GWLP_USERDATA));
-        }
-        if (self)
-            return self->handle(msg, wp, lp);
-        return DefWindowProcW(h, msg, wp, lp);
-    }
-
-    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
-        switch (msg) {
-        case WM_CREATE:
-            SetTimer(hwnd_, kTimerResume, 100, nullptr);
-            return 0;
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            BeginPaint(hwnd_, &ps);
-            renderNow();
-            EndPaint(hwnd_, &ps);
-            return 0;
-        }
-        case WM_TIMER:
-            onTimer();
-            return 0;
-        case WM_MOUSEWHEEL:
-            onMouseWheel(GET_WHEEL_DELTA_WPARAM(wp));
-            return 0;
-        case WM_DESTROY:
-            KillTimer(hwnd_, kTimerResume);
-            hwnd_ = nullptr;
-            return 0;
-        }
-        return DefWindowProcW(hwnd_, msg, wp, lp);
-    }
-
-    void onTimer() {
-        if (manualScroll_) {
-            DWORD now = GetTickCount();
-            if (now - lastScrollTick_ >= kResumeDelayMs) {
-                manualScroll_ = false;
-                syncToCurrentLine();
-                renderNow();
-            }
-        }
-    }
-
-    void onMouseWheel(int delta) {
-        if (lines_.empty())
-            return;
-        wheelAccum_ += delta;
-        int notch = wheelAccum_ / WHEEL_DELTA;
-        if (notch == 0)
-            return;
-        wheelAccum_ -= notch * WHEEL_DELTA;
-        // 滚轮向上（delta > 0）内容向上走，topLine 减小；向下则增大
-        scrollBy(-notch * kWheelLinesPerNotch);
-    }
-
-    float lyricContentTop() const {
-        return capabilityLabel_.empty() ? 0.0f : 27.0f;
-    }
-
-    int visibleRowsForHeight(float hDip) const {
-        float availableHeight = std::max(0.0f, hDip - lyricContentTop());
-        return std::max(1, static_cast<int>(std::floor(availableHeight / kLyricRowHeightDip)));
-    }
-
-    int visibleRowCount() const {
-        if (!hwnd_)
-            return 1;
-        RECT rc{};
-        GetClientRect(hwnd_, &rc);
-        UINT dpi = GetDpiForWindow(hwnd_);
-        if (!dpi)
-            dpi = GetDpiForSystem();
-        return visibleRowsForHeight(
-            static_cast<float>(rc.bottom - rc.top) / fluent::dipScale(dpi));
-    }
-
-    void scrollBy(int lines) {
-        int visible = visibleRowCount();
-        int maxTop = std::max(0, static_cast<int>(lines_.size()) - visible);
-        topLine_ = std::clamp(topLine_ + lines, 0, maxTop);
-        manualScroll_ = true;
-        lastScrollTick_ = GetTickCount();
-        renderNow();
-    }
-
-    void syncToCurrentLine() {
-        int total = static_cast<int>(lines_.size());
-        if (total == 0) {
-            topLine_ = 0;
-            return;
-        }
-        int visible = visibleRowCount();
-        int maxTop = std::max(0, total - visible);
-        if (currentLine_ < 0)
-            topLine_ = 0;
-        else
-            topLine_ = std::clamp(currentLine_ - visible / 2, 0, maxTop);
-    }
-
-    float karaokeProgressX(IDWriteTextLayout* layout, const LyricLine& line) const {
-        if (!layout || line.chars.empty() || line.text.empty())
-            return 0.0f;
-
-        UINT32 sungLength = 0;
-        const LyricChar* currentChar = nullptr;
-        for (const auto& ch : line.chars) {
-            if (ch.startMs > positionMs_)
-                break;
-            currentChar = &ch;
-            sungLength += static_cast<UINT32>(ch.text.size());
-        }
-        if (!currentChar || sungLength == 0)
-            return 0.0f;
-
-        const UINT32 textLength = static_cast<UINT32>(line.text.size());
-        sungLength = std::min(sungLength, textLength);
-        const UINT32 charLength = std::min(static_cast<UINT32>(currentChar->text.size()), sungLength);
-        const UINT32 charOffset = sungLength - charLength;
-
-        DWRITE_HIT_TEST_METRICS metrics{};
-        float startX = 0.0f;
-        float hitY = 0.0f;
-        if (FAILED(layout->HitTestTextPosition(charOffset, FALSE, &startX, &hitY, &metrics)))
-            return 0.0f;
-
-        float endX = startX;
-        if (FAILED(layout->HitTestTextPosition(sungLength - 1, TRUE, &endX, &hitY, &metrics)))
-            endX = startX;
-
-        const int64_t durationMs = std::max<int64_t>(currentChar->endMs - currentChar->startMs, 1);
-        const float fraction = static_cast<float>(std::clamp(
-            static_cast<double>(positionMs_ - currentChar->startMs) /
-                static_cast<double>(durationMs),
-            0.0, 1.0));
-        return startX + (endX - startX) * fraction;
-    }
-
-    void drawCurrentLine(ID2D1DCRenderTarget* rt, ID2D1SolidColorBrush* br,
-                         const fluent::Palette& palette, const LyricLine& line,
-                         const D2D1_RECT_F& rect) {
-        auto* fmt = textFormat(15.0f, 700, true);
-        if (!fmt)
-            return;
-
-        if (line.chars.empty()) {
-            br->SetColor(fluent::toD2D(RGB(49, 194, 124)));
-            rt->DrawTextW(line.text.c_str(), static_cast<UINT32>(line.text.size()), fmt, rect, br);
-            return;
-        }
-
-        IDWriteTextLayout* layout = nullptr;
-        IDWriteFactory* dw = dwrite();
-        if (!dw || FAILED(dw->CreateTextLayout(
-                       line.text.c_str(), static_cast<UINT32>(line.text.size()), fmt,
-                       std::max(rect.right - rect.left, 1.0f),
-                       std::max(rect.bottom - rect.top, 1.0f), &layout)) ||
-            !layout) {
-            return;
-        }
-
-        const D2D1_POINT_2F origin = D2D1::Point2F(rect.left, rect.top);
-        br->SetColor(palette.textSecondary);
-        rt->DrawTextLayout(origin, layout, br);
-
-        const float progressX = karaokeProgressX(layout, line);
-        if (progressX > 0.0f) {
-            rt->PushAxisAlignedClip(
-                D2D1::RectF(rect.left, rect.top,
-                            std::min(rect.left + progressX, rect.right), rect.bottom),
-                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            br->SetColor(fluent::toD2D(RGB(49, 194, 124)));
-            rt->DrawTextLayout(origin, layout, br);
-            rt->PopAxisAlignedClip();
-        }
-        layout->Release();
-    }
-
-    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
-        const fluent::Palette& p = fluent::palette();
-        auto* br = brush(rt);
-        if (!br)
-            return;
-        // 半透明圆角卡片，叠在 Mica 背景上
-        D2D1_RECT_F card = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
-        br->SetColor(p.cardFill);
-        rt->FillRoundedRectangle(
-            D2D1::RoundedRect(card, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br);
-        br->SetColor(p.cardStroke);
-        rt->DrawRoundedRectangle(
-            D2D1::RoundedRect(card, fluent::metrics::cardRadius, fluent::metrics::cardRadius), br,
-            1.0f);
-
-        float pad = 12.0f;
-        if (lines_.empty()) {
-            if (auto* fmt = textFormat(15.0f, 400, true)) {
-                const std::wstring placeholder = L"选择左侧歌曲预览歌词";
-                br->SetColor(p.textSecondary);
-                rt->DrawTextW(placeholder.c_str(), static_cast<UINT32>(placeholder.size()), fmt,
-                              D2D1::RectF(pad, hDip * 0.4f, wDip - pad, hDip * 0.6f), br);
-            }
-            return;
-        }
-        const float contentTop = lyricContentTop();
-        if (!capabilityLabel_.empty()) {
-            if (auto* fmt = textFormat(11.0f, 400, true)) {
-                br->SetColor(p.textSecondary);
-                rt->DrawTextW(capabilityLabel_.c_str(), static_cast<UINT32>(capabilityLabel_.size()),
-                              fmt, D2D1::RectF(pad, 7.0f, wDip - pad, 27.0f), br);
-            }
-        }
-        int total = static_cast<int>(lines_.size());
-        int visible = visibleRowsForHeight(hDip);
-        int maxTop = std::max(0, total - visible);
-        if (!manualScroll_) {
-            if (currentLine_ >= 0)
-                topLine_ = std::clamp(currentLine_ - visible / 2, 0, maxTop);
-            else
-                topLine_ = std::clamp(topLine_, 0, maxTop);
-        }
-        int top = std::clamp(topLine_, 0, maxTop);
-        int count = std::min(visible, total - top);
-        const float lyricBlockHeight = visible * kLyricRowHeightDip;
-        const float availableHeight = std::max(0.0f, hDip - contentTop);
-        const float lyricTop = contentTop +
-                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
-        const float lyricLeft = (wDip - kLyricTextWidthDip) * 0.5f;
-        const float lyricRight = lyricLeft + kLyricTextWidthDip;
-        for (int i = 0; i < count; ++i) {
-            int lineIdx = top + i;
-            bool cur = (currentLine_ >= 0 && lineIdx == currentLine_);
-            const std::wstring& text = lines_[lineIdx].text;
-            D2D1_RECT_F rect = D2D1::RectF(lyricLeft, lyricTop + i * kLyricRowHeightDip,
-                                           lyricRight, lyricTop + (i + 1) * kLyricRowHeightDip);
-            // 每行按需取格式：不同参数会重建缓存格式，跨行持有指针会悬空
-            if (cur) {
-                drawCurrentLine(rt, br, p, lines_[lineIdx], rect);
-            } else if (auto* fmt = textFormat(14.0f, 400, true)) {
-                br->SetColor(p.text);
-                rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmt, rect, br);
-            }
-        }
-    }
-
-    std::vector<LyricLine> lines_;
-    std::wstring capabilityLabel_;
-    int64_t positionMs_ = 0;
-    int topLine_ = 0;
-    int currentLine_ = -1;
-    bool manualScroll_ = false;
-    DWORD lastScrollTick_ = 0;
-    int wheelAccum_ = 0;
+struct ScrollBarGeometry {
+    float trackTop = 0.0f;
+    float thumbHeight = 0.0f;
+    float usable = 0.0f;
 };
+
+ScrollBarGeometry scrollBarGeometry(float viewHeight, float contentHeight) {
+    const float trackHeight = std::max(0.0f, viewHeight - kScrollBarInset * 2.0f);
+    const float thumbHeight = std::min(
+        trackHeight, std::max(20.0f, trackHeight * viewHeight / std::max(1.0f, contentHeight)));
+    return {kScrollBarInset, thumbHeight, std::max(0.0f, trackHeight - thumbHeight)};
+}
+
+float scrollBarThumbY(const ScrollBarGeometry& bar, float scrollY, float maxScroll) {
+    if (maxScroll <= 0.0f || bar.usable <= 0.0f)
+        return bar.trackTop;
+    return bar.trackTop + scrollY / maxScroll * bar.usable;
+}
 
 } // namespace
 
 struct ManualSearchDialog::Impl {
-    HINSTANCE inst = nullptr;
+    struct TextField {
+        std::wstring text;
+        std::wstring cue;
+        size_t caret = 0;
+        size_t anchor = 0;
+    };
+
+    struct CandidateItem {
+        std::wstring text;
+        int candidateIndex = -1; // -1 表示分组标题
+        bool header = false;
+    };
+
     HWND hwnd = nullptr;
     HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
+    bool backdrop = false;
 
-    fluent::FluentLabel titleLabel;
-    fluent::FluentLabel subtitleLabel;
-    fluent::FluentEdit titleEdit;
-    fluent::FluentEdit artistEdit;
-    fluent::FluentButton searchBtn;
-    fluent::FluentList list;
-    fluent::FluentLabel statusLabel;
-    fluent::FluentLabel hintLabel;
-    fluent::FluentLabel compatibilityLabel;
-    fluent::FluentButton okBtn;
-    fluent::FluentButton cancelBtn;
-    fluent::FluentButton advanceLyricBtn;
-    fluent::FluentButton delayLyricBtn;
-    LyricPreviewPanel preview;
+    fluent::FluentDialogSurface surface;
+
+    TextField titleEdit;
+    TextField artistEdit;
+    std::wstring statusText;
+    bool searching = false;
 
     LyricProvider* provider = nullptr;
     std::wstring targetTitle;
     std::wstring targetArtist;
     int64_t targetDurationMs = 0;
     std::wstring targetNeteaseSongId;
+
     std::vector<SearchCandidate> candidates;
-    std::vector<int> itemToCand; // 列表行号 -> candidates 下标（-1 为分组标题行）
+    std::vector<CandidateItem> candidateItems;
+    int selectedItemRow = -1;
     int selectedIdx = -1;
+    int hoverItemRow = -1;
+
     std::vector<LyricLine> previewLines;
     SongInfo previewInfo;
+    std::wstring previewCapabilityLabel;
     int64_t previewOffsetMs = 0;
     int64_t playbackPositionMs = 0;
+    int64_t previewPositionMs = 0;
+    int previewTopLine = 0;
+    int previewCurrentLine = -1;
+    bool previewManualScroll = false;
+    DWORD previewLastScrollTick = 0;
+    int previewWheelAccum = 0;
+
+    float candidateScroll = 0.0f;
+    int candidateWheelAccum = 0;
+    bool candidateScrollDragging = false;
+    float candidateScrollGrabDy = 0.0f;
+
+    D2D1_RECT_F titleRect{};
+    D2D1_RECT_F subtitleRect{};
+    D2D1_RECT_F titleEditRect{};
+    D2D1_RECT_F artistEditRect{};
+    D2D1_RECT_F searchRect{};
+    D2D1_RECT_F statusRect{};
+    D2D1_RECT_F hintRect{};
+    D2D1_RECT_F compatibilityRect{};
+    D2D1_RECT_F candidateListRect{};
+    D2D1_RECT_F previewRect{};
+    D2D1_RECT_F advanceRect{};
+    D2D1_RECT_F delayRect{};
+    D2D1_RECT_F applyRect{};
+    D2D1_RECT_F cancelRect{};
+
+    int hoverId = 0;
+    int pressedId = 0;
+    int focusedId = kIdTitleEdit;
+    bool focusVisible = false;
 
     ManualSearchDialog::ApplyCallback onApply;
 
-    void refreshTheme() {
-        titleLabel.refreshTheme();
-        subtitleLabel.refreshTheme();
-        titleEdit.refreshTheme();
-        artistEdit.refreshTheme();
-        searchBtn.refreshTheme();
-        list.refreshTheme();
-        statusLabel.refreshTheme();
-        hintLabel.refreshTheme();
-        compatibilityLabel.refreshTheme();
-        okBtn.refreshTheme();
-        cancelBtn.refreshTheme();
-        advanceLyricBtn.refreshTheme();
-        delayLyricBtn.refreshTheme();
-        preview.refreshTheme();
-    }
+    ~Impl() = default;
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -437,360 +174,1067 @@ struct ManualSearchDialog::Impl {
         return DefWindowProcW(h, msg, wp, lp);
     }
 
-    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
-        switch (msg) {
-        case WM_CREATE:
-            fluent::styleDialogWindow(hwnd);
-            createControls();
-            layout();
-            statusLabel.setText(L"请输入歌名和歌手，点击搜索。");
-            return 0;
-        case WM_SIZE:
-            layout();
-            // 分层子窗口移动后不会替父窗口擦除拉伸产生的新客户区，完整重绘父子窗口。
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            return 0;
-        case WM_GETMINMAXINFO:
-            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
-            return 0;
-        case WM_SETTINGCHANGE:
-        case WM_THEMECHANGED:
-            fluent::styleDialogWindow(hwnd);
-            refreshTheme();
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            return 0;
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            HDC hdc = BeginPaint(hwnd, &ps);
-            // 分层子窗口需要一个稳定的不透明宿主底色，避免拉伸后暴露未初始化区域。
-            fluent::paintDialogBackground(hwnd, hdc, false);
-            EndPaint(hwnd, &ps);
-            return 0;
+    static bool contains(const D2D1_RECT_F& rect, float x, float y) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    static bool isCtrlDown() {
+        return (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    }
+
+    static bool isShiftDown() {
+        return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    }
+
+    TextField* editFor(int id) {
+        if (id == kIdTitleEdit)
+            return &titleEdit;
+        if (id == kIdArtistEdit)
+            return &artistEdit;
+        return nullptr;
+    }
+
+    const TextField* editFor(int id) const {
+        if (id == kIdTitleEdit)
+            return &titleEdit;
+        if (id == kIdArtistEdit)
+            return &artistEdit;
+        return nullptr;
+    }
+
+    static size_t selectionStart(const TextField& field) {
+        return std::min(field.caret, field.anchor);
+    }
+
+    static size_t selectionEnd(const TextField& field) {
+        return std::max(field.caret, field.anchor);
+    }
+
+    static void collapseSelection(TextField& field, bool toEnd) {
+        const size_t position = toEnd ? selectionEnd(field) : selectionStart(field);
+        field.caret = position;
+        field.anchor = position;
+    }
+
+    void moveCaret(TextField& field, size_t next, bool extend) {
+        next = std::min(next, field.text.size());
+        if (extend)
+            field.caret = next;
+        else
+            field.caret = field.anchor = next;
+        surface.invalidate();
+    }
+
+    void replaceSelection(TextField& field, const std::wstring& inserted) {
+        const size_t start = selectionStart(field);
+        const size_t end = selectionEnd(field);
+        std::wstring accepted;
+        for (wchar_t character : inserted) {
+            if (character >= L' ' && character != 0x7f)
+                accepted.push_back(character);
         }
-        case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), false);
-            return 1;
-        case WM_MOUSEWHEEL: {
-            // 滚轮消息默认发往焦点窗口，这里按光标位置转发给列表或预览面板
-            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            ScreenToClient(hwnd, &pt);
-            HWND child = ChildWindowFromPoint(hwnd, pt);
-            if (child == preview.hwnd())
-                SendMessageW(preview.hwnd(), WM_MOUSEWHEEL, wp, lp);
-            else if (child == list.hwnd())
-                SendMessageW(list.hwnd(), WM_MOUSEWHEEL, wp, lp);
-            return 0;
-        }
-        case WM_COMMAND:
-            onCommand(LOWORD(wp), HIWORD(wp));
-            return 0;
-        case kMsgCandidatesReady: {
-            auto* payload = reinterpret_cast<std::vector<SearchCandidate>*>(lp);
-            if (payload) {
-                this->onCandidatesReady(*payload);
-                delete payload;
+
+        field.text.erase(start, end - start);
+        field.text.insert(start, accepted);
+        field.caret = start + accepted.size();
+        field.anchor = field.caret;
+    }
+
+    void copySelection(const TextField& field) const {
+        const size_t start = selectionStart(field);
+        const size_t end = selectionEnd(field);
+        if (start == end || !OpenClipboard(hwnd))
+            return;
+
+        EmptyClipboard();
+        const std::wstring text = field.text.substr(start, end - start);
+        const SIZE_T bytes = (text.size() + 1) * sizeof(wchar_t);
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (memory) {
+            void* data = GlobalLock(memory);
+            if (data) {
+                std::memcpy(data, text.c_str(), bytes);
+                GlobalUnlock(memory);
+                if (!SetClipboardData(CF_UNICODETEXT, memory))
+                    GlobalFree(memory);
+            } else {
+                GlobalFree(memory);
             }
-            return 0;
         }
-        case kMsgPreviewLyricReady: {
-            auto* payload = reinterpret_cast<std::tuple<int, bool, std::vector<LyricLine>, SongInfo>*>(lp);
-            if (payload) {
-                this->onPreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
-                                          std::get<2>(*payload), std::get<3>(*payload));
-                delete payload;
+        CloseClipboard();
+    }
+
+    std::wstring clipboardText() const {
+        std::wstring result;
+        if (!OpenClipboard(hwnd))
+            return result;
+        HANDLE handle = GetClipboardData(CF_UNICODETEXT);
+        if (handle) {
+            const auto* text = static_cast<const wchar_t*>(GlobalLock(handle));
+            if (text)
+                result = text;
+            if (text)
+                GlobalUnlock(handle);
+        }
+        CloseClipboard();
+        return result;
+    }
+
+    void editChanged() {
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    bool handleEditKey(WPARAM key) {
+        TextField* field = editFor(focusedId);
+        if (!field)
+            return false;
+
+        const bool ctrl = isCtrlDown();
+        const bool shift = isShiftDown();
+        if (ctrl && (key == 'A' || key == 'a')) {
+            field->anchor = 0;
+            field->caret = field->text.size();
+            surface.invalidate();
+            return true;
+        }
+        if (ctrl && (key == 'C' || key == 'c')) {
+            copySelection(*field);
+            return true;
+        }
+        if (ctrl && (key == 'X' || key == 'x')) {
+            copySelection(*field);
+            if (selectionStart(*field) != selectionEnd(*field)) {
+                replaceSelection(*field, L"");
+                editChanged();
             }
-            return 0;
+            return true;
         }
-        case WM_CLOSE:
-            this->destroy();
-            return 0;
-        case WM_DESTROY:
-            hwnd = nullptr;
-            if (notifyHwnd)
-                PostMessageW(notifyHwnd, kMsgDialogClosed,
-                             static_cast<WPARAM>(DialogKind::ManualSearch), 0);
-            return 0;
+        if (ctrl && (key == 'V' || key == 'v')) {
+            replaceSelection(*field, clipboardText());
+            editChanged();
+            return true;
         }
-        return DefWindowProcW(hwnd, msg, wp, lp);
+
+        switch (key) {
+        case VK_LEFT:
+            if (!shift && selectionStart(*field) != selectionEnd(*field))
+                collapseSelection(*field, false);
+            else if (field->caret > 0)
+                moveCaret(*field, field->caret - 1, shift);
+            else
+                surface.invalidate();
+            return true;
+        case VK_RIGHT:
+            if (!shift && selectionStart(*field) != selectionEnd(*field))
+                collapseSelection(*field, true);
+            else if (field->caret < field->text.size())
+                moveCaret(*field, field->caret + 1, shift);
+            else
+                surface.invalidate();
+            return true;
+        case VK_HOME:
+            moveCaret(*field, 0, shift);
+            return true;
+        case VK_END:
+            moveCaret(*field, field->text.size(), shift);
+            return true;
+        case VK_BACK:
+            if (selectionStart(*field) != selectionEnd(*field)) {
+                replaceSelection(*field, L"");
+            } else if (field->caret > 0) {
+                const size_t start = field->caret - 1;
+                field->text.erase(start, 1);
+                field->caret = field->anchor = start;
+            }
+            editChanged();
+            return true;
+        case VK_DELETE:
+            if (selectionStart(*field) != selectionEnd(*field)) {
+                replaceSelection(*field, L"");
+            } else if (field->caret < field->text.size()) {
+                field->text.erase(field->caret, 1);
+            }
+            editChanged();
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool handleCharacter(wchar_t character) {
+        TextField* field = editFor(focusedId);
+        if (!field || character < L' ' || character == 0x7f)
+            return false;
+        replaceSelection(*field, std::wstring(1, character));
+        editChanged();
+        return true;
     }
 
     void createControls() {
-        titleLabel.create(hwnd, kIdTitleLabel, L"手动搜索歌词", false, 20.0f, 600);
-        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"从多个来源选择并预览歌词", true, 13.0f, 400);
-        titleEdit.create(hwnd, kIdTitleEdit, L"歌名");
-        titleEdit.setText(targetTitle);
-        artistEdit.create(hwnd, kIdArtistEdit, L"歌手");
-        artistEdit.setText(targetArtist);
-        searchBtn.create(hwnd, kIdSearchBtn, L"搜索", true);
+        titleEdit.cue = L"歌名";
+        titleEdit.text = targetTitle;
+        titleEdit.caret = titleEdit.anchor = titleEdit.text.size();
+        artistEdit.cue = L"歌手";
+        artistEdit.text = targetArtist;
+        artistEdit.caret = artistEdit.anchor = artistEdit.text.size();
 
-        statusLabel.create(hwnd, kIdStatus, L"", false);
-        hintLabel.create(hwnd, kIdHint,
-                         L"YRC/LRC 为网易云歌词；QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词",
-                         true);
-        compatibilityLabel.create(
-            hwnd, kIdCompatibilityLabel,
-            L"提示：网易云歌词保存后不能给 QQ 音乐使用；QQ 音乐/酷狗音乐歌词保存后不能给网易云音乐使用。",
-            false, 13.0f, 600);
-
-        list.create(hwnd, kIdCandidateList);
-
-        okBtn.create(hwnd, kIdOkBtn, L"使用此歌词", true);
-        okBtn.setEnabled(false);
-        cancelBtn.create(hwnd, kIdCancelBtn, L"取消", false);
-        advanceLyricBtn.create(hwnd, kIdAdvanceLyric, L"提前 0.5 秒", false);
-        advanceLyricBtn.setEnabled(false);
-        delayLyricBtn.create(hwnd, kIdDelayLyric, L"延后 0.5 秒", false);
-        delayLyricBtn.setEnabled(false);
-
-        preview.create(hwnd, inst, 0, 0, 0, 0);
+        statusText = L"请输入歌名和歌手，点击搜索。";
+        searching = false;
+        focusedId = kIdTitleEdit;
+        focusVisible = false;
+        candidateScroll = 0.0f;
+        candidateWheelAccum = 0;
+        candidateScrollDragging = false;
+        previewWheelAccum = 0;
+        resetPreviewView();
     }
 
     void layout() {
-        RECT rc;
+        RECT rc{};
         GetClientRect(hwnd, &rc);
-        float s = fluent::dipScale(GetDpiForWindow(hwnd));
-        auto px = [&](float dip) { return static_cast<int>(dip * s); };
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-        int pad = px(fluent::metrics::pagePadding);
-        int gap = px(fluent::metrics::controlGap);
-        int editH = px(fluent::metrics::controlHeight);
-        int btnW = px(88);
-        int statusH = px(22);
+        const float scale = surface.dipScale();
+        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / scale);
+        const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / scale);
+        const float pad = fluent::metrics::pagePadding;
+        const float gap = fluent::metrics::controlGap;
+        const float compactGap = fluent::metrics::compactGap;
+        const float controlH = fluent::metrics::controlHeight;
 
-        int titleH = px(28.0f);
-        int subtitleH = px(20.0f);
-        titleLabel.move(pad, pad, w - pad * 2, titleH);
-        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
+        const float titleH = 30.0f;
+        const float subtitleH = 20.0f;
+        titleRect = D2D1::RectF(pad, pad, std::max(pad, w - pad), pad + titleH);
+        subtitleRect = D2D1::RectF(pad, pad + titleH, std::max(pad, w - pad),
+                                    pad + titleH + subtitleH);
 
-        // 顶部输入区：歌名 [编辑框] 歌手 [编辑框] [搜索]
-        int topRowW = w - pad * 2;
-        int editW = (topRowW - gap * 2 - btnW) / 2;
-        int inputY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
-        titleEdit.move(pad, inputY, editW, editH);
-        artistEdit.move(pad + editW + gap, inputY, editW, editH);
-        searchBtn.move(w - pad - btnW, inputY, btnW, editH);
+        const float inputY = pad + titleH + subtitleH + fluent::metrics::sectionGap;
+        const float searchW = 88.0f;
+        const float inputW = std::max(40.0f, (w - pad * 2.0f - gap * 2.0f - searchW) / 2.0f);
+        titleEditRect = D2D1::RectF(pad, inputY, pad + inputW, inputY + controlH);
+        artistEditRect = D2D1::RectF(pad + inputW + gap, inputY,
+                                     pad + inputW * 2.0f + gap, inputY + controlH);
+        searchRect = D2D1::RectF(w - pad - searchW, inputY, w - pad, inputY + controlH);
 
-        int statusY = inputY + editH + px(fluent::metrics::compactGap);
-        statusLabel.move(pad, statusY, w - pad * 2, statusH);
+        const float statusY = inputY + controlH + compactGap;
+        const float statusH = 22.0f;
+        statusRect = D2D1::RectF(pad, statusY, std::max(pad, w - pad), statusY + statusH);
+        const float hintY = statusY + statusH + 4.0f;
+        hintRect = D2D1::RectF(pad, hintY, std::max(pad, w - pad), hintY + statusH);
+        const float compatibilityY = hintY + statusH + 2.0f;
+        compatibilityRect = D2D1::RectF(pad, compatibilityY, std::max(pad, w - pad),
+                                          compatibilityY + statusH);
 
-        int hintY = statusY + statusH + px(4);
-        hintLabel.move(pad, hintY, w - pad * 2, statusH);
+        const float contentTop = compatibilityY + statusH + fluent::metrics::sectionGap;
+        const float buttonH = controlH;
+        const float buttonY = std::max(contentTop, h - pad - buttonH);
+        const float contentBottom = buttonY - fluent::metrics::sectionGap;
+        const float contentH = std::max(0.0f, contentBottom - contentTop);
+        const float availableW = std::max(0.0f, w - pad * 2.0f - gap);
+        const float listW = availableW * 0.4f;
+        const float rightX = pad + listW + gap;
+        const float rightW = std::max(0.0f, w - rightX - pad);
+        candidateListRect = D2D1::RectF(pad, contentTop, pad + listW, contentTop + contentH);
+        previewRect = D2D1::RectF(rightX, contentTop, rightX + rightW, contentTop + contentH);
 
-        int compatibilityY = hintY + statusH + px(2);
-        compatibilityLabel.move(pad, compatibilityY, w - pad * 2, statusH);
-
-        int contentTop = compatibilityY + statusH + px(fluent::metrics::sectionGap);
-        int bottomH = pad + px(fluent::metrics::controlHeight) +
-                      px(fluent::metrics::sectionGap);
-        int contentH = h - contentTop - bottomH;
-        int availableW = w - pad * 2 - gap;
-        int listW = availableW * 2 / 5;
-        int rightX = pad + listW + gap;
-        int rightW = w - rightX - pad;
-
-        // 左侧候选列表
-        list.move(pad, contentTop, listW, contentH);
-        // 右侧预览
-        preview.move(rightX, contentTop, rightW, contentH);
-
-        // 底部按钮
-        int okW = px(120);
-        int cancelW = px(88);
-        int btnH = px(fluent::metrics::controlHeight);
-        int btnY = h - pad - btnH;
-        int timingW = px(100);
-        advanceLyricBtn.move(pad, btnY, timingW, btnH);
-        delayLyricBtn.move(pad + timingW + gap, btnY, timingW, btnH);
-        okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
-        cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
+        const float timingW = 100.0f;
+        advanceRect = D2D1::RectF(pad, buttonY, pad + timingW, buttonY + buttonH);
+        delayRect = D2D1::RectF(pad + timingW + gap, buttonY,
+                                pad + timingW + gap + timingW, buttonY + buttonH);
+        const float cancelW = 88.0f;
+        const float applyW = 120.0f;
+        cancelRect = D2D1::RectF(w - pad - cancelW, buttonY, w - pad, buttonY + buttonH);
+        applyRect = D2D1::RectF(w - pad - cancelW - gap - applyW, buttonY,
+                                w - pad - cancelW - gap, buttonY + buttonH);
+        candidateScroll = std::clamp(candidateScroll, 0.0f, candidateMaxScroll());
+        syncPreviewToCurrentLine();
     }
 
-    void onCommand(int id, int code) {
-        if (id == kIdSearchBtn && code == BN_CLICKED) {
-            this->doSearch();
-        } else if (id == kIdCancelBtn && code == BN_CLICKED) {
-            this->destroy();
-        } else if (id == kIdOkBtn && code == BN_CLICKED) {
-            this->applySelection();
-        } else if (id == kIdAdvanceLyric && code == BN_CLICKED) {
-            this->shiftPreviewTimes(-500);
-        } else if (id == kIdDelayLyric && code == BN_CLICKED) {
-            this->shiftPreviewTimes(500);
-        } else if (id == kIdCandidateList && code == LBN_SELCHANGE) {
-            this->onSelectionChanged();
-        } else if ((id == kIdTitleEdit || id == kIdArtistEdit) && code == EN_KILLFOCUS) {
-            // 无需处理，仅避免未命中分支告警
+    float candidateItemHeight(int row) const {
+        if (row < 0 || row >= static_cast<int>(candidateItems.size()))
+            return 0.0f;
+        return candidateItems[row].header ? kCandidateHeaderHeight : kCandidateRowHeight;
+    }
+
+    float candidateContentHeight() const {
+        float height = 0.0f;
+        for (int i = 0; i < static_cast<int>(candidateItems.size()); ++i)
+            height += candidateItemHeight(i);
+        return height;
+    }
+
+    float candidateMaxScroll() const {
+        return std::max(0.0f, candidateContentHeight() -
+                                  (candidateListRect.bottom - candidateListRect.top));
+    }
+
+    int candidateRowAt(float y) const {
+        if (y < candidateListRect.top || y > candidateListRect.bottom)
+            return -1;
+        float localY = y - candidateListRect.top + candidateScroll;
+        if (localY < 0.0f)
+            return -1;
+        for (int row = 0; row < static_cast<int>(candidateItems.size()); ++row) {
+            const float rowH = candidateItemHeight(row);
+            if (localY < rowH)
+                return row;
+            localY -= rowH;
+        }
+        return -1;
+    }
+
+    bool candidateHasScroll() const {
+        return candidateContentHeight() > candidateListRect.bottom - candidateListRect.top;
+    }
+
+    bool isCandidateScrollBarHit(float x) const {
+        return candidateHasScroll() && x >= candidateListRect.right - kScrollBarHitWidth;
+    }
+
+    void scrollCandidatesBy(int delta) {
+        candidateWheelAccum += delta;
+        const int notches = candidateWheelAccum / WHEEL_DELTA;
+        if (notches == 0)
+            return;
+        candidateWheelAccum -= notches * WHEEL_DELTA;
+        candidateScroll = std::clamp(candidateScroll - notches * 3.0f * kCandidateRowHeight,
+                                     0.0f, candidateMaxScroll());
+        surface.invalidate();
+    }
+
+    void ensureCandidateVisible(int row) {
+        if (row < 0 || row >= static_cast<int>(candidateItems.size()))
+            return;
+        float top = 0.0f;
+        for (int i = 0; i < row; ++i)
+            top += candidateItemHeight(i);
+        const float bottom = top + candidateItemHeight(row);
+        const float viewHeight = candidateListRect.bottom - candidateListRect.top;
+        if (top < candidateScroll)
+            candidateScroll = top;
+        else if (bottom > candidateScroll + viewHeight)
+            candidateScroll = bottom - viewHeight;
+        candidateScroll = std::clamp(candidateScroll, 0.0f, candidateMaxScroll());
+    }
+
+    int nextCandidateRow(int from, int direction) const {
+        int row = from;
+        while (true) {
+            row += direction;
+            if (row < 0 || row >= static_cast<int>(candidateItems.size()))
+                return -1;
+            if (!candidateItems[row].header && candidateItems[row].candidateIndex >= 0)
+                return row;
+        }
+    }
+
+    bool beginCandidateScrollDrag(float x, float y) {
+        if (!isCandidateScrollBarHit(x))
+            return false;
+        const float viewHeight = candidateListRect.bottom - candidateListRect.top;
+        const auto bar = scrollBarGeometry(viewHeight, candidateContentHeight());
+        const float thumbY = candidateListRect.top +
+                             scrollBarThumbY(bar, candidateScroll, candidateMaxScroll());
+        if (y >= thumbY && y <= thumbY + bar.thumbHeight) {
+            candidateScrollDragging = true;
+            candidateScrollGrabDy = y - thumbY;
+            SetCapture(hwnd);
+        } else {
+            candidateScroll = std::clamp(
+                candidateScroll + (y < thumbY ? -viewHeight : viewHeight), 0.0f,
+                candidateMaxScroll());
+            surface.invalidate();
+            SetCapture(hwnd);
+        }
+        return true;
+    }
+
+    void updateCandidateScrollDrag(float y) {
+        if (!candidateScrollDragging)
+            return;
+        const float viewHeight = candidateListRect.bottom - candidateListRect.top;
+        const auto bar = scrollBarGeometry(viewHeight, candidateContentHeight());
+        if (bar.usable > 0.0f) {
+            const float localY = y - candidateListRect.top;
+            candidateScroll = std::clamp(
+                (localY - bar.trackTop - candidateScrollGrabDy) / bar.usable *
+                    candidateMaxScroll(),
+                0.0f, candidateMaxScroll());
+        }
+        surface.invalidate();
+    }
+
+    void updatePreviewCapability() {
+        bool hasTranslation = false;
+        bool hasRomanization = false;
+        for (const auto& line : previewLines) {
+            hasTranslation = hasTranslation || !line.translation.empty();
+            hasRomanization = hasRomanization || !line.romanization.empty();
+        }
+        if (hasTranslation && hasRomanization)
+            previewCapabilityLabel = L"[支持翻译 + 罗马音]";
+        else if (hasTranslation)
+            previewCapabilityLabel = L"[支持翻译]";
+        else if (hasRomanization)
+            previewCapabilityLabel = L"[支持罗马音]";
+        else
+            previewCapabilityLabel.clear();
+    }
+
+    float previewContentTop() const {
+        return previewCapabilityLabel.empty() ? 0.0f : 27.0f;
+    }
+
+    int visiblePreviewRows(float height) const {
+        const float availableHeight = std::max(0.0f, height - previewContentTop());
+        return std::max(1, static_cast<int>(std::floor(availableHeight / kLyricRowHeightDip)));
+    }
+
+    int visiblePreviewRows() const {
+        return visiblePreviewRows(std::max(0.0f, previewRect.bottom - previewRect.top));
+    }
+
+    void syncPreviewToCurrentLine() {
+        const int total = static_cast<int>(previewLines.size());
+        if (total == 0) {
+            previewTopLine = 0;
+            return;
+        }
+        const int visible = visiblePreviewRows();
+        const int maxTop = std::max(0, total - visible);
+        if (previewCurrentLine < 0)
+            previewTopLine = 0;
+        else
+            previewTopLine = std::clamp(previewCurrentLine - visible / 2, 0, maxTop);
+    }
+
+    void resetPreviewView() {
+        previewPositionMs = playbackPositionMs;
+        previewCurrentLine = LyricProvider::findLine(previewLines, previewPositionMs);
+        previewTopLine = 0;
+        previewManualScroll = false;
+        previewLastScrollTick = 0;
+        previewWheelAccum = 0;
+        syncPreviewToCurrentLine();
+    }
+
+    void setPreviewLines(const std::vector<LyricLine>& lines) {
+        previewLines = lines;
+        updatePreviewCapability();
+        resetPreviewView();
+        surface.invalidate();
+    }
+
+    void setPreviewPosition(int64_t positionMs) {
+        previewPositionMs = positionMs;
+        previewCurrentLine = LyricProvider::findLine(previewLines, positionMs);
+        if (!previewManualScroll)
+            syncPreviewToCurrentLine();
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    void scrollPreviewBy(int lines) {
+        if (previewLines.empty())
+            return;
+        const int visible = visiblePreviewRows();
+        const int maxTop = std::max(0, static_cast<int>(previewLines.size()) - visible);
+        previewTopLine = std::clamp(previewTopLine + lines, 0, maxTop);
+        previewManualScroll = true;
+        previewLastScrollTick = GetTickCount();
+        surface.invalidate();
+    }
+
+    void scrollPreviewByWheel(int delta) {
+        previewWheelAccum += delta;
+        const int notches = previewWheelAccum / WHEEL_DELTA;
+        if (notches == 0)
+            return;
+        previewWheelAccum -= notches * WHEEL_DELTA;
+        scrollPreviewBy(-notches * kPreviewWheelLinesPerNotch);
+    }
+
+    void onPreviewTimer() {
+        if (previewManualScroll &&
+            GetTickCount() - previewLastScrollTick >= kPreviewResumeDelayMs) {
+            previewManualScroll = false;
+            syncPreviewToCurrentLine();
+            surface.invalidate();
+        }
+    }
+
+    float karaokeProgressX(IDWriteTextLayout* layout, const LyricLine& line) const {
+        if (!layout || line.chars.empty() || line.text.empty())
+            return 0.0f;
+
+        UINT32 sungLength = 0;
+        const LyricChar* currentChar = nullptr;
+        for (const auto& character : line.chars) {
+            if (character.startMs > previewPositionMs)
+                break;
+            currentChar = &character;
+            sungLength += static_cast<UINT32>(character.text.size());
+        }
+        if (!currentChar || sungLength == 0)
+            return 0.0f;
+
+        const UINT32 textLength = static_cast<UINT32>(line.text.size());
+        sungLength = std::min(sungLength, textLength);
+        if (sungLength == 0)
+            return 0.0f;
+        const UINT32 charLength = std::min(static_cast<UINT32>(currentChar->text.size()), sungLength);
+        const UINT32 charOffset = sungLength - charLength;
+
+        DWRITE_HIT_TEST_METRICS metrics{};
+        float startX = 0.0f;
+        float hitY = 0.0f;
+        if (FAILED(layout->HitTestTextPosition(charOffset, FALSE, &startX, &hitY, &metrics)))
+            return 0.0f;
+
+        float endX = startX;
+        if (FAILED(layout->HitTestTextPosition(sungLength - 1, TRUE, &endX, &hitY, &metrics)))
+            endX = startX;
+
+        const int64_t durationMs = std::max<int64_t>(currentChar->endMs - currentChar->startMs, 1);
+        const float fraction = static_cast<float>(std::clamp(
+            static_cast<double>(previewPositionMs - currentChar->startMs) /
+                static_cast<double>(durationMs),
+            0.0, 1.0));
+        return startX + (endX - startX) * fraction;
+    }
+
+    void drawCurrentLyric(fluent::FluentDialogSurface::Painter& painter, const LyricLine& line,
+                          const D2D1_RECT_F& rect) {
+        const auto& p = fluent::palette();
+        auto* format = painter.textFormat(15.0f, 700, true);
+        if (!format)
+            return;
+
+        if (line.chars.empty()) {
+            painter.drawText(line.text, format, rect, fluent::toD2D(RGB(49, 194, 124)));
+            return;
+        }
+
+        auto* layout = painter.textLayout(line.text, format, rect.right - rect.left,
+                                          rect.bottom - rect.top);
+        if (!layout)
+            return;
+
+        const D2D1_POINT_2F origin = D2D1::Point2F(rect.left, rect.top);
+        painter.drawTextLayout(layout, origin, p.textSecondary);
+        const float progressX = karaokeProgressX(layout, line);
+        if (progressX > 0.0f) {
+            painter.target()->PushAxisAlignedClip(
+                D2D1::RectF(rect.left, rect.top,
+                            std::min(rect.left + progressX, rect.right), rect.bottom),
+                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            painter.drawTextLayout(layout, origin, fluent::toD2D(RGB(49, 194, 124)));
+            painter.target()->PopAxisAlignedClip();
+        }
+    }
+
+    void drawTextField(fluent::FluentDialogSurface::Painter& painter,
+                       const D2D1_RECT_F& rect, const TextField& field, int id) {
+        const auto& p = fluent::palette();
+        painter.fillRoundRect(p.cardFill, rect);
+        painter.strokeRoundRect(p.cardStroke, rect);
+        if (focusedId == id && focusVisible) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
+                            rect.bottom - 1.5f),
+                1.5f, fluent::metrics::controlRadius - 1.0f);
+        }
+
+        auto* format = painter.textFormat(14.0f, 400, false, true);
+        if (!format)
+            return;
+        const D2D1_RECT_F textRect =
+            D2D1::RectF(rect.left + 12.0f, rect.top, rect.right - 12.0f, rect.bottom);
+        const bool hasSelection = selectionStart(field) != selectionEnd(field);
+        if (hasSelection) {
+            const std::wstring before = field.text.substr(0, selectionStart(field));
+            const std::wstring selected =
+                field.text.substr(selectionStart(field), selectionEnd(field) - selectionStart(field));
+            const float left = textRect.left + painter.measureTextWidth(before, format);
+            const float right = std::min(textRect.right,
+                                         left + painter.measureTextWidth(selected, format));
+            if (right > left)
+                painter.target()->FillRectangle(
+                    D2D1::RectF(left, textRect.top + 6.0f, right, textRect.bottom - 6.0f),
+                    painter.brush(p.listSelected));
+        }
+
+        if (field.text.empty())
+            painter.drawText(field.cue, format, textRect, p.textSecondary);
+        else
+            painter.drawText(field.text, format, textRect, p.text);
+
+        if (focusedId == id) {
+            const std::wstring before = field.text.substr(0, field.caret);
+            const float caretX = std::clamp(textRect.left + painter.measureTextWidth(before, format),
+                                            textRect.left, textRect.right - 1.0f);
+            if (auto* brush = painter.brush(p.accent))
+                painter.target()->FillRectangle(
+                    D2D1::RectF(caretX, textRect.top + 7.0f, caretX + 1.0f,
+                                textRect.bottom - 7.0f),
+                    brush);
+        }
+    }
+
+    bool isEnabled(int id) const {
+        if (id == kIdSearchButton)
+            return !searching;
+        if (id == kIdApplyButton || id == kIdAdvanceButton || id == kIdDelayButton)
+            return !previewLines.empty();
+        return id != 0;
+    }
+
+    void drawButton(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    const wchar_t* text, bool accent, int id) {
+        const auto& p = fluent::palette();
+        const bool enabled = isEnabled(id);
+        const bool hovered = enabled && hoverId == id;
+        const bool pressed = enabled && pressedId == id;
+        D2D1_COLOR_F fill{};
+        D2D1_COLOR_F textColor{};
+        if (!enabled) {
+            fill = p.listHover;
+            textColor = p.disabled;
+        } else if (accent) {
+            fill = pressed ? p.accentPressed : hovered ? p.accentHover : p.accent;
+            textColor = p.textOnAccent;
+        } else {
+            fill = pressed ? p.controlPressed : hovered ? p.controlHover : p.controlFill;
+            textColor = p.text;
+        }
+        painter.fillRoundRect(fill, rect);
+        if (!accent || !enabled)
+            painter.strokeRoundRect(p.cardStroke, rect);
+        if (focusedId == id && focusVisible && enabled) {
+            painter.strokeRoundRect(
+                accent ? p.textOnAccent : p.accent,
+                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
+                            rect.bottom - 1.5f),
+                1.5f, fluent::metrics::controlRadius - 1.0f);
+        }
+        painter.drawText(text, painter.textFormat(14.0f, 400, true, true),
+                         D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f, rect.bottom),
+                         textColor);
+    }
+
+    void drawCandidateList(fluent::FluentDialogSurface::Painter& painter) {
+        const auto& p = fluent::palette();
+        const float height = candidateListRect.bottom - candidateListRect.top;
+        candidateScroll = std::clamp(candidateScroll, 0.0f, candidateMaxScroll());
+
+        painter.fillRoundRect(p.cardFill, candidateListRect, fluent::metrics::cardRadius);
+        painter.strokeRoundRect(p.cardStroke, candidateListRect, 1.0f,
+                                fluent::metrics::cardRadius);
+        if (focusedId == kIdCandidateList && focusVisible) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(candidateListRect.left + 1.5f, candidateListRect.top + 1.5f,
+                            candidateListRect.right - 1.5f, candidateListRect.bottom - 1.5f),
+                1.5f, fluent::metrics::cardRadius - 1.0f);
+        }
+
+        painter.target()->PushAxisAlignedClip(candidateListRect,
+                                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        float y = candidateListRect.top - candidateScroll;
+        for (int row = 0; row < static_cast<int>(candidateItems.size()); ++row) {
+            const float rowH = candidateItemHeight(row);
+            const D2D1_RECT_F rowRect = D2D1::RectF(candidateListRect.left, y,
+                                                   candidateListRect.right, y + rowH);
+            if (rowRect.bottom >= candidateListRect.top && rowRect.top <= candidateListRect.bottom) {
+                const auto& item = candidateItems[row];
+                if (!item.header) {
+                    const bool selected = row == selectedItemRow;
+                    const bool hovered = row == hoverItemRow;
+                    if (selected)
+                        painter.fillRoundRect(
+                            p.listSelected,
+                            D2D1::RectF(candidateListRect.left + 4.0f, y + 2.0f,
+                                        candidateListRect.right - 4.0f, y + rowH - 2.0f));
+                    else if (hovered)
+                        painter.fillRoundRect(
+                            p.listHover,
+                            D2D1::RectF(candidateListRect.left + 4.0f, y + 2.0f,
+                                        candidateListRect.right - 4.0f, y + rowH - 2.0f));
+                    if (selected)
+                        painter.fillRoundRect(
+                            p.accent,
+                            D2D1::RectF(candidateListRect.left + 7.0f,
+                                        y + rowH * 0.5f - 8.0f,
+                                        candidateListRect.left + 10.0f,
+                                        y + rowH * 0.5f + 8.0f),
+                            1.5f);
+                    painter.drawTrimmedText(
+                        item.text, painter.textFormat(13.0f, 400, false, true),
+                        D2D1::RectF(candidateListRect.left + 16.0f, y,
+                                    candidateListRect.right - 12.0f, y + rowH),
+                        p.text);
+                } else {
+                    painter.drawText(
+                        item.text, painter.textFormat(12.0f, 600, false, true),
+                        D2D1::RectF(candidateListRect.left + 16.0f, y,
+                                    candidateListRect.right - 12.0f, y + rowH),
+                        p.textSecondary);
+                }
+            }
+            y += rowH;
+        }
+
+        if (candidateHasScroll() && height > 0.0f) {
+            const auto bar = scrollBarGeometry(height, candidateContentHeight());
+            const float thumbY = candidateListRect.top +
+                                 scrollBarThumbY(bar, candidateScroll, candidateMaxScroll());
+            painter.fillRoundRect(
+                p.textSecondary,
+                D2D1::RectF(candidateListRect.right - kScrollBarInset - kScrollBarWidth, thumbY,
+                            candidateListRect.right - kScrollBarInset, thumbY + bar.thumbHeight),
+                kScrollBarWidth * 0.5f);
+        }
+        painter.target()->PopAxisAlignedClip();
+    }
+
+    void drawPreview(fluent::FluentDialogSurface::Painter& painter) {
+        const auto& p = fluent::palette();
+        const float width = previewRect.right - previewRect.left;
+        const float height = previewRect.bottom - previewRect.top;
+        painter.fillRoundRect(p.cardFill, previewRect, fluent::metrics::cardRadius);
+        painter.strokeRoundRect(p.cardStroke, previewRect, 1.0f, fluent::metrics::cardRadius);
+        if (focusedId == kIdPreview && focusVisible) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(previewRect.left + 1.5f, previewRect.top + 1.5f,
+                            previewRect.right - 1.5f, previewRect.bottom - 1.5f),
+                1.5f, fluent::metrics::cardRadius - 1.0f);
+        }
+
+        if (previewLines.empty()) {
+            painter.drawText(
+                L"选择左侧歌曲预览歌词", painter.textFormat(15.0f, 400, true),
+                D2D1::RectF(previewRect.left + 12.0f, previewRect.top + height * 0.4f,
+                            previewRect.right - 12.0f, previewRect.top + height * 0.6f),
+                p.textSecondary);
+            return;
+        }
+
+        const float contentTop = previewContentTop();
+        if (!previewCapabilityLabel.empty())
+            painter.drawText(previewCapabilityLabel, painter.textFormat(11.0f, 400, true),
+                             D2D1::RectF(previewRect.left + 12.0f, previewRect.top + 7.0f,
+                                         previewRect.right - 12.0f, previewRect.top + 27.0f),
+                             p.textSecondary);
+
+        const int total = static_cast<int>(previewLines.size());
+        const int visible = visiblePreviewRows(height);
+        const int maxTop = std::max(0, total - visible);
+        if (!previewManualScroll) {
+            if (previewCurrentLine >= 0)
+                previewTopLine = std::clamp(previewCurrentLine - visible / 2, 0, maxTop);
+            else
+                previewTopLine = std::clamp(previewTopLine, 0, maxTop);
+        }
+        const int top = std::clamp(previewTopLine, 0, maxTop);
+        const int count = std::min(visible, total - top);
+        const float lyricBlockHeight = visible * kLyricRowHeightDip;
+        const float availableHeight = std::max(0.0f, height - contentTop);
+        const float lyricTop = previewRect.top + contentTop +
+                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
+        const float lyricWidth = std::min(kLyricTextWidthDip, std::max(0.0f, width - 24.0f));
+        const float lyricLeft = previewRect.left + (width - lyricWidth) * 0.5f;
+        const float lyricRight = lyricLeft + lyricWidth;
+
+        painter.target()->PushAxisAlignedClip(
+            D2D1::RectF(previewRect.left, previewRect.top, previewRect.right, previewRect.bottom),
+            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        for (int i = 0; i < count; ++i) {
+            const int lineIndex = top + i;
+            const bool current = previewCurrentLine >= 0 && lineIndex == previewCurrentLine;
+            const D2D1_RECT_F rect =
+                D2D1::RectF(lyricLeft, lyricTop + i * kLyricRowHeightDip, lyricRight,
+                            lyricTop + (i + 1) * kLyricRowHeightDip);
+            if (current) {
+                drawCurrentLyric(painter, previewLines[lineIndex], rect);
+            } else {
+                painter.drawText(previewLines[lineIndex].text,
+                                 painter.textFormat(14.0f, 400, true), rect, p.text);
+            }
+        }
+        painter.target()->PopAxisAlignedClip();
+    }
+
+    void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
+        const auto& p = fluent::palette();
+        painter.drawText(L"手动搜索歌词", painter.textFormat(20.0f, 600), titleRect, p.text);
+        painter.drawText(L"从多个来源选择并预览歌词", painter.textFormat(13.0f, 400), subtitleRect,
+                         p.textSecondary);
+        drawTextField(painter, titleEditRect, titleEdit, kIdTitleEdit);
+        drawTextField(painter, artistEditRect, artistEdit, kIdArtistEdit);
+        drawButton(painter, searchRect, L"搜索", true, kIdSearchButton);
+
+        painter.drawTrimmedText(statusText, painter.textFormat(13.0f, 400, false, true), statusRect,
+                                 p.text);
+        painter.drawTrimmedText(
+            L"YRC/LRC 为网易云歌词；QRC 为 QQ 原生逐字歌词；KRC 为酷狗逐字歌词",
+            painter.textFormat(12.0f, 400, false, true), hintRect, p.textSecondary);
+        painter.drawTrimmedText(
+            L"提示：网易云歌词保存后不能给 QQ 音乐使用；QQ 音乐/酷狗音乐歌词保存后不能给网易云音乐使用。",
+            painter.textFormat(13.0f, 600, false, true), compatibilityRect, p.text);
+
+        drawCandidateList(painter);
+        drawPreview(painter);
+        drawButton(painter, advanceRect, L"提前 0.5 秒", false, kIdAdvanceButton);
+        drawButton(painter, delayRect, L"延后 0.5 秒", false, kIdDelayButton);
+        drawButton(painter, applyRect, L"使用此歌词", true, kIdApplyButton);
+        drawButton(painter, cancelRect, L"取消", false, kIdCancelButton);
+    }
+
+    int hitTest(float x, float y) const {
+        if (contains(titleEditRect, x, y))
+            return kIdTitleEdit;
+        if (contains(artistEditRect, x, y))
+            return kIdArtistEdit;
+        if (contains(searchRect, x, y))
+            return kIdSearchButton;
+        if (contains(candidateListRect, x, y))
+            return kIdCandidateList;
+        if (contains(previewRect, x, y))
+            return kIdPreview;
+        if (contains(advanceRect, x, y))
+            return kIdAdvanceButton;
+        if (contains(delayRect, x, y))
+            return kIdDelayButton;
+        if (contains(applyRect, x, y))
+            return kIdApplyButton;
+        if (contains(cancelRect, x, y))
+            return kIdCancelButton;
+        return 0;
+    }
+
+    std::vector<int> focusOrder() const {
+        std::vector<int> order{kIdTitleEdit, kIdArtistEdit, kIdSearchButton,
+                               kIdCandidateList, kIdAdvanceButton, kIdDelayButton,
+                               kIdApplyButton, kIdCancelButton};
+        order.erase(std::remove_if(order.begin(), order.end(),
+                                   [this](int id) { return !isEnabled(id); }),
+                    order.end());
+        return order;
+    }
+
+    void focusStep(int direction) {
+        const auto order = focusOrder();
+        if (order.empty())
+            return;
+        auto it = std::find(order.begin(), order.end(), focusedId);
+        int index = it == order.end() ? (direction > 0 ? -1 : 0)
+                                      : static_cast<int>(it - order.begin());
+        index = (index + direction + static_cast<int>(order.size())) %
+                static_cast<int>(order.size());
+        focusedId = order[index];
+        focusVisible = true;
+        surface.invalidate();
+    }
+
+    void selectCandidateRow(int row) {
+        if (row < 0 || row >= static_cast<int>(candidateItems.size()) ||
+            candidateItems[row].header || candidateItems[row].candidateIndex < 0)
+            return;
+        selectedItemRow = row;
+        selectedIdx = candidateItems[row].candidateIndex;
+        ensureCandidateVisible(row);
+        onSelectionChanged();
+    }
+
+    void onCommand(int id) {
+        switch (id) {
+        case kIdSearchButton:
+            doSearch();
+            break;
+        case kIdAdvanceButton:
+            shiftPreviewTimes(-500);
+            break;
+        case kIdDelayButton:
+            shiftPreviewTimes(500);
+            break;
+        case kIdApplyButton:
+            applySelection();
+            break;
+        case kIdCancelButton:
+            destroy();
+            break;
+        default:
+            break;
         }
     }
 
     void doSearch() {
         if (!provider)
             return;
-        searchBtn.setEnabled(false);
-        list.clear();
-        preview.setLyrics({});
-        selectedIdx = -1;
-        previewLines.clear();
-        previewOffsetMs = 0;
+        searching = true;
+        candidateItems.clear();
         candidates.clear();
-        itemToCand.clear();
-        okBtn.setEnabled(false);
-        advanceLyricBtn.setEnabled(false);
-        delayLyricBtn.setEnabled(false);
-        statusLabel.setText(L"搜索中，请稍候…");
+        selectedItemRow = -1;
+        selectedIdx = -1;
+        hoverItemRow = -1;
+        candidateScroll = 0.0f;
+        candidateWheelAccum = 0;
+        previewOffsetMs = 0;
+        setPreviewLines({});
+        statusText = L"搜索中，请稍候…";
+        surface.invalidate();
 
-        std::wstring title = titleEdit.text();
-        std::wstring artist = artistEdit.text();
+        const std::wstring title = titleEdit.text;
+        const std::wstring artist = artistEdit.text;
         HWND hwndCopy = hwnd;
         provider->searchCandidatesAsync(title, artist,
             [hwndCopy](const std::vector<SearchCandidate>& result) {
                 if (!IsWindow(hwndCopy))
                     return;
                 auto* payload = new std::vector<SearchCandidate>(result);
-                PostMessageW(hwndCopy, kMsgCandidatesReady, 0, reinterpret_cast<LPARAM>(payload));
+                PostMessageW(hwndCopy, kMsgCandidatesReady, 0,
+                             reinterpret_cast<LPARAM>(payload));
             });
     }
 
-    void onCandidatesReady(const std::vector<SearchCandidate>& cands) {
-        candidates = cands;
-        itemToCand.clear();
-        searchBtn.setEnabled(true);
+    void handleCandidatesReady(const std::vector<SearchCandidate>& result) {
+        candidates = result;
+        candidateItems.clear();
+        selectedItemRow = -1;
+        selectedIdx = -1;
+        hoverItemRow = -1;
+        candidateScroll = 0.0f;
+        candidateWheelAccum = 0;
+        searching = false;
+        previewOffsetMs = 0;
+        setPreviewLines({});
 
-        int yrcCount = 0, qrcCount = 0, krcCount = 0, lrcCount = 0;
-        for (const auto& c : candidates) {
-            if (c.source == LyricSource::Yrc) ++yrcCount;
-            else if (c.source == LyricSource::Qrc) ++qrcCount;
-            else if (c.source == LyricSource::Krc) ++krcCount;
-            else ++lrcCount;
+        int yrcCount = 0;
+        int qrcCount = 0;
+        int krcCount = 0;
+        int lrcCount = 0;
+        for (const auto& candidate : candidates) {
+            if (candidate.source == LyricSource::Yrc)
+                ++yrcCount;
+            else if (candidate.source == LyricSource::Qrc)
+                ++qrcCount;
+            else if (candidate.source == LyricSource::Krc)
+                ++krcCount;
+            else
+                ++lrcCount;
         }
 
-        std::vector<fluent::FluentListItem> items;
-        auto addHeader = [&](const wchar_t* text) {
-            items.push_back({text, true});
-            itemToCand.push_back(-1);
+        auto addHeader = [this](const wchar_t* text) {
+            candidateItems.push_back({text, -1, true});
         };
-        auto addItem = [&](int idx) {
-            const auto& c = candidates[idx];
-            items.push_back({c.name + L" - " + c.singer, false});
-            itemToCand.push_back(idx);
+        auto addCandidate = [this](int index) {
+            const auto& candidate = candidates[index];
+            candidateItems.push_back(
+                {candidate.name + L" - " + candidate.singer, index, false});
         };
         if (yrcCount > 0) {
             addHeader(L"网易云歌词（YRC/LRC）");
-            for (int i = 0; i < (int)candidates.size(); ++i)
+            for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
                 if (candidates[i].source == LyricSource::Yrc)
-                    addItem(i);
+                    addCandidate(i);
         }
         if (krcCount > 0) {
             addHeader(L"酷狗逐字歌词（KRC）");
-            for (int i = 0; i < (int)candidates.size(); ++i)
+            for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
                 if (candidates[i].source == LyricSource::Krc)
-                    addItem(i);
+                    addCandidate(i);
         }
         if (qrcCount > 0) {
             addHeader(L"QQ 音乐逐字歌词（QRC）");
-            for (int i = 0; i < (int)candidates.size(); ++i)
+            for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
                 if (candidates[i].source == LyricSource::Qrc)
-                    addItem(i);
+                    addCandidate(i);
         }
         if (lrcCount > 0) {
             addHeader(L"QQ 音乐逐行歌词（LRC）");
-            for (int i = 0; i < (int)candidates.size(); ++i)
+            for (int i = 0; i < static_cast<int>(candidates.size()); ++i)
                 if (candidates[i].source == LyricSource::Lrc)
-                    addItem(i);
+                    addCandidate(i);
         }
-        list.setItems(std::move(items));
 
         if (candidates.empty()) {
-            statusLabel.setText(L"未找到相关歌曲，请尝试更换关键词。");
+            statusText = L"未找到相关歌曲，请尝试更换关键词。";
         } else {
-            statusLabel.setText(L"找到 " + std::to_wstring(yrcCount) + L" 条网易云（YRC/LRC）、 " +
-                                std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
-                                std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
-                                std::to_wstring(lrcCount) + L" 条 QQ 逐行（LRC）候选，点击选择以预览歌词。");
-            // 默认选中第一条非分组标题的候选
-            for (int i = 0; i < (int)itemToCand.size(); ++i) {
-                if (itemToCand[i] >= 0) {
-                    list.setSelectedIndex(i);
+            statusText = L"找到 " + std::to_wstring(yrcCount) + L" 条网易云（YRC/LRC）、 " +
+                         std::to_wstring(krcCount) + L" 条酷狗逐字（KRC）、 " +
+                         std::to_wstring(qrcCount) + L" 条 QQ 逐字（QRC）、 " +
+                         std::to_wstring(lrcCount) + L" 条 QQ 逐行（LRC）候选，点击选择以预览歌词。";
+            for (int row = 0; row < static_cast<int>(candidateItems.size()); ++row) {
+                if (!candidateItems[row].header) {
+                    selectCandidateRow(row);
                     break;
                 }
             }
-            this->onSelectionChanged();
         }
+        surface.invalidate();
     }
 
     void onSelectionChanged() {
-        int listIdx = list.selectedIndex();
-        if (listIdx < 0 || listIdx >= (int)itemToCand.size())
+        if (selectedIdx < 0 || selectedIdx >= static_cast<int>(candidates.size()) || !provider)
             return;
-        int idx = itemToCand[listIdx];
-        if (idx < 0)
-            return; // 分组标题不可选（FluentList 已保证不会选中标题行）
-        selectedIdx = idx;
-        preview.setLyrics({});
-        previewLines.clear();
+        setPreviewLines({});
         previewOffsetMs = 0;
-        okBtn.setEnabled(false);
-        advanceLyricBtn.setEnabled(false);
-        delayLyricBtn.setEnabled(false);
-        statusLabel.setText(L"正在加载《" + candidates[idx].name + L"》的歌词预览…");
+        statusText = L"正在加载《" + candidates[selectedIdx].name + L"》的歌词预览…";
+        surface.invalidate();
+
         HWND hwndCopy = hwnd;
-        int idxCopy = idx;
-        provider->fetchLyricAsync(candidates[idx],
-            [hwndCopy, idxCopy](bool ok, const std::vector<LyricLine>& lines, const SongInfo& info) {
+        const int index = selectedIdx;
+        provider->fetchLyricAsync(candidates[index],
+            [hwndCopy, index](bool ok, const std::vector<LyricLine>& lines,
+                              const SongInfo& info) {
                 if (!IsWindow(hwndCopy))
                     return;
                 auto* payload = new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(
-                    idxCopy, ok, lines, info);
+                    index, ok, lines, info);
                 PostMessageW(hwndCopy, kMsgPreviewLyricReady, 0,
                              reinterpret_cast<LPARAM>(payload));
             });
     }
 
-    void onPreviewLyricReady(int idx, bool ok, const std::vector<LyricLine>& lines,
-                             const SongInfo& info) {
-        if (idx != selectedIdx || !ok) {
-            if (idx == selectedIdx)
-                statusLabel.setText(L"该候选没有可用歌词，请尝试其他歌曲。");
+    void handlePreviewLyricReady(int index, bool ok, const std::vector<LyricLine>& lines,
+                                 const SongInfo& info) {
+        if (index != selectedIdx || !ok) {
+            if (index == selectedIdx)
+                statusText = L"该候选没有可用歌词，请尝试其他歌曲。";
+            surface.invalidate();
             return;
         }
-        previewLines = lines;
         previewInfo = info;
         previewOffsetMs = 0;
-        preview.setLyrics(previewLines);
-        okBtn.setEnabled(true);
-        advanceLyricBtn.setEnabled(true);
-        delayLyricBtn.setEnabled(true);
-        // QRC/KRC/YRC 通常带逐字时间轴，LRC 或没有逐字数据时显示整行时间轴。
+        setPreviewLines(lines);
         bool wordByWord = false;
-        for (const auto& l : lines) {
-            if (!l.chars.empty()) {
+        for (const auto& line : lines) {
+            if (!line.chars.empty()) {
                 wordByWord = true;
                 break;
             }
         }
-        statusLabel.setText(L"已加载《" + candidates[idx].name +
-                            (wordByWord ? L"》的逐字歌词预览，点击“使用此歌词”应用。"
-                                        : L"》的整行歌词预览，点击“使用此歌词”应用。"));
+        statusText = L"已加载《" + candidates[index].name +
+                     (wordByWord ? L"》的逐字歌词预览，点击“使用此歌词”应用。"
+                                 : L"》的整行歌词预览，点击“使用此歌词”应用。");
+        surface.invalidate();
     }
 
     void applySelection() {
-        if (selectedIdx < 0 || selectedIdx >= (int)candidates.size())
-            return;
-        if (previewLines.empty())
+        if (selectedIdx < 0 || selectedIdx >= static_cast<int>(candidates.size()) ||
+            previewLines.empty())
             return;
         if (provider) {
             SongInfo info = previewInfo;
             if (!targetNeteaseSongId.empty())
                 info.neteaseSongId = targetNeteaseSongId;
             provider->setManualOverride(targetTitle, targetArtist, targetDurationMs,
-                                          std::vector<LyricLine>(previewLines), info);
+                                         std::vector<LyricLine>(previewLines), info);
         }
         if (onApply)
             onApply();
-        this->destroy();
+        destroy();
     }
 
     void shiftPreviewTimes(int64_t deltaMs) {
@@ -799,19 +1243,16 @@ struct ManualSearchDialog::Impl {
         previewOffsetMs += deltaMs;
         for (auto& line : previewLines) {
             line.ms += deltaMs;
-            for (auto& ch : line.chars) {
-                ch.startMs += deltaMs;
-                ch.endMs += deltaMs;
+            for (auto& character : line.chars) {
+                character.startMs += deltaMs;
+                character.endMs += deltaMs;
             }
         }
-        preview.setLyrics(previewLines);
-        preview.setPosition(playbackPositionMs);
+        resetPreviewView();
         std::wstring offsetText = previewOffsetMs >= 0 ? L"+" : L"";
         offsetText += std::to_wstring(previewOffsetMs / 1000);
-        std::wstring status = L"预览时间已调整 ";
-        status += offsetText;
-        status += L" 秒，确认后点击“使用此歌词”。";
-        statusLabel.setText(status);
+        statusText = L"预览时间已调整 " + offsetText + L" 秒，确认后点击“使用此歌词”。";
+        surface.invalidate();
     }
 
     void destroy() {
@@ -819,6 +1260,255 @@ struct ManualSearchDialog::Impl {
             DestroyWindow(hwnd);
             hwnd = nullptr;
         }
+    }
+
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+        case WM_CREATE:
+            backdrop = fluent::styleDialogWindow(hwnd);
+            surface.initialize(hwnd);
+            createControls();
+            layout();
+            SetTimer(hwnd, kPreviewTimerId, 100, nullptr);
+            return 0;
+        case WM_SIZE:
+            layout();
+            surface.invalidate();
+            return 0;
+        case WM_DPICHANGED: {
+            auto* suggested = reinterpret_cast<RECT*>(lp);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            layout();
+            surface.invalidate();
+            return 0;
+        }
+        case WM_GETMINMAXINFO:
+            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
+            return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
+            surface.invalidate();
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            surface.paint(hdc, backdrop,
+                          [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
+                              paint(painter, w, h);
+                          });
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            return 1;
+        case WM_TIMER:
+            if (wp == kPreviewTimerId)
+                onPreviewTimer();
+            return 0;
+        case kMsgCandidatesReady: {
+            auto* payload = reinterpret_cast<std::vector<SearchCandidate>*>(lp);
+            if (payload) {
+                handleCandidatesReady(*payload);
+                delete payload;
+            }
+            return 0;
+        }
+        case kMsgPreviewLyricReady: {
+            auto* payload =
+                reinterpret_cast<std::tuple<int, bool, std::vector<LyricLine>, SongInfo>*>(lp);
+            if (payload) {
+                handlePreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
+                                        std::get<2>(*payload), std::get<3>(*payload));
+                delete payload;
+            }
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            if (candidateScrollDragging) {
+                const float scale = surface.dipScale();
+                updateCandidateScrollDrag(GET_Y_LPARAM(lp) / scale);
+                return 0;
+            }
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+            const float scale = surface.dipScale();
+            const float x = GET_X_LPARAM(lp) / scale;
+            const float y = GET_Y_LPARAM(lp) / scale;
+            const int id = hitTest(x, y);
+            const int row = id == kIdCandidateList ? candidateRowAt(y) : -1;
+            if (id != hoverId || row != hoverItemRow) {
+                hoverId = id;
+                hoverItemRow = row;
+                surface.invalidate();
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (!candidateScrollDragging) {
+                hoverId = 0;
+                hoverItemRow = -1;
+                surface.invalidate();
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            focusVisible = false;
+            const float scale = surface.dipScale();
+            const float x = GET_X_LPARAM(lp) / scale;
+            const float y = GET_Y_LPARAM(lp) / scale;
+            const int id = hitTest(x, y);
+            focusedId = id;
+            pressedId = 0;
+
+            if (id == kIdTitleEdit || id == kIdArtistEdit) {
+                if (auto* field = editFor(id))
+                    field->caret = field->anchor = field->text.size();
+            } else if (id == kIdCandidateList) {
+                if (beginCandidateScrollDrag(x, y)) {
+                    focusedId = kIdCandidateList;
+                } else {
+                    const int row = candidateRowAt(y);
+                    if (row >= 0 && row < static_cast<int>(candidateItems.size()) &&
+                        !candidateItems[row].header)
+                        selectCandidateRow(row);
+                }
+            } else if (isEnabled(id) && id != kIdPreview) {
+                pressedId = id;
+                SetCapture(hwnd);
+            }
+            surface.invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            if (candidateScrollDragging) {
+                candidateScrollDragging = false;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                surface.invalidate();
+                return 0;
+            }
+            const float scale = surface.dipScale();
+            const int hit = hitTest(GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale);
+            const int pressed = pressedId;
+            pressedId = 0;
+            if (GetCapture() == hwnd)
+                ReleaseCapture();
+            if (pressed != 0 && pressed == hit && isEnabled(pressed))
+                onCommand(pressed);
+            surface.invalidate();
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            candidateScrollDragging = false;
+            pressedId = 0;
+            surface.invalidate();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &point);
+            const float scale = surface.dipScale();
+            const float x = point.x / scale;
+            const float y = point.y / scale;
+            if (contains(candidateListRect, x, y))
+                scrollCandidatesBy(GET_WHEEL_DELTA_WPARAM(wp));
+            else if (contains(previewRect, x, y))
+                scrollPreviewByWheel(GET_WHEEL_DELTA_WPARAM(wp));
+            return 0;
+        }
+        case WM_GETDLGCODE:
+            return DLGC_WANTALLKEYS | DLGC_WANTTAB | DLGC_WANTCHARS;
+        case WM_KEYDOWN:
+            if (wp == VK_TAB) {
+                focusStep(isShiftDown() ? -1 : 1);
+                return 0;
+            }
+            if (wp == VK_ESCAPE) {
+                destroy();
+                return 0;
+            }
+            if (handleEditKey(wp))
+                return 0;
+            if (focusedId == kIdCandidateList &&
+                (wp == VK_UP || wp == VK_DOWN || wp == VK_PRIOR || wp == VK_NEXT ||
+                 wp == VK_HOME || wp == VK_END)) {
+                int target = -1;
+                if (wp == VK_UP || wp == VK_DOWN) {
+                    const int direction = wp == VK_DOWN ? 1 : -1;
+                    target = nextCandidateRow(
+                        selectedItemRow < 0
+                            ? (direction > 0 ? -1 : static_cast<int>(candidateItems.size()))
+                            : selectedItemRow,
+                        direction);
+                } else if (wp == VK_HOME || wp == VK_END) {
+                    target = wp == VK_HOME
+                                 ? nextCandidateRow(-1, 1)
+                                 : nextCandidateRow(static_cast<int>(candidateItems.size()), -1);
+                } else {
+                    const int direction = wp == VK_NEXT ? 1 : -1;
+                    int cursor = selectedItemRow < 0
+                                     ? (direction > 0 ? -1
+                                                      : static_cast<int>(candidateItems.size()))
+                                     : selectedItemRow;
+                    const int page = std::max(
+                        1, static_cast<int>((candidateListRect.bottom - candidateListRect.top) /
+                                            kCandidateRowHeight) -
+                               1);
+                    for (int i = 0; i < page; ++i) {
+                        const int next = nextCandidateRow(cursor, direction);
+                        if (next < 0)
+                            break;
+                        cursor = next;
+                    }
+                    target = cursor == selectedItemRow ? -1 : cursor;
+                }
+                if (target >= 0)
+                    selectCandidateRow(target);
+                return 0;
+            }
+            if (wp == VK_RETURN || wp == VK_SPACE) {
+                if (focusedId == kIdTitleEdit || focusedId == kIdArtistEdit) {
+                    if (wp == VK_RETURN && isEnabled(kIdSearchButton))
+                        doSearch();
+                } else if (isEnabled(focusedId) && focusedId != kIdCandidateList &&
+                           focusedId != kIdPreview) {
+                    onCommand(focusedId);
+                }
+                return 0;
+            }
+            break;
+        case WM_CHAR:
+            if (handleCharacter(static_cast<wchar_t>(wp)))
+                return 0;
+            break;
+        case WM_IME_CHAR:
+            if (handleCharacter(static_cast<wchar_t>(wp)))
+                return 0;
+            break;
+        case WM_SETFOCUS:
+            focusVisible = true;
+            surface.invalidate();
+            return 0;
+        case WM_KILLFOCUS:
+            focusVisible = false;
+            surface.invalidate();
+            return 0;
+        case WM_CLOSE:
+            destroy();
+            return 0;
+        case WM_DESTROY:
+            KillTimer(hwnd, kPreviewTimerId);
+            surface.discard();
+            hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::ManualSearch), 0);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
     }
 };
 
@@ -833,7 +1523,6 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
                                 const std::wstring& targetArtist,
                                 int64_t targetDurationMs,
                                 const std::wstring& targetNeteaseSongId) {
-    impl_->inst = inst;
     impl_->notifyHwnd = parent; // 仅用于关闭通知
     impl_->provider = provider;
     impl_->targetTitle = targetTitle;
@@ -843,6 +1532,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricManualSearch";
@@ -852,27 +1542,28 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
 
     RECT work{};
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
-    UINT dpi = GetDpiForSystem();
-    float s = fluent::dipScale(dpi);
-    // 期望的客户区尺寸，按标题栏/边框反推窗口整体尺寸
-    RECT rc{0, 0, static_cast<LONG>(std::lround(920 * s)),
-            static_cast<LONG>(std::lround(640 * s))};
+    const UINT dpi = GetDpiForSystem();
+    const float scale = fluent::dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(920.0f * scale)),
+            static_cast<LONG>(std::lround(640.0f * scale))};
     AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
-    int x = work.left + ((work.right - work.left) - w) / 2;
-    int y = work.top + ((work.bottom - work.top) - h) / 2;
+    const int width = rc.right - rc.left;
+    const int height = rc.bottom - rc.top;
+    const int x = work.left + ((work.right - work.left) - width) / 2;
+    const int y = work.top + ((work.bottom - work.top) - height) / 2;
 
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricManualSearch", L"手动搜索歌词",
-                                  kDialogStyle, x, y, w, h, nullptr, nullptr, inst, impl_.get());
-    if (!impl_->hwnd)
-        return false;
-    return true;
+                                  kDialogStyle, x, y, width, height, nullptr, nullptr, inst,
+                                  impl_.get());
+    return impl_->hwnd != nullptr;
 }
 
 void ManualSearchDialog::show() {
-    if (impl_->hwnd)
+    if (impl_->hwnd) {
         ShowWindow(impl_->hwnd, SW_SHOW);
+        SetForegroundWindow(impl_->hwnd);
+        SetFocus(impl_->hwnd);
+    }
 }
 
 void ManualSearchDialog::destroy() {
@@ -899,7 +1590,8 @@ void ManualSearchDialog::onPreviewLyricReady(int idx, bool ok,
     if (impl_->hwnd)
         PostMessageW(impl_->hwnd, kMsgPreviewLyricReady, 0,
                      reinterpret_cast<LPARAM>(
-                         new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(idx, ok, lines, info)));
+                         new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(
+                             idx, ok, lines, info)));
 }
 
 void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
@@ -908,5 +1600,5 @@ void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
 
 void ManualSearchDialog::setPlaybackPosition(int64_t positionMs) {
     impl_->playbackPositionMs = positionMs;
-    impl_->preview.setPosition(positionMs);
+    impl_->setPreviewPosition(positionMs);
 }

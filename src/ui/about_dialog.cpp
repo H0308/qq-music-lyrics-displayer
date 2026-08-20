@@ -2,7 +2,7 @@
 
 #include "app_info.h"
 #include "ui/dialog_notify.h"
-#include "ui/fluent_controls.h"
+#include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
 
@@ -596,20 +596,15 @@ std::vector<MarkdownBlock> parseMarkdown(const std::wstring& markdown) {
     return blocks;
 }
 
-// 关于页的 Win11 风格开关：点击后向父窗口发送 WM_COMMAND/BN_CLICKED。
-class ReleaseNotesPanel : public fluent::LayeredChild {
+// 关于页的更新日志逻辑模型。它不创建子窗口，只保存解析结果和滚动位置，
+// 由 AboutDialog 的单一绘制表面调用 paint()。
+class ReleaseNotesModel {
 public:
-    bool create(HWND parent, int id) {
-        clearAlpha_ = 1.0f / 255.0f;
-        return createLayered(parent, L"QQMusicLyricReleaseNotes", wndProc, id);
-    }
-
     void setRelease(ReleaseInfo release) {
         release_ = std::move(release);
         blocks_ = parseMarkdown(release_->body);
         message_.clear();
         scrollY_ = 0.0f;
-        renderNow();
     }
 
     void setMessage(const std::wstring& message) {
@@ -617,67 +612,12 @@ public:
         blocks_.clear();
         message_ = message;
         scrollY_ = 0.0f;
-        renderNow();
     }
+
+    void scrollBy(float delta) { scrollY_ += delta; }
+    float contentHeight() const { return contentHeight_; }
 
 private:
-    static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-        auto* self = reinterpret_cast<ReleaseNotesPanel*>(
-            GetWindowLongPtrW(h, GWLP_USERDATA));
-        if (msg == WM_NCCREATE) {
-            self = static_cast<ReleaseNotesPanel*>(
-                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            self->hwnd_ = h;
-            SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        }
-        if (self)
-            return self->handle(msg, wp, lp);
-        return DefWindowProcW(h, msg, wp, lp);
-    }
-
-    IDWriteTextFormat* createFormat(float dipSize, int weight, bool monospace = false) {
-        IDWriteFactory* factory = dwrite();
-        if (!factory)
-            return nullptr;
-
-        IDWriteTextFormat* format = nullptr;
-        const wchar_t* familyName = monospace ? L"Consolas" : fluent::uiFontFamily();
-        HRESULT hr = factory->CreateTextFormat(
-            familyName, nullptr, static_cast<DWRITE_FONT_WEIGHT>(weight),
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, dipSize, L"zh-cn", &format);
-        if (FAILED(hr) || !format)
-            return nullptr;
-
-        fluent::applyUiFontFallback(format);
-        format->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        return format;
-    }
-
-    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
-        switch (msg) {
-        case WM_NCHITTEST:
-            return HTCLIENT;
-        case WM_MOUSEWHEEL:
-            scrollY_ -= static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA * 64.0f;
-            renderNow();
-            return 0;
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            BeginPaint(hwnd_, &ps);
-            renderNow();
-            EndPaint(hwnd_, &ps);
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_DESTROY:
-            hwnd_ = nullptr;
-            return 0;
-        }
-        return DefWindowProcW(hwnd_, msg, wp, lp);
-    }
-
     void applyMarkdownStyles(IDWriteTextLayout* layout, const MarkdownBlock& block,
                              ID2D1SolidColorBrush* linkBrush) {
         for (const auto& span : block.spans) {
@@ -705,105 +645,80 @@ private:
         }
     }
 
-    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
-        const auto& palette = fluent::palette();
-        auto* br = brush(rt);
-        if (!br)
+public:
+    void paint(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect) {
+        ID2D1DCRenderTarget* rt = painter.target();
+        if (!rt)
             return;
 
-        D2D1_RECT_F panelRect =
-            D2D1::RectF(0.5f, 0.5f, std::max(0.5f, wDip - 0.5f),
-                        std::max(0.5f, hDip - 0.5f));
-        br->SetColor(palette.cardFill);
-        rt->FillRoundedRectangle(
-            D2D1::RoundedRect(panelRect, fluent::metrics::cardRadius,
-                              fluent::metrics::cardRadius),
-            br);
-        br->SetColor(palette.cardStroke);
-        rt->DrawRoundedRectangle(
-            D2D1::RoundedRect(panelRect, fluent::metrics::cardRadius,
-                              fluent::metrics::cardRadius),
-            br, 1.0f);
+        const auto& palette = fluent::palette();
+        const float wDip = std::max(0.0f, rect.right - rect.left);
+        const float hDip = std::max(0.0f, rect.bottom - rect.top);
+        D2D1_RECT_F panelRect = D2D1::RectF(
+            rect.left + 0.5f, rect.top + 0.5f, std::max(rect.left + 0.5f, rect.right - 0.5f),
+            std::max(rect.top + 0.5f, rect.bottom - 0.5f));
+        painter.fillRoundRect(palette.cardFill, panelRect, fluent::metrics::cardRadius);
+        painter.strokeRoundRect(palette.cardStroke, panelRect, 1.0f,
+                                fluent::metrics::cardRadius);
 
+        auto* bodyFormat = painter.textFormat(13.0f, 400);
+        if (bodyFormat)
+            bodyFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         if (!release_) {
-            IDWriteTextFormat* format = createFormat(13.0f, 400);
-            if (format) {
-                br->SetColor(palette.textSecondary);
-                const std::wstring& message =
-                    message_.empty() ? emptyMessage() : message_;
-                rt->DrawTextW(
-                    message.c_str(), static_cast<UINT32>(message.size()), format,
-                    D2D1::RectF(16.0f, 12.0f, std::max(16.0f, wDip - 16.0f),
-                                std::max(12.0f, hDip - 12.0f)),
-                    br, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-                format->Release();
-            }
+            const std::wstring& message = message_.empty() ? emptyMessage() : message_;
+            painter.drawText(message, bodyFormat,
+                             D2D1::RectF(rect.left + 16.0f, rect.top + 12.0f,
+                                          std::max(rect.left + 16.0f, rect.right - 16.0f),
+                                          std::max(rect.top + 12.0f, rect.bottom - 12.0f)),
+                             palette.textSecondary);
             contentHeight_ = hDip;
             return;
         }
 
-        IDWriteFactory* factory = dwrite();
-        IDWriteTextFormat* headerFormat = createFormat(14.0f, 600);
-        IDWriteTextFormat* bodyFormat = createFormat(13.0f, 400);
-        IDWriteTextFormat* codeFormat = createFormat(12.0f, 400, true);
-        IDWriteTextFormat* heading1Format = createFormat(18.0f, 700);
-        IDWriteTextFormat* heading2Format = createFormat(16.0f, 700);
-        IDWriteTextFormat* heading3Format = createFormat(14.0f, 600);
-        ID2D1SolidColorBrush* linkBrush = nullptr;
-        rt->CreateSolidColorBrush(palette.accent, &linkBrush);
-
-        auto releaseResources = [&] {
-            if (linkBrush)
-                linkBrush->Release();
-            if (headerFormat)
-                headerFormat->Release();
-            if (bodyFormat)
-                bodyFormat->Release();
-            if (codeFormat)
-                codeFormat->Release();
-            if (heading1Format)
-                heading1Format->Release();
-            if (heading2Format)
-                heading2Format->Release();
-            if (heading3Format)
-                heading3Format->Release();
-        };
-
-        if (!factory || !headerFormat || !bodyFormat || !codeFormat ||
-            !heading1Format || !heading2Format || !heading3Format) {
-            releaseResources();
+        auto* factory = painter.dwrite();
+        auto* headerFormat = painter.textFormat(14.0f, 600);
+        auto* codeFormat = painter.textFormat(12.0f, 400, false, false, L"Consolas");
+        auto* heading1Format = painter.textFormat(18.0f, 700);
+        auto* heading2Format = painter.textFormat(16.0f, 700);
+        auto* heading3Format = painter.textFormat(14.0f, 600);
+        ID2D1SolidColorBrush* linkBrush = painter.createBrush(palette.accent);
+        if (!factory || !bodyFormat || !headerFormat || !codeFormat || !heading1Format ||
+            !heading2Format || !heading3Format)
             return;
-        }
 
         const auto& release = *release_;
         std::wstring header = displayVersion(release.version);
         if (!release.publishedAt.empty())
             header += L"  ·  " + displayReleaseDate(release.publishedAt);
+        painter.drawText(header, headerFormat,
+                         D2D1::RectF(rect.left + 16.0f, rect.top + 8.0f,
+                                      std::max(rect.left + 16.0f, rect.right - 16.0f),
+                                      rect.top + 31.0f),
+                         palette.text);
+        if (auto* br = painter.brush(palette.separator)) {
+            rt->DrawLine(D2D1::Point2F(rect.left + 16.0f, rect.top + 39.0f),
+                          D2D1::Point2F(std::max(rect.left + 16.0f, rect.right - 16.0f),
+                                        rect.top + 39.0f),
+                         br, 1.0f);
+        }
 
-        br->SetColor(palette.text);
-        rt->DrawTextW(
-            header.c_str(), static_cast<UINT32>(header.size()), headerFormat,
-            D2D1::RectF(16.0f, 8.0f, std::max(16.0f, wDip - 16.0f), 31.0f),
-            br, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
-        br->SetColor(palette.separator);
-        rt->DrawLine(
-            D2D1::Point2F(16.0f, 39.0f),
-            D2D1::Point2F(std::max(16.0f, wDip - 16.0f), 39.0f), br, 1.0f);
-
-        const float bodyTop = 48.0f;
-        const float bodyViewHeight = std::max(0.0f, hDip - bodyTop);
+        const float bodyTop = rect.top + 48.0f;
+        const float bodyViewHeight = std::max(0.0f, hDip - 48.0f);
         if (blocks_.empty()) {
-            const std::wstring emptyBody = L"暂无发布说明";
-            br->SetColor(palette.textSecondary);
-            rt->DrawTextW(
-                emptyBody.c_str(), static_cast<UINT32>(emptyBody.size()), bodyFormat,
-                D2D1::RectF(16.0f, bodyTop, std::max(16.0f, wDip - 16.0f),
-                            std::max(bodyTop + 18.0f, hDip - 12.0f)),
-                br, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+            painter.drawText(L"暂无发布说明", bodyFormat,
+                             D2D1::RectF(rect.left + 16.0f, bodyTop,
+                                          std::max(rect.left + 16.0f, rect.right - 16.0f),
+                                          std::max(bodyTop + 18.0f, rect.bottom - 12.0f)),
+                             palette.textSecondary);
             contentHeight_ = bodyViewHeight;
-            releaseResources();
             return;
         }
+
+        codeFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        headerFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        heading1Format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        heading2Format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        heading3Format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
 
         struct RenderedBlock {
             const MarkdownBlock* block = nullptr;
@@ -815,7 +730,6 @@ private:
         std::vector<RenderedBlock> rendered;
         rendered.reserve(blocks_.size());
         float totalHeight = 0.0f;
-
         for (const auto& block : blocks_) {
             RenderedBlock item;
             item.block = &block;
@@ -831,25 +745,18 @@ private:
             if (block.kind == MarkdownBlockKind::Code) {
                 format = codeFormat;
             } else if (block.kind == MarkdownBlockKind::Heading) {
-                if (block.level <= 1)
-                    format = heading1Format;
-                else if (block.level == 2)
-                    format = heading2Format;
-                else
-                    format = heading3Format;
+                format = block.level <= 1 ? heading1Format
+                                         : block.level == 2 ? heading2Format : heading3Format;
             }
-
             std::wstring displayText = block.prefix + block.text;
-            float textWidth = block.kind == MarkdownBlockKind::Code
-                                  ? std::max(1.0f, wDip - 48.0f)
-                                  : std::max(1.0f, wDip - 32.0f);
-            HRESULT hr = factory->CreateTextLayout(
-                displayText.c_str(), static_cast<UINT32>(displayText.size()), format,
-                textWidth, 100000.0f, &item.layout);
-            if (SUCCEEDED(hr) && item.layout) {
-                DWRITE_TEXT_METRICS metrics{};
-                item.layout->GetMetrics(&metrics);
-                item.height = std::max(18.0f, metrics.height);
+            const float textWidth = block.kind == MarkdownBlockKind::Code
+                                        ? std::max(1.0f, wDip - 48.0f)
+                                        : std::max(1.0f, wDip - 32.0f);
+            item.layout = painter.textLayout(displayText, format, textWidth, 100000.0f);
+            if (item.layout) {
+                DWRITE_TEXT_METRICS textMetrics{};
+                item.layout->GetMetrics(&textMetrics);
+                item.height = std::max(18.0f, textMetrics.height);
                 if (block.kind == MarkdownBlockKind::Code)
                     item.height += 12.0f;
                 if (block.kind != MarkdownBlockKind::Code)
@@ -858,13 +765,9 @@ private:
                 item.height = block.kind == MarkdownBlockKind::Code ? 30.0f : 18.0f;
             }
 
-            if (block.kind == MarkdownBlockKind::Code)
-                item.gap = 12.0f;
-            else if (block.kind == MarkdownBlockKind::Heading)
-                item.gap = 8.0f;
-            else
-                item.gap = 6.0f;
-
+            item.gap = block.kind == MarkdownBlockKind::Code
+                           ? 12.0f
+                           : block.kind == MarkdownBlockKind::Heading ? 8.0f : 6.0f;
             rendered.push_back(item);
             totalHeight += item.height + item.gap;
         }
@@ -872,46 +775,39 @@ private:
         if (!rendered.empty())
             totalHeight = std::max(0.0f, totalHeight - rendered.back().gap);
         contentHeight_ = totalHeight;
-        float maxScroll = std::max(0.0f, contentHeight_ - bodyViewHeight);
+        const float maxScroll = std::max(0.0f, contentHeight_ - bodyViewHeight);
         scrollY_ = std::clamp(scrollY_, 0.0f, maxScroll);
 
-        rt->PushAxisAlignedClip(
-            D2D1::RectF(0.0f, bodyTop, wDip, std::max(bodyTop, hDip)),
-            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-
+        rt->PushAxisAlignedClip(D2D1::RectF(rect.left, bodyTop, rect.right, rect.bottom),
+                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         float y = bodyTop - scrollY_;
         for (const auto& item : rendered) {
             const auto& block = *item.block;
             if (block.kind == MarkdownBlockKind::Rule) {
-                if (y + item.height >= bodyTop && y <= hDip) {
-                    br->SetColor(palette.separator);
-                    float lineY = y + item.height / 2.0f;
-                    rt->DrawLine(
-                        D2D1::Point2F(16.0f, lineY),
-                        D2D1::Point2F(std::max(16.0f, wDip - 16.0f), lineY), br, 1.0f);
+                if (y + item.height >= bodyTop && y <= rect.bottom) {
+                    if (auto* br = painter.brush(palette.separator)) {
+                        const float lineY = y + item.height / 2.0f;
+                        rt->DrawLine(D2D1::Point2F(rect.left + 16.0f, lineY),
+                                     D2D1::Point2F(std::max(rect.left + 16.0f, rect.right - 16.0f),
+                                                   lineY),
+                                     br, 1.0f);
+                    }
                 }
-            } else if (item.layout && y + item.height >= bodyTop && y <= hDip) {
+            } else if (item.layout && y + item.height >= bodyTop && y <= rect.bottom) {
                 if (block.kind == MarkdownBlockKind::Code) {
-                    D2D1_RECT_F codeRect =
-                        D2D1::RectF(16.0f, y, std::max(16.0f, wDip - 16.0f),
-                                    y + item.height);
-                    br->SetColor(palette.cardFillSolid);
-                    rt->FillRoundedRectangle(
-                        D2D1::RoundedRect(codeRect, 6.0f, 6.0f), br);
-                    br->SetColor(palette.cardStroke);
-                    rt->DrawRoundedRectangle(
-                        D2D1::RoundedRect(codeRect, 6.0f, 6.0f), br, 1.0f);
-                    br->SetColor(palette.text);
-                    rt->DrawTextLayout(
-                        D2D1::Point2F(24.0f, y + 6.0f), item.layout, br,
-                        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                    D2D1_RECT_F codeRect = D2D1::RectF(
+                        rect.left + 16.0f, y, std::max(rect.left + 16.0f, rect.right - 16.0f),
+                        y + item.height);
+                    painter.fillRoundRect(palette.cardFillSolid, codeRect, 6.0f);
+                    painter.strokeRoundRect(palette.cardStroke, codeRect, 1.0f, 6.0f);
+                    painter.drawTextLayout(item.layout,
+                                           D2D1::Point2F(rect.left + 24.0f, y + 6.0f),
+                                           palette.text);
                 } else {
-                    br->SetColor(block.kind == MarkdownBlockKind::Quote
-                                     ? palette.textSecondary
-                                     : palette.text);
-                    rt->DrawTextLayout(
-                        D2D1::Point2F(16.0f, y), item.layout, br,
-                        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT);
+                    painter.drawTextLayout(
+                        item.layout, D2D1::Point2F(rect.left + 16.0f, y),
+                        block.kind == MarkdownBlockKind::Quote ? palette.textSecondary
+                                                               : palette.text);
                 }
             }
             y += item.height + item.gap;
@@ -922,24 +818,16 @@ private:
             const float trackTop = bodyTop + 8.0f;
             const float trackHeight = std::max(0.0f, bodyViewHeight - 16.0f);
             const float thumbHeight =
-                std::min(trackHeight, std::max(24.0f,
-                    trackHeight * bodyViewHeight / contentHeight_));
+                std::min(trackHeight, std::max(24.0f, trackHeight * bodyViewHeight / contentHeight_));
             const float thumbTravel = std::max(0.0f, trackHeight - thumbHeight);
             const float thumbTop =
                 trackTop + (maxScroll > 0.0f ? scrollY_ / maxScroll * thumbTravel : 0.0f);
-            br->SetColor(palette.textSecondary);
-            D2D1_RECT_F thumbRect =
-                D2D1::RectF(std::max(0.0f, wDip - 11.0f), thumbTop,
-                            std::max(0.0f, wDip - 8.0f), thumbTop + thumbHeight);
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(thumbRect, 1.5f, 1.5f), br);
+            painter.fillRoundRect(
+                palette.textSecondary,
+                D2D1::RectF(std::max(rect.left, rect.right - 11.0f), thumbTop,
+                             std::max(rect.left, rect.right - 8.0f), thumbTop + thumbHeight),
+                1.5f);
         }
-
-        for (auto& item : rendered) {
-            if (item.layout)
-                item.layout->Release();
-        }
-        releaseResources();
     }
 
     static const std::wstring& emptyMessage() {
@@ -967,37 +855,32 @@ struct AboutDialog::Impl {
     std::wstring releaseUrl = app_info::kLatestReleasePage;
     std::function<void(bool)> onAutoCheckChanged;
 
-    fluent::FluentLabel titleLabel;
-    fluent::FluentLabel subtitleLabel;
-    fluent::FluentCard infoCard;
-    fluent::FluentLabel versionLabel;
-    fluent::FluentLabel autoCheckLabel;
-    fluent::FluentToggle autoCheckSwitch;
-    fluent::FluentLabel releaseTitleLabel;
-    ReleaseNotesPanel releaseNotes;
-    fluent::FluentButton projectButton;
-    fluent::FluentLabel statusLabel;
-    fluent::FluentLabel latestLabel;
-    fluent::FluentButton checkButton;
-    fluent::FluentButton releaseButton;
-    fluent::FluentButton closeButton;
+    fluent::FluentDialogSurface surface;
+    ReleaseNotesModel releaseNotes;
+    std::wstring versionText;
+    std::wstring statusText;
+    std::wstring latestText;
+    bool releaseButtonAccent = false;
 
-    void refreshTheme() {
-        titleLabel.refreshTheme();
-        subtitleLabel.refreshTheme();
-        infoCard.refreshTheme();
-        versionLabel.refreshTheme();
-        autoCheckLabel.refreshTheme();
-        autoCheckSwitch.refreshTheme();
-        releaseTitleLabel.refreshTheme();
-        releaseNotes.refreshTheme();
-        projectButton.refreshTheme();
-        statusLabel.refreshTheme();
-        latestLabel.refreshTheme();
-        checkButton.refreshTheme();
-        releaseButton.refreshTheme();
-        closeButton.refreshTheme();
-    }
+    D2D1_RECT_F autoSwitchRect{};
+    D2D1_RECT_F titleRect{};
+    D2D1_RECT_F subtitleRect{};
+    D2D1_RECT_F infoCardRect{};
+    D2D1_RECT_F versionRect{};
+    D2D1_RECT_F autoCheckLabelRect{};
+    D2D1_RECT_F releaseTitleRect{};
+    D2D1_RECT_F statusRect{};
+    D2D1_RECT_F latestRect{};
+    D2D1_RECT_F projectRect{};
+    D2D1_RECT_F checkRect{};
+    D2D1_RECT_F releaseRect{};
+    D2D1_RECT_F closeRect{};
+    D2D1_RECT_F notesRect{};
+
+    int hoverId = 0;
+    int pressedId = 0;
+    int focusedId = kIdAutoCheckSwitch;
+    bool focusVisible = false;
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -1013,183 +896,154 @@ struct AboutDialog::Impl {
         return DefWindowProcW(h, msg, wp, lp);
     }
 
-    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
-        switch (msg) {
-        case WM_CREATE:
-            backdrop = fluent::styleDialogWindow(hwnd);
-            createControls();
-            layout();
-            return 0;
-        case WM_SIZE:
-            layout();
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            return 0;
-        case WM_SETTINGCHANGE:
-        case WM_THEMECHANGED:
-            backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
-            refreshTheme();
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            return 0;
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            HDC hdc = BeginPaint(hwnd, &ps);
-            fluent::paintDialogBackground(hwnd, hdc, backdrop);
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
-            return 1;
-        case WM_COMMAND:
-            onCommand(LOWORD(wp), HIWORD(wp));
-            return 0;
-        case kMsgUpdateReady: {
-            std::unique_ptr<UpdatePayload> result(reinterpret_cast<UpdatePayload*>(lp));
-            if (!result || result->requestId != activeRequest)
-                return 0;
-            checking = false;
-            checkButton.setEnabled(true);
-            if (result->release)
-                releaseNotes.setRelease(std::move(*result->release));
-            else
-                releaseNotes.setMessage(result->detail.empty() ? L"暂无更新日志" : result->detail);
-            std::wstring visibleVersion = displayVersion(result->version);
-            if (result->state == UpdateState::Available) {
-                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
-                                                        : result->releaseUrl;
-                statusLabel.setText(L"发现新版本：" + visibleVersion +
-                                    L"，请点击“打开发布页”");
-                latestLabel.setText(L"最新版本：" + visibleVersion);
-                releaseButton.setAccent(true);
-            } else if (result->state == UpdateState::Current) {
-                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
-                                                        : result->releaseUrl;
-                statusLabel.setText(L"当前已是最新版本");
-                latestLabel.setText(L"当前正式版本：" + visibleVersion);
-                releaseButton.setAccent(false);
-            } else {
-                releaseUrl = app_info::kLatestReleasePage;
-                statusLabel.setText(result->detail);
-                latestLabel.setText(L"");
-                releaseButton.setAccent(false);
-            }
-            return 0;
-        }
-        case WM_CLOSE:
-            destroy();
-            return 0;
-        case WM_DESTROY:
-            hwnd = nullptr;
-            if (notifyHwnd)
-                PostMessageW(notifyHwnd, kMsgDialogClosed,
-                             static_cast<WPARAM>(DialogKind::About), 0);
-            return 0;
-        }
-        return DefWindowProcW(hwnd, msg, wp, lp);
+    static bool contains(const D2D1_RECT_F& rect, float x, float y) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
-    void createControls() {
-        titleLabel.create(hwnd, kIdTitleLabel, L"QQ 音乐/网易云任务栏歌词", false, 21.0f, 600);
-        subtitleLabel.create(hwnd, kIdSubtitleLabel, L"把歌词带到 Windows 任务栏", true, 13.0f,
-                             400);
-        infoCard.create(hwnd, kIdInfoCard);
-        std::wstring versionText = std::wstring(L"当前版本：") + displayVersion(app_info::kVersion);
-        versionLabel.create(hwnd, kIdVersionLabel, versionText.c_str());
-        autoCheckLabel.create(hwnd, kIdAutoCheckLabel, L"启动时自动检查更新", true, 13.0f, 400);
-        autoCheckSwitch.create(hwnd, kIdAutoCheckSwitch, autoCheckOnStartup);
-        releaseTitleLabel.create(hwnd, kIdReleaseTitleLabel, L"更新日志", false, 14.0f, 600);
-        releaseNotes.create(hwnd, kIdReleaseNotes);
-        releaseNotes.setMessage(L"点击“检查更新”加载更新日志");
-        projectButton.create(hwnd, kIdProjectButton, L"查看 GitHub 项目");
-        statusLabel.create(hwnd, kIdStatusLabel, L"点击“检查更新”获取最新版本", true, 13.0f, 400);
-        latestLabel.create(hwnd, kIdLatestLabel, L"", true, 13.0f, 400);
-        checkButton.create(hwnd, kIdCheckButton, L"检查更新", true);
-        releaseButton.create(hwnd, kIdReleaseButton, L"打开发布页");
-        closeButton.create(hwnd, kIdCloseButton, L"关闭");
-
-        // 卡片必须位于卡片内容下方，避免半透明表面冲淡文字和按钮。
-        SetWindowPos(infoCard.hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    bool isEnabled(int id) const {
+        return id != kIdCheckButton || !checking;
     }
 
-    void layout() {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        float s = fluent::dipScale(GetDpiForWindow(hwnd));
-        auto px = [&](float dip) { return static_cast<int>(std::lround(dip * s)); };
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-        int pad = px(fluent::metrics::pagePadding);
-        int gap = px(fluent::metrics::controlGap);
-
-        int titleH = px(30.0f);
-        int subtitleH = px(20.0f);
-        titleLabel.move(pad, pad, w - pad * 2, titleH);
-        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
-
-        int cardY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
-        int cardH = px(100.0f);
-        infoCard.move(pad, cardY, w - pad * 2, cardH);
-        int contentX = pad + px(16.0f);
-        int contentW = w - contentX - pad - px(16.0f);
-        versionLabel.move(contentX, cardY + px(14.0f), contentW, px(22.0f));
-        projectButton.move(contentX, cardY + px(54.0f), px(148.0f), px(32.0f));
-        int switchW = px(fluent::FluentToggle::kWidth);
-        int switchH = px(fluent::FluentToggle::kHeight);
-        int switchX = w - pad - px(16.0f) - switchW;
-        autoCheckLabel.move(contentX + px(164.0f), cardY + px(60.0f),
-                            std::max(px(20.0f), switchX - px(8.0f) - contentX - px(164.0f)),
-                            px(20.0f));
-        autoCheckSwitch.move(switchX, cardY + px(60.0f) + (px(32.0f) - switchH) / 2,
-                             switchW, switchH);
-
-        int btnH = px(fluent::metrics::controlHeight);
-        int closeW = px(88.0f);
-        int releaseW = px(116.0f);
-        int checkW = px(116.0f);
-        int btnY = h - pad - btnH;
-        closeButton.move(w - pad - closeW, btnY, closeW, btnH);
-        releaseButton.move(w - pad - closeW - gap - releaseW, btnY, releaseW, btnH);
-        checkButton.move(w - pad - closeW - gap - releaseW - gap - checkW, btnY, checkW, btnH);
-
-        int releaseTitleY = cardY + cardH + px(fluent::metrics::sectionGap);
-        releaseTitleLabel.move(pad, releaseTitleY, w - pad * 2, px(22.0f));
-        int notesY = releaseTitleY + px(22.0f) + px(fluent::metrics::compactGap);
-        int statusH = px(22.0f);
-        int latestH = px(20.0f);
-        int latestY = btnY - gap - latestH;
-        int statusY = latestY - statusH;
-        int notesBottom = statusY - gap;
-        releaseNotes.move(pad, notesY, w - pad * 2,
-                          std::max(px(80.0f), notesBottom - notesY));
-        statusLabel.move(pad, statusY, w - pad * 2, statusH);
-        latestLabel.move(pad, latestY, w - pad * 2, latestH);
+    void drawButton(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    const std::wstring& text, bool accent, int id) {
+        const auto& p = fluent::palette();
+        const bool enabled = isEnabled(id);
+        const bool hovered = enabled && hoverId == id;
+        const bool pressed = enabled && pressedId == id;
+        D2D1_COLOR_F fill{};
+        D2D1_COLOR_F textColor{};
+        if (!enabled) {
+            fill = p.listHover;
+            textColor = p.disabled;
+        } else if (accent) {
+            fill = pressed ? p.accentPressed : hovered ? p.accentHover : p.accent;
+            textColor = p.textOnAccent;
+        } else {
+            fill = pressed ? p.controlPressed : hovered ? p.controlHover : p.controlFill;
+            textColor = p.text;
+        }
+        painter.fillRoundRect(fill, rect);
+        if (!accent || !enabled)
+            painter.strokeRoundRect(p.cardStroke, rect);
+        if (focusedId == id && focusVisible && enabled) {
+            painter.strokeRoundRect(accent ? p.textOnAccent : p.accent,
+                                    D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f,
+                                                rect.right - 1.5f, rect.bottom - 1.5f),
+                                    1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
+        }
+        auto* format = painter.textFormat(14.0f, 400, true, true);
+        painter.drawText(text, format,
+                         D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f, rect.bottom),
+                         textColor);
     }
 
-    void startCheck() {
-        if (checking || !hwnd)
+    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    bool checked) {
+        const auto& p = fluent::palette();
+        const bool enabled = true;
+        const bool hovered = hoverId == kIdAutoCheckSwitch;
+        const bool focused = focusedId == kIdAutoCheckSwitch && focusVisible;
+        const float trackH = std::min(20.0f, rect.bottom - rect.top);
+        const float centerY = (rect.top + rect.bottom) * 0.5f;
+        const D2D1_RECT_F track = D2D1::RectF(
+            rect.left + 0.5f, centerY - trackH * 0.5f, rect.right - 0.5f,
+            centerY + trackH * 0.5f);
+        const float radius = trackH * 0.5f;
+        const float knobR = trackH * 0.5f - 3.5f;
+        const float knobX = checked ? track.right - trackH * 0.5f : track.left + trackH * 0.5f;
+        if (checked) {
+            painter.fillRoundRect(hovered ? p.accentHover : p.accent, track, radius);
+            if (auto* br = painter.brush(p.textOnAccent))
+                painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR,
+                                                            knobR),
+                                             br);
+        } else {
+            painter.fillRoundRect(hovered ? p.controlHover : p.controlFill, track, radius);
+            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            if (auto* br = painter.brush(p.textSecondary))
+                painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR,
+                                                            knobR),
+                                             br);
+        }
+        if (focused && enabled) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(track.left + 1.5f, track.top + 1.5f,
+                            track.right - 1.5f, track.bottom - 1.5f),
+                1.5f, std::max(1.0f, radius - 1.5f));
+        }
+    }
+
+    void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
+        const auto& p = fluent::palette();
+        painter.drawText(L"QQ 音乐/网易云任务栏歌词", painter.textFormat(21.0f, 600), titleRect,
+                         p.text);
+        painter.drawText(L"把歌词带到 Windows 任务栏", painter.textFormat(13.0f, 400), subtitleRect,
+                         p.textSecondary);
+
+        painter.fillRoundRect(p.cardFill, infoCardRect, fluent::metrics::cardRadius);
+        painter.strokeRoundRect(p.cardStroke, infoCardRect, 1.0f, fluent::metrics::cardRadius);
+        painter.drawText(versionText, painter.textFormat(13.0f, 400), versionRect, p.text);
+        painter.drawText(L"启动时自动检查更新", painter.textFormat(13.0f, 400), autoCheckLabelRect,
+                         p.textSecondary);
+        drawToggle(painter, autoSwitchRect, autoCheckOnStartup);
+        drawButton(painter, projectRect, L"查看 GitHub 项目", false, kIdProjectButton);
+
+        painter.drawText(L"更新日志", painter.textFormat(14.0f, 600), releaseTitleRect, p.text);
+        releaseNotes.paint(painter, notesRect);
+        painter.drawText(statusText, painter.textFormat(13.0f, 400), statusRect, p.textSecondary);
+        painter.drawText(latestText, painter.textFormat(13.0f, 400), latestRect, p.textSecondary);
+
+        drawButton(painter, checkRect, L"检查更新", true, kIdCheckButton);
+        drawButton(painter, releaseRect, L"打开发布页", releaseButtonAccent, kIdReleaseButton);
+        drawButton(painter, closeRect, L"关闭", false, kIdCloseButton);
+    }
+
+    int hitTest(float x, float y) const {
+        if (contains(autoSwitchRect, x, y))
+            return kIdAutoCheckSwitch;
+        if (contains(projectRect, x, y))
+            return kIdProjectButton;
+        if (contains(checkRect, x, y))
+            return kIdCheckButton;
+        if (contains(releaseRect, x, y))
+            return kIdReleaseButton;
+        if (contains(closeRect, x, y))
+            return kIdCloseButton;
+        if (contains(notesRect, x, y))
+            return kIdReleaseNotes;
+        return 0;
+    }
+
+    std::vector<int> focusOrder() const {
+        std::vector<int> order{kIdAutoCheckSwitch, kIdProjectButton, kIdCheckButton,
+                               kIdReleaseButton, kIdCloseButton};
+        order.erase(std::remove_if(order.begin(), order.end(),
+                                   [this](int id) { return !isEnabled(id); }),
+                    order.end());
+        return order;
+    }
+
+    void focusStep(int direction) {
+        const auto order = focusOrder();
+        if (order.empty())
             return;
-        checking = true;
-        activeRequest = nextRequestId();
-        releaseUrl = app_info::kLatestReleasePage;
-        // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
-        // 留到 kMsgUpdateReady 统一刷新，避免 show() 时串行触发多次 D2D 重绘
-        checkButton.setEnabled(false);
-        statusLabel.setText(L"正在检查更新…");
-        requestLatestRelease(hwnd, activeRequest);
+        auto it = std::find(order.begin(), order.end(), focusedId);
+        int index = it == order.end() ? (direction > 0 ? -1 : 0)
+                                      : static_cast<int>(it - order.begin());
+        index = (index + direction + static_cast<int>(order.size())) % order.size();
+        focusedId = order[index];
+        focusVisible = true;
+        surface.invalidate();
     }
 
-    void onCommand(int id, int code) {
-        if (code != BN_CLICKED)
-            return;
+    void onCommand(int id) {
         switch (id) {
         case kIdProjectButton:
             openUrl(app_info::kProjectUrl);
             break;
         case kIdAutoCheckSwitch:
-            autoCheckOnStartup = autoCheckSwitch.checked();
+            autoCheckOnStartup = !autoCheckOnStartup;
             if (onAutoCheckChanged)
                 onAutoCheckChanged(autoCheckOnStartup);
             break;
@@ -1201,8 +1055,263 @@ struct AboutDialog::Impl {
             break;
         case kIdCloseButton:
             destroy();
-            break;
+            return;
         }
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
+        switch (msg) {
+        case WM_CREATE:
+            backdrop = fluent::styleDialogWindow(hwnd);
+            surface.initialize(hwnd);
+            createControls();
+            layout();
+            return 0;
+        case WM_SIZE:
+            layout();
+            surface.invalidate();
+            return 0;
+        case WM_DPICHANGED: {
+            auto* suggested = reinterpret_cast<RECT*>(lp);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            layout();
+            surface.invalidate();
+            return 0;
+        }
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
+            surface.invalidate();
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            surface.paint(hdc, backdrop,
+                          [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
+                              paint(painter, w, h);
+                          });
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            return 1;
+        case WM_MOUSEMOVE: {
+            if (!GetCapture()) {
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+                TrackMouseEvent(&tme);
+            }
+            const float s = surface.dipScale();
+            const int id = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+            if (id != hoverId) {
+                hoverId = id;
+                surface.invalidate();
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (hoverId != 0) {
+                hoverId = 0;
+                surface.invalidate();
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            focusVisible = false;
+            const float s = surface.dipScale();
+            pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+            if (pressedId == kIdReleaseNotes)
+                pressedId = 0;
+            if (pressedId != 0) {
+                focusedId = pressedId;
+                SetCapture(hwnd);
+            }
+            surface.invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            const float s = surface.dipScale();
+            const int hit = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+            const int pressed = pressedId;
+            pressedId = 0;
+            if (GetCapture() == hwnd)
+                ReleaseCapture();
+            if (pressed != 0 && pressed == hit && isEnabled(pressed))
+                onCommand(pressed);
+            surface.invalidate();
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            pressedId = 0;
+            surface.invalidate();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &point);
+            const float s = surface.dipScale();
+            if (contains(notesRect, point.x / s, point.y / s)) {
+                releaseNotes.scrollBy(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) /
+                                       WHEEL_DELTA * 64.0f);
+                surface.invalidate();
+            }
+            return 0;
+        }
+        case WM_GETDLGCODE:
+            return DLGC_WANTALLKEYS | DLGC_WANTTAB;
+        case WM_KEYDOWN:
+            if (wp == VK_TAB) {
+                focusStep((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
+                return 0;
+            }
+            if (wp == VK_ESCAPE) {
+                destroy();
+                return 0;
+            }
+            if (wp == VK_SPACE || wp == VK_RETURN) {
+                if (focusedId != 0 && isEnabled(focusedId))
+                    onCommand(focusedId);
+                return 0;
+            }
+            break;
+        case WM_SETFOCUS:
+            focusVisible = true;
+            surface.invalidate();
+            return 0;
+        case WM_KILLFOCUS:
+            focusVisible = false;
+            surface.invalidate();
+            return 0;
+        case WM_COMMAND:
+            if (HIWORD(wp) == BN_CLICKED)
+                onCommand(LOWORD(wp));
+            return 0;
+        case kMsgUpdateReady: {
+            std::unique_ptr<UpdatePayload> result(reinterpret_cast<UpdatePayload*>(lp));
+            if (!result || result->requestId != activeRequest)
+                return 0;
+            checking = false;
+            if (result->release)
+                releaseNotes.setRelease(std::move(*result->release));
+            else
+                releaseNotes.setMessage(result->detail.empty() ? L"暂无更新日志" : result->detail);
+            std::wstring visibleVersion = displayVersion(result->version);
+            if (result->state == UpdateState::Available) {
+                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
+                                                        : result->releaseUrl;
+                statusText = L"发现新版本：" + visibleVersion + L"，请点击“打开发布页”";
+                latestText = L"最新版本：" + visibleVersion;
+                releaseButtonAccent = true;
+            } else if (result->state == UpdateState::Current) {
+                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
+                                                        : result->releaseUrl;
+                statusText = L"当前已是最新版本";
+                latestText = L"当前正式版本：" + visibleVersion;
+                releaseButtonAccent = false;
+            } else {
+                releaseUrl = app_info::kLatestReleasePage;
+                statusText = result->detail;
+                latestText.clear();
+                releaseButtonAccent = false;
+            }
+            surface.invalidate();
+            return 0;
+        }
+        case WM_CLOSE:
+            destroy();
+            return 0;
+        case WM_DESTROY:
+            surface.discard();
+            hwnd = nullptr;
+            if (notifyHwnd)
+                PostMessageW(notifyHwnd, kMsgDialogClosed,
+                             static_cast<WPARAM>(DialogKind::About), 0);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+
+    void createControls() {
+        versionText = std::wstring(L"当前版本：") + displayVersion(app_info::kVersion);
+        statusText = L"点击“检查更新”获取最新版本";
+        latestText.clear();
+        releaseNotes.setMessage(L"点击“检查更新”加载更新日志");
+    }
+
+    void layout() {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        const float s = surface.dipScale();
+        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
+        const float pad = fluent::metrics::pagePadding;
+        const float gap = fluent::metrics::controlGap;
+
+        const float titleH = 30.0f;
+        const float subtitleH = 20.0f;
+        titleRect = D2D1::RectF(pad, pad, std::max(pad, w - pad), pad + titleH);
+        subtitleRect = D2D1::RectF(pad, pad + titleH, std::max(pad, w - pad),
+                                    pad + titleH + subtitleH);
+
+        const float cardY = pad + titleH + subtitleH + fluent::metrics::sectionGap;
+        const float cardH = 100.0f;
+        infoCardRect = D2D1::RectF(pad, cardY, std::max(pad, w - pad), cardY + cardH);
+        const float contentX = pad + 16.0f;
+        const float contentW = std::max(20.0f, w - contentX - pad - 16.0f);
+        versionRect = D2D1::RectF(contentX, cardY + 14.0f, contentX + contentW,
+                                   cardY + 36.0f);
+        projectRect = D2D1::RectF(contentX, cardY + 54.0f, contentX + 148.0f,
+                                  cardY + 86.0f);
+
+        const float switchW = 40.0f;
+        const float switchH = 20.0f;
+        const float switchX = w - pad - 16.0f - switchW;
+        autoCheckLabelRect = D2D1::RectF(
+            contentX + 164.0f, cardY + 60.0f,
+            std::max(contentX + 184.0f, switchX - 8.0f), cardY + 80.0f);
+        autoSwitchRect = D2D1::RectF(switchX, cardY + 60.0f + (32.0f - switchH) / 2.0f,
+                                     switchX + switchW,
+                                     cardY + 60.0f + (32.0f - switchH) / 2.0f + switchH);
+
+        const float btnH = fluent::metrics::controlHeight;
+        const float closeW = 88.0f;
+        const float releaseW = 116.0f;
+        const float checkW = 116.0f;
+        const float btnY = h - pad - btnH;
+        closeRect = D2D1::RectF(w - pad - closeW, btnY, w - pad, btnY + btnH);
+        releaseRect = D2D1::RectF(w - pad - closeW - gap - releaseW, btnY,
+                                  w - pad - closeW - gap, btnY + btnH);
+        checkRect = D2D1::RectF(w - pad - closeW - gap - releaseW - gap - checkW, btnY,
+                                w - pad - closeW - gap - releaseW - gap, btnY + btnH);
+
+        const float releaseTitleY = cardY + cardH + fluent::metrics::sectionGap;
+        releaseTitleRect = D2D1::RectF(pad, releaseTitleY, std::max(pad, w - pad),
+                                       releaseTitleY + 22.0f);
+        const float notesY = releaseTitleY + 22.0f + fluent::metrics::compactGap;
+        const float statusH = 22.0f;
+        const float latestH = 20.0f;
+        const float latestY = btnY - gap - latestH;
+        const float statusY = latestY - statusH;
+        const float notesBottom = statusY - gap;
+        notesRect = D2D1::RectF(pad, notesY, std::max(pad, w - pad),
+                                std::max(notesY + 80.0f, notesBottom));
+        statusRect = D2D1::RectF(pad, statusY, std::max(pad, w - pad), statusY + statusH);
+        latestRect = D2D1::RectF(pad, latestY, std::max(pad, w - pad), latestY + latestH);
+    }
+
+    void startCheck() {
+        if (checking || !hwnd)
+            return;
+        checking = true;
+        activeRequest = nextRequestId();
+        releaseUrl = app_info::kLatestReleasePage;
+        // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
+        // 留到 kMsgUpdateReady 统一刷新。
+        statusText = L"正在检查更新…";
+        requestLatestRelease(hwnd, activeRequest);
     }
 
     void destroy() {

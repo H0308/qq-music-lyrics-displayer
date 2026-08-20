@@ -1,13 +1,14 @@
 #include "settings_dialog.h"
 
-#include "ui/dialog_notify.h"
-#include "ui/fluent_controls.h"
-#include "ui/fluent_theme.h"
 #include "resource.h"
+#include "ui/dialog_notify.h"
+#include "ui/fluent_dialog_surface.h"
+#include "ui/fluent_theme.h"
 
 #include <windowsx.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -41,445 +42,64 @@ constexpr float kRowGap = 8.0f;
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
-// 单选组宽度估算：圆 + 间距 + 文本（CJK 按字号宽度估）
 float estimateRadioWidth(const std::vector<std::wstring>& options) {
     float w = 0.0f;
-    for (const auto& o : options)
-        w += 16.0f + 8.0f + static_cast<float>(o.size()) * 14.0f + 20.0f;
+    for (const auto& option : options)
+        w += 16.0f + 8.0f + static_cast<float>(option.size()) * 14.0f + 20.0f;
     return w > 0.0f ? w - 20.0f : 0.0f;
 }
 
 } // namespace
 
 struct SettingsDialog::Impl {
+    enum class ControlKind {
+        Toggle,
+        Radio,
+        Button,
+    };
+
+    struct Row {
+        int id = 0;
+        ControlKind kind = ControlKind::Toggle;
+        std::wstring text;
+        std::wstring hint;
+        std::wstring controlText;
+        std::vector<std::wstring> options;
+        bool showHint = false;
+        bool checked = false;
+        bool enabled = true;
+        int selected = -1;
+        float controlW = 0.0f;
+        float height = kRowH;
+        D2D1_RECT_F cardRect{};
+        D2D1_RECT_F labelRect{};
+        D2D1_RECT_F hintRect{};
+        D2D1_RECT_F controlRect{};
+        std::vector<D2D1_RECT_F> optionRects;
+    };
+
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    HWND notifyHwnd = nullptr; // 关闭时向托盘窗口投递 kMsgDialogClosed
+    HWND notifyHwnd = nullptr;
     bool backdrop = false;
     SettingsState state;
     SettingsActions actions;
     int activePage = 0;
 
-    // --- 拖动模式 ---
-    // 高刷新率（如 240Hz）下 DWM 单帧预算仅约 4ms，装不下 Mica 材质 + 约 20 个
-    // 逐像素透明子表面的实时合成，拖动时位置更新排队、窗口"追赶"鼠标。
-    // 拖动期间把整窗内容快照成一张静态位图（各子控件保留的 D2D 离屏帧按 alpha
-    // 拼合），隐藏子控件并关闭 Mica——每帧只需搬运一个不透明表面，松手后恢复。
-    // ULW 表面内容跨隐藏/重显不丢失（翻页切换依赖同一机制）。
-    bool dragActive = false;
-    bool dragSavedBackdrop = false;
-    HDC snapDc = nullptr;
-    HBITMAP snapBmp = nullptr;
-    HGDIOBJ snapOld = nullptr;
-    int snapW = 0;
-    int snapH = 0;
-
-    // 一行设置：卡片底 + 主标签 + 可选提示 + 右侧控件
-    struct Row {
-        std::unique_ptr<fluent::FluentCard> card;
-        std::unique_ptr<fluent::FluentLabel> label;
-        std::unique_ptr<fluent::FluentLabel> hint; // 可空：次要说明
-        bool showHint = false; // hint 有文本时才参与布局
-        std::unique_ptr<fluent::LayeredChild> control;
-        float controlW = 0.0f; // 控件宽度（DIP），右对齐布局用
-        float height = kRowH;
-    };
-
-    fluent::FluentList nav;
-    std::unique_ptr<fluent::FluentLabel> pageTitles[3];
+    fluent::FluentDialogSurface surface;
+    std::array<std::wstring, 3> navItems{L"显示", L"字体与颜色", L"歌词"};
+    std::array<std::wstring, 3> pageTitles{L"显示", L"字体与颜色", L"歌词"};
     std::vector<Row> rows[3];
+    D2D1_RECT_F navRect{};
+    std::array<D2D1_RECT_F, 3> navItemRects{};
+    std::array<D2D1_RECT_F, 3> pageTitleRects{};
 
-    // 窗口复用时需要更新内容的控件
-    fluent::FluentLabel* hintFont = nullptr;
-    fluent::FluentLabel* hintSecondary = nullptr;
-    Row* rowSecondary = nullptr;
-
-    // 需要在命令处理里读状态的控件
-    fluent::FluentToggle* tglSongInfo = nullptr;
-    fluent::FluentToggle* tglAlbumCover = nullptr;
-    fluent::FluentToggle* tglPlatformIcon = nullptr;
-    fluent::FluentToggle* tglSpectrum = nullptr;
-    fluent::FluentToggle* tglHoverControls = nullptr;
-    fluent::FluentToggle* tglFollowAlbum = nullptr;
-    fluent::FluentToggle* tglDoubleLine = nullptr;
-    fluent::FluentToggle* tglSecondaryOn = nullptr;
-    fluent::FluentRadioGroup* radioCoverEffect = nullptr;
-    fluent::FluentRadioGroup* radioRenderMode = nullptr;
-    fluent::FluentRadioGroup* radioAlign = nullptr;
-    fluent::FluentRadioGroup* radioSecondaryType = nullptr;
-
-    template <typename T, typename... Args>
-    T& addRowControl(int page, const wchar_t* text, const wchar_t* hint, float controlW,
-                     float rowH, Args&&... args) {
-        Row row;
-        row.card = std::make_unique<fluent::FluentCard>();
-        row.card->create(hwnd, 0);
-        row.label = std::make_unique<fluent::FluentLabel>();
-        row.label->create(hwnd, 0, text, false, 14.0f, 400);
-        if (hint) {
-            row.hint = std::make_unique<fluent::FluentLabel>();
-            row.hint->create(hwnd, 0, hint, true, 12.0f, 400);
-            row.showHint = *hint != L'\0';
-        }
-        auto control = std::make_unique<T>();
-        control->create(hwnd, std::forward<Args>(args)...);
-        row.controlW = controlW;
-        row.height = rowH;
-        T* ptr = control.get();
-        row.control = std::move(control);
-        rows[page].push_back(std::move(row));
-        return *ptr;
-    }
-
-    void createControls() {
-        nav.create(hwnd, kIdNav);
-        nav.setItems({{L"显示"}, {L"字体与颜色"}, {L"歌词"}});
-
-        const wchar_t* titles[] = {L"显示", L"字体与颜色", L"歌词"};
-        for (int i = 0; i < 3; ++i) {
-            pageTitles[i] = std::make_unique<fluent::FluentLabel>();
-            pageTitles[i]->create(hwnd, 0, titles[i], false, 20.0f, 600);
-        }
-
-        // ---- 显示 ----
-        tglSongInfo = &addRowControl<fluent::FluentToggle>(0, L"显示歌曲信息", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdSongInfo, state.songInfoVisible);
-        tglAlbumCover = &addRowControl<fluent::FluentToggle>(0, L"显示专辑封面", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdAlbumCover, state.albumCoverVisible);
-        tglPlatformIcon = &addRowControl<fluent::FluentToggle>(0, L"显示平台图标", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdPlatformIcon, state.platformIconVisible);
-        {
-            auto& radio = addRowControl<fluent::FluentRadioGroup>(0, L"专辑封面效果", nullptr,
-                estimateRadioWidth({L"默认", L"黑胶唱片"}), kRowH, kIdCoverEffect);
-            radio.setOptions({L"默认", L"黑胶唱片"});
-            radio.setSelectedIndex(state.coverEffectVinyl ? 1 : 0);
-            radio.setEnabled(state.albumCoverVisible);
-            radioCoverEffect = &radio;
-        }
-        tglSpectrum = &addRowControl<fluent::FluentToggle>(0, L"频谱", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdSpectrum, state.spectrumOn);
-        tglHoverControls = &addRowControl<fluent::FluentToggle>(0, L"悬浮时显示播放控件", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdHoverControls, state.hoverControls);
-        {
-            auto& radio = addRowControl<fluent::FluentRadioGroup>(0, L"性能模式",
-                L"低渲染降帧省 GPU，完全停止仅驻留内存",
-                estimateRadioWidth({L"正常", L"低渲染", L"完全停止"}), kRowTallH, kIdRenderMode);
-            radio.setOptions({L"正常", L"低渲染", L"完全停止"});
-            radio.setSelectedIndex(state.renderMode);
-            radioRenderMode = &radio;
-        }
-
-        // ---- 字体与颜色 ----
-        addRowControl<fluent::FluentButton>(1, L"字体", state.fontDesc.c_str(), 132.0f, kRowH,
-                                            kIdPickFont, L"选择字体…");
-        hintFont = rows[1].back().hint.get();
-        addRowControl<fluent::FluentButton>(1, L"字体颜色与效果", nullptr, 132.0f, kRowH,
-                                            kIdFontColor, L"打开…");
-        tglFollowAlbum = &addRowControl<fluent::FluentToggle>(1, L"已播放颜色跟随专辑", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdFollowAlbum, state.followAlbum);
-
-        // ---- 歌词 ----
-        tglDoubleLine = &addRowControl<fluent::FluentToggle>(2, L"双行歌词", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdDoubleLine, state.doubleLineLyrics);
-        {
-            auto& radio = addRowControl<fluent::FluentRadioGroup>(2, L"歌词对齐", nullptr,
-                estimateRadioWidth({L"左对齐", L"居中", L"右对齐"}), kRowH, kIdAlignment);
-            radio.setOptions({L"左对齐", L"居中", L"右对齐"});
-            radio.setSelectedIndex(state.lyricAlignment);
-            radioAlign = &radio;
-        }
-        tglSecondaryOn = &addRowControl<fluent::FluentToggle>(2, L"开启翻译/罗马音", nullptr,
-            fluent::FluentToggle::kWidth, kRowH, kIdSecondaryOn, state.secondaryEnabled);
-        {
-            const wchar_t* hint = state.secondaryAvailability == 1 ? L"正在检查翻译和罗马音…"
-                                  : state.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音"
-                                                                     : L"";
-            auto& radio = addRowControl<fluent::FluentRadioGroup>(2, L"辅助歌词类型", hint,
-                estimateRadioWidth({L"翻译", L"罗马音"}), *hint ? kRowTallH : kRowH,
-                kIdSecondaryType);
-            radio.setOptions({L"翻译", L"罗马音"});
-            radio.setSelectedIndex(state.preferRomanization ? 1 : 0);
-            radio.setEnabled(state.secondaryEnabled && state.secondaryAvailability == 0);
-            radioSecondaryType = &radio;
-            rowSecondary = &rows[2].back();
-            hintSecondary = rowSecondary->hint.get();
-        }
-    }
-
-    // 只布置活动页。非活动页的分层子控件一旦被 move（内部带 SWP_SHOWWINDOW +
-    // UpdateLayeredWindow）再立刻隐藏，窗口第一次显示时 DWM 可能把刚更新的
-    // 表面合成出一帧过期内容（首开时“字体与颜色”页闪一下的根因）。非活动页
-    // 保持从未显示的状态，在 showPage 激活时再通过 layout 布置渲染。
-    void layout() {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        float s = fluent::dipScale(GetDpiForWindow(hwnd));
-        auto px = [&](float dip) { return static_cast<int>(std::lround(dip * s)); };
-        int w = rc.right - rc.left;
-        int h = rc.bottom - rc.top;
-
-        int navX = px(12.0f);
-        nav.move(navX, navX, px(kNavW), h - navX * 2);
-        int contentX = px(12.0f + kNavW + 16.0f);
-        int contentW = w - contentX - px(24.0f);
-
-        int titleH = px(28.0f);
-        int y = px(14.0f) + titleH + px(16.0f);
-        const int page = activePage;
-        pageTitles[page]->move(contentX, px(14.0f), contentW, titleH);
-        for (auto& row : rows[page]) {
-            int rowH = px(row.height);
-            row.card->move(contentX, y, contentW, rowH);
-            int innerX = contentX + px(16.0f);
-            int controlW = px(row.controlW);
-            int controlX = contentX + contentW - px(16.0f) - controlW;
-            int labelW = controlX - innerX - px(12.0f);
-            if (row.hint && row.showHint) {
-                row.label->move(innerX, y + px(12.0f), labelW, px(22.0f));
-                row.hint->move(innerX, y + rowH - px(26.0f), labelW, px(18.0f));
-            } else {
-                row.label->move(innerX, y + (rowH - px(22.0f)) / 2, labelW, px(22.0f));
-            }
-            // 控件垂直居中：开关/单选 20-24 DIP，按钮 32 DIP
-            float controlH = dynamic_cast<fluent::FluentButton*>(row.control.get())
-                                 ? fluent::metrics::controlHeight
-                                 : 24.0f;
-            int ctrlH = px(controlH);
-            row.control->move(controlX, y + (rowH - ctrlH) / 2, controlW, ctrlH);
-            y += rowH + px(kRowGap);
-        }
-        // 分层子窗口按 Z-order 合成：卡片必须压到最底，否则半透明卡片填充
-        // 会盖在文字和控件上面，看起来雾蒙蒙（与 about_dialog 的 infoCard 同理）
-        for (auto& row : rows[page])
-            SetWindowPos(row.card->hwnd(), HWND_BOTTOM, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-
-    void showPage(int page) {
-        if (page != activePage) {
-            activePage = page;
-            layout(); // 新激活页可能从未布置过，补齐定位与渲染
-        }
-        for (int i = 0; i < 3; ++i) {
-            const int cmd = i == activePage ? SW_SHOW : SW_HIDE;
-            ShowWindow(pageTitles[i]->hwnd(), cmd);
-            for (auto& row : rows[i]) {
-                ShowWindow(row.card->hwnd(), cmd);
-                ShowWindow(row.label->hwnd(), cmd);
-                if (row.hint)
-                    ShowWindow(row.hint->hwnd(), cmd);
-                ShowWindow(row.control->hwnd(), cmd);
-            }
-        }
-    }
-
-    // 有效背景材质：拖动模式期间视为无材质，WM_PAINT/WM_ERASEBKGND 改画快照
-    bool effectiveBackdrop() const { return backdrop && !dragActive; }
-
-    // 隐藏/恢复全部分层子控件（恢复走 showPage 保证只显示当前页）
-    void setChildrenHidden(bool hidden) {
-        if (!hidden) {
-            ShowWindow(nav.hwnd(), SW_SHOW);
-            showPage(activePage);
-            return;
-        }
-        ShowWindow(nav.hwnd(), SW_HIDE);
-        for (int i = 0; i < 3; ++i) {
-            ShowWindow(pageTitles[i]->hwnd(), SW_HIDE);
-            for (auto& row : rows[i]) {
-                ShowWindow(row.card->hwnd(), SW_HIDE);
-                ShowWindow(row.label->hwnd(), SW_HIDE);
-                if (row.hint)
-                    ShowWindow(row.hint->hwnd(), SW_HIDE);
-                ShowWindow(row.control->hwnd(), SW_HIDE);
-            }
-        }
-    }
-
-    // 抓取当前可见内容到位图：子控件最近的 D2D 帧保留在各自离屏 DC 中，
-    // 按其相对父客户区的位置 AlphaBlend 拼合；卡片在 Z 序最底，先拼。
-    void buildSnapshot() {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        snapW = rc.right - rc.left;
-        snapH = rc.bottom - rc.top;
-        if (snapW <= 0 || snapH <= 0)
-            return;
-        HDC screen = GetDC(nullptr);
-        snapDc = CreateCompatibleDC(screen);
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = snapW;
-        bmi.bmiHeader.biHeight = -snapH;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        snapBmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, nullptr, nullptr, 0);
-        ReleaseDC(nullptr, screen);
-        if (!snapBmp) {
-            DeleteDC(snapDc);
-            snapDc = nullptr;
-            return;
-        }
-        snapOld = SelectObject(snapDc, snapBmp);
-        // 拖动期间材质关闭，用实心回退底色铺满
-        HBRUSH bg = CreateSolidBrush(fluent::fallbackBgColor());
-        RECT full{0, 0, snapW, snapH};
-        FillRect(snapDc, &full, bg);
-        DeleteObject(bg);
-
-        auto put = [this](fluent::LayeredChild* c) {
-            if (!c || !c->hwnd() || !IsWindowVisible(c->hwnd()))
-                return;
-            RECT wr{};
-            GetWindowRect(c->hwnd(), &wr);
-            POINT pt{wr.left, wr.top};
-            ScreenToClient(hwnd, &pt);
-            c->compositeTo(snapDc, pt.x, pt.y);
-        };
-        for (int i = 0; i < 3; ++i)
-            for (auto& row : rows[i])
-                put(row.card.get());
-        put(&nav);
-        for (int i = 0; i < 3; ++i) {
-            put(pageTitles[i].get());
-            for (auto& row : rows[i]) {
-                put(row.label.get());
-                if (row.hint)
-                    put(row.hint.get());
-                put(row.control.get());
-            }
-        }
-    }
-
-    void destroySnapshot() {
-        if (snapDc) {
-            if (snapOld)
-                SelectObject(snapDc, snapOld);
-            if (snapBmp)
-                DeleteObject(snapBmp);
-            DeleteDC(snapDc);
-        }
-        snapDc = nullptr;
-        snapBmp = nullptr;
-        snapOld = nullptr;
-        snapW = snapH = 0;
-    }
-
-    void beginDragMode() {
-        if (dragActive)
-            return;
-        dragActive = true;
-        dragSavedBackdrop = backdrop;
-        buildSnapshot();
-        setChildrenHidden(true);
-        if (backdrop)
-            fluent::clearBackdrop(hwnd);
-        // 同步重绘一帧快照，避免拖动开始瞬间闪出空背景
-        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-    }
-
-    void endDragMode() {
-        if (!dragActive)
-            return;
-        dragActive = false;
-        destroySnapshot();
-        setChildrenHidden(false);
-        if (dragSavedBackdrop) {
-            fluent::applyBackdrop(hwnd, false);
-            // GDI 画过的不透明像素不会因重新启用材质而消失，隐藏再显示
-            // 让 DWM 丢弃旧表面（与主题切换 restyleDialogWindow 同理）
-            ShowWindow(hwnd, SW_HIDE);
-            ShowWindow(hwnd, SW_SHOW);
-        }
-        dragSavedBackdrop = false;
-    }
-
-    void refreshTheme() {
-        nav.refreshTheme();
-        for (int i = 0; i < 3; ++i) {
-            pageTitles[i]->refreshTheme();
-            for (auto& row : rows[i]) {
-                row.card->refreshTheme();
-                row.label->refreshTheme();
-                if (row.hint)
-                    row.hint->refreshTheme();
-                row.control->refreshTheme();
-            }
-        }
-    }
-
-    void onCommand(int id, int code) {
-        if (id == kIdNav && code == LBN_SELCHANGE) {
-            showPage(nav.selectedIndex());
-            return;
-        }
-        if (code != BN_CLICKED)
-            return;
-        switch (id) {
-        case kIdSongInfo:
-            if (actions.onSongInfoVisible)
-                actions.onSongInfoVisible(tglSongInfo->checked());
-            break;
-        case kIdAlbumCover:
-            if (actions.onAlbumCoverVisible)
-                actions.onAlbumCoverVisible(tglAlbumCover->checked());
-            // 封面隐藏时封面效果无意义，联动禁用
-            radioCoverEffect->setEnabled(tglAlbumCover->checked());
-            break;
-        case kIdPlatformIcon:
-            if (actions.onPlatformIconVisible)
-                actions.onPlatformIconVisible(tglPlatformIcon->checked());
-            break;
-        case kIdCoverEffect:
-            if (actions.onCoverEffectVinyl)
-                actions.onCoverEffectVinyl(radioCoverEffect->selectedIndex() == 1);
-            break;
-        case kIdSpectrum:
-            if (actions.onSpectrum)
-                actions.onSpectrum(tglSpectrum->checked());
-            break;
-        case kIdHoverControls:
-            if (actions.onHoverControls)
-                actions.onHoverControls(tglHoverControls->checked());
-            break;
-        case kIdRenderMode:
-            if (actions.onRenderMode)
-                actions.onRenderMode(radioRenderMode->selectedIndex());
-            break;
-        case kIdPickFont:
-            if (actions.onPickFont)
-                actions.onPickFont();
-            break;
-        case kIdFontColor:
-            if (actions.onFontColorEffect)
-                actions.onFontColorEffect();
-            break;
-        case kIdFollowAlbum:
-            if (actions.onFollowAlbum)
-                actions.onFollowAlbum(tglFollowAlbum->checked());
-            break;
-        case kIdDoubleLine:
-            if (actions.onDoubleLineLyrics)
-                actions.onDoubleLineLyrics(tglDoubleLine->checked());
-            break;
-        case kIdAlignment:
-            if (actions.onLyricAlignment)
-                actions.onLyricAlignment(radioAlign->selectedIndex());
-            break;
-        case kIdSecondaryOn:
-            if (actions.onSecondaryEnabled)
-                actions.onSecondaryEnabled(tglSecondaryOn->checked());
-            // 辅助歌词类型只在总开关开且当前歌曲有能力时可选
-            radioSecondaryType->setEnabled(tglSecondaryOn->checked() &&
-                                           state.secondaryAvailability == 0);
-            break;
-        case kIdSecondaryType:
-            if (actions.onPreferRomanization)
-                actions.onPreferRomanization(radioSecondaryType->selectedIndex() == 1);
-            break;
-        }
-    }
+    int hoverId = 0;
+    int hoverOption = -1;
+    int pressedId = 0;
+    int pressedOption = -1;
+    int focusedId = kIdNav;
+    bool focusVisible = false;
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -495,22 +115,530 @@ struct SettingsDialog::Impl {
         return DefWindowProcW(h, msg, wp, lp);
     }
 
+    static bool contains(const D2D1_RECT_F& rect, float x, float y) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    Row* findRow(int id) {
+        for (auto& page : rows) {
+            for (auto& row : page) {
+                if (row.id == id)
+                    return &row;
+            }
+        }
+        return nullptr;
+    }
+
+    const Row* findRow(int id) const {
+        for (const auto& page : rows) {
+            for (const auto& row : page) {
+                if (row.id == id)
+                    return &row;
+            }
+        }
+        return nullptr;
+    }
+
+    Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
+                float controlW, float height) {
+        Row row;
+        row.id = id;
+        row.kind = kind;
+        row.text = text ? text : L"";
+        row.hint = hint ? hint : L"";
+        row.showHint = !row.hint.empty();
+        row.controlW = controlW;
+        row.height = height;
+        rows[page].push_back(std::move(row));
+        return rows[page].back();
+    }
+
+    Row& addToggle(int page, int id, const wchar_t* text, bool checked) {
+        Row& row = addRow(page, id, ControlKind::Toggle, text, nullptr, 40.0f, kRowH);
+        row.checked = checked;
+        return row;
+    }
+
+    Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
+                  std::vector<std::wstring> options, int selected, bool enabled, float height) {
+        Row& row = addRow(page, id, ControlKind::Radio, text, hint,
+                          estimateRadioWidth(options), height);
+        row.options = std::move(options);
+        row.selected = selected;
+        row.enabled = enabled;
+        return row;
+    }
+
+    Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
+                   const wchar_t* controlText) {
+        Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, kRowH);
+        row.controlText = controlText ? controlText : L"";
+        return row;
+    }
+
+    void createControls() {
+        addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
+        addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
+        addToggle(0, kIdPlatformIcon, L"显示平台图标", state.platformIconVisible);
+        addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
+                 state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
+        addToggle(0, kIdSpectrum, L"频谱", state.spectrumOn);
+        addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
+        addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
+                 {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
+
+        addButton(1, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
+        addButton(1, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
+        addToggle(1, kIdFollowAlbum, L"已播放颜色跟随专辑", state.followAlbum);
+
+        addToggle(2, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
+        addRadio(2, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
+                 state.lyricAlignment, true, kRowH);
+        addToggle(2, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
+        const wchar_t* secondaryHint = state.secondaryAvailability == 1
+                                            ? L"正在检查翻译和罗马音…"
+                                            : state.secondaryAvailability == 2
+                                                  ? L"当前歌曲无翻译或罗马音"
+                                                  : L"";
+        addRadio(2, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
+                 {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
+                 state.secondaryEnabled && state.secondaryAvailability == 0,
+                 *secondaryHint ? kRowTallH : kRowH);
+    }
+
+    void layout() {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        const float s = surface.dipScale();
+        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
+
+        navRect = D2D1::RectF(12.0f, 12.0f, 12.0f + kNavW, std::max(12.0f, h - 12.0f));
+        for (int i = 0; i < 3; ++i) {
+            navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * 32.0f,
+                                          navRect.right, navRect.top + (i + 1) * 32.0f);
+            pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
+        }
+
+        const float contentX = 12.0f + kNavW + 16.0f;
+        const float contentW = std::max(20.0f, w - contentX - 24.0f);
+        pageTitleRects[activePage] =
+            D2D1::RectF(contentX, 14.0f, contentX + contentW, 42.0f);
+        float y = 14.0f + 28.0f + 16.0f;
+        for (auto& page : rows) {
+            for (auto& row : page) {
+                row.cardRect = D2D1::RectF(0, 0, 0, 0);
+                row.labelRect = D2D1::RectF(0, 0, 0, 0);
+                row.hintRect = D2D1::RectF(0, 0, 0, 0);
+                row.controlRect = D2D1::RectF(0, 0, 0, 0);
+                row.optionRects.clear();
+            }
+        }
+
+        for (auto& row : rows[activePage]) {
+            const float rowH = row.height;
+            row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
+            const float innerX = contentX + 16.0f;
+            const float controlX = contentX + contentW - 16.0f - row.controlW;
+            const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
+            if (row.showHint) {
+                row.labelRect = D2D1::RectF(innerX, y + 12.0f, innerX + labelW, y + 34.0f);
+                row.hintRect = D2D1::RectF(innerX, y + rowH - 26.0f,
+                                           innerX + labelW, y + rowH - 8.0f);
+            } else {
+                row.labelRect = D2D1::RectF(innerX, y + (rowH - 22.0f) / 2.0f,
+                                           innerX + labelW, y + (rowH - 22.0f) / 2.0f + 22.0f);
+            }
+            const float controlH = row.kind == ControlKind::Button
+                                       ? fluent::metrics::controlHeight
+                                       : 24.0f;
+            row.controlRect = D2D1::RectF(controlX, y + (rowH - controlH) / 2.0f,
+                                          controlX + row.controlW,
+                                          y + (rowH - controlH) / 2.0f + controlH);
+            y += rowH + kRowGap;
+        }
+    }
+
+    void showPage(int page) {
+        if (page < 0 || page >= 3 || page == activePage)
+            return;
+        activePage = page;
+        hoverId = 0;
+        hoverOption = -1;
+        pressedId = 0;
+        pressedOption = -1;
+        focusedId = kIdNav;
+        layout();
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    void drawNav(fluent::FluentDialogSurface::Painter& painter) {
+        const auto& p = fluent::palette();
+        painter.fillRoundRect(p.cardFill, navRect, fluent::metrics::cardRadius);
+        painter.strokeRoundRect(p.cardStroke, navRect, 1.0f, fluent::metrics::cardRadius);
+        if (focusedId == kIdNav && focusVisible) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(navRect.left + 1.5f, navRect.top + 1.5f, navRect.right - 1.5f,
+                            navRect.bottom - 1.5f),
+                1.5f, fluent::metrics::cardRadius - 1.0f);
+        }
+        auto* format = painter.textFormat(13.0f, 400, false, true);
+        for (int i = 0; i < 3; ++i) {
+            const bool selected = i == activePage;
+            const bool hovered = hoverId == kIdNav && hoverOption == i;
+            if (selected)
+                painter.fillRoundRect(p.listSelected,
+                                      D2D1::RectF(navItemRects[i].left + 4.0f,
+                                                  navItemRects[i].top + 2.0f,
+                                                  navItemRects[i].right - 4.0f,
+                                                  navItemRects[i].bottom - 2.0f));
+            else if (hovered)
+                painter.fillRoundRect(p.listHover,
+                                      D2D1::RectF(navItemRects[i].left + 4.0f,
+                                                  navItemRects[i].top + 2.0f,
+                                                  navItemRects[i].right - 4.0f,
+                                                  navItemRects[i].bottom - 2.0f));
+            if (selected)
+                painter.fillRoundRect(
+                    p.accent,
+                    D2D1::RectF(navItemRects[i].left + 7.0f,
+                                (navItemRects[i].top + navItemRects[i].bottom) / 2.0f - 8.0f,
+                                navItemRects[i].left + 10.0f,
+                                (navItemRects[i].top + navItemRects[i].bottom) / 2.0f + 8.0f),
+                    1.5f);
+            painter.drawText(navItems[i], format,
+                             D2D1::RectF(navItemRects[i].left + 16.0f, navItemRects[i].top,
+                                         navItemRects[i].right - 12.0f, navItemRects[i].bottom),
+                             p.text);
+        }
+    }
+
+    void drawButton(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+        const auto& p = fluent::palette();
+        const bool hovered = hoverId == row.id;
+        const bool pressed = pressedId == row.id;
+        D2D1_COLOR_F fill = pressed ? p.controlPressed : hovered ? p.controlHover : p.controlFill;
+        D2D1_COLOR_F textColor = row.enabled ? p.text : p.disabled;
+        if (!row.enabled)
+            fill = p.listHover;
+        painter.fillRoundRect(fill, row.controlRect);
+        painter.strokeRoundRect(p.cardStroke, row.controlRect);
+        if (focusedId == row.id && focusVisible && row.enabled) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(row.controlRect.left + 1.5f, row.controlRect.top + 1.5f,
+                            row.controlRect.right - 1.5f, row.controlRect.bottom - 1.5f),
+                1.5f, fluent::metrics::controlRadius - 1.0f);
+        }
+        painter.drawText(row.controlText, painter.textFormat(14.0f, 400, true, true),
+                         D2D1::RectF(row.controlRect.left + 4.0f, row.controlRect.top,
+                                     row.controlRect.right - 4.0f, row.controlRect.bottom),
+                         textColor);
+    }
+
+    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+        const auto& p = fluent::palette();
+        const bool hovered = hoverId == row.id;
+        const bool enabled = row.enabled;
+        const bool focused = focusedId == row.id && focusVisible;
+        const float trackH = std::min(20.0f, row.controlRect.bottom - row.controlRect.top);
+        const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
+        const D2D1_RECT_F track = D2D1::RectF(
+            row.controlRect.left + 0.5f, centerY - trackH * 0.5f,
+            row.controlRect.right - 0.5f, centerY + trackH * 0.5f);
+        const float radius = trackH * 0.5f;
+        const float knobR = trackH * 0.5f - 3.5f;
+        const float knobX = row.checked ? track.right - trackH * 0.5f
+                                        : track.left + trackH * 0.5f;
+        if (!enabled) {
+            painter.fillRoundRect(p.listHover, track, radius);
+            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+        } else if (row.checked) {
+            painter.fillRoundRect(hovered ? p.accentHover : p.accent, track, radius);
+        } else {
+            painter.fillRoundRect(hovered ? p.controlHover : p.controlFill, track, radius);
+            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+        }
+        if (auto* br = painter.brush(!enabled ? p.disabled
+                                               : row.checked ? p.textOnAccent : p.textSecondary)) {
+            painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR),
+                                             br);
+        }
+        if (focused && enabled) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(track.left + 1.5f, track.top + 1.5f,
+                            track.right - 1.5f, track.bottom - 1.5f),
+                1.5f, std::max(1.0f, radius - 1.5f));
+        }
+    }
+
+    void drawRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* format = painter.textFormat(13.0f, 400, false, true);
+        if (!format)
+            return;
+        const float cy = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
+        constexpr float kCircle = 16.0f;
+        constexpr float kTextGap = 8.0f;
+        constexpr float kOptionGap = 20.0f;
+        float x = row.controlRect.left;
+        row.optionRects.clear();
+        for (size_t i = 0; i < row.options.size(); ++i) {
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id && hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            const float textW = painter.measureTextWidth(row.options[i], format);
+            D2D1_ELLIPSE circle{D2D1::Point2F(x + kCircle * 0.5f, cy), kCircle * 0.5f,
+                                kCircle * 0.5f};
+            if (!row.enabled) {
+                if (auto* br = painter.brush(p.disabled)) {
+                    painter.target()->DrawEllipse(circle, br, 1.0f);
+                    if (selected)
+                        painter.target()->FillEllipse(
+                            D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+                }
+            } else if (selected) {
+                if (auto* br = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(circle, br);
+                if (auto* br = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+            } else {
+                if (hovered)
+                    painter.target()->FillEllipse(circle, painter.brush(p.listHover));
+                if (auto* br = painter.brush(p.textSecondary))
+                    painter.target()->DrawEllipse(circle, br, pressed ? 1.5f : 1.0f);
+            }
+            painter.drawText(row.options[i], format,
+                             D2D1::RectF(x + kCircle + kTextGap, row.controlRect.top,
+                                         x + kCircle + kTextGap + textW + 1.0f,
+                                         row.controlRect.bottom),
+                             row.enabled ? p.text : p.disabled);
+            row.optionRects.push_back(D2D1::RectF(
+                x, row.controlRect.top, x + kCircle + kTextGap + textW,
+                row.controlRect.bottom));
+            x += kCircle + kTextGap + textW + kOptionGap;
+        }
+    }
+
+    void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
+        const auto& p = fluent::palette();
+        drawNav(painter);
+        painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
+                         pageTitleRects[activePage], p.text);
+        for (auto& row : rows[activePage]) {
+            painter.fillRoundRect(p.cardFill, row.cardRect, fluent::metrics::cardRadius);
+            painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
+            painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect, p.text);
+            if (row.showHint)
+                painter.drawText(row.hint, painter.textFormat(12.0f, 400), row.hintRect,
+                                 p.textSecondary);
+            if (row.kind == ControlKind::Toggle)
+                drawToggle(painter, row);
+            else if (row.kind == ControlKind::Radio)
+                drawRadio(painter, row);
+            else
+                drawButton(painter, row);
+        }
+    }
+
+    int hitTest(float x, float y, int* option = nullptr) const {
+        if (option)
+            *option = -1;
+        for (int i = 0; i < 3; ++i) {
+            if (contains(navItemRects[i], x, y)) {
+                if (option)
+                    *option = i;
+                return kIdNav;
+            }
+        }
+        for (const auto& row : rows[activePage]) {
+            if (!contains(row.controlRect, x, y))
+                continue;
+            if (option && row.kind == ControlKind::Radio) {
+                for (size_t i = 0; i < row.optionRects.size(); ++i) {
+                    if (contains(row.optionRects[i], x, y)) {
+                        *option = static_cast<int>(i);
+                        break;
+                    }
+                }
+            }
+            return row.id;
+        }
+        return 0;
+    }
+
+    std::vector<int> focusOrder() const {
+        std::vector<int> order{kIdNav};
+        for (const auto& row : rows[activePage]) {
+            if (row.enabled)
+                order.push_back(row.id);
+        }
+        return order;
+    }
+
+    void focusStep(int direction) {
+        const auto order = focusOrder();
+        if (order.empty())
+            return;
+        auto it = std::find(order.begin(), order.end(), focusedId);
+        int index = it == order.end() ? (direction > 0 ? -1 : 0)
+                                      : static_cast<int>(it - order.begin());
+        index = (index + direction + static_cast<int>(order.size())) % order.size();
+        focusedId = order[index];
+        focusVisible = true;
+        surface.invalidate();
+    }
+
+    void onCommand(int id) {
+        if (id == kIdNav)
+            return;
+        Row* row = findRow(id);
+        if (!row || !row->enabled)
+            return;
+        switch (id) {
+        case kIdSongInfo:
+            row->checked = !row->checked;
+            if (actions.onSongInfoVisible)
+                actions.onSongInfoVisible(row->checked);
+            break;
+        case kIdAlbumCover:
+            row->checked = !row->checked;
+            if (actions.onAlbumCoverVisible)
+                actions.onAlbumCoverVisible(row->checked);
+            if (auto* effect = findRow(kIdCoverEffect))
+                effect->enabled = row->checked;
+            break;
+        case kIdPlatformIcon:
+            row->checked = !row->checked;
+            if (actions.onPlatformIconVisible)
+                actions.onPlatformIconVisible(row->checked);
+            break;
+        case kIdCoverEffect:
+            if (actions.onCoverEffectVinyl)
+                actions.onCoverEffectVinyl(row->selected == 1);
+            break;
+        case kIdSpectrum:
+            row->checked = !row->checked;
+            if (actions.onSpectrum)
+                actions.onSpectrum(row->checked);
+            break;
+        case kIdHoverControls:
+            row->checked = !row->checked;
+            if (actions.onHoverControls)
+                actions.onHoverControls(row->checked);
+            break;
+        case kIdRenderMode:
+            if (actions.onRenderMode)
+                actions.onRenderMode(row->selected);
+            break;
+        case kIdPickFont:
+            if (actions.onPickFont)
+                actions.onPickFont();
+            break;
+        case kIdFontColor:
+            if (actions.onFontColorEffect)
+                actions.onFontColorEffect();
+            break;
+        case kIdFollowAlbum:
+            row->checked = !row->checked;
+            if (actions.onFollowAlbum)
+                actions.onFollowAlbum(row->checked);
+            break;
+        case kIdDoubleLine:
+            row->checked = !row->checked;
+            if (actions.onDoubleLineLyrics)
+                actions.onDoubleLineLyrics(row->checked);
+            break;
+        case kIdAlignment:
+            if (actions.onLyricAlignment)
+                actions.onLyricAlignment(row->selected);
+            break;
+        case kIdSecondaryOn:
+            row->checked = !row->checked;
+            if (actions.onSecondaryEnabled)
+                actions.onSecondaryEnabled(row->checked);
+            if (auto* type = findRow(kIdSecondaryType))
+                type->enabled = row->checked && state.secondaryAvailability == 0;
+            break;
+        case kIdSecondaryType:
+            if (actions.onPreferRomanization)
+                actions.onPreferRomanization(row->selected == 1);
+            break;
+        }
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    void updateState(const SettingsState& s) {
+        state = s;
+        if (auto* row = findRow(kIdSongInfo))
+            row->checked = s.songInfoVisible;
+        if (auto* row = findRow(kIdAlbumCover))
+            row->checked = s.albumCoverVisible;
+        if (auto* row = findRow(kIdPlatformIcon))
+            row->checked = s.platformIconVisible;
+        if (auto* row = findRow(kIdCoverEffect)) {
+            row->selected = s.coverEffectVinyl ? 1 : 0;
+            row->enabled = s.albumCoverVisible;
+        }
+        if (auto* row = findRow(kIdSpectrum))
+            row->checked = s.spectrumOn;
+        if (auto* row = findRow(kIdHoverControls))
+            row->checked = s.hoverControls;
+        if (auto* row = findRow(kIdRenderMode))
+            row->selected = s.renderMode;
+        if (auto* row = findRow(kIdPickFont)) {
+            row->hint = s.fontDesc;
+            row->showHint = !row->hint.empty();
+            row->height = kRowH;
+        }
+        if (auto* row = findRow(kIdFollowAlbum))
+            row->checked = s.followAlbum;
+        if (auto* row = findRow(kIdDoubleLine))
+            row->checked = s.doubleLineLyrics;
+        if (auto* row = findRow(kIdAlignment))
+            row->selected = s.lyricAlignment;
+        if (auto* row = findRow(kIdSecondaryOn))
+            row->checked = s.secondaryEnabled;
+        if (auto* row = findRow(kIdSecondaryType)) {
+            row->hint = s.secondaryAvailability == 1
+                            ? L"正在检查翻译和罗马音…"
+                            : s.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音" : L"";
+            row->showHint = !row->hint.empty();
+            row->height = row->showHint ? kRowTallH : kRowH;
+            row->selected = s.preferRomanization ? 1 : 0;
+            row->enabled = s.secondaryEnabled && s.secondaryAvailability == 0;
+        }
+        layout();
+        surface.invalidate();
+    }
+
+    void updateFontDescription(const std::wstring& description) {
+        state.fontDesc = description;
+        if (auto* row = findRow(kIdPickFont)) {
+            row->hint = description;
+            row->showHint = !description.empty();
+            row->height = kRowH;
+            layout();
+            surface.invalidate();
+        }
+    }
+
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd, false);
+            surface.initialize(hwnd);
             createControls();
             layout();
-            nav.setSelectedIndex(0);
             return 0;
         case WM_SIZE:
             layout();
-            return 0;
-        case WM_ENTERSIZEMOVE:
-            beginDragMode();
-            return 0;
-        case WM_EXITSIZEMOVE:
-            endDragMode();
+            surface.invalidate();
             return 0;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
@@ -518,51 +646,154 @@ struct SettingsDialog::Impl {
                          suggested->right - suggested->left, suggested->bottom - suggested->top,
                          SWP_NOZORDER | SWP_NOACTIVATE);
             layout();
-            refreshTheme();
-            if (dragActive) {
-                // layout() 的 move 会重新显示并渲染子控件：重拼快照后再隐藏
-                destroySnapshot();
-                buildSnapshot();
-                setChildrenHidden(true);
-                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
-            }
+            surface.invalidate();
             return 0;
         }
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
-            refreshTheme();
-            RedrawWindow(hwnd, nullptr, nullptr,
-                         RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            surface.invalidate();
             return 0;
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            if (dragActive && snapDc)
-                BitBlt(hdc, 0, 0, snapW, snapH, snapDc, 0, 0, SRCCOPY);
-            else
-                fluent::paintDialogBackground(hwnd, hdc, effectiveBackdrop());
+            surface.paint(hdc, backdrop,
+                          [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
+                              paint(painter, w, h);
+                          });
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_ERASEBKGND:
-            if (dragActive && snapDc) {
-                BitBlt(reinterpret_cast<HDC>(wp), 0, 0, snapW, snapH, snapDc, 0, 0, SRCCOPY);
-                return 1;
-            }
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), effectiveBackdrop());
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
             return 1;
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+            const float s = surface.dipScale();
+            int option = -1;
+            const int id = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
+            if (id != hoverId || option != hoverOption) {
+                hoverId = id;
+                hoverOption = option;
+                surface.invalidate();
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            hoverId = 0;
+            hoverOption = -1;
+            surface.invalidate();
+            return 0;
+        case WM_LBUTTONDOWN: {
+            SetFocus(hwnd);
+            focusVisible = false;
+            const float s = surface.dipScale();
+            int option = -1;
+            pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
+            pressedOption = option;
+            if (pressedId != 0)
+                focusedId = pressedId;
+            if (pressedId != 0)
+                SetCapture(hwnd);
+            surface.invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            const float s = surface.dipScale();
+            int option = -1;
+            const int hit = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
+            const int pressed = pressedId;
+            const int pressedOptionValue = pressedOption;
+            pressedId = 0;
+            pressedOption = -1;
+            if (GetCapture() == hwnd)
+                ReleaseCapture();
+            if (pressed == kIdNav && hit == kIdNav && option >= 0)
+                showPage(option);
+            else if (pressed != 0 && pressed == hit) {
+                Row* row = findRow(pressed);
+                if (row && row->enabled) {
+                    if (row->kind == ControlKind::Radio) {
+                        if (pressedOptionValue >= 0 && pressedOptionValue == option &&
+                            pressedOptionValue != row->selected) {
+                            row->selected = pressedOptionValue;
+                            onCommand(pressed);
+                        }
+                    } else {
+                        onCommand(pressed);
+                    }
+                }
+            }
+            surface.invalidate();
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            pressedId = 0;
+            pressedOption = -1;
+            surface.invalidate();
+            return 0;
+        case WM_MOUSEWHEEL:
+            return 0;
+        case WM_GETDLGCODE:
+            return DLGC_WANTALLKEYS | DLGC_WANTTAB;
+        case WM_KEYDOWN:
+            if (wp == VK_TAB) {
+                focusStep((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
+                return 0;
+            }
+            if (wp == VK_ESCAPE) {
+                ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+            if (wp == VK_UP || wp == VK_DOWN) {
+                if (focusedId == kIdNav) {
+                    int next = activePage + (wp == VK_DOWN ? 1 : -1);
+                    if (next < 0)
+                        next = 2;
+                    if (next >= 3)
+                        next = 0;
+                    showPage(next);
+                }
+                return 0;
+            }
+            if (wp == VK_LEFT || wp == VK_RIGHT) {
+                Row* row = findRow(focusedId);
+                if (row && row->kind == ControlKind::Radio && row->enabled && !row->options.empty()) {
+                    int direction = wp == VK_LEFT ? -1 : 1;
+                    row->selected = (row->selected + direction +
+                                     static_cast<int>(row->options.size())) %
+                                    static_cast<int>(row->options.size());
+                    onCommand(row->id);
+                }
+                return 0;
+            }
+            if (wp == VK_SPACE || wp == VK_RETURN) {
+                if (focusedId != kIdNav) {
+                    Row* row = findRow(focusedId);
+                    if (row && row->enabled && row->kind != ControlKind::Radio)
+                        onCommand(focusedId);
+                }
+                return 0;
+            }
+            break;
+        case WM_SETFOCUS:
+            focusVisible = true;
+            surface.invalidate();
+            return 0;
+        case WM_KILLFOCUS:
+            focusVisible = false;
+            surface.invalidate();
+            return 0;
         case WM_COMMAND:
-            onCommand(LOWORD(wp), HIWORD(wp));
+            if (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == LBN_SELCHANGE)
+                onCommand(LOWORD(wp));
             return 0;
         case WM_CLOSE:
-            // 只隐藏不销毁：窗口与全部控件复用，再次打开无需重建
-            //（同步重建十几个分层子控件会阻塞 UI 线程，导致任务栏歌词动画掉帧）。
-            // 窗口随 App 退出由 ~SettingsDialog 销毁。
-            endDragMode(); // 拖动中被关闭（如 Alt+F4）：先恢复子控件与材质
             ShowWindow(hwnd, SW_HIDE);
             return 0;
         case WM_DESTROY:
+            surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)
                 PostMessageW(notifyHwnd, kMsgDialogClosed,
@@ -573,45 +804,10 @@ struct SettingsDialog::Impl {
     }
 
     void destroy() {
-        destroySnapshot();
         if (hwnd) {
             DestroyWindow(hwnd);
             hwnd = nullptr;
         }
-    }
-
-    // 窗口隐藏期间状态可能经托盘菜单等途径变更，再次打开前同步快照。
-    // 各 setter 都有相同值早退，未变化的控件不会触发重绘。
-    void updateState(const SettingsState& s) {
-        state = s;
-        tglSongInfo->setChecked(s.songInfoVisible);
-        tglAlbumCover->setChecked(s.albumCoverVisible);
-        tglPlatformIcon->setChecked(s.platformIconVisible);
-        radioCoverEffect->setSelectedIndex(s.coverEffectVinyl ? 1 : 0);
-        radioCoverEffect->setEnabled(s.albumCoverVisible);
-        tglSpectrum->setChecked(s.spectrumOn);
-        tglHoverControls->setChecked(s.hoverControls);
-        radioRenderMode->setSelectedIndex(s.renderMode);
-        tglFollowAlbum->setChecked(s.followAlbum);
-        if (hintFont)
-            hintFont->setText(s.fontDesc);
-        tglDoubleLine->setChecked(s.doubleLineLyrics);
-        radioAlign->setSelectedIndex(s.lyricAlignment);
-        tglSecondaryOn->setChecked(s.secondaryEnabled);
-        const wchar_t* hint = s.secondaryAvailability == 1 ? L"正在检查翻译和罗马音…"
-                              : s.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音" : L"";
-        hintSecondary->setText(hint);
-        rowSecondary->showHint = *hint != L'\0';
-        rowSecondary->height = rowSecondary->showHint ? kRowTallH : kRowH;
-        radioSecondaryType->setSelectedIndex(s.preferRomanization ? 1 : 0);
-        radioSecondaryType->setEnabled(s.secondaryEnabled && s.secondaryAvailability == 0);
-        layout();
-    }
-
-    void updateFontDescription(const std::wstring& description) {
-        state.fontDesc = description;
-        if (hintFont)
-            hintFont->setText(description);
     }
 };
 
@@ -624,7 +820,7 @@ SettingsDialog::~SettingsDialog() {
 
 bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& state,
                             SettingsActions actions) {
-    impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者
+    impl_->notifyHwnd = parent;
     impl_->inst = inst;
     impl_->state = state;
     impl_->actions = std::move(actions);
@@ -670,6 +866,7 @@ void SettingsDialog::show() {
     if (impl_->hwnd) {
         ShowWindow(impl_->hwnd, SW_SHOW);
         SetForegroundWindow(impl_->hwnd);
+        SetFocus(impl_->hwnd);
     }
 }
 
