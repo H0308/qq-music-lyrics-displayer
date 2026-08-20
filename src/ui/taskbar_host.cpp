@@ -2480,7 +2480,8 @@ struct TaskbarHost::Impl {
 
     void drawTransitionTextTo(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textW,
                               float textH, float areaW, float x, float y, float offset,
-                              ID2D1Brush* brush) {
+                              ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
+                              ID2D1Brush* glow = nullptr) {
         if (!rt || !layout || !brush || areaW <= 0.0f)
             return;
         D2D1_RECT_F clip{x, y, x + areaW, y + textH};
@@ -2505,6 +2506,26 @@ struct TaskbarHost::Impl {
             float loopW = textW + kTextPadding * 2.0f;
             bases[n++] = x - offset;
             bases[n++] = x - offset + loopW;
+        }
+        static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
+                                              {0.7071f, 0.7071f},
+                                              {0.0f, 1.0f},
+                                              {-0.7071f, 0.7071f},
+                                              {-1.0f, 0.0f},
+                                              {-0.7071f, -0.7071f},
+                                              {0.0f, -1.0f},
+                                              {0.7071f, -0.7071f}};
+        for (int i = 0; i < n; ++i) {
+            if (glow) {
+                for (auto& d : kDirs)
+                    rt->DrawTextLayout(
+                        D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f), layout, glow);
+            }
+            if (outline) {
+                for (auto& d : kDirs)
+                    rt->DrawTextLayout(
+                        D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f), layout, outline);
+            }
         }
         for (int i = 0; i < n; ++i)
             rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
@@ -2535,8 +2556,10 @@ struct TaskbarHost::Impl {
             mainOffset = lyricScrollOffset_;
             secondaryOffset = secondaryScrollOffset_;
         }
+        ID2D1Brush* effectOutline = lyricOutline_ ? brushLyricOutline_ : nullptr;
+        ID2D1Brush* effectGlow = lyricGlow_ ? brushLyricGlow_ : nullptr;
         drawTransitionTextTo(dc, main, mainW, mainH, lyricAreaW, lyricAreaX, y, mainOffset,
-                             mainBrush);
+                             mainBrush, effectOutline, effectGlow);
         if (secondary)
             drawTransitionTextTo(dc, secondary, secondaryW, secondaryH, lyricAreaW, lyricAreaX,
                                  y + mainH + gap, secondaryOffset, brushDim_);
@@ -2774,7 +2797,9 @@ struct TaskbarHost::Impl {
                     // 过渡期间停用逐字填充，避免高亮进度和移动中的旧行叠加造成视觉噪声。
                     drawLyricScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW,
                                            lyricAreaX, lyricY + newShift, lyricScrollOffset_,
-                                           incomingBrush, nullptr, nullptr,
+                                           incomingBrush,
+                                           lyricOutline_ ? brushLyricOutline_ : nullptr,
+                                           lyricGlow_ ? brushLyricGlow_ : nullptr,
                                            nullptr, 0.0f, fadeInT);
                     if (secondaryLayout_)
                         drawLyricScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
