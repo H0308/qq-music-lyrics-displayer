@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -57,6 +58,20 @@ struct SettingsDialog::Impl {
     SettingsState state;
     SettingsActions actions;
     int activePage = 0;
+
+    // --- 拖动模式 ---
+    // 高刷新率（如 240Hz）下 DWM 单帧预算仅约 4ms，装不下 Mica 材质 + 约 20 个
+    // 逐像素透明子表面的实时合成，拖动时位置更新排队、窗口"追赶"鼠标。
+    // 拖动期间把整窗内容快照成一张静态位图（各子控件保留的 D2D 离屏帧按 alpha
+    // 拼合），隐藏子控件并关闭 Mica——每帧只需搬运一个不透明表面，松手后恢复。
+    // ULW 表面内容跨隐藏/重显不丢失（翻页切换依赖同一机制）。
+    bool dragActive = false;
+    bool dragSavedBackdrop = false;
+    HDC snapDc = nullptr;
+    HBITMAP snapBmp = nullptr;
+    HGDIOBJ snapOld = nullptr;
+    int snapW = 0;
+    int snapH = 0;
 
     // 一行设置：卡片底 + 主标签 + 可选提示 + 右侧控件
     struct Row {
@@ -248,6 +263,128 @@ struct SettingsDialog::Impl {
         }
     }
 
+    // 有效背景材质：拖动模式期间视为无材质，WM_PAINT/WM_ERASEBKGND 改画快照
+    bool effectiveBackdrop() const { return backdrop && !dragActive; }
+
+    // 隐藏/恢复全部分层子控件（恢复走 showPage 保证只显示当前页）
+    void setChildrenHidden(bool hidden) {
+        if (!hidden) {
+            ShowWindow(nav.hwnd(), SW_SHOW);
+            showPage(activePage);
+            return;
+        }
+        ShowWindow(nav.hwnd(), SW_HIDE);
+        for (int i = 0; i < 3; ++i) {
+            ShowWindow(pageTitles[i]->hwnd(), SW_HIDE);
+            for (auto& row : rows[i]) {
+                ShowWindow(row.card->hwnd(), SW_HIDE);
+                ShowWindow(row.label->hwnd(), SW_HIDE);
+                if (row.hint)
+                    ShowWindow(row.hint->hwnd(), SW_HIDE);
+                ShowWindow(row.control->hwnd(), SW_HIDE);
+            }
+        }
+    }
+
+    // 抓取当前可见内容到位图：子控件最近的 D2D 帧保留在各自离屏 DC 中，
+    // 按其相对父客户区的位置 AlphaBlend 拼合；卡片在 Z 序最底，先拼。
+    void buildSnapshot() {
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        snapW = rc.right - rc.left;
+        snapH = rc.bottom - rc.top;
+        if (snapW <= 0 || snapH <= 0)
+            return;
+        HDC screen = GetDC(nullptr);
+        snapDc = CreateCompatibleDC(screen);
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = snapW;
+        bmi.bmiHeader.biHeight = -snapH;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        snapBmp = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, nullptr, nullptr, 0);
+        ReleaseDC(nullptr, screen);
+        if (!snapBmp) {
+            DeleteDC(snapDc);
+            snapDc = nullptr;
+            return;
+        }
+        snapOld = SelectObject(snapDc, snapBmp);
+        // 拖动期间材质关闭，用实心回退底色铺满
+        HBRUSH bg = CreateSolidBrush(fluent::fallbackBgColor());
+        RECT full{0, 0, snapW, snapH};
+        FillRect(snapDc, &full, bg);
+        DeleteObject(bg);
+
+        auto put = [this](fluent::LayeredChild* c) {
+            if (!c || !c->hwnd() || !IsWindowVisible(c->hwnd()))
+                return;
+            RECT wr{};
+            GetWindowRect(c->hwnd(), &wr);
+            POINT pt{wr.left, wr.top};
+            ScreenToClient(hwnd, &pt);
+            c->compositeTo(snapDc, pt.x, pt.y);
+        };
+        for (int i = 0; i < 3; ++i)
+            for (auto& row : rows[i])
+                put(row.card.get());
+        put(&nav);
+        for (int i = 0; i < 3; ++i) {
+            put(pageTitles[i].get());
+            for (auto& row : rows[i]) {
+                put(row.label.get());
+                if (row.hint)
+                    put(row.hint.get());
+                put(row.control.get());
+            }
+        }
+    }
+
+    void destroySnapshot() {
+        if (snapDc) {
+            if (snapOld)
+                SelectObject(snapDc, snapOld);
+            if (snapBmp)
+                DeleteObject(snapBmp);
+            DeleteDC(snapDc);
+        }
+        snapDc = nullptr;
+        snapBmp = nullptr;
+        snapOld = nullptr;
+        snapW = snapH = 0;
+    }
+
+    void beginDragMode() {
+        if (dragActive)
+            return;
+        dragActive = true;
+        dragSavedBackdrop = backdrop;
+        buildSnapshot();
+        setChildrenHidden(true);
+        if (backdrop)
+            fluent::clearBackdrop(hwnd);
+        // 同步重绘一帧快照，避免拖动开始瞬间闪出空背景
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+    }
+
+    void endDragMode() {
+        if (!dragActive)
+            return;
+        dragActive = false;
+        destroySnapshot();
+        setChildrenHidden(false);
+        if (dragSavedBackdrop) {
+            fluent::applyBackdrop(hwnd, false);
+            // GDI 画过的不透明像素不会因重新启用材质而消失，隐藏再显示
+            // 让 DWM 丢弃旧表面（与主题切换 restyleDialogWindow 同理）
+            ShowWindow(hwnd, SW_HIDE);
+            ShowWindow(hwnd, SW_SHOW);
+        }
+        dragSavedBackdrop = false;
+    }
+
     void refreshTheme() {
         nav.refreshTheme();
         for (int i = 0; i < 3; ++i) {
@@ -355,6 +492,12 @@ struct SettingsDialog::Impl {
         case WM_SIZE:
             layout();
             return 0;
+        case WM_ENTERSIZEMOVE:
+            beginDragMode();
+            return 0;
+        case WM_EXITSIZEMOVE:
+            endDragMode();
+            return 0;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
@@ -362,6 +505,13 @@ struct SettingsDialog::Impl {
                          SWP_NOZORDER | SWP_NOACTIVATE);
             layout();
             refreshTheme();
+            if (dragActive) {
+                // layout() 的 move 会重新显示并渲染子控件：重拼快照后再隐藏
+                destroySnapshot();
+                buildSnapshot();
+                setChildrenHidden(true);
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            }
             return 0;
         }
         case WM_SETTINGCHANGE:
@@ -374,12 +524,19 @@ struct SettingsDialog::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            fluent::paintDialogBackground(hwnd, hdc, backdrop);
+            if (dragActive && snapDc)
+                BitBlt(hdc, 0, 0, snapW, snapH, snapDc, 0, 0, SRCCOPY);
+            else
+                fluent::paintDialogBackground(hwnd, hdc, effectiveBackdrop());
             EndPaint(hwnd, &ps);
             return 0;
         }
         case WM_ERASEBKGND:
-            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), backdrop);
+            if (dragActive && snapDc) {
+                BitBlt(reinterpret_cast<HDC>(wp), 0, 0, snapW, snapH, snapDc, 0, 0, SRCCOPY);
+                return 1;
+            }
+            fluent::paintDialogBackground(hwnd, reinterpret_cast<HDC>(wp), effectiveBackdrop());
             return 1;
         case WM_COMMAND:
             onCommand(LOWORD(wp), HIWORD(wp));
@@ -388,6 +545,7 @@ struct SettingsDialog::Impl {
             // 只隐藏不销毁：窗口与全部控件复用，再次打开无需重建
             //（同步重建十几个分层子控件会阻塞 UI 线程，导致任务栏歌词动画掉帧）。
             // 窗口随 App 退出由 ~SettingsDialog 销毁。
+            endDragMode(); // 拖动中被关闭（如 Alt+F4）：先恢复子控件与材质
             ShowWindow(hwnd, SW_HIDE);
             return 0;
         case WM_DESTROY:
@@ -401,6 +559,7 @@ struct SettingsDialog::Impl {
     }
 
     void destroy() {
+        destroySnapshot();
         if (hwnd) {
             DestroyWindow(hwnd);
             hwnd = nullptr;

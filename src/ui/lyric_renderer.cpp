@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <iterator>
 
+#pragma comment(lib, "msimg32.lib") // AlphaBlend（compositeTo）
+
 LyricRenderer::LyricRenderer() = default;
 
 LyricRenderer::~LyricRenderer() {
@@ -144,6 +146,13 @@ bool LyricRenderer::copyToDC(HDC hdc, int width, int height) {
     if (!memdc_ || width <= 0 || height <= 0)
         return false;
     return !!BitBlt(hdc, 0, 0, width, height, memdc_, 0, 0, SRCCOPY);
+}
+
+bool LyricRenderer::compositeTo(HDC dst, int x, int y) {
+    if (!memdc_ || bmpW_ <= 0 || bmpH_ <= 0)
+        return false;
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    return !!AlphaBlend(dst, x, y, bmpW_, bmpH_, memdc_, 0, 0, bmpW_, bmpH_, blend);
 }
 
 void LyricRenderer::discard() {

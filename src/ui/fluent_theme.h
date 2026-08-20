@@ -58,6 +58,7 @@ const Palette& palette();
 // ---- DWM Win11 窗口元素 ----
 void applyRoundCorners(HWND hwnd, bool smallCorners = false);
 bool applyBackdrop(HWND hwnd, bool transientWindow); // Mica / 亚克力；返回是否应用成功
+void clearBackdrop(HWND hwnd); // 关闭背景材质（恢复不透明客户区）
 void applyDarkCaption(HWND hwnd, bool dark);
 void applyBorderColor(HWND hwnd, COLORREF color);
 // 不绘制窗口边框（用于弹出菜单等无边框窗口）
