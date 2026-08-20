@@ -57,6 +57,11 @@ public:
     void setPlatformIconVisible(bool on);
     void setAlbumCoverEffect(AlbumCoverEffect effect);
 
+    // 渲染模式：0 正常（播放时跟随屏幕刷新率）；1 低渲染（固定 ~30fps，降低 GPU/CPU
+    // 占用）；2 完全停止（隐藏窗口、停帧定时器并释放 GPU 设备，仅内存中保留数据状态，
+    // 切回时按最近会话状态立即还原）
+    void setRenderMode(int mode);
+
     // 音频频谱（任务栏独有）：on 控制显隐，bands 为兼容入口；正式播放链路使用 SpectrumPatch。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;

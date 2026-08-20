@@ -13,6 +13,7 @@ struct SettingsState {
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
     bool spectrumOn = false;
+    int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     bool followAlbum = false;
     bool doubleLineLyrics = false;
@@ -30,6 +31,7 @@ struct SettingsActions {
     std::function<void(bool)> onPlatformIconVisible;
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(bool)> onSpectrum;
+    std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void()> onPickFont;
     std::function<void()> onFontColorEffect;

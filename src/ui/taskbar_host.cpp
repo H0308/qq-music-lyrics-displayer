@@ -551,6 +551,12 @@ struct TaskbarHost::Impl {
     bool platformIconVisible_ = false;
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
     bool clientAnimations_ = true;
+    // 渲染模式：0 正常；1 低渲染（播放中也固定 ~30fps）；2 完全停止（窗口隐藏、
+    // 帧定时器停止、GPU 设备释放，数据状态保留在内存）
+    int renderMode_ = 0;
+    // 最近一帧的会话可见性：完全停止模式下窗口被强制隐藏且 visible 被清，
+    // 恢复时据此判断是否需要立即重新显示
+    bool sessionVisible_ = false;
     float vinylAngleDeg_ = 0.0f;
     ULONGLONG vinylTickMs_ = 0;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
@@ -1127,7 +1133,8 @@ struct TaskbarHost::Impl {
         if (statusChanged || sceneChanged)
             textDirty_ = true;
 
-        if (frame.visible) {
+        sessionVisible_ = frame.visible;
+        if (frame.visible && renderMode_ != 2) {
             if (!visible) {
                 visible = true;
                 if (hwnd)
@@ -2935,6 +2942,9 @@ struct TaskbarHost::Impl {
     }
 
     UINT activeFrameMs() const {
+        // 低渲染模式：播放中也固定 ~30fps，逐字渐变/黑胶旋转的 GPU 提交随之减半以上
+        if (renderMode_ == 1)
+            return kTimerPausedMs;
         const UINT hz = displayRefreshHz_ ? displayRefreshHz_ : 60;
         return std::clamp(1000 / hz, kTimerMinMs, kTimerMs);
     }
@@ -2957,6 +2967,44 @@ struct TaskbarHost::Impl {
             timerRunning_ = false;
             timerMs_ = 0;
         }
+    }
+
+    void setRenderMode(int mode) {
+        if (mode == renderMode_)
+            return;
+        renderMode_ = mode;
+        if (mode == 2) {
+            // 完全停止：隐藏窗口、停帧定时器、释放 GPU 设备链。此后 SMTC 事件仍更新
+            // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
+            if (visible) {
+                visible = false;
+                stopFrameTimer();
+                if (hwnd)
+                    ShowWindow(hwnd, SW_HIDE);
+            }
+            releaseAll();
+            return;
+        }
+        // 帧定时器运行中则立即按新档位调整间隔（正常=跟随刷新率，低渲染=~30fps）
+        if (timerRunning_) {
+            const UINT wantMs = (media.playing || lyricTransitionPending_ ||
+                                 lyricTransitionActive_)
+                                    ? activeFrameMs()
+                                    : kTimerPausedMs;
+            if (wantMs != timerMs_) {
+                SetTimer(hwnd, kTimerId, wantMs, nullptr);
+                timerMs_ = wantMs;
+            }
+        }
+        // 从完全停止恢复：按最近会话可见性立即还原窗口；设备链由 render() 惰性重建
+        if (sessionVisible_ && !visible) {
+            visible = true;
+            if (hwnd)
+                ShowWindow(hwnd, SW_SHOWNA);
+            startFrameTimer();
+        }
+        if (visible)
+            render();
     }
 
     // 静止判定：所有动画源都停止且没有待处理的布局/资源变化时，跳过整帧重绘。
@@ -3262,6 +3310,10 @@ void TaskbarHost::setPlatformIconVisible(bool on) {
 
 void TaskbarHost::setAlbumCoverEffect(AlbumCoverEffect effect) {
     impl_->setAlbumCoverEffect(effect);
+}
+
+void TaskbarHost::setRenderMode(int mode) {
+    impl_->setRenderMode(mode);
 }
 
 void TaskbarHost::setSpectrumVisible(bool on) {

@@ -279,6 +279,8 @@ struct App {
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
     bool hoverPlaybackControls_ = true;
+    // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止（仅驻留内存）
+    int renderMode_ = 0;
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
@@ -350,7 +352,15 @@ struct App {
 
     void applySpectrumOn(bool on) {
         spectrumOn_ = on;
-        if (on && taskbarHost) {
+        syncSpectrumWithMode();
+        saveSettings();
+    }
+
+    // 频谱实际启停 = 用户开关 && 正常渲染模式 && 宿主存在；低渲染/完全停止模式下
+    // 强制暂停捕获线程与绘制（频谱是持续动画源，开着就等于没省），切回正常模式自动恢复
+    void syncSpectrumWithMode() {
+        const bool active = spectrumOn_ && renderMode_ == 0 && taskbarHost != nullptr;
+        if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
             if (*processName)
@@ -362,6 +372,13 @@ struct App {
             if (taskbarHost)
                 taskbarHost->setSpectrumVisible(false);
         }
+    }
+
+    void applyRenderMode(int mode) {
+        renderMode_ = std::clamp(mode, 0, 2);
+        if (taskbarHost)
+            taskbarHost->setRenderMode(renderMode_);
+        syncSpectrumWithMode();
         saveSettings();
     }
 
@@ -529,8 +546,9 @@ struct App {
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
         taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         taskbarHost->setPositionMode(taskbarPosition_);
-        taskbarHost->setSpectrumVisible(spectrumOn_);
-        if (spectrumOn_)
+        taskbarHost->setRenderMode(renderMode_);
+        taskbarHost->setSpectrumVisible(spectrumOn_ && renderMode_ == 0);
+        if (spectrumOn_ && renderMode_ == 0)
             spectrum_.start();
         updateTrayIcon();
         return true;
@@ -704,7 +722,7 @@ struct App {
         const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
         if (*spectrumProcess) {
             spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
-            if (spectrumOn_)
+            if (spectrumOn_ && renderMode_ == 0)
                 spectrum_.start();
             // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
             std::wstring spectrumKey = makeTrackKey(snap);
@@ -932,6 +950,7 @@ void App::loadSettings() {
         // 老配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它，视觉不变
         lyricOutline_ = j.value("lyricOutline", lyricGlow_);
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
+        renderMode_ = std::clamp(j.value("renderMode", 0), 0, 2);
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
         spectrumOn_ = j.value("spectrum", false);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
@@ -982,6 +1001,7 @@ void App::saveSettings() {
         j["lyricGlow"] = lyricGlow_;
         j["lyricOutline"] = lyricOutline_;
         j["taskbarPosition"] = taskbarPosition_;
+        j["renderMode"] = renderMode_;
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["spectrum"] = spectrumOn_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
@@ -1289,6 +1309,7 @@ SettingsState App::currentSettingsState() const {
     st.platformIconVisible = platformIconVisible_;
     st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
     st.spectrumOn = spectrumOn_;
+    st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = doubleLineLyricsEnabled_;
@@ -1312,6 +1333,7 @@ SettingsActions App::buildSettingsActions() {
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
+    act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onPickFont = [this] { pickFont(); };
     act.onFontColorEffect = [this] { showFontColorDialog(); };

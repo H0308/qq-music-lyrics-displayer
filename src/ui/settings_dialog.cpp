@@ -22,6 +22,7 @@ constexpr int kIdPlatformIcon = 412;
 constexpr int kIdCoverEffect = 413;
 constexpr int kIdSpectrum = 414;
 constexpr int kIdHoverControls = 415;
+constexpr int kIdRenderMode = 416;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -103,6 +104,7 @@ struct SettingsDialog::Impl {
     fluent::FluentToggle* tglDoubleLine = nullptr;
     fluent::FluentToggle* tglSecondaryOn = nullptr;
     fluent::FluentRadioGroup* radioCoverEffect = nullptr;
+    fluent::FluentRadioGroup* radioRenderMode = nullptr;
     fluent::FluentRadioGroup* radioAlign = nullptr;
     fluent::FluentRadioGroup* radioSecondaryType = nullptr;
 
@@ -158,6 +160,14 @@ struct SettingsDialog::Impl {
             fluent::FluentToggle::kWidth, kRowH, kIdSpectrum, state.spectrumOn);
         tglHoverControls = &addRowControl<fluent::FluentToggle>(0, L"悬浮时显示播放控件", nullptr,
             fluent::FluentToggle::kWidth, kRowH, kIdHoverControls, state.hoverControls);
+        {
+            auto& radio = addRowControl<fluent::FluentRadioGroup>(0, L"性能模式",
+                L"低渲染降帧省 GPU，完全停止仅驻留内存",
+                estimateRadioWidth({L"正常", L"低渲染", L"完全停止"}), kRowTallH, kIdRenderMode);
+            radio.setOptions({L"正常", L"低渲染", L"完全停止"});
+            radio.setSelectedIndex(state.renderMode);
+            radioRenderMode = &radio;
+        }
 
         // ---- 字体与颜色 ----
         addRowControl<fluent::FluentButton>(1, L"字体", state.fontDesc.c_str(), 132.0f, kRowH,
@@ -433,6 +443,10 @@ struct SettingsDialog::Impl {
             if (actions.onHoverControls)
                 actions.onHoverControls(tglHoverControls->checked());
             break;
+        case kIdRenderMode:
+            if (actions.onRenderMode)
+                actions.onRenderMode(radioRenderMode->selectedIndex());
+            break;
         case kIdPickFont:
             if (actions.onPickFont)
                 actions.onPickFont();
@@ -577,6 +591,7 @@ struct SettingsDialog::Impl {
         radioCoverEffect->setEnabled(s.albumCoverVisible);
         tglSpectrum->setChecked(s.spectrumOn);
         tglHoverControls->setChecked(s.hoverControls);
+        radioRenderMode->setSelectedIndex(s.renderMode);
         tglFollowAlbum->setChecked(s.followAlbum);
         if (hintFont)
             hintFont->setText(s.fontDesc);
