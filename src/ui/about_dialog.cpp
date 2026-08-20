@@ -70,6 +70,14 @@ struct UpdatePayload {
     std::optional<ReleaseInfo> release;
 };
 
+void discardPendingUpdateResults(HWND hwnd) {
+    if (!hwnd)
+        return;
+    MSG msg{};
+    while (PeekMessageW(&msg, hwnd, kMsgUpdateReady, kMsgUpdateReady, PM_REMOVE))
+        delete reinterpret_cast<UpdatePayload*>(msg.lParam);
+}
+
 std::wstring wideOf(const std::string& s) {
     if (s.empty())
         return {};
@@ -1224,6 +1232,7 @@ struct AboutDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            discardPendingUpdateResults(hwnd);
             surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)
@@ -1316,7 +1325,9 @@ struct AboutDialog::Impl {
 
     void destroy() {
         if (hwnd) {
-            DestroyWindow(hwnd);
+            HWND target = hwnd;
+            DestroyWindow(target);
+            discardPendingUpdateResults(target);
             hwnd = nullptr;
         }
     }

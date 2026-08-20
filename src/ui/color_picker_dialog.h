@@ -5,6 +5,9 @@
 #include <functional>
 #include <memory>
 
+// 取色器窗口销毁后通知其父级，由父级释放 ColorPickerDialog 对象。
+constexpr UINT kMsgColorPickerClosed = WM_APP + 220;
+
 // Win11 风格颜色选择对话框（替代系统 ChooseColor）：
 // SV 取色板 + 色相滑条 + HEX 输入 + 新旧颜色对比。
 class ColorPickerDialog {

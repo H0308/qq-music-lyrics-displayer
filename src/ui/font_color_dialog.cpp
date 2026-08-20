@@ -437,9 +437,15 @@ struct FontColorDialog::Impl {
         setAlpha(kAlphaMin + static_cast<int>(std::lround(t * (kAlphaMax - kAlphaMin))));
     }
 
+    void closePicker() {
+        if (!picker)
+            return;
+        picker->destroy();
+        picker.reset();
+    }
+
     void openPicker(int swatchId) {
-        if (picker)
-            picker->destroy();
+        closePicker();
         picker = std::make_unique<ColorPickerDialog>();
         if (!picker->create(inst, hwnd, colorRefOf(swatchId), titleOf(swatchId))) {
             picker.reset();
@@ -636,12 +642,15 @@ struct FontColorDialog::Impl {
             focusVisible = false;
             surface.invalidate();
             return 0;
+        case kMsgColorPickerClosed:
+            if (picker && !picker->isOpen())
+                picker.reset();
+            return 0;
         case WM_CLOSE:
             destroy();
             return 0;
         case WM_DESTROY:
-            if (picker)
-                picker->destroy();
+            closePicker();
             surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)
@@ -746,8 +755,7 @@ struct FontColorDialog::Impl {
     }
 
     void destroy() {
-        if (picker)
-            picker->destroy();
+        closePicker();
         if (hwnd) {
             DestroyWindow(hwnd);
             hwnd = nullptr;

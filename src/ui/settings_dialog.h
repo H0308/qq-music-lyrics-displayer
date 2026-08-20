@@ -53,7 +53,7 @@ public:
 
     bool create(HINSTANCE inst, HWND parent, const SettingsState& state,
                 SettingsActions actions);
-    // 窗口复用（关闭仅隐藏）时，打开前同步最新状态快照
+    // 打开前同步最新状态快照；窗口关闭后销毁，下次打开重新创建
     void updateState(const SettingsState& state);
     void updateFontDescription(const std::wstring& description);
     void show();

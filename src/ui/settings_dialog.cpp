@@ -743,7 +743,7 @@ struct SettingsDialog::Impl {
                 return 0;
             }
             if (wp == VK_ESCAPE) {
-                ShowWindow(hwnd, SW_HIDE);
+                destroy();
                 return 0;
             }
             if (wp == VK_UP || wp == VK_DOWN) {
@@ -790,7 +790,7 @@ struct SettingsDialog::Impl {
                 onCommand(LOWORD(wp));
             return 0;
         case WM_CLOSE:
-            ShowWindow(hwnd, SW_HIDE);
+            destroy();
             return 0;
         case WM_DESTROY:
             surface.discard();

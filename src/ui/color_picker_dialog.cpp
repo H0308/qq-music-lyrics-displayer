@@ -316,6 +316,7 @@ private:
 struct ColorPickerDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
+    HWND notifyHwnd = nullptr;
     bool backdrop = false;
 
     fluent::FluentLabel titleLabel;
@@ -388,9 +389,14 @@ struct ColorPickerDialog::Impl {
         case WM_CLOSE:
             destroy();
             return 0;
-        case WM_DESTROY:
+        case WM_DESTROY: {
+            HWND notify = notifyHwnd;
             hwnd = nullptr;
+            notifyHwnd = nullptr;
+            if (notify)
+                PostMessageW(notify, kMsgColorPickerClosed, 0, 0);
             return 0;
+        }
         }
         return DefWindowProcW(hwnd, msg, wp, lp);
     }
@@ -486,8 +492,9 @@ ColorPickerDialog::~ColorPickerDialog() {
 
 bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
                                const wchar_t* title, int cascadeIndex) {
-    (void)parent; // 托盘窗口是消息窗口，不能作为所有者；与搜索对话框一致使用无所有者窗口
+    // 托盘窗口是消息窗口，不能作为所有者；parent 仅用于关闭通知。
     impl_->inst = inst;
+    impl_->notifyHwnd = parent;
     impl_->initial = initial;
     impl_->titleText = title ? title : L"选择颜色";
 

@@ -1346,6 +1346,9 @@ SettingsActions App::buildSettingsActions() {
 }
 
 void App::showSettings() {
+    if (settingsDialog && !settingsDialog->isOpen())
+        settingsDialog.reset();
+
     if (!settingsDialog) {
         settingsDialog = std::make_unique<SettingsDialog>();
         if (!settingsDialog->create(GetModuleHandleW(nullptr), trayHwnd,
@@ -1361,28 +1364,33 @@ void App::showSettings() {
         SetForegroundWindow(settingsDialog->hwnd());
         return;
     } else {
-        // 窗口复用后，托盘菜单等途径可能已改动状态，打开前同步一次快照
+        // 启动时窗口已预创建但仍隐藏，打开前同步最新状态快照。
         settingsDialog->updateState(currentSettingsState());
     }
     settingsDialog->show();
 }
 
 void App::onDialogClosed(DialogKind kind) {
+    auto resetIfClosed = [](auto& dialog) {
+        if (dialog && !dialog->isOpen())
+            dialog.reset();
+    };
+
     switch (kind) {
     case DialogKind::Settings:
-        settingsDialog.reset();
+        resetIfClosed(settingsDialog);
         break;
     case DialogKind::About:
-        aboutDialog.reset();
+        resetIfClosed(aboutDialog);
         break;
     case DialogKind::ManualSearch:
-        manualSearchDialog.reset();
+        resetIfClosed(manualSearchDialog);
         break;
     case DialogKind::FontPicker:
-        fontPickerDialog.reset();
+        resetIfClosed(fontPickerDialog);
         break;
     case DialogKind::FontColor:
-        fontColorDialog.reset();
+        resetIfClosed(fontColorDialog);
         break;
     }
 }
@@ -1395,8 +1403,10 @@ void App::showAbout() {
     aboutDialog = std::make_unique<AboutDialog>();
     if (!aboutDialog->create(
             GetModuleHandleW(nullptr), trayHwnd, autoCheckOnStartup_,
-            [this](bool enabled) { setAutoCheckOnStartup(enabled); }))
+            [this](bool enabled) { setAutoCheckOnStartup(enabled); })) {
+        aboutDialog.reset();
         return;
+    }
     aboutDialog->show();
 }
 
@@ -1489,8 +1499,8 @@ int main() {
             inst, app.trayHwnd, app.autoCheckOnStartup_,
             [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); }))
         app.aboutDialog.reset();
-    // 设置窗口预创建（保持隐藏）：把控件构建成本挪到启动阶段，之后关闭仅隐藏复用，
-    // 避免打开时同步创建十几个分层子控件阻塞 UI 线程、导致歌词动画掉帧
+    // 设置窗口预创建（保持隐藏）：把首次打开时的控件构建成本挪到启动阶段；
+    // 关闭后仍会销毁，下一次打开重新创建。
     app.settingsDialog = std::make_unique<SettingsDialog>();
     if (!app.settingsDialog->create(inst, app.trayHwnd, app.currentSettingsState(),
                                     app.buildSettingsActions()))

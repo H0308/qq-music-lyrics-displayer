@@ -48,6 +48,23 @@ constexpr float kLyricRowHeightDip = 50.0f;
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
 
+void releaseResultPayload(const MSG& msg) {
+    if (msg.message == kMsgCandidatesReady) {
+        delete reinterpret_cast<std::vector<SearchCandidate>*>(msg.lParam);
+    } else if (msg.message == kMsgPreviewLyricReady) {
+        delete reinterpret_cast<std::tuple<int, bool, std::vector<LyricLine>, SongInfo>*>(
+            msg.lParam);
+    }
+}
+
+void discardPendingResults(HWND hwnd) {
+    if (!hwnd)
+        return;
+    MSG msg{};
+    while (PeekMessageW(&msg, hwnd, kMsgCandidatesReady, kMsgPreviewLyricReady, PM_REMOVE))
+        releaseResultPayload(msg);
+}
+
 void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
     UINT dpi = GetDpiForWindow(hwnd);
     if (!dpi)
@@ -1093,8 +1110,9 @@ struct ManualSearchDialog::Impl {
                 if (!IsWindow(hwndCopy))
                     return;
                 auto* payload = new std::vector<SearchCandidate>(result);
-                PostMessageW(hwndCopy, kMsgCandidatesReady, 0,
-                             reinterpret_cast<LPARAM>(payload));
+                if (!PostMessageW(hwndCopy, kMsgCandidatesReady, 0,
+                                  reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
             });
     }
 
@@ -1192,8 +1210,9 @@ struct ManualSearchDialog::Impl {
                     return;
                 auto* payload = new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(
                     index, ok, lines, info);
-                PostMessageW(hwndCopy, kMsgPreviewLyricReady, 0,
-                             reinterpret_cast<LPARAM>(payload));
+                if (!PostMessageW(hwndCopy, kMsgPreviewLyricReady, 0,
+                                  reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
             });
     }
 
@@ -1257,7 +1276,9 @@ struct ManualSearchDialog::Impl {
 
     void destroy() {
         if (hwnd) {
-            DestroyWindow(hwnd);
+            HWND target = hwnd;
+            DestroyWindow(target);
+            discardPendingResults(target);
             hwnd = nullptr;
         }
     }
@@ -1500,6 +1521,7 @@ struct ManualSearchDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            discardPendingResults(hwnd);
             KillTimer(hwnd, kPreviewTimerId);
             surface.discard();
             hwnd = nullptr;
@@ -1579,19 +1601,24 @@ HWND ManualSearchDialog::hwnd() const {
 }
 
 void ManualSearchDialog::onCandidatesReady(const std::vector<SearchCandidate>& cands) {
-    if (impl_->hwnd)
-        PostMessageW(impl_->hwnd, kMsgCandidatesReady, 0,
-                     reinterpret_cast<LPARAM>(new std::vector<SearchCandidate>(cands)));
+    if (!impl_->hwnd)
+        return;
+    auto* payload = new std::vector<SearchCandidate>(cands);
+    if (!PostMessageW(impl_->hwnd, kMsgCandidatesReady, 0,
+                      reinterpret_cast<LPARAM>(payload)))
+        delete payload;
 }
 
 void ManualSearchDialog::onPreviewLyricReady(int idx, bool ok,
                                              const std::vector<LyricLine>& lines,
                                              const SongInfo& info) {
-    if (impl_->hwnd)
-        PostMessageW(impl_->hwnd, kMsgPreviewLyricReady, 0,
-                     reinterpret_cast<LPARAM>(
-                         new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(
-                             idx, ok, lines, info)));
+    if (!impl_->hwnd)
+        return;
+    auto* payload =
+        new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(idx, ok, lines, info);
+    if (!PostMessageW(impl_->hwnd, kMsgPreviewLyricReady, 0,
+                      reinterpret_cast<LPARAM>(payload)))
+        delete payload;
 }
 
 void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
