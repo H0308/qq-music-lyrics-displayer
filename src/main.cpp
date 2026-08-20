@@ -1540,12 +1540,9 @@ int main() {
         if (app.settingsDialog && app.settingsDialog->isOpen() &&
             IsDialogMessageW(app.settingsDialog->hwnd(), &msg))
             continue;
-        if (app.manualSearchDialog && app.manualSearchDialog->isOpen() &&
-            IsDialogMessageW(app.manualSearchDialog->hwnd(), &msg))
-            continue;
-        if (app.fontPickerDialog && app.fontPickerDialog->isOpen() &&
-            IsDialogMessageW(app.fontPickerDialog->hwnd(), &msg))
-            continue;
+        // 手动搜索和选择字体使用窗口级自绘输入框，字符输入必须经过
+        // TranslateMessage 生成 WM_CHAR，再由各自窗口处理；不能交给
+        // IsDialogMessageW 抢先消费键盘消息。
         if (app.fontColorDialog && app.fontColorDialog->isOpen() &&
             app.fontColorDialog->isDialogMessage(&msg))
             continue;
