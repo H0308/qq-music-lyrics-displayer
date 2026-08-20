@@ -952,6 +952,7 @@ struct TaskbarHost::Impl {
         if (lyricGlow_ == on)
             return;
         lyricGlow_ = on;
+        ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
         render();
     }
 
@@ -959,6 +960,7 @@ struct TaskbarHost::Impl {
         if (lyricOutline_ == on)
             return;
         lyricOutline_ = on;
+        ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
         render();
     }
 
@@ -2374,13 +2376,14 @@ struct TaskbarHost::Impl {
 
     void drawScaledScrollingText(IDWriteTextLayout* layout, float textW, float textH,
                                  float areaW, float x, float y, float offset, ID2D1Brush* brush,
-                                 float opacity, float scale) {
+                                 float opacity, float scale, ID2D1Brush* outline = nullptr,
+                                 ID2D1Brush* glow = nullptr) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
         if (scale >= 0.999f) {
-            drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, nullptr,
-                                   nullptr, nullptr, 0.0f, opacity);
+            drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
+                                   nullptr, 0.0f, opacity);
             return;
         }
 
@@ -2391,7 +2394,7 @@ struct TaskbarHost::Impl {
             anchorX = x + areaW;
         const D2D1_POINT_2F anchor = D2D1::Point2F(anchorX, y + textH * 0.5f);
         rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor));
-        drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, nullptr, nullptr,
+        drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
                                nullptr, 0.0f, opacity);
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
     }
@@ -2450,7 +2453,9 @@ struct TaskbarHost::Impl {
             drawScaledScrollingText(
                 lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, scaledIncomingY,
                 lyricScrollOffset_, incomingBrush,
-                kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * fadeInT, incomingScale);
+                kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * fadeInT, incomingScale,
+                lyricOutline_ ? brushLyricOutline_ : nullptr,
+                lyricGlow_ ? brushLyricGlow_ : nullptr);
             return;
         }
 
