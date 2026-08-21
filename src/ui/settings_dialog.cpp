@@ -33,6 +33,7 @@ constexpr int kIdSecondaryOn = 432;
 constexpr int kIdSecondaryType = 433;
 constexpr int kIdQqLocalLyricsEnabled = 434;
 constexpr int kIdQqLocalLyricsPath = 435;
+constexpr int kIdQqLocalLyricsPersistOrder = 436;
 
 constexpr float kWindowW = 760.0f;
 constexpr float kWindowH = 552.0f;
@@ -211,6 +212,11 @@ struct SettingsDialog::Impl {
                  *secondaryHint ? kRowTallH : kRowH);
         addToggle(2, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
+        Row& persistOrder = addRow(2, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
+                                   L"切换版本持久化",
+                                   L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
+                                   40.0f, kRowH);
+        persistOrder.checked = state.qqLocalLyricsPersistOrder;
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
@@ -587,6 +593,11 @@ struct SettingsDialog::Impl {
             if (actions.onQqLocalLyricsEnabled)
                 actions.onQqLocalLyricsEnabled(row->checked);
             break;
+        case kIdQqLocalLyricsPersistOrder:
+            row->checked = !row->checked;
+            if (actions.onQqLocalLyricsPersistOrder)
+                actions.onQqLocalLyricsPersistOrder(row->checked);
+            break;
         case kIdQqLocalLyricsPath:
             if (actions.onPickQqLocalLyricsPath)
                 actions.onPickQqLocalLyricsPath();
@@ -638,6 +649,8 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdQqLocalLyricsEnabled))
             row->checked = s.qqLocalLyricsEnabled;
+        if (auto* row = findRow(kIdQqLocalLyricsPersistOrder))
+            row->checked = s.qqLocalLyricsPersistOrder;
         if (auto* row = findRow(kIdQqLocalLyricsPath)) {
             row->hint = s.qqLocalLyricsPath.empty() ? std::wstring(L"未配置")
                                                     : s.qqLocalLyricsPath;

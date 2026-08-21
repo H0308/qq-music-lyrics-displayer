@@ -22,6 +22,7 @@ struct SettingsState {
     bool preferRomanization = false;
     int secondaryAvailability = 0; // 0 可用 1 检查中 2 当前歌曲无翻译/罗马音
     bool qqLocalLyricsEnabled = false;
+    bool qqLocalLyricsPersistOrder = false;
     std::wstring qqLocalLyricsPath;
     std::wstring fontDesc;         // 字体页提示文字（如 "Microsoft YaHei UI, 16px, 常规"）
 };
@@ -43,6 +44,7 @@ struct SettingsActions {
     std::function<void(bool)> onSecondaryEnabled;
     std::function<void(bool)> onPreferRomanization; // true = 罗马音
     std::function<void(bool)> onQqLocalLyricsEnabled;
+    std::function<void(bool)> onQqLocalLyricsPersistOrder;
     std::function<void()> onPickQqLocalLyricsPath;
 };
 

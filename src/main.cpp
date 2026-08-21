@@ -331,6 +331,7 @@ struct App {
     bool updatePromptFocusVisible_ = false;
     std::wstring settingsPath_;
     bool qqLocalLyricsEnabled_ = false;
+    bool qqLocalLyricsPersistOrder_ = false;
     std::wstring qqLocalLyricsPath_;
     bool qqLocalLyricsPickerOpen_ = false;
 
@@ -472,6 +473,11 @@ struct App {
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
         saveSettings();
         reloadCurrentQqLyrics();
+    }
+
+    void applyQqLocalLyricsPersistOrder(bool on) {
+        qqLocalLyricsPersistOrder_ = on;
+        saveSettings();
     }
 
     OverlayMediaInfo makeMediaInfo(const SmtcSnapshot& snap) const {
@@ -691,7 +697,8 @@ struct App {
 
     // 发起一次歌词请求：网易云逻辑保持不变（事件完整、可直接请求）；
     // QQ 由防抖定时器在切歌事件合并完成后调用。
-    void startLyricRequest(const SmtcSnapshot& snap, bool bypassLocal = false) {
+    void startLyricRequest(const SmtcSnapshot& snap, bool forceOnline = false,
+                           bool forceLocal = false, bool persistOrder = false) {
         lyricLoading_ = true;
         currentLyricsFromLocal_ = false;
         currentLyricsFromManual_ = false;
@@ -710,7 +717,7 @@ struct App {
                                          snap.durationMs, postLyricResult);
         } else {
             provider.requestAsync(snap.title, snap.artist, snap.durationMs,
-                                  postLyricResult, bypassLocal);
+                                  postLyricResult, forceOnline, forceLocal, persistOrder);
         }
     }
 
@@ -985,7 +992,8 @@ struct App {
     void setAutoCheckOnStartup(bool enabled);
     void pickQqLocalLyricsPath();
     void applyQqLocalLyricsPath(const std::wstring& path);
-    void reloadCurrentQqLyrics(bool bypassLocal = false);
+    void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
+                               bool persistOrder = false);
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
     void tryExtractAlbumColor();
@@ -1001,6 +1009,7 @@ void App::loadSettings() {
         return;
     settingsPath_ = dir + L"\\settings.json";
     provider.setManualOverrideDir(dir + L"\\manual_lyrics");
+    provider.setQqLyricOrderDir(dir + L"\\manual_lyrics_settings");
     try {
         std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
         if (!f)
@@ -1057,6 +1066,7 @@ void App::loadSettings() {
                                 ? AlbumCoverEffect::Vinyl
                                 : AlbumCoverEffect::Default;
         qqLocalLyricsEnabled_ = j.value("qqLocalLyricsEnabled", false);
+        qqLocalLyricsPersistOrder_ = j.value("qqLocalLyricsPersistOrder", false);
         qqLocalLyricsPath_ = wideOf(j.value("qqLocalLyricsPath", std::string()));
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
     } catch (...) {
@@ -1097,6 +1107,7 @@ void App::saveSettings() {
         j["platformIconVisible"] = platformIconVisible_;
         j["albumCoverEffect"] = albumCoverEffect_ == AlbumCoverEffect::Vinyl ? "vinyl" : "default";
         j["qqLocalLyricsEnabled"] = qqLocalLyricsEnabled_;
+        j["qqLocalLyricsPersistOrder"] = qqLocalLyricsPersistOrder_;
         j["qqLocalLyricsPath"] = utf8Of(qqLocalLyricsPath_);
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
@@ -1171,11 +1182,12 @@ void App::applyQqLocalLyricsPath(const std::wstring& selectedPath) {
     }
 }
 
-void App::reloadCurrentQqLyrics(bool bypassLocal) {
+void App::reloadCurrentQqLyrics(bool forceOnline, bool forceLocal, bool persistOrder) {
     const SmtcSnapshot snap = monitor.snapshot();
     if (!snap.sessionAlive || snap.player != SmtcPlayerType::QQMusic || currentKey.empty() ||
         snap.title.empty() || snap.timelineStale || makeTrackKey(snap) != currentKey ||
-        (bypassLocal && !currentLyricsFromLocal_))
+        (forceOnline && !currentLyricsFromLocal_) ||
+        (forceLocal && (currentLyricsFromLocal_ || currentLyricsFromManual_)))
         return;
 
     cancelLyricDebounce();
@@ -1184,7 +1196,7 @@ void App::reloadCurrentQqLyrics(bool bypassLocal) {
     currentLyricsFromManual_ = false;
     updateLyricCapabilities(currentLyrics_);
     lyricLoading_ = true;
-    startLyricRequest(snap, bypassLocal);
+    startLyricRequest(snap, forceOnline, forceLocal, persistOrder);
     publishPresentationFrame(snap, false, true);
 }
 
@@ -1669,9 +1681,9 @@ void App::onMenuCommand(int cmd) {
         break;
     case kCmdSwitchLyricSource:
         if (currentLyricsFromLocal_)
-            reloadCurrentQqLyrics(true);
+            reloadCurrentQqLyrics(true, false, qqLocalLyricsPersistOrder_);
         else if (!currentLyricsFromManual_)
-            reloadCurrentQqLyrics(false);
+            reloadCurrentQqLyrics(false, true, qqLocalLyricsPersistOrder_);
         break;
     case kCmdSecondaryLyric:
         applySecondaryEnabled(!secondaryLyricEnabled_);
@@ -1843,6 +1855,7 @@ SettingsState App::currentSettingsState() const {
     st.secondaryAvailability = lyricLoading_ ? 1
                                : (!currentHasTranslation_ && !currentHasRomanization_) ? 2 : 0;
     st.qqLocalLyricsEnabled = qqLocalLyricsEnabled_;
+    st.qqLocalLyricsPersistOrder = qqLocalLyricsPersistOrder_;
     st.qqLocalLyricsPath = qqLocalLyricsPath_;
     st.fontDesc = fontFamily_ + L", " +
                   std::to_wstring(static_cast<int>(std::lround(fontSize_))) + L"px, " +
@@ -1867,6 +1880,7 @@ SettingsActions App::buildSettingsActions() {
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
     act.onQqLocalLyricsEnabled = [this](bool on) { applyQqLocalLyricsEnabled(on); };
+    act.onQqLocalLyricsPersistOrder = [this](bool on) { applyQqLocalLyricsPersistOrder(on); };
     act.onPickQqLocalLyricsPath = [this] { pickQqLocalLyricsPath(); };
     return act;
 }

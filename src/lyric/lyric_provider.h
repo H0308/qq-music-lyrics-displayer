@@ -64,9 +64,11 @@ public:
 
     // 异步请求歌词；优先按版本标注匹配（本地有版本则候选必须有相同版本，
     // 本地无版本则候选优先不带版本），无合适结果时回退到加权模糊匹配
-    // bypassLocal 仅用于“获取在线版歌词”操作；手动保存的歌词仍然优先。
+    // forceOnline/forceLocal 仅用于右键切换；手动保存的歌词仍然优先。
+    // persistOrder 在后台保存单曲的本地/在线顺序标记，不阻塞调用线程。
     void requestAsync(const std::wstring& title, const std::wstring& artist, int64_t durationMs,
-                      ReadyCallback cb, bool bypassLocal = false);
+                      ReadyCallback cb, bool forceOnline = false, bool forceLocal = false,
+                      bool persistOrder = false);
 
     // 按网易云歌曲 ID 异步取歌词：优先 YRC，失败后回退网易云 LRC。
     // 同时传入当前元数据，用于读取按歌曲 ID 保存的手动歌词覆盖。
@@ -91,6 +93,9 @@ public:
 
     // 设置 QQ 音乐本地 QRC 来源；仅影响 QQ 请求，未启用或目录为空时保持原有在线链路。
     void setQqLocalLyricsConfig(bool enabled, const std::wstring& dir);
+
+    // 设置 QQ 版本顺序标记目录；只保存 *_qm.order.json，不保存歌词内容。
+    void setQqLyricOrderDir(const std::wstring& dir);
 
     // 最近一次应用的歌词（仅在 ReadyCallback(true) 之后于 UI 线程读取）
     const std::vector<LyricLine>& lines() const;

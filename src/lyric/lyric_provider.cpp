@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <condition_variable>
@@ -1100,6 +1101,7 @@ struct LocalLyricBundle {
     std::filesystem::path originalPath;
     std::filesystem::path translationPath;
     std::filesystem::path romanizationPath;
+    std::filesystem::path orderPath;
     std::wstring artist;
     std::wstring artistKey;
     std::vector<std::wstring> titles;
@@ -1237,7 +1239,8 @@ bool parseLocalQrcPath(const std::filesystem::path& path, std::wstring& base,
     return false;
 }
 
-std::shared_ptr<LocalLyricIndex> buildLocalLyricIndex(const std::wstring& root) {
+std::shared_ptr<LocalLyricIndex> buildLocalLyricIndex(const std::wstring& root,
+                                                      const std::wstring& orderDir) {
     auto index = std::make_shared<LocalLyricIndex>();
     try {
         const std::filesystem::path rootPath(root);
@@ -1291,10 +1294,15 @@ std::shared_ptr<LocalLyricIndex> buildLocalLyricIndex(const std::wstring& root) 
             }
         }
 
+        const std::filesystem::path orderRoot(orderDir);
         for (auto& [key, bundle] : groups) {
             (void)key;
             if (bundle.originalPath.empty() || bundle.artistKey.empty() || bundle.titles.empty())
                 continue;
+            if (!orderRoot.empty()) {
+                bundle.orderPath = orderRoot / bundle.originalPath.filename();
+                bundle.orderPath.replace_extension(L".order.json");
+            }
             index->bundles.push_back(std::move(bundle));
         }
         std::sort(index->bundles.begin(), index->bundles.end(), [](const auto& a, const auto& b) {
@@ -1336,8 +1344,11 @@ void filterLocalSecondary(std::vector<LyricLine>& lines, bool romanization) {
 }
 
 bool loadLocalLyricBundle(const LocalLyricBundle& bundle, std::vector<LyricLine>& out) {
-    if (!decodeLocalLyricFile(bundle.originalPath, out) || out.empty())
+    if (!decodeLocalLyricFile(bundle.originalPath, out) || out.empty()) {
+        const std::wstring path = bundle.originalPath.wstring();
+        std::wprintf(L"[lyric][local-decode-failed][QQ] file=\"%ls\"\n", path.c_str());
         return false;
+    }
 
     if (!bundle.translationPath.empty()) {
         std::vector<LyricLine> translation;
@@ -1367,10 +1378,31 @@ bool localLyricTitleMatches(const LocalLyricBundle& bundle, const std::wstring& 
     return false;
 }
 
+std::wstring joinLocalArtists(const std::vector<std::wstring>& artists) {
+    std::wstring result;
+    for (const auto& artist : artists) {
+        if (artist.empty())
+            continue;
+        if (!result.empty())
+            result.push_back(L' ');
+        result += artist;
+    }
+    return result;
+}
+
 bool localArtistSubsetMatches(const std::wstring& localKey, const std::wstring& queryKey) {
     const auto localArtists = splitLocalField(localKey, L'\x1f');
     const auto queryArtists = splitLocalField(queryKey, L'\x1f');
-    if (localArtists.empty() || queryArtists.empty() || localArtists.size() == queryArtists.size())
+    if (localArtists.empty() || queryArtists.empty())
+        return false;
+
+    // 某些 QQ 文件会把歌手名中的句点/空格也编码成下划线，例如
+    // “G.E.M. 邓紫棋”会保存为“G_E_M_邓紫棋”。先比较完整序列，
+    // 同时不影响真正的多歌手“歌手A_歌手B”匹配。
+    if (joinLocalArtists(localArtists) == joinLocalArtists(queryArtists))
+        return true;
+
+    if (localArtists.size() == queryArtists.size())
         return false;
 
     const auto& subset = localArtists.size() < queryArtists.size() ? localArtists : queryArtists;
@@ -1380,11 +1412,12 @@ bool localArtistSubsetMatches(const std::wstring& localKey, const std::wstring& 
     });
 }
 
-bool lookupLocalLyric(const LocalLyricIndex& index, const std::wstring& title,
-                      const std::wstring& artist, std::vector<LyricLine>& out) {
+std::vector<size_t> findLocalLyricCandidates(const LocalLyricIndex& index,
+                                             const std::wstring& title,
+                                             const std::wstring& artist) {
     const std::wstring artistKey = normalizeLocalArtists(artist, L'/');
     if (artistKey.empty())
-        return false;
+        return {};
 
     std::vector<size_t> candidates;
     const auto exact = index.byArtist.find(artistKey);
@@ -1403,17 +1436,68 @@ bool lookupLocalLyric(const LocalLyricIndex& index, const std::wstring& title,
             candidates.push_back(bundleIndex);
     }
 
-    if (candidates.empty())
-        return false;
     std::sort(candidates.begin(), candidates.end(), [&index](const auto& a, const auto& b) {
         return index.bundles[a].originalPath.wstring() < index.bundles[b].originalPath.wstring();
     });
-    for (size_t bundleIndex : candidates) {
+    return candidates;
+}
+
+bool lookupLocalLyric(const LocalLyricIndex& index, const std::wstring& title,
+                      const std::wstring& artist, std::vector<LyricLine>& out) {
+    for (size_t bundleIndex : findLocalLyricCandidates(index, title, artist)) {
         if (loadLocalLyricBundle(index.bundles[bundleIndex], out))
             return true;
     }
     out.clear();
     return false;
+}
+
+bool readLocalOrderOverride(const LocalLyricBundle& bundle) {
+    if (bundle.orderPath.empty())
+        return false;
+    try {
+        std::ifstream file(bundle.orderPath, std::ios::binary);
+        if (!file)
+            return false;
+        const auto json = nlohmann::json::parse(file, nullptr, false);
+        if (json.is_discarded())
+            return false;
+        const auto it = json.find("sourceOrder");
+        if (it == json.end() || !it->is_array() || it->size() != 3)
+            return false;
+        return (*it)[0] == "manual" && (*it)[1] == "online" && (*it)[2] == "local";
+    } catch (...) {
+        return false;
+    }
+}
+
+bool writeLocalOrderOverride(const LocalLyricBundle& bundle, bool onlineFirst) {
+    if (bundle.orderPath.empty())
+        return false;
+    if (!onlineFirst) {
+        std::error_code ec;
+        std::filesystem::remove(bundle.orderPath, ec);
+        return !ec;
+    }
+    try {
+        nlohmann::json order = nlohmann::json::array();
+        order.push_back("manual");
+        order.push_back("online");
+        order.push_back("local");
+        nlohmann::json json;
+        json["sourceOrder"] = std::move(order);
+        std::error_code ec;
+        std::filesystem::create_directories(bundle.orderPath.parent_path(), ec);
+        if (ec)
+            return false;
+        std::ofstream file(bundle.orderPath, std::ios::binary | std::ios::trunc);
+        if (!file)
+            return false;
+        file << json.dump(2);
+        return file.good();
+    } catch (...) {
+        return false;
+    }
 }
 
 std::string xmlInnerText(const std::string& xml, const std::string& tag) {
@@ -1939,9 +2023,11 @@ struct LyricProvider::Impl {
     std::wstring overrideDir; // 手动歌词持久化目录（每首歌一个 JSON 文件），空表示不持久化
     bool qqLocalLyricsEnabled = false;
     std::wstring qqLocalLyricsDir;
+    std::wstring qqLocalLyricOrderDir;
     std::shared_ptr<const LocalLyricIndex> qqLocalIndex;
     bool qqLocalIndexBuilding = false;
     uint64_t qqLocalConfigGeneration = 0;
+    std::chrono::steady_clock::time_point qqLocalIndexRefreshedAt{};
     std::condition_variable qqLocalIndexCv;
     std::list<std::wstring> lru; // 前 = 最近使用
     std::unordered_map<std::wstring, std::list<std::wstring>::iterator> lruIt;
@@ -1982,32 +2068,35 @@ struct LyricProvider::Impl {
         qqLocalIndex.reset();
         if (!qqLocalLyricsEnabled || qqLocalLyricsDir.empty()) {
             qqLocalIndexBuilding = false;
+            qqLocalIndexRefreshedAt = {};
             qqLocalIndexCv.notify_all();
             return;
         }
 
         const uint64_t configGeneration = qqLocalConfigGeneration;
         const std::wstring root = qqLocalLyricsDir;
+        const std::wstring orderDir = qqLocalLyricOrderDir;
         qqLocalIndexBuilding = true;
         Worker worker;
         auto done = worker.done;
         Impl* impl = this;
-        worker.thread = std::thread([impl, root, configGeneration, done]() {
+        worker.thread = std::thread([impl, root, orderDir, configGeneration, done]() {
             DoneFlag flag{done};
-            auto index = buildLocalLyricIndex(root);
+            auto index = buildLocalLyricIndex(root, orderDir);
             std::lock_guard<std::mutex> lk(impl->mtx);
             if (impl->qqLocalConfigGeneration != configGeneration)
                 return;
             impl->qqLocalIndex = std::move(index);
             impl->qqLocalIndexBuilding = false;
+            impl->qqLocalIndexRefreshedAt = std::chrono::steady_clock::now();
+            std::wprintf(L"[lyric][local-index][QQ] root=\"%ls\" bundles=%zu\n",
+                         root.c_str(), impl->qqLocalIndex->bundles.size());
             impl->qqLocalIndexCv.notify_all();
         });
         workers.push_back(std::move(worker));
     }
 
-    bool lookupLocalLyrics(const std::wstring& title, const std::wstring& artist,
-                           std::vector<LyricLine>& out) {
-        std::shared_ptr<const LocalLyricIndex> index;
+    bool acquireLocalIndex(std::shared_ptr<const LocalLyricIndex>& index) {
         {
             std::unique_lock<std::mutex> lk(mtx);
             while (true) {
@@ -2022,7 +2111,74 @@ struct LyricProvider::Impl {
                 });
             }
         }
-        return index && lookupLocalLyric(*index, title, artist, out);
+        return static_cast<bool>(index);
+    }
+
+    // QQ 会在程序运行期间继续写入新的 QRC 文件。歌词未命中时允许后台刷新索引，
+    // 但限制刷新频率，避免没有本地歌词的歌曲连续触发全目录扫描。
+    bool refreshLocalIndex(std::shared_ptr<const LocalLyricIndex>& index) {
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (g_shutdown.load() || !qqLocalLyricsEnabled || qqLocalLyricsDir.empty())
+                return false;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (!qqLocalIndexBuilding && qqLocalIndexRefreshedAt.time_since_epoch().count() != 0 &&
+                now - qqLocalIndexRefreshedAt < std::chrono::seconds(2)) {
+                index = qqLocalIndex;
+                return static_cast<bool>(index);
+            }
+            if (!qqLocalIndexBuilding)
+                rebuildLocalIndexLocked();
+        }
+        return acquireLocalIndex(index);
+    }
+
+    bool lookupLocalLyrics(const std::wstring& title, const std::wstring& artist,
+                           std::vector<LyricLine>& out) {
+        std::shared_ptr<const LocalLyricIndex> index;
+        if (!acquireLocalIndex(index))
+            return false;
+        if (lookupLocalLyric(*index, title, artist, out))
+            return true;
+        if (!refreshLocalIndex(index))
+            return false;
+        const bool hit = lookupLocalLyric(*index, title, artist, out);
+        if (!hit) {
+            std::wprintf(L"[lyric][local-no-match][QQ] title=\"%ls\" artist=\"%ls\" "
+                         L"indexed-bundles=%zu\n",
+                         title.c_str(), artist.c_str(), index->bundles.size());
+        }
+        return hit;
+    }
+
+    bool localOrderOnlineFirst(const std::wstring& title, const std::wstring& artist) {
+        std::shared_ptr<const LocalLyricIndex> index;
+        if (!acquireLocalIndex(index))
+            return false;
+        auto candidates = findLocalLyricCandidates(*index, title, artist);
+        if (candidates.empty()) {
+            if (!refreshLocalIndex(index))
+                return false;
+            candidates = findLocalLyricCandidates(*index, title, artist);
+        }
+        return !candidates.empty() && readLocalOrderOverride(index->bundles[candidates.front()]);
+    }
+
+    bool setLocalOrderOverride(const std::wstring& title, const std::wstring& artist,
+                               bool onlineFirst) {
+        std::shared_ptr<const LocalLyricIndex> index;
+        if (!acquireLocalIndex(index))
+            return false;
+        auto candidates = findLocalLyricCandidates(*index, title, artist);
+        if (candidates.empty()) {
+            if (!refreshLocalIndex(index))
+                return false;
+            candidates = findLocalLyricCandidates(*index, title, artist);
+        }
+        if (candidates.empty())
+            return false;
+        return writeLocalOrderOverride(index->bundles[candidates.front()], onlineFirst);
     }
 
     bool cacheGet(const std::wstring& key, CacheEntry& out) {
@@ -2275,10 +2431,11 @@ LyricProvider::LyricProvider() : impl_(std::make_unique<Impl>()) {
 LyricProvider::~LyricProvider() = default;
 
 void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& artist,
-                                 int64_t durationMs, ReadyCallback cb, bool bypassLocal) {
+                                 int64_t durationMs, ReadyCallback cb, bool forceOnline,
+                                 bool forceLocal, bool persistOrder) {
     const std::wstring key = makeKey(title, artist, durationMs);
     uint64_t gen = ++impl_->generation;
-    bool useLocalLyrics = false;
+    bool localConfigured = false;
     std::wprintf(L"[lyric][request][QQ] title=\"%ls\" artist=\"%ls\" duration=%lldms\n",
                  title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
     {
@@ -2296,10 +2453,9 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             if (cb) cb(true);
             return;
         }
-        useLocalLyrics = !bypassLocal && impl_->qqLocalLyricsEnabled &&
-                         !impl_->qqLocalLyricsDir.empty();
-        if (!useLocalLyrics) {
-            // 2) 未启用本地歌词时保持原有普通缓存路径
+        localConfigured = impl_->qqLocalLyricsEnabled && !impl_->qqLocalLyricsDir.empty();
+        if (!localConfigured) {
+            // 2) 未配置本地歌词时保持原有在线缓存路径
             CacheEntry cached;
             if (impl_->cacheGet(key, cached)) {
                 impl_->current = std::move(cached.lines);
@@ -2311,52 +2467,87 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             }
         }
     }
+
     Impl* impl = impl_.get();
     Impl::Worker worker;
     auto done = worker.done;
     worker.thread = std::thread([impl, gen, key, title, artist, durationMs, cb = std::move(cb),
-                                 useLocalLyrics, done]() mutable {
+                                 localConfigured, forceOnline, forceLocal, persistOrder,
+                                 done]() mutable {
         DoneFlag flag{done};
         std::vector<LyricLine> result;
         SongInfo info;
-        const bool localHit = useLocalLyrics && impl->lookupLocalLyrics(title, artist, result);
-        bool ok = localHit;
-        if (localHit) {
-            // 本地 QRC 没有在线 songmid；不把旧歌的封面标识带到当前歌曲。
-            info = SongInfo{};
-            std::wprintf(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" lines=%zu\n",
-                         title.c_str(), artist.c_str(), result.size());
-        } else {
-            // 3) 本地未命中后才允许复用在线缓存，再回到原有在线获取链路。
-            if (useLocalLyrics) {
-                std::wprintf(L"[lyric][local-miss][QQ] title=\"%ls\" artist=\"%ls\" "
-                             L"fallback=online\n",
-                             title.c_str(), artist.c_str());
-            }
+
+        // 本地索引可能仍在构建，顺序标记的读写必须留在工作线程，不能阻塞 UI 线程。
+        if (persistOrder)
+            impl->setLocalOrderOverride(title, artist, forceOnline && !forceLocal);
+
+        bool onlineFirst = forceOnline && !forceLocal;
+        if (!forceOnline && !forceLocal && localConfigured)
+            onlineFirst = impl->localOrderOnlineFirst(title, artist);
+        const bool useLocalLyrics = localConfigured && !onlineFirst;
+
+        auto loadOnline = [&]() -> bool {
             {
                 std::lock_guard<std::mutex> lk(impl->mtx);
                 if (impl->generation != gen)
-                    return;
+                    return false;
                 CacheEntry cached;
                 if (impl->cacheGet(key, cached)) {
-                    impl->lastLoadWasLocal = false;
-                    impl->lastLoadWasManual = false;
-                    impl->current = std::move(cached.lines);
-                    impl->currentSongInfo = std::move(cached.info);
+                    result = std::move(cached.lines);
+                    info = std::move(cached.info);
                     std::wprintf(L"[lyric][source=online-cache][QQ] title=\"%ls\" "
                                  L"artist=\"%ls\"\n",
                                  title.c_str(), artist.c_str());
-                    if (cb) cb(true);
-                    return;
+                    return true;
                 }
             }
             std::wprintf(L"[lyric][source=online][QQ] fetching title=\"%ls\" artist=\"%ls\"\n",
                          title.c_str(), artist.c_str());
-            ok = impl->fetch(title, artist, durationMs, result, info);
+            const bool ok = impl->fetch(title, artist, durationMs, result, info);
             std::wprintf(L"[lyric][source=online][QQ] result=%ls title=\"%ls\" "
                          L"artist=\"%ls\" lines=%zu\n",
                          ok ? L"success" : L"failed", title.c_str(), artist.c_str(), result.size());
+            return ok;
+        };
+
+        bool localHit = false;
+        bool ok = false;
+        if (useLocalLyrics) {
+            localHit = impl->lookupLocalLyrics(title, artist, result);
+            ok = localHit;
+            if (localHit) {
+                // 本地 QRC 没有在线 songmid；不把旧歌的封面标识带到当前歌曲。
+                info = SongInfo{};
+                std::wprintf(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
+                             L"lines=%zu\n",
+                             title.c_str(), artist.c_str(), result.size());
+            } else {
+                std::wprintf(L"[lyric][local-miss][QQ] title=\"%ls\" artist=\"%ls\" "
+                             L"fallback=online\n",
+                             title.c_str(), artist.c_str());
+                ok = loadOnline();
+            }
+        } else {
+            ok = loadOnline();
+            if (!ok && onlineFirst && localConfigured) {
+                {
+                    std::lock_guard<std::mutex> lk(impl->mtx);
+                    if (impl->generation != gen)
+                        return;
+                }
+                // 在线优先失败时，按“手动 -> 在线 -> 本地”继续尝试本地歌词。
+                result.clear();
+                info = SongInfo{};
+                localHit = impl->lookupLocalLyrics(title, artist, result);
+                ok = localHit;
+                if (localHit)
+                    std::wprintf(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
+                                 L"fallback=online lines=%zu\n",
+                                 title.c_str(), artist.c_str(), result.size());
+            }
         }
+
         if (ok) {
             std::lock_guard<std::mutex> lk(impl->mtx);
             if (impl->generation == gen) { // 防止过期请求覆盖新歌
@@ -2605,5 +2796,13 @@ void LyricProvider::setQqLocalLyricsConfig(bool enabled, const std::wstring& dir
     impl_->qqLocalLyricsDir = dir;
     ++impl_->generation;
     impl_->sweepFinished();
+    impl_->rebuildLocalIndexLocked();
+}
+
+void LyricProvider::setQqLyricOrderDir(const std::wstring& dir) {
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    if (impl_->qqLocalLyricOrderDir == dir)
+        return;
+    impl_->qqLocalLyricOrderDir = dir;
     impl_->rebuildLocalIndexLocked();
 }
