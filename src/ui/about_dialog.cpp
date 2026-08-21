@@ -44,6 +44,9 @@ constexpr int kIdSubtitleLabel = 311;
 constexpr int kIdReleaseNotes = 312;
 constexpr int kIdAutoCheckLabel = 313;
 constexpr int kIdAutoCheckSwitch = 314;
+constexpr int kIdGiteeProjectButton = 315;
+constexpr int kIdGithubSourceButton = 316;
+constexpr int kIdGiteeSourceButton = 317;
 
 constexpr UINT kMsgUpdateReady = WM_APP + 30;
 constexpr UINT kMsgDownloadProgress = WM_APP + 31;
@@ -63,6 +66,33 @@ enum class UpdateState {
     NoRelease,
     Failed,
 };
+
+enum class UpdateSource {
+    GitHub,
+    Gitee,
+};
+
+const wchar_t* updateSourceName(UpdateSource source) {
+    return source == UpdateSource::Gitee ? L"Gitee" : L"GitHub";
+}
+
+const char* updateSourceApi(UpdateSource source) {
+    return source == UpdateSource::Gitee ? app_info::kGiteeLatestReleaseApi
+                                        : app_info::kLatestReleaseApi;
+}
+
+const wchar_t* updateSourceReleasePage(UpdateSource source) {
+    return source == UpdateSource::Gitee ? app_info::kGiteeLatestReleasePage
+                                         : app_info::kLatestReleasePage;
+}
+
+int updateSourceIndex(UpdateSource source) {
+    return source == UpdateSource::Gitee ? 1 : 0;
+}
+
+UpdateSource updateSourceFromIndex(int index) {
+    return index == 1 ? UpdateSource::Gitee : UpdateSource::GitHub;
+}
 
 struct ReleaseInfo {
     std::wstring version;
@@ -329,10 +359,11 @@ std::wstring makeTempInstallerPath(const std::wstring& installerName) {
 }
 
 void downloadInstaller(HWND hwnd, uint64_t requestId, std::wstring url,
-                       std::wstring outputPath, int64_t expectedBytes,
+                       std::wstring outputPath, int64_t expectedBytes, std::wstring sourceName,
                        std::shared_ptr<std::atomic_bool> cancelled) {
     std::thread([hwnd, requestId, url = std::move(url), outputPath = std::move(outputPath),
-                 expectedBytes, cancelled = std::move(cancelled)]() mutable {
+                 expectedBytes, sourceName = std::move(sourceName),
+                 cancelled = std::move(cancelled)]() mutable {
         const std::string urlUtf8 = utf8Of(url);
         if (urlUtf8.empty()) {
             DeleteFileW(outputPath.c_str());
@@ -398,7 +429,8 @@ void downloadInstaller(HWND hwnd, uint64_t requestId, std::wstring url,
         if (responseCode < 200 || responseCode >= 300) {
             DeleteFileW(outputPath.c_str());
             postDownloadFinished(hwnd, requestId, false, false, {},
-                                 L"下载失败：GitHub 返回 HTTP " + std::to_wstring(responseCode));
+                                 L"下载失败：" + sourceName + L" 返回 HTTP " +
+                                     std::to_wstring(responseCode));
             return;
         }
 
@@ -484,25 +516,29 @@ void postUpdateResult(HWND hwnd, uint64_t requestId, UpdateState state,
         delete payload;
 }
 
-void requestLatestRelease(HWND hwnd, uint64_t requestId) {
-    std::thread([hwnd, requestId] {
+void requestLatestRelease(HWND hwnd, uint64_t requestId, UpdateSource source) {
+    std::thread([hwnd, requestId, source] {
         CURL* curl = curl_easy_init();
         if (!curl) {
             postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {}, L"无法初始化网络请求");
             return;
         }
 
+        const std::wstring sourceName = updateSourceName(source);
         std::string body;
         constexpr char kUserAgent[] = "QQMusicLyric";
         curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
-        headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
+        if (source == UpdateSource::GitHub) {
+            headers = curl_slist_append(headers, "Accept: application/vnd.github+json");
+            headers = curl_slist_append(headers, "X-GitHub-Api-Version: 2022-11-28");
+        }
 
-        curl_easy_setopt(curl, CURLOPT_URL, app_info::kLatestReleaseApi);
+        curl_easy_setopt(curl, CURLOPT_URL, updateSourceApi(source));
         // 版本 API 保持直连；只让体积较大的安装器下载读取系统代理，避免代理节点对
-        // api.github.com 返回 403。空字符串会显式禁用环境变量代理。
+        // 代码托管平台的 API 返回异常。空字符串会显式禁用环境变量代理。
         curl_easy_setopt(curl, CURLOPT_PROXY, "");
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        if (headers)
+            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curlWrite);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
         curl_easy_setopt(curl, CURLOPT_USERAGENT, kUserAgent);
@@ -525,24 +561,23 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId) {
         }
         if (responseCode == 404) {
             postUpdateResult(hwnd, requestId, UpdateState::NoRelease, {}, {},
-                             L"GitHub 尚未发布可供检查的正式版本");
+                             sourceName + L" 尚未发布可供检查的正式版本");
             return;
         }
         if (responseCode != 200) {
             postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"GitHub 返回 HTTP " + std::to_wstring(responseCode));
+                             sourceName + L" 返回 HTTP " + std::to_wstring(responseCode));
             return;
         }
 
         auto json = nlohmann::json::parse(body, nullptr, false);
         if (json.is_discarded() || !json.is_object()) {
             postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"无法读取 GitHub 返回的数据");
+                             L"无法读取 " + sourceName + L" 返回的数据");
             return;
         }
 
-        if (!json.contains("tag_name") || !json["tag_name"].is_string() ||
-            !json.contains("html_url") || !json["html_url"].is_string()) {
+        if (!json.contains("tag_name") || !json["tag_name"].is_string()) {
             postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
                              L"最新版本信息不完整");
             return;
@@ -551,7 +586,11 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId) {
         const std::string versionTag = json["tag_name"].get<std::string>();
         ReleaseInfo latestRelease;
         latestRelease.version = wideOf(versionTag);
-        latestRelease.releaseUrl = wideOf(json["html_url"].get<std::string>());
+        // Gitee v5 的 latest Release 响应可能没有 html_url，使用已知发布页作为回退。
+        if (json.contains("html_url") && json["html_url"].is_string())
+            latestRelease.releaseUrl = wideOf(json["html_url"].get<std::string>());
+        else
+            latestRelease.releaseUrl = updateSourceReleasePage(source);
         if (json.contains("published_at") && json["published_at"].is_string())
             latestRelease.publishedAt = wideOf(json["published_at"].get<std::string>());
         if (json.contains("body") && json["body"].is_string())
@@ -1204,6 +1243,7 @@ struct AboutDialog::Impl {
     bool downloading = false;
     bool installingUpdate = false;
     bool autoCheckOnStartup = true;
+    UpdateSource updateSource = UpdateSource::GitHub;
     uint64_t activeRequest = 0;
     std::wstring releaseUrl = app_info::kLatestReleasePage;
     std::function<void(bool)> onAutoCheckChanged;
@@ -1231,6 +1271,10 @@ struct AboutDialog::Impl {
     D2D1_RECT_F statusRect{};
     D2D1_RECT_F latestRect{};
     D2D1_RECT_F projectRect{};
+    D2D1_RECT_F giteeProjectRect{};
+    D2D1_RECT_F updateSourceLabelRect{};
+    D2D1_RECT_F githubSourceRect{};
+    D2D1_RECT_F giteeSourceRect{};
     D2D1_RECT_F checkRect{};
     D2D1_RECT_F releaseRect{};
     D2D1_RECT_F closeRect{};
@@ -1259,11 +1303,17 @@ struct AboutDialog::Impl {
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
+    bool canChangeUpdateSource() const {
+        return hwnd && !downloading && !installingUpdate && downloadedInstallerPath.empty();
+    }
+
     bool isEnabled(int id) const {
         if (id == kIdCheckButton)
             return !checking && !downloading && !installingUpdate && downloadedInstallerPath.empty();
         if (id == kIdReleaseButton)
             return releaseButtonEnabled && !checking && !downloading && !installingUpdate;
+        if (id == kIdGithubSourceButton || id == kIdGiteeSourceButton)
+            return canChangeUpdateSource();
         return true;
     }
 
@@ -1298,6 +1348,46 @@ struct AboutDialog::Impl {
         painter.drawText(text, format,
                          D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f, rect.bottom),
                          textColor);
+    }
+
+    void drawUpdateSourceRadio(fluent::FluentDialogSurface::Painter& painter,
+                               const D2D1_RECT_F& rect, const wchar_t* text, bool selected,
+                               int id) {
+        const auto& p = fluent::palette();
+        const bool enabled = isEnabled(id);
+        const bool hovered = enabled && hoverId == id;
+        const bool pressed = enabled && pressedId == id;
+        const float centerY = (rect.top + rect.bottom) * 0.5f;
+        const D2D1_ELLIPSE circle{D2D1::Point2F(rect.left + 8.0f, centerY), 8.0f, 8.0f};
+
+        if (!enabled) {
+            if (auto* br = painter.brush(p.disabled)) {
+                painter.target()->DrawEllipse(circle, br, 1.0f);
+                if (selected)
+                    painter.target()->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+            }
+        } else if (selected) {
+            if (auto* br = painter.brush(pressed || hovered ? p.accentHover : p.accent))
+                painter.target()->FillEllipse(circle, br);
+            if (auto* br = painter.brush(p.textOnAccent))
+                painter.target()->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
+        } else {
+            if (hovered) {
+                if (auto* br = painter.brush(p.listHover))
+                    painter.target()->FillEllipse(circle, br);
+            }
+            if (auto* br = painter.brush(p.textSecondary))
+                painter.target()->DrawEllipse(circle, br, pressed ? 1.5f : 1.0f);
+        }
+
+        painter.drawText(text, painter.textFormat(13.0f, 400),
+                         D2D1::RectF(rect.left + 24.0f, rect.top, rect.right, rect.bottom),
+                         enabled ? p.text : p.disabled);
+        if (focusedId == id && focusVisible && enabled) {
+            if (auto* br = painter.brush(p.accent))
+                painter.target()->DrawEllipse(
+                    D2D1::Ellipse(circle.point, 10.0f, 10.0f), br, 1.5f);
+        }
     }
 
     void drawToggle(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
@@ -1350,9 +1440,17 @@ struct AboutDialog::Impl {
         painter.drawText(L"启动时自动检查更新", painter.textFormat(13.0f, 400), autoCheckLabelRect,
                          p.textSecondary);
         drawToggle(painter, autoSwitchRect, autoCheckOnStartup);
-        drawButton(painter, projectRect, L"查看 GitHub 项目", false, kIdProjectButton);
+        drawButton(painter, projectRect, L"GitHub", false, kIdProjectButton);
+        drawButton(painter, giteeProjectRect, L"Gitee", false, kIdGiteeProjectButton);
 
         painter.drawText(L"更新日志", painter.textFormat(14.0f, 600), releaseTitleRect, p.text);
+        painter.drawText(L"更新来源", painter.textFormat(13.0f, 400), updateSourceLabelRect,
+                         p.textSecondary);
+        const int selectedSource = updateSourceIndex(updateSource);
+        drawUpdateSourceRadio(painter, githubSourceRect, L"GitHub",
+                              selectedSource == 0, kIdGithubSourceButton);
+        drawUpdateSourceRadio(painter, giteeSourceRect, L"Gitee",
+                              selectedSource == 1, kIdGiteeSourceButton);
         releaseNotes.paint(painter, notesRect);
         painter.drawText(statusText, painter.textFormat(13.0f, 400), statusRect, p.textSecondary);
         painter.drawText(latestText, painter.textFormat(13.0f, 400), latestRect, p.textSecondary);
@@ -1367,6 +1465,12 @@ struct AboutDialog::Impl {
             return kIdAutoCheckSwitch;
         if (contains(projectRect, x, y))
             return kIdProjectButton;
+        if (contains(giteeProjectRect, x, y))
+            return kIdGiteeProjectButton;
+        if (contains(githubSourceRect, x, y))
+            return kIdGithubSourceButton;
+        if (contains(giteeSourceRect, x, y))
+            return kIdGiteeSourceButton;
         if (contains(checkRect, x, y))
             return kIdCheckButton;
         if (contains(releaseRect, x, y))
@@ -1379,7 +1483,8 @@ struct AboutDialog::Impl {
     }
 
     std::vector<int> focusOrder() const {
-        std::vector<int> order{kIdAutoCheckSwitch, kIdProjectButton, kIdCheckButton,
+        std::vector<int> order{kIdAutoCheckSwitch, kIdProjectButton, kIdGiteeProjectButton,
+                               kIdGithubSourceButton, kIdGiteeSourceButton, kIdCheckButton,
                                kIdReleaseButton, kIdCloseButton};
         order.erase(std::remove_if(order.begin(), order.end(),
                                    [this](int id) { return !isEnabled(id); }),
@@ -1400,10 +1505,27 @@ struct AboutDialog::Impl {
         surface.invalidate();
     }
 
+    void selectUpdateSource(UpdateSource source) {
+        if (source == updateSource || !canChangeUpdateSource())
+            return;
+        updateSource = source;
+        checking = false;
+        startCheck();
+    }
+
     void onCommand(int id) {
         switch (id) {
         case kIdProjectButton:
             openUrl(app_info::kProjectUrl);
+            break;
+        case kIdGiteeProjectButton:
+            openUrl(app_info::kGiteeProjectUrl);
+            break;
+        case kIdGithubSourceButton:
+            selectUpdateSource(UpdateSource::GitHub);
+            break;
+        case kIdGiteeSourceButton:
+            selectUpdateSource(UpdateSource::Gitee);
             break;
         case kIdAutoCheckSwitch:
             autoCheckOnStartup = !autoCheckOnStartup;
@@ -1547,6 +1669,17 @@ struct AboutDialog::Impl {
                 destroy();
                 return 0;
             }
+            if (wp == VK_LEFT || wp == VK_RIGHT) {
+                if (focusedId == kIdGithubSourceButton || focusedId == kIdGiteeSourceButton) {
+                    if (canChangeUpdateSource()) {
+                        const int current = focusedId == kIdGiteeSourceButton ? 1 : 0;
+                        const int next = (current + (wp == VK_RIGHT ? 1 : -1) + 2) % 2;
+                        focusedId = next == 1 ? kIdGiteeSourceButton : kIdGithubSourceButton;
+                        selectUpdateSource(updateSourceFromIndex(next));
+                    }
+                    return 0;
+                }
+            }
             if (wp == VK_SPACE || wp == VK_RETURN) {
                 if (focusedId != 0 && isEnabled(focusedId))
                     onCommand(focusedId);
@@ -1583,7 +1716,7 @@ struct AboutDialog::Impl {
                 releaseNotes.setMessage(result->detail.empty() ? L"暂无更新日志" : result->detail);
             std::wstring visibleVersion = displayVersion(result->version);
             if (result->state == UpdateState::Available) {
-                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
+                releaseUrl = result->releaseUrl.empty() ? updateSourceReleasePage(updateSource)
                                                         : result->releaseUrl;
                 if (latestRelease && !latestRelease->installerUrl.empty()) {
                     statusText = L"发现新版本：" + visibleVersion + L"，点击“下载更新”";
@@ -1595,12 +1728,12 @@ struct AboutDialog::Impl {
                 }
                 latestText = L"最新版本：" + visibleVersion;
             } else if (result->state == UpdateState::Current) {
-                releaseUrl = result->releaseUrl.empty() ? app_info::kLatestReleasePage
+                releaseUrl = result->releaseUrl.empty() ? updateSourceReleasePage(updateSource)
                                                         : result->releaseUrl;
                 statusText = L"当前已是最新版本";
                 latestText = L"当前正式版本：" + visibleVersion;
             } else {
-                releaseUrl = app_info::kLatestReleasePage;
+                releaseUrl = updateSourceReleasePage(updateSource);
                 statusText = result->detail;
                 latestText.clear();
             }
@@ -1683,8 +1816,13 @@ struct AboutDialog::Impl {
         const float contentW = std::max(20.0f, w - contentX - pad - 16.0f);
         versionRect = D2D1::RectF(contentX, cardY + 14.0f, contentX + contentW,
                                    cardY + 36.0f);
-        projectRect = D2D1::RectF(contentX, cardY + 54.0f, contentX + 148.0f,
+        const float projectW = 72.0f;
+        const float projectGap = 8.0f;
+        projectRect = D2D1::RectF(contentX, cardY + 54.0f, contentX + projectW,
                                   cardY + 86.0f);
+        giteeProjectRect = D2D1::RectF(contentX + projectW + projectGap, cardY + 54.0f,
+                                       contentX + projectW + projectGap + projectW,
+                                       cardY + 86.0f);
 
         const float switchW = 40.0f;
         const float switchH = 20.0f;
@@ -1708,14 +1846,28 @@ struct AboutDialog::Impl {
                                 w - pad - closeW - gap - releaseW - gap, btnY + btnH);
 
         const float releaseTitleY = cardY + cardH + fluent::metrics::sectionGap;
-        releaseTitleRect = D2D1::RectF(pad, releaseTitleY, std::max(pad, w - pad),
-                                       releaseTitleY + 22.0f);
         const float notesY = releaseTitleY + 22.0f + fluent::metrics::compactGap;
         const float statusH = 22.0f;
         const float latestH = 20.0f;
         const float latestY = btnY - gap - latestH;
         const float statusY = latestY - statusH;
         const float notesBottom = statusY - gap;
+        const float sourceLabelW = 56.0f;
+        const float sourceOptionW = 72.0f;
+        const float sourceGap = 8.0f;
+        const float sourceGroupW = sourceLabelW + sourceGap + sourceOptionW + sourceGap +
+                                   sourceOptionW;
+        const float sourceX = std::max(pad, w - pad - sourceGroupW);
+        releaseTitleRect = D2D1::RectF(pad, releaseTitleY,
+                                       std::max(pad, sourceX - gap), releaseTitleY + 22.0f);
+        updateSourceLabelRect = D2D1::RectF(sourceX, releaseTitleY, sourceX + sourceLabelW,
+                                            releaseTitleY + 22.0f);
+        const float githubX = sourceX + sourceLabelW + sourceGap;
+        githubSourceRect = D2D1::RectF(githubX, releaseTitleY, githubX + sourceOptionW,
+                                       releaseTitleY + 22.0f);
+        const float giteeX = githubX + sourceOptionW + sourceGap;
+        giteeSourceRect = D2D1::RectF(giteeX, releaseTitleY, giteeX + sourceOptionW,
+                                      releaseTitleY + 22.0f);
         notesRect = D2D1::RectF(pad, notesY, std::max(pad, w - pad),
                                 std::max(notesY + 80.0f, notesBottom));
         statusRect = D2D1::RectF(pad, statusY, std::max(pad, w - pad), statusY + statusH);
@@ -1750,7 +1902,8 @@ struct AboutDialog::Impl {
         activeRequest = nextRequestId();
         downloadCancel = std::make_shared<std::atomic_bool>(false);
         downloadInstaller(hwnd, activeRequest, latestRelease->installerUrl, outputPath,
-                          latestRelease->installerSize, downloadCancel);
+                          latestRelease->installerSize, updateSourceName(updateSource),
+                          downloadCancel);
         surface.invalidate();
     }
 
@@ -1782,11 +1935,11 @@ struct AboutDialog::Impl {
         releaseButtonAccent = false;
         releaseButtonText = L"无可用更新";
         activeRequest = nextRequestId();
-        releaseUrl = app_info::kLatestReleasePage;
+        releaseUrl = updateSourceReleasePage(updateSource);
         // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
         // 留到 kMsgUpdateReady 统一刷新。
-        statusText = L"正在检查更新…";
-        requestLatestRelease(hwnd, activeRequest);
+        statusText = L"正在检查" + std::wstring(updateSourceName(updateSource)) + L"更新…";
+        requestLatestRelease(hwnd, activeRequest, updateSource);
     }
 
     void destroy() {
@@ -1829,7 +1982,7 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
     impl_->releaseButtonAccent = false;
     impl_->releaseButtonText = L"无可用更新";
     impl_->activeRequest = nextRequestId();
-    impl_->releaseUrl = app_info::kLatestReleasePage;
+    impl_->releaseUrl = updateSourceReleasePage(impl_->updateSource);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
