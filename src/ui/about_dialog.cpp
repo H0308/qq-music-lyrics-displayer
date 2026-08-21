@@ -70,6 +70,7 @@ struct ReleaseInfo {
     std::wstring body;
     std::wstring releaseUrl;
     std::wstring installerUrl;
+    std::wstring installerName;
     int64_t installerSize = 0;
 };
 
@@ -310,22 +311,19 @@ int downloadProgress(void* userdata, curl_off_t dltotal, curl_off_t dlnow,
     return 0;
 }
 
-std::wstring makeTempInstallerPath() {
+std::wstring makeTempInstallerPath(const std::wstring& installerName) {
+    if (installerName.empty())
+        return {};
+
     wchar_t tempDir[MAX_PATH]{};
     DWORD length = GetTempPathW(static_cast<DWORD>(std::size(tempDir)), tempDir);
     if (length == 0 || length >= std::size(tempDir))
         return {};
 
-    wchar_t tempFile[MAX_PATH]{};
-    if (!GetTempFileNameW(tempDir, L"QML", 0, tempFile))
-        return {};
-    DeleteFileW(tempFile);
-
-    std::wstring path = tempFile;
-    const size_t dot = path.find_last_of(L'.');
-    if (dot != std::wstring::npos)
-        path.resize(dot);
-    path += L".exe";
+    std::wstring path = tempDir;
+    if (!path.empty() && path.back() != L'\\')
+        path += L'\\';
+    path += installerName;
     DeleteFileW(path.c_str());
     return path;
 }
@@ -572,6 +570,7 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId) {
                     !asset.contains("browser_download_url") ||
                     !asset["browser_download_url"].is_string())
                     continue;
+                latestRelease.installerName = wideOf(asset["name"].get<std::string>());
                 latestRelease.installerUrl =
                     wideOf(asset["browser_download_url"].get<std::string>());
                 if (asset.contains("size") && asset["size"].is_number_integer())
@@ -1736,7 +1735,7 @@ struct AboutDialog::Impl {
             return;
 
         clearDownloadedInstaller();
-        const std::wstring outputPath = makeTempInstallerPath();
+        const std::wstring outputPath = makeTempInstallerPath(latestRelease->installerName);
         if (outputPath.empty()) {
             statusText = L"无法创建下载临时文件";
             surface.invalidate();
