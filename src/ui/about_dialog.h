@@ -16,9 +16,12 @@ public:
     AboutDialog& operator=(const AboutDialog&) = delete;
 
     bool create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup = true,
+                bool useGiteeUpdateSource = false,
                 std::function<void(bool)> onAutoCheckChanged = {},
-                std::function<bool(const std::wstring&)> onInstallUpdate = {});
-    void show();
+                std::function<void(bool)> onUpdateSourceChanged = {},
+                std::function<bool(const std::wstring&)> onInstallUpdate = {},
+                std::function<void(const std::wstring&)> onStartupUpdateAvailable = {});
+    void show(bool downloadUpdate = false);
     void destroy();
     bool isOpen() const;
     HWND hwnd() const;

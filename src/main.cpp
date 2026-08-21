@@ -1,5 +1,6 @@
 #include "lyric/cover_provider.h"
 #include "lyric/lyric_provider.h"
+#include "app_info.h"
 #include "ui/font_style.h"
 #include "ui/lyric_window.h"
 #include "ui/taskbar_host.h"
@@ -9,6 +10,7 @@
 #include "ui/font_color_dialog.h"
 #include "ui/settings_dialog.h"
 #include "ui/dialog_notify.h"
+#include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_menu.h"
 #include "ui/fluent_theme.h"
 #include "media/smtc_monitor.h"
@@ -17,6 +19,7 @@
 #include "resource.h"
 
 #include <windows.h>
+#include <windowsx.h>
 #include <winrt/Windows.Foundation.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -29,6 +32,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <io.h>
 #include <algorithm>
 #include <cmath>
@@ -72,6 +76,9 @@ constexpr UINT kCmdLyricAlignRight = 125;
 constexpr UINT kCmdHoverPlaybackControls = 126;
 constexpr UINT kCmdSettings = 127;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
+constexpr int kUpdatePromptReleasePage = 1;
+constexpr int kUpdatePromptDownload = 2;
+constexpr int kUpdatePromptAbout = 3;
 
 struct CoverPayload {
     std::wstring key;
@@ -293,6 +300,25 @@ struct App {
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
 
     bool autoCheckOnStartup_ = true;
+    bool useGiteeUpdateSource_ = false;
+    HWND updatePromptHwnd_ = nullptr;
+    bool updatePromptBackdrop_ = false;
+    fluent::FluentDialogSurface updatePromptSurface_;
+    std::wstring updatePromptLatestVersion_;
+    bool updatePromptUseGiteeSource_ = false;
+    D2D1_RECT_F updatePromptTitleRect_{};
+    D2D1_RECT_F updatePromptSubtitleRect_{};
+    D2D1_RECT_F updatePromptVersionCardRect_{};
+    D2D1_RECT_F updatePromptCurrentVersionRect_{};
+    D2D1_RECT_F updatePromptLatestVersionRect_{};
+    D2D1_RECT_F updatePromptSourceRect_{};
+    D2D1_RECT_F updatePromptReleasePageRect_{};
+    D2D1_RECT_F updatePromptDownloadRect_{};
+    D2D1_RECT_F updatePromptAboutRect_{};
+    int updatePromptHoverId_ = 0;
+    int updatePromptPressedId_ = 0;
+    int updatePromptFocusedId_ = kUpdatePromptAbout;
+    bool updatePromptFocusVisible_ = false;
     std::wstring settingsPath_;
 
     std::vector<ILyricHost*> hosts() {
@@ -909,7 +935,18 @@ struct App {
     SettingsActions buildSettingsActions();
     void pickFont();
     void showFontColorDialog();
-    void showAbout();
+    void showAbout(bool downloadUpdate = false);
+    void showUpdatePrompt(const std::wstring& latestVersion);
+    void layoutUpdatePrompt();
+    void paintUpdatePrompt(fluent::FluentDialogSurface::Painter& painter, float width,
+                           float height);
+    void drawUpdatePromptButton(fluent::FluentDialogSurface::Painter& painter,
+                                const D2D1_RECT_F& rect, const wchar_t* text, bool accent,
+                                int id);
+    int hitTestUpdatePrompt(float x, float y) const;
+    void focusStepUpdatePrompt(int direction);
+    void closeUpdatePrompt();
+    void onUpdatePromptCommand(int command);
     bool launchUpdateInstaller(const std::wstring& path);
     void onDialogClosed(DialogKind kind);
     void setAutoCheckOnStartup(bool enabled);
@@ -919,6 +956,7 @@ struct App {
     void loadSettings();
     void saveSettings();
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
+    static LRESULT CALLBACK updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
 
 void App::loadSettings() {
@@ -955,6 +993,7 @@ void App::loadSettings() {
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
         spectrumOn_ = j.value("spectrum", false);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
+        useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
         if (j.contains("secondaryLyricEnabled") || j.contains("secondaryLyricType")) {
             secondaryLyricEnabled_ = j.value("secondaryLyricEnabled", true);
@@ -1006,6 +1045,7 @@ void App::saveSettings() {
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["spectrum"] = spectrumOn_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
+        j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
@@ -1072,6 +1112,347 @@ void App::updateTrayIcon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
     // 首次创建时 MODIFY 不会生效，用 ADD
     Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+void App::showUpdatePrompt(const std::wstring& latestVersion) {
+    if (latestVersion.empty())
+        return;
+    if (updatePromptHwnd_) {
+        SetForegroundWindow(updatePromptHwnd_);
+        return;
+    }
+
+    updatePromptLatestVersion_ = latestVersion;
+    updatePromptUseGiteeSource_ = useGiteeUpdateSource_;
+    updatePromptHoverId_ = 0;
+    updatePromptPressedId_ = 0;
+    updatePromptFocusedId_ = kUpdatePromptAbout;
+    updatePromptFocusVisible_ = false;
+
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = App::updatePromptWndProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"QQMusicLyricUpdatePrompt";
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    RegisterClassExW(&wc);
+
+    RECT work{};
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const UINT dpi = GetDpiForSystem();
+    const float s = fluent::dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(500.0f * s)),
+            static_cast<LONG>(std::lround(280.0f * s))};
+    constexpr DWORD style = WS_CAPTION | WS_SYSMENU;
+    constexpr DWORD exStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
+    AdjustWindowRectExForDpi(&rc, style, FALSE, exStyle, dpi);
+    const int w = rc.right - rc.left;
+    const int h = rc.bottom - rc.top;
+    const int x = work.left + ((work.right - work.left) - w) / 2;
+    const int y = work.top + ((work.bottom - work.top) - h) / 2;
+    HWND hwnd = CreateWindowExW(exStyle, wc.lpszClassName, L"发现新版本", style, x, y, w, h,
+                                nullptr, nullptr, wc.hInstance, this);
+    if (!hwnd) {
+        updatePromptLatestVersion_.clear();
+        return;
+    }
+
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    UpdateWindow(hwnd);
+    SetForegroundWindow(hwnd);
+    SetFocus(hwnd);
+}
+
+void App::layoutUpdatePrompt() {
+    if (!updatePromptHwnd_)
+        return;
+
+    RECT rc{};
+    GetClientRect(updatePromptHwnd_, &rc);
+    const float s = updatePromptSurface_.dipScale();
+    const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+    const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
+    const float pad = fluent::metrics::pagePadding;
+    const float gap = fluent::metrics::controlGap;
+    const float titleH = 30.0f;
+    const float subtitleH = 20.0f;
+    const float titleW = 112.0f;
+    const float sourceX = pad + titleW + fluent::metrics::compactGap;
+    const float sourceY = pad + 8.0f;
+    updatePromptTitleRect_ = D2D1::RectF(pad, pad, pad + titleW, pad + titleH);
+    updatePromptSourceRect_ = D2D1::RectF(sourceX, sourceY, std::max(sourceX, w - pad), pad + titleH);
+    updatePromptSubtitleRect_ = D2D1::RectF(pad, pad + titleH,
+                                             std::max(pad, w - pad), pad + titleH + subtitleH);
+
+    const float cardY = pad + titleH + subtitleH + fluent::metrics::compactGap;
+    const float cardH = 102.0f;
+    updatePromptVersionCardRect_ = D2D1::RectF(pad, cardY, std::max(pad, w - pad), cardY + cardH);
+    const float contentX = pad + 16.0f;
+    const float contentW = std::max(20.0f, w - contentX - pad - 16.0f);
+    updatePromptCurrentVersionRect_ = D2D1::RectF(contentX, cardY + 17.0f,
+                                                  contentX + contentW, cardY + 41.0f);
+    updatePromptLatestVersionRect_ = D2D1::RectF(contentX, cardY + 57.0f,
+                                                 contentX + contentW, cardY + 81.0f);
+
+    const float buttonH = fluent::metrics::controlHeight;
+    const float buttonY = h - pad - buttonH;
+    const float releaseW = 128.0f;
+    const float downloadW = 112.0f;
+    const float aboutW = 128.0f;
+    const float totalW = releaseW + downloadW + aboutW + gap * 2.0f;
+    const float buttonX = std::max(pad, (w - totalW) * 0.5f);
+    updatePromptReleasePageRect_ = D2D1::RectF(buttonX, buttonY, buttonX + releaseW,
+                                               buttonY + buttonH);
+    updatePromptDownloadRect_ = D2D1::RectF(updatePromptReleasePageRect_.right + gap, buttonY,
+                                            updatePromptReleasePageRect_.right + gap + downloadW,
+                                            buttonY + buttonH);
+    updatePromptAboutRect_ = D2D1::RectF(updatePromptDownloadRect_.right + gap, buttonY,
+                                         updatePromptDownloadRect_.right + gap + aboutW,
+                                         buttonY + buttonH);
+}
+
+void App::drawUpdatePromptButton(fluent::FluentDialogSurface::Painter& painter,
+                                 const D2D1_RECT_F& rect, const wchar_t* text, bool accent,
+                                 int id) {
+    const auto& p = fluent::palette();
+    const bool hovered = updatePromptHoverId_ == id;
+    const bool pressed = updatePromptPressedId_ == id;
+    const D2D1_COLOR_F fill = accent
+                                  ? pressed ? p.accentPressed : hovered ? p.accentHover : p.accent
+                                  : pressed ? p.controlPressed
+                                            : hovered ? p.controlHover
+                                                      : p.controlFill;
+    const D2D1_COLOR_F textColor = accent ? p.textOnAccent : p.text;
+    painter.fillRoundRect(fill, rect);
+    if (!accent)
+        painter.strokeRoundRect(p.cardStroke, rect);
+    if (updatePromptFocusedId_ == id && updatePromptFocusVisible_) {
+        painter.strokeRoundRect(
+            accent ? p.textOnAccent : p.accent,
+            D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
+                        rect.bottom - 1.5f),
+            1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
+    }
+    painter.drawText(std::wstring(text), painter.textFormat(14.0f, 400, true, true),
+                     D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f, rect.bottom),
+                     textColor);
+}
+
+void App::paintUpdatePrompt(fluent::FluentDialogSurface::Painter& painter, float,
+                            float) {
+    const auto& p = fluent::palette();
+    painter.drawText(L"发现新版本", painter.textFormat(21.0f, 600), updatePromptTitleRect_, p.text);
+    painter.drawText(std::wstring(L"更新源：") +
+                         (updatePromptUseGiteeSource_ ? L"Gitee" : L"GitHub"),
+                     painter.textFormat(13.0f, 400), updatePromptSourceRect_, p.textSecondary);
+    painter.drawText(L"检测到新的正式版本，可选择查看详情或立即更新",
+                     painter.textFormat(13.0f, 400), updatePromptSubtitleRect_, p.textSecondary);
+
+    painter.fillRoundRect(p.cardFill, updatePromptVersionCardRect_, fluent::metrics::cardRadius);
+    painter.strokeRoundRect(p.cardStroke, updatePromptVersionCardRect_, 1.0f,
+                            fluent::metrics::cardRadius);
+    painter.drawText(std::wstring(L"当前版本：") + app_info::kVersion,
+                     painter.textFormat(14.0f, 400), updatePromptCurrentVersionRect_, p.text);
+    painter.drawText(std::wstring(L"最新版本：") + updatePromptLatestVersion_,
+                     painter.textFormat(14.0f, 600), updatePromptLatestVersionRect_, p.text);
+
+    drawUpdatePromptButton(painter, updatePromptReleasePageRect_, L"跳转到发布页", false,
+                           kUpdatePromptReleasePage);
+    drawUpdatePromptButton(painter, updatePromptDownloadRect_, L"下载更新", true,
+                           kUpdatePromptDownload);
+    drawUpdatePromptButton(painter, updatePromptAboutRect_, L"进入关于页面", false,
+                           kUpdatePromptAbout);
+}
+
+int App::hitTestUpdatePrompt(float x, float y) const {
+    auto contains = [x, y](const D2D1_RECT_F& rect) {
+        return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    };
+    if (contains(updatePromptReleasePageRect_))
+        return kUpdatePromptReleasePage;
+    if (contains(updatePromptDownloadRect_))
+        return kUpdatePromptDownload;
+    if (contains(updatePromptAboutRect_))
+        return kUpdatePromptAbout;
+    return 0;
+}
+
+void App::focusStepUpdatePrompt(int direction) {
+    constexpr int ids[] = {kUpdatePromptReleasePage, kUpdatePromptDownload, kUpdatePromptAbout};
+    int index = 0;
+    for (int i = 0; i < static_cast<int>(std::size(ids)); ++i) {
+        if (ids[i] == updatePromptFocusedId_) {
+            index = i;
+            break;
+        }
+    }
+    index = (index + direction + static_cast<int>(std::size(ids))) % static_cast<int>(std::size(ids));
+    updatePromptFocusedId_ = ids[index];
+    updatePromptFocusVisible_ = true;
+    updatePromptSurface_.invalidate();
+}
+
+void App::closeUpdatePrompt() {
+    if (updatePromptHwnd_)
+        DestroyWindow(updatePromptHwnd_);
+}
+
+void App::onUpdatePromptCommand(int command) {
+    if (command != kUpdatePromptReleasePage && command != kUpdatePromptDownload &&
+        command != kUpdatePromptAbout)
+        return;
+
+    const bool useGiteeSource = updatePromptUseGiteeSource_;
+    closeUpdatePrompt();
+    if (command == kUpdatePromptReleasePage) {
+        const wchar_t* releasePage = useGiteeSource ? app_info::kGiteeLatestReleasePage
+                                                    : app_info::kLatestReleasePage;
+        ShellExecuteW(nullptr, L"open", releasePage, nullptr, nullptr, SW_SHOWNORMAL);
+    } else if (command == kUpdatePromptDownload) {
+        showAbout(true);
+    } else {
+        showAbout();
+    }
+}
+
+LRESULT CALLBACK App::updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_NCCREATE) {
+        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
+        auto* app = reinterpret_cast<App*>(cs->lpCreateParams);
+        SetWindowLongPtrW(h, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(app));
+        if (app)
+            app->updatePromptHwnd_ = h;
+    }
+
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
+    if (!app)
+        return DefWindowProcW(h, msg, wp, lp);
+
+    switch (msg) {
+    case WM_CREATE:
+        app->updatePromptBackdrop_ = fluent::styleDialogWindow(h);
+        app->updatePromptSurface_.initialize(h, app->updatePromptBackdrop_);
+        app->layoutUpdatePrompt();
+        return 0;
+    case WM_SIZE:
+        app->layoutUpdatePrompt();
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_DPICHANGED: {
+        auto* suggested = reinterpret_cast<RECT*>(lp);
+        SetWindowPos(h, nullptr, suggested->left, suggested->top,
+                     suggested->right - suggested->left, suggested->bottom - suggested->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        app->layoutUpdatePrompt();
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    }
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        app->updatePromptBackdrop_ =
+            fluent::restyleDialogWindow(h, app->updatePromptBackdrop_);
+        app->updatePromptSurface_.setBackdrop(app->updatePromptBackdrop_);
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(h, &ps);
+        app->updatePromptSurface_.paint(
+            hdc, app->updatePromptBackdrop_,
+            [app](fluent::FluentDialogSurface::Painter& painter, float width, float height) {
+                app->paintUpdatePrompt(painter, width, height);
+            });
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        app->updatePromptSurface_.eraseBackground(reinterpret_cast<HDC>(wp),
+                                                   app->updatePromptBackdrop_);
+        return 1;
+    case WM_MOUSEMOVE: {
+        if (!GetCapture()) {
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, h, 0};
+            TrackMouseEvent(&tme);
+        }
+        const float s = app->updatePromptSurface_.dipScale();
+        const int id = app->hitTestUpdatePrompt(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+        if (id != app->updatePromptHoverId_) {
+            app->updatePromptHoverId_ = id;
+            app->updatePromptSurface_.invalidate();
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        app->updatePromptHoverId_ = 0;
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_LBUTTONDOWN: {
+        SetFocus(h);
+        app->updatePromptFocusVisible_ = false;
+        const float s = app->updatePromptSurface_.dipScale();
+        app->updatePromptPressedId_ =
+            app->hitTestUpdatePrompt(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+        if (app->updatePromptPressedId_ != 0) {
+            app->updatePromptFocusedId_ = app->updatePromptPressedId_;
+            SetCapture(h);
+        }
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    }
+    case WM_LBUTTONUP: {
+        const float s = app->updatePromptSurface_.dipScale();
+        const int hit = app->hitTestUpdatePrompt(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
+        const int pressed = app->updatePromptPressedId_;
+        app->updatePromptPressedId_ = 0;
+        if (GetCapture() == h)
+            ReleaseCapture();
+        if (pressed != 0 && pressed == hit)
+            app->onUpdatePromptCommand(pressed);
+        if (app->updatePromptHwnd_ == h)
+            app->updatePromptSurface_.invalidate();
+        return 0;
+    }
+    case WM_CAPTURECHANGED:
+        app->updatePromptPressedId_ = 0;
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_GETDLGCODE:
+        return DLGC_WANTALLKEYS | DLGC_WANTTAB;
+    case WM_KEYDOWN:
+        if (wp == VK_TAB) {
+            app->focusStepUpdatePrompt((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
+            return 0;
+        }
+        if (wp == VK_ESCAPE) {
+            app->closeUpdatePrompt();
+            return 0;
+        }
+        if (wp == VK_SPACE || wp == VK_RETURN) {
+            app->onUpdatePromptCommand(app->updatePromptFocusedId_);
+            return 0;
+        }
+        break;
+    case WM_SETFOCUS:
+        app->updatePromptFocusVisible_ = true;
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_KILLFOCUS:
+        app->updatePromptFocusVisible_ = false;
+        app->updatePromptSurface_.invalidate();
+        return 0;
+    case WM_CLOSE:
+        app->closeUpdatePrompt();
+        return 0;
+    case WM_DESTROY:
+        app->updatePromptSurface_.discard();
+        app->updatePromptHwnd_ = nullptr;
+        app->updatePromptHoverId_ = 0;
+        app->updatePromptPressedId_ = 0;
+        app->updatePromptLatestVersion_.clear();
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
 }
 
 void App::showTrayMenu() {
@@ -1396,20 +1777,27 @@ void App::onDialogClosed(DialogKind kind) {
     }
 }
 
-void App::showAbout() {
+void App::showAbout(bool downloadUpdate) {
     if (aboutDialog && aboutDialog->isOpen()) {
-        aboutDialog->show();
+        aboutDialog->show(downloadUpdate);
         return;
     }
     aboutDialog = std::make_unique<AboutDialog>();
     if (!aboutDialog->create(
-            GetModuleHandleW(nullptr), trayHwnd, autoCheckOnStartup_,
+            GetModuleHandleW(nullptr), trayHwnd, autoCheckOnStartup_, useGiteeUpdateSource_,
             [this](bool enabled) { setAutoCheckOnStartup(enabled); },
-            [this](const std::wstring& path) { return launchUpdateInstaller(path); })) {
+            [this](bool useGitee) {
+                if (useGiteeUpdateSource_ == useGitee)
+                    return;
+                useGiteeUpdateSource_ = useGitee;
+                saveSettings();
+            },
+            [this](const std::wstring& path) { return launchUpdateInstaller(path); },
+            [this](const std::wstring& version) { showUpdatePrompt(version); })) {
         aboutDialog.reset();
         return;
     }
-    aboutDialog->show();
+    aboutDialog->show(downloadUpdate);
 }
 
 bool App::launchUpdateInstaller(const std::wstring& path) {
@@ -1531,9 +1919,16 @@ int main() {
     // 关于窗口保持隐藏，用于在程序启动后自动检查更新；用户打开关于时会再次检查。
     app.aboutDialog = std::make_unique<AboutDialog>();
     if (!app.aboutDialog->create(
-            inst, app.trayHwnd, app.autoCheckOnStartup_,
+            inst, app.trayHwnd, app.autoCheckOnStartup_, app.useGiteeUpdateSource_,
             [&app](bool enabled) { app.setAutoCheckOnStartup(enabled); },
-            [&app](const std::wstring& path) { return app.launchUpdateInstaller(path); }))
+            [&app](bool useGitee) {
+                if (app.useGiteeUpdateSource_ == useGitee)
+                    return;
+                app.useGiteeUpdateSource_ = useGitee;
+                app.saveSettings();
+            },
+            [&app](const std::wstring& path) { return app.launchUpdateInstaller(path); },
+            [&app](const std::wstring& version) { app.showUpdatePrompt(version); }))
         app.aboutDialog.reset();
     // 设置窗口预创建（保持隐藏）：把首次打开时的控件构建成本挪到启动阶段；
     // 关闭后仍会销毁，下一次打开重新创建。
@@ -1573,6 +1968,8 @@ int main() {
         if (app.aboutDialog && app.aboutDialog->isOpen() &&
             IsDialogMessageW(app.aboutDialog->hwnd(), &msg))
             continue;
+        if (app.updatePromptHwnd_ && IsDialogMessageW(app.updatePromptHwnd_, &msg))
+            continue;
         if (app.settingsDialog && app.settingsDialog->isOpen() &&
             IsDialogMessageW(app.settingsDialog->hwnd(), &msg))
             continue;
@@ -1585,6 +1982,7 @@ int main() {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    app.closeUpdatePrompt();
     app.destroyTray();
     timeEndPeriod(1);
     return 0;

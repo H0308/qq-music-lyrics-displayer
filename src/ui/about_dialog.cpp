@@ -1243,11 +1243,15 @@ struct AboutDialog::Impl {
     bool downloading = false;
     bool installingUpdate = false;
     bool autoCheckOnStartup = true;
+    bool notifyStartupUpdate = false;
+    bool downloadAfterCheck = false;
     UpdateSource updateSource = UpdateSource::GitHub;
     uint64_t activeRequest = 0;
     std::wstring releaseUrl = app_info::kLatestReleasePage;
     std::function<void(bool)> onAutoCheckChanged;
+    std::function<void(bool)> onUpdateSourceChanged;
     std::function<bool(const std::wstring&)> onInstallUpdate;
+    std::function<void(const std::wstring&)> onStartupUpdateAvailable;
     std::optional<ReleaseInfo> latestRelease;
     std::shared_ptr<std::atomic_bool> downloadCancel;
     std::wstring downloadedInstallerPath;
@@ -1509,6 +1513,8 @@ struct AboutDialog::Impl {
         if (source == updateSource || !canChangeUpdateSource())
             return;
         updateSource = source;
+        if (onUpdateSourceChanged)
+            onUpdateSourceChanged(updateSource == UpdateSource::Gitee);
         checking = false;
         startCheck();
     }
@@ -1702,6 +1708,12 @@ struct AboutDialog::Impl {
             std::unique_ptr<UpdatePayload> result(reinterpret_cast<UpdatePayload*>(lp));
             if (!result || result->requestId != activeRequest)
                 return 0;
+            const bool shouldNotifyStartupUpdate =
+                notifyStartupUpdate && result->state == UpdateState::Available;
+            const bool shouldDownloadAfterCheck = downloadAfterCheck;
+            // 一次启动检查只提示一次；用户打开关于页或手动检查不复用这个标记。
+            notifyStartupUpdate = false;
+            downloadAfterCheck = false;
             checking = false;
             latestRelease.reset();
             releaseButtonEnabled = false;
@@ -1738,6 +1750,11 @@ struct AboutDialog::Impl {
                 latestText.clear();
             }
             surface.invalidate();
+            if (shouldDownloadAfterCheck && result->state == UpdateState::Available &&
+                latestRelease && !latestRelease->installerUrl.empty())
+                startDownload();
+            if (shouldNotifyStartupUpdate && onStartupUpdateAvailable)
+                onStartupUpdateAvailable(visibleVersion);
             return 0;
         }
         case kMsgDownloadProgress: {
@@ -1965,13 +1982,21 @@ AboutDialog::~AboutDialog() {
 }
 
 bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
+                         bool useGiteeUpdateSource,
                          std::function<void(bool)> onAutoCheckChanged,
-                         std::function<bool(const std::wstring&)> onInstallUpdate) {
+                         std::function<void(bool)> onUpdateSourceChanged,
+                         std::function<bool(const std::wstring&)> onInstallUpdate,
+                         std::function<void(const std::wstring&)> onStartupUpdateAvailable) {
     impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者。
     impl_->inst = inst;
     impl_->autoCheckOnStartup = autoCheckOnStartup;
+    impl_->updateSource = useGiteeUpdateSource ? UpdateSource::Gitee : UpdateSource::GitHub;
     impl_->onAutoCheckChanged = std::move(onAutoCheckChanged);
+    impl_->onUpdateSourceChanged = std::move(onUpdateSourceChanged);
     impl_->onInstallUpdate = std::move(onInstallUpdate);
+    impl_->onStartupUpdateAvailable = std::move(onStartupUpdateAvailable);
+    impl_->notifyStartupUpdate = false;
+    impl_->downloadAfterCheck = false;
     impl_->checking = false;
     impl_->downloading = false;
     impl_->installingUpdate = false;
@@ -2011,17 +2036,29 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
         return false;
 
     // 启动检查受设置控制；AboutDialog::show() 不受此设置影响。
-    if (impl_->autoCheckOnStartup)
+    if (impl_->autoCheckOnStartup) {
+        impl_->notifyStartupUpdate = true;
         impl_->startCheck();
+    }
     return true;
 }
 
-void AboutDialog::show() {
+void AboutDialog::show(bool downloadUpdate) {
     if (impl_->hwnd) {
-        // 每次打开关于窗口都重新检查一次；若上一次启动检查仍在进行则保持单请求。
-        impl_->startCheck();
+        // 用户已经主动打开关于页，不再把本次检查当成启动通知。
+        impl_->notifyStartupUpdate = false;
+        const bool canStartDownload =
+            downloadUpdate && !impl_->checking && !impl_->downloading &&
+            !impl_->installingUpdate && impl_->downloadedInstallerPath.empty() &&
+            impl_->latestRelease && !impl_->latestRelease->installerUrl.empty();
+        impl_->downloadAfterCheck = downloadUpdate && !canStartDownload;
+        // 普通打开关于页时重新检查；弹窗触发下载时优先复用启动检查已取得的 Release。
+        if (!canStartDownload)
+            impl_->startCheck();
         ShowWindow(impl_->hwnd, SW_SHOW);
         SetForegroundWindow(impl_->hwnd);
+        if (canStartDownload)
+            impl_->startDownload();
     }
 }
 
