@@ -48,7 +48,11 @@ constexpr int kIdAutoCheckSwitch = 314;
 constexpr UINT kMsgUpdateReady = WM_APP + 30;
 constexpr UINT kMsgDownloadProgress = WM_APP + 31;
 constexpr UINT kMsgDownloadFinished = WM_APP + 32;
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU;
+constexpr float kMinClientWidthDip = 440.0f;
+constexpr float kMinClientHeightDip = 460.0f;
+// 关于页本身是竖向布局，比例下限沿用其默认客户区 520×620，不能按最小宽高直接相除。
+constexpr float kMinClientAspectRatio = 520.0f / 620.0f;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 std::atomic<uint64_t> gNextRequestId{0};
@@ -1436,6 +1440,15 @@ struct AboutDialog::Impl {
             layout();
             surface.invalidate();
             return 0;
+        case WM_GETMINMAXINFO:
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
+            return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,

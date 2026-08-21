@@ -3,6 +3,7 @@
 #include <dwmapi.h>
 
 #include <algorithm>
+#include <cmath>
 
 #ifndef DWMWA_REDIRECTIONBITMAP_ALPHA
 #define DWMWA_REDIRECTIONBITMAP_ALPHA 39
@@ -34,6 +35,79 @@ void excludeVisibleChildren(HWND parent, HDC hdc) {
 }
 
 } // namespace
+
+void setDialogMinimumTrackSize(HWND hwnd, MINMAXINFO* info, DWORD style, DWORD exStyle,
+                               float minClientWidthDip, float minClientHeightDip) {
+    if (!hwnd || !info || minClientWidthDip <= 0.0f || minClientHeightDip <= 0.0f)
+        return;
+
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!dpi)
+        dpi = GetDpiForSystem();
+    const float scale = dipScale(dpi);
+    RECT rc{0, 0, static_cast<LONG>(std::lround(minClientWidthDip * scale)),
+            static_cast<LONG>(std::lround(minClientHeightDip * scale))};
+    if (!AdjustWindowRectExForDpi(&rc, style, FALSE, exStyle, dpi))
+        return;
+
+    info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
+    info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
+}
+
+void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* proposedRect,
+                                     float minClientAspectRatio) {
+    if (!hwnd || !proposedRect || minClientAspectRatio <= 0.0f)
+        return;
+
+    RECT client{};
+    RECT window{};
+    if (!GetClientRect(hwnd, &client) || !GetWindowRect(hwnd, &window))
+        return;
+
+    const int frameWidth = (window.right - window.left) - (client.right - client.left);
+    const int frameHeight = (window.bottom - window.top) - (client.bottom - client.top);
+    const int outerWidth = std::max(1L, proposedRect->right - proposedRect->left);
+    const int outerHeight = std::max(1L, proposedRect->bottom - proposedRect->top);
+    const int clientWidth = std::max(1, outerWidth - frameWidth);
+    const int clientHeight = std::max(1, outerHeight - frameHeight);
+
+    if (static_cast<double>(clientWidth) >=
+        static_cast<double>(minClientAspectRatio) * clientHeight)
+        return;
+
+    const bool horizontalEdge = sizingEdge == WMSZ_LEFT || sizingEdge == WMSZ_RIGHT ||
+                                sizingEdge == WMSZ_TOPLEFT || sizingEdge == WMSZ_TOPRIGHT ||
+                                sizingEdge == WMSZ_BOTTOMLEFT || sizingEdge == WMSZ_BOTTOMRIGHT;
+    const bool topEdge = sizingEdge == WMSZ_TOP || sizingEdge == WMSZ_TOPLEFT ||
+                         sizingEdge == WMSZ_TOPRIGHT;
+    const bool bottomEdge = sizingEdge == WMSZ_BOTTOM || sizingEdge == WMSZ_BOTTOMLEFT ||
+                            sizingEdge == WMSZ_BOTTOMRIGHT;
+    const bool verticalEdge = sizingEdge == WMSZ_TOP || sizingEdge == WMSZ_BOTTOM;
+
+    if (horizontalEdge) {
+        // 拖动左右边或角点时保留用户给出的宽度，用高度收敛到最小比例。
+        const int newClientHeight = std::max(
+            1, static_cast<int>(std::lround(clientWidth / minClientAspectRatio)));
+        const int newOuterHeight = newClientHeight + frameHeight;
+        if (topEdge)
+            proposedRect->top = proposedRect->bottom - newOuterHeight;
+        else if (bottomEdge)
+            proposedRect->bottom = proposedRect->top + newOuterHeight;
+        else {
+            const int center = (proposedRect->top + proposedRect->bottom) / 2;
+            proposedRect->top = center - newOuterHeight / 2;
+            proposedRect->bottom = proposedRect->top + newOuterHeight;
+        }
+    } else if (verticalEdge) {
+        // 只拖动上下边时保持窗口中心不漂移，按高度补足所需宽度。
+        const int newClientWidth = std::max(
+            1, static_cast<int>(std::lround(clientHeight * minClientAspectRatio)));
+        const int newOuterWidth = newClientWidth + frameWidth;
+        const int center = (proposedRect->left + proposedRect->right) / 2;
+        proposedRect->left = center - newOuterWidth / 2;
+        proposedRect->right = proposedRect->left + newOuterWidth;
+    }
+}
 
 FluentDialogSurface::Painter::Painter(ID2D1DCRenderTarget* target, IDWriteFactory* dwrite)
     : target_(target), dwrite_(dwrite) {}

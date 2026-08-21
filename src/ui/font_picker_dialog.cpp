@@ -31,6 +31,8 @@ constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 constexpr float kMinClientWidthDip = 520.0f;
 constexpr float kMinClientHeightDip = 468.0f;
+// 默认客户区为 600×560；最小尺寸更宽，比例下限取两者中较小的设计比例。
+constexpr float kMinClientAspectRatio = 600.0f / 560.0f;
 
 constexpr float kListRowHeight = 32.0f;
 constexpr float kScrollBarWidth = 3.0f;
@@ -43,19 +45,6 @@ constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 14, 16, 18, 20,
 const std::array<const wchar_t*, 4>& styleNames() {
     static const std::array<const wchar_t*, 4> names = {L"常规", L"加粗", L"斜体", L"粗斜体"};
     return names;
-}
-
-void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
-    UINT dpi = GetDpiForWindow(hwnd);
-    if (!dpi)
-        dpi = GetDpiForSystem();
-    float s = fluent::dipScale(dpi);
-    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * s)),
-            static_cast<LONG>(std::lround(kMinClientHeightDip * s))};
-    if (!AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi))
-        return;
-    info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
-    info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
 }
 
 std::wstring lowerOf(const std::wstring& s) {
@@ -996,8 +985,14 @@ struct FontPickerDialog::Impl {
             return 0;
         }
         case WM_GETMINMAXINFO:
-            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
             return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);

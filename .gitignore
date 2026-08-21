@@ -7,3 +7,5 @@ vcpkg_installed/
 *.user 
 .vscode/ 
 Thumbs.db 
+dist/
+installer/prereq/

@@ -31,6 +31,16 @@ constexpr int kAlphaMax = 100;
 
 constexpr float kOptionsWidth = 340.0f;
 constexpr float kPreviewHeight = 96.0f;
+constexpr float kOptionsHeight = 16.0f + 5.0f * fluent::metrics::controlHeight +
+                                 4.0f * fluent::metrics::controlGap + 16.0f;
+constexpr float kMinClientWidthDip = fluent::metrics::pagePadding + kOptionsWidth +
+                                     fluent::metrics::pagePadding;
+constexpr float kMinClientHeightDip = fluent::metrics::pagePadding + 30.0f + 20.0f +
+                                      fluent::metrics::sectionGap + kOptionsHeight +
+                                      fluent::metrics::sectionGap + kPreviewHeight +
+                                      fluent::metrics::sectionGap + fluent::metrics::controlHeight +
+                                      fluent::metrics::pagePadding;
+constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 
 const wchar_t kSampleText[] = L"我是你爸爸，养你这么大";
 
@@ -41,7 +51,7 @@ constexpr float kGlowAlpha = 0.28f;
 constexpr float kOutlineAlpha = 0.50f;
 constexpr float kPlayedRatio = 0.55f;
 
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 const std::array<int, 4> kSwatchIds = {
@@ -505,6 +515,15 @@ struct FontColorDialog::Impl {
             layout();
             surface.invalidate();
             return 0;
+        case WM_GETMINMAXINFO:
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
+            return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
@@ -790,15 +809,8 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
     const UINT dpi = GetDpiForSystem();
     const float s = fluent::dipScale(dpi);
-    const float optionsH = 16.0f + 5.0f * fluent::metrics::controlHeight +
-                           4.0f * fluent::metrics::controlGap + 16.0f;
-    const float clientW = fluent::metrics::pagePadding + kOptionsWidth +
-                          fluent::metrics::pagePadding;
-    const float clientH = fluent::metrics::pagePadding + 30.0f + 20.0f +
-                          fluent::metrics::sectionGap + optionsH +
-                          fluent::metrics::sectionGap + kPreviewHeight +
-                          fluent::metrics::sectionGap + fluent::metrics::controlHeight +
-                          fluent::metrics::pagePadding;
+    const float clientW = kMinClientWidthDip;
+    const float clientH = kMinClientHeightDip;
     RECT rc{0, 0, static_cast<LONG>(std::lround(clientW * s)),
             static_cast<LONG>(std::lround(clientH * s))};
     AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);

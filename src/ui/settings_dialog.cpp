@@ -33,13 +33,16 @@ constexpr int kIdSecondaryOn = 432;
 constexpr int kIdSecondaryType = 433;
 
 constexpr float kWindowW = 760.0f;
-constexpr float kWindowH = 520.0f;
+constexpr float kWindowH = 552.0f;
+constexpr float kMinClientWidthDip = 600.0f;
+constexpr float kMinClientHeightDip = 552.0f;
+constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 constexpr float kNavW = 176.0f;
 constexpr float kRowH = 56.0f;
-constexpr float kRowTallH = 72.0f;
+constexpr float kRowTallH = 96.0f;
 constexpr float kRowGap = 8.0f;
 
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 float estimateRadioWidth(const std::vector<std::wstring>& options) {
@@ -243,8 +246,10 @@ struct SettingsDialog::Impl {
             const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
             if (row.showHint) {
                 row.labelRect = D2D1::RectF(innerX, y + 12.0f, innerX + labelW, y + 34.0f);
-                row.hintRect = D2D1::RectF(innerX, y + rowH - 26.0f,
-                                           innerX + labelW, y + rowH - 8.0f);
+                // 提示可能在窄窗口中换成三行，给它完整的多行高度，避免溢出卡片。
+                const float hintTop = rowH >= kRowTallH ? y + 36.0f : y + rowH - 26.0f;
+                row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
+                                           y + rowH - 8.0f);
             } else {
                 row.labelRect = D2D1::RectF(innerX, y + (rowH - 22.0f) / 2.0f,
                                            innerX + labelW, y + (rowH - 22.0f) / 2.0f + 22.0f);
@@ -640,6 +645,15 @@ struct SettingsDialog::Impl {
             layout();
             surface.invalidate();
             return 0;
+        case WM_GETMINMAXINFO:
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
+            return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
             SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,

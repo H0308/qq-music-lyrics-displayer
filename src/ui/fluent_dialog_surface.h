@@ -13,6 +13,14 @@
 
 namespace fluent {
 
+// 为普通顶层窗口设置按客户区 DIP 计算的最小外框尺寸。
+void setDialogMinimumTrackSize(HWND hwnd, MINMAXINFO* info, DWORD style, DWORD exStyle,
+                               float minClientWidthDip, float minClientHeightDip);
+
+// 在 WM_SIZING 中保持客户区不低于指定的宽高比，避免可调整窗口被拉成长条。
+void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* proposedRect,
+                                     float minClientAspectRatio);
+
 // 普通顶层 Fluent 窗口共用的单表面绘制宿主。
 // 它只负责把一次 WM_PAINT 绑定到 D2D、处理 DIP 换算和资源生命周期；
 // 页面布局、命中测试和业务命令仍由各自的窗口实现。

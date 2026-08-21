@@ -1,6 +1,7 @@
 #include "color_picker_dialog.h"
 
 #include "ui/fluent_controls.h"
+#include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "resource.h"
 
@@ -19,6 +20,8 @@ constexpr int kIdOk = 304;
 constexpr int kIdCancel = 305;
 constexpr int kIdTitleLabel = 306;
 constexpr int kIdSubtitleLabel = 307;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 // HSV(h: 0-360, s/v: 0-1) <-> RGB
 void hsvToRgb(float h, float s, float v, float& r, float& g, float& b) {
@@ -311,6 +314,17 @@ private:
     bool focused_ = false;
 };
 
+constexpr float kMinClientWidthDip = fluent::metrics::pagePadding + ColorCanvas::kSvSize +
+                                     ColorCanvas::kGap + ColorCanvas::kHueW +
+                                     fluent::metrics::pagePadding;
+constexpr float kMinClientHeightDip = fluent::metrics::pagePadding + 28.0f + 20.0f +
+                                      fluent::metrics::sectionGap + ColorCanvas::kSvSize +
+                                      ColorCanvas::kGap + ColorCanvas::kSwatchH +
+                                      fluent::metrics::controlGap + fluent::metrics::controlHeight +
+                                      fluent::metrics::controlGap + fluent::metrics::controlHeight +
+                                      fluent::metrics::pagePadding;
+constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
+
 } // namespace
 
 struct ColorPickerDialog::Impl {
@@ -366,6 +380,15 @@ struct ColorPickerDialog::Impl {
         case WM_SIZE:
             layout();
             return 0;
+        case WM_GETMINMAXINFO:
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
+            return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, true);
@@ -512,17 +535,11 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
     UINT dpi = GetDpiForSystem();
     float s = fluent::dipScale(dpi);
     // 期望的客户区尺寸（DIP），按标题栏等边框反推整个窗口尺寸，否则底部控件被裁掉
-    float clientW = fluent::metrics::pagePadding + ColorCanvas::kSvSize + ColorCanvas::kGap +
-                    ColorCanvas::kHueW + fluent::metrics::pagePadding;
-    float clientH = fluent::metrics::pagePadding + 28.0f + 20.0f + fluent::metrics::sectionGap +
-                    ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kSwatchH +
-                    fluent::metrics::controlGap +
-                    fluent::metrics::controlHeight + fluent::metrics::controlGap +
-                    fluent::metrics::controlHeight + fluent::metrics::pagePadding;
+    const float clientW = kMinClientWidthDip;
+    const float clientH = kMinClientHeightDip;
     RECT rc{0, 0, static_cast<LONG>(std::lround(clientW * s)),
             static_cast<LONG>(std::lround(clientH * s))};
-    AdjustWindowRectExForDpi(&rc, WS_CAPTION | WS_SYSMENU, FALSE,
-                             WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, dpi);
+    AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     int x = work.left + ((work.right - work.left) - w) / 2;
@@ -531,9 +548,9 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
     x += static_cast<int>(cascadeIndex * 28 * s);
     y += static_cast<int>(cascadeIndex * 28 * s);
 
-    impl_->hwnd = CreateWindowExW(WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE,
+    impl_->hwnd = CreateWindowExW(kDialogExStyle,
                                   L"QQMusicLyricColorPicker", title ? title : L"选择颜色",
-                                  WS_CAPTION | WS_SYSMENU | WS_VISIBLE, x, y, w, h, nullptr,
+                                  kDialogStyle | WS_VISIBLE, x, y, w, h, nullptr,
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;

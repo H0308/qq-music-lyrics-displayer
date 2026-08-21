@@ -32,6 +32,7 @@ constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 constexpr float kMinClientWidthDip = 520.0f;
 constexpr float kMinClientHeightDip = 504.0f;
+constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 
 constexpr float kCandidateHeaderHeight = 28.0f;
 constexpr float kCandidateRowHeight = 40.0f;
@@ -63,19 +64,6 @@ void discardPendingResults(HWND hwnd) {
     MSG msg{};
     while (PeekMessageW(&msg, hwnd, kMsgCandidatesReady, kMsgPreviewLyricReady, PM_REMOVE))
         releaseResultPayload(msg);
-}
-
-void setMinimumTrackSize(HWND hwnd, MINMAXINFO* info) {
-    UINT dpi = GetDpiForWindow(hwnd);
-    if (!dpi)
-        dpi = GetDpiForSystem();
-    const float scale = fluent::dipScale(dpi);
-    RECT rc{0, 0, static_cast<LONG>(std::lround(kMinClientWidthDip * scale)),
-            static_cast<LONG>(std::lround(kMinClientHeightDip * scale))};
-    if (!AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi))
-        return;
-    info->ptMinTrackSize.x = std::max(info->ptMinTrackSize.x, rc.right - rc.left);
-    info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
 }
 
 struct ScrollBarGeometry {
@@ -1306,8 +1294,14 @@ struct ManualSearchDialog::Impl {
             return 0;
         }
         case WM_GETMINMAXINFO:
-            setMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp));
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
+                                               kDialogStyle, kDialogExStyle,
+                                               kMinClientWidthDip, kMinClientHeightDip);
             return 0;
+        case WM_SIZING:
+            fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
+                                                     kMinClientAspectRatio);
+            return TRUE;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
