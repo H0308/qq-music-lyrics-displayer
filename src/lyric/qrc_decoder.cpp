@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <iterator>
 #include <sstream>
 
 #include <windows.h>
@@ -74,6 +76,55 @@ bool inflateQrc(const std::vector<unsigned char>& compressed, std::string& out) 
     }
     inflateEnd(&stream);
     return result == Z_STREAM_END && !out.empty();
+}
+
+// QQ 客户端本地 QRC 外层使用固定 8x7 掩码表，并在每个 0x8000 字节边界
+// 跳过一个掩码位置；解掩码后首行通常为 [offset:0]。
+std::vector<unsigned char> unmaskLocalQmc(const std::vector<unsigned char>& input) {
+    constexpr unsigned char kMaskSeed[8][7] = {
+        {0x4a, 0xd6, 0xca, 0x90, 0x67, 0xf7, 0x52},
+        {0x5e, 0x95, 0x23, 0x9f, 0x13, 0x11, 0x7e},
+        {0x47, 0x74, 0x3d, 0x90, 0xaa, 0x3f, 0x51},
+        {0xc6, 0x09, 0xd5, 0x9f, 0xfa, 0x66, 0xf9},
+        {0xf3, 0xd6, 0xa1, 0x90, 0xa0, 0xf7, 0xf0},
+        {0x1d, 0x95, 0xde, 0x9f, 0x84, 0x11, 0xf4},
+        {0x0e, 0x74, 0xbb, 0x90, 0xbc, 0x3f, 0x92},
+        {0x00, 0x09, 0x5b, 0x9f, 0x62, 0x66, 0xa1},
+    };
+
+    int x = -1;
+    int y = 8;
+    int dx = 1;
+    int64_t index = -1;
+    auto nextMask = [&]() -> unsigned char {
+        unsigned char mask = 0;
+        if (x < 0) {
+            dx = 1;
+            y = (8 - y) % 8;
+            mask = 0xc3;
+        } else if (x > 6) {
+            dx = -1;
+            y = 7 - y;
+            mask = 0xd8;
+        } else {
+            mask = kMaskSeed[y][x];
+        }
+        x += dx;
+        return mask;
+    };
+
+    std::vector<unsigned char> output;
+    output.reserve(input.size());
+    for (unsigned char value : input) {
+        ++index;
+        unsigned char mask = nextMask();
+        if (index == 0x8000 || (index > 0x8000 && (index + 1) % 0x8000 == 0)) {
+            ++index;
+            mask = nextMask();
+        }
+        output.push_back(static_cast<unsigned char>(value ^ mask));
+    }
+    return output;
 }
 
 void replaceAll(std::string& text, const std::string& from, const std::string& to) {
@@ -187,4 +238,41 @@ bool decodeQrcLyrics(const std::string& encryptedHex, std::vector<LyricLine>& ou
     }
     std::string unwrapped = unwrapLyricContent(std::move(content));
     return parseQrc(unwrapped, out);
+}
+
+bool decodeLocalQrcText(const std::filesystem::path& path, std::string& out) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+        return false;
+
+    const std::vector<char> bytes((std::istreambuf_iterator<char>(file)),
+                                  std::istreambuf_iterator<char>());
+    if (bytes.empty())
+        return false;
+    std::vector<unsigned char> raw(bytes.begin(), bytes.end());
+
+    const std::vector<unsigned char> unmasked = unmaskLocalQmc(raw);
+    const std::string unmaskedText(unmasked.begin(), unmasked.end());
+    size_t bodyOffset = 0;
+    if (unmaskedText.rfind("[offset:", 0) == 0) {
+        const size_t newline = unmaskedText.find('\n');
+        if (newline == std::string::npos)
+            return false;
+        bodyOffset = newline + 1;
+    }
+    if (bodyOffset >= unmasked.size())
+        return false;
+
+    std::vector<unsigned char> encrypted(unmasked.begin() + bodyOffset, unmasked.end());
+    std::vector<unsigned char> decrypted;
+    std::string content;
+    if (!decryptQrcDes(encrypted, decrypted) || !inflateQrc(decrypted, content))
+        return false;
+
+    out = unwrapLyricContent(std::move(content));
+    return !out.empty();
+}
+
+bool parseQrcLyricsText(const std::string& content, std::vector<LyricLine>& out) {
+    return parseQrc(content, out);
 }

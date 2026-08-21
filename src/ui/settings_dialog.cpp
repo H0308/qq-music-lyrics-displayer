@@ -31,6 +31,8 @@ constexpr int kIdDoubleLine = 430;
 constexpr int kIdAlignment = 431;
 constexpr int kIdSecondaryOn = 432;
 constexpr int kIdSecondaryType = 433;
+constexpr int kIdQqLocalLyricsEnabled = 434;
+constexpr int kIdQqLocalLyricsPath = 435;
 
 constexpr float kWindowW = 760.0f;
 constexpr float kWindowH = 552.0f;
@@ -207,6 +209,13 @@ struct SettingsDialog::Impl {
                  {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
                  state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
+        addToggle(2, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
+                  state.qqLocalLyricsEnabled);
+        const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
+                                                ? std::wstring(L"未配置")
+                                                : state.qqLocalLyricsPath;
+        addButton(2, kIdQqLocalLyricsPath, L"本地歌词目录", localPathHint.c_str(),
+                  L"选择文件夹…");
     }
 
     void layout() {
@@ -573,6 +582,15 @@ struct SettingsDialog::Impl {
             if (actions.onPreferRomanization)
                 actions.onPreferRomanization(row->selected == 1);
             break;
+        case kIdQqLocalLyricsEnabled:
+            row->checked = !row->checked;
+            if (actions.onQqLocalLyricsEnabled)
+                actions.onQqLocalLyricsEnabled(row->checked);
+            break;
+        case kIdQqLocalLyricsPath:
+            if (actions.onPickQqLocalLyricsPath)
+                actions.onPickQqLocalLyricsPath();
+            break;
         }
         if (hwnd)
             surface.invalidate();
@@ -617,6 +635,14 @@ struct SettingsDialog::Impl {
             row->height = row->showHint ? kRowTallH : kRowH;
             row->selected = s.preferRomanization ? 1 : 0;
             row->enabled = s.secondaryEnabled && s.secondaryAvailability == 0;
+        }
+        if (auto* row = findRow(kIdQqLocalLyricsEnabled))
+            row->checked = s.qqLocalLyricsEnabled;
+        if (auto* row = findRow(kIdQqLocalLyricsPath)) {
+            row->hint = s.qqLocalLyricsPath.empty() ? std::wstring(L"未配置")
+                                                    : s.qqLocalLyricsPath;
+            row->showHint = true;
+            row->height = kRowH;
         }
         layout();
         surface.invalidate();
