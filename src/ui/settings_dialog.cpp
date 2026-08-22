@@ -46,6 +46,10 @@ constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip
 constexpr float kNavW = 176.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
+constexpr float kHintTopOffset = 36.0f;
+constexpr float kHintBottomPadding = 8.0f;
+constexpr float kHintTextSize = 12.0f;
+constexpr float kHintMeasureHeight = 10000.0f;
 constexpr float kRowGap = 8.0f;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
@@ -85,6 +89,7 @@ struct SettingsDialog::Impl {
         bool enabled = true;
         int selected = -1;
         float controlW = 0.0f;
+        float minHeight = kRowH;
         float height = kRowH;
         D2D1_RECT_F cardRect{};
         D2D1_RECT_F labelRect{};
@@ -171,6 +176,7 @@ struct SettingsDialog::Impl {
         row.hint = hint ? hint : L"";
         row.showHint = !row.hint.empty();
         row.controlW = controlW;
+        row.minHeight = height;
         row.height = height;
         rows[page].push_back(std::move(row));
         return rows[page].back();
@@ -272,7 +278,7 @@ struct SettingsDialog::Impl {
         addToggle(0, kIdSpectrum, L"频谱", state.spectrumOn);
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
-                 L"内嵌控件保持当前样式；媒体卡片在任务栏外展开，歌词保持显示",
+                 L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
                  {L"内嵌控件", L"媒体卡片"}, state.hoverControlStyle, state.hoverControls,
                  kRowTallH);
         addRadio(0, kIdMediaPopupBackground, L"媒体卡片背景",
@@ -313,6 +319,45 @@ struct SettingsDialog::Impl {
         Row& localPath = addButton(2, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
+    }
+
+    float measureHintHeight(fluent::FluentDialogSurface::Painter& painter,
+                            const Row& row) const {
+        if (!row.showHint || row.hint.empty())
+            return 0.0f;
+
+        const float width = row.hintRect.right - row.hintRect.left;
+        if (width <= 0.0f)
+            return 0.0f;
+
+        auto* format = painter.textFormat(kHintTextSize, 400);
+        auto* textLayout = painter.textLayout(row.hint, format, width, kHintMeasureHeight);
+        if (!textLayout)
+            return 0.0f;
+
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(textLayout->GetMetrics(&metrics)))
+            return 0.0f;
+        return static_cast<float>(std::ceil(std::max(0.0f, metrics.height)));
+    }
+
+    void updateHintHeights(fluent::FluentDialogSurface::Painter& painter) {
+        bool changed = false;
+        for (auto& row : rows[activePage]) {
+            float requiredHeight = row.minHeight;
+            if (row.showHint && !row.hint.empty()) {
+                const float hintHeight = measureHintHeight(painter, row);
+                if (hintHeight > 0.0f)
+                    requiredHeight = std::max(
+                        requiredHeight, kHintTopOffset + hintHeight + kHintBottomPadding);
+            }
+            if (std::fabs(row.height - requiredHeight) > 0.5f) {
+                row.height = requiredHeight;
+                changed = true;
+            }
+        }
+        if (changed)
+            layout();
     }
 
     void layout() {
@@ -369,8 +414,8 @@ struct SettingsDialog::Impl {
             const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
             if (row.showHint) {
                 row.labelRect = D2D1::RectF(innerX, y + 12.0f, innerX + labelW, y + 34.0f);
-                // 提示可能在窄窗口中换成三行，给它完整的多行高度，避免溢出卡片。
-                const float hintTop = rowH >= kRowTallH ? y + 36.0f : y + rowH - 26.0f;
+                // 提示区域跟随行高扩展，避免多行小字继续绘制到下一张卡片。
+                const float hintTop = y + kHintTopOffset;
                 row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
                                            y + rowH - 8.0f);
             } else {
@@ -564,6 +609,7 @@ struct SettingsDialog::Impl {
     }
 
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
+        updateHintHeights(painter);
         const auto& p = fluent::palette();
         drawNav(painter);
         painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
@@ -785,7 +831,8 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdPickFont)) {
             row->hint = s.fontDesc;
             row->showHint = !row->hint.empty();
-            row->height = kRowH;
+            row->minHeight = kRowH;
+            row->height = row->minHeight;
         }
         if (auto* row = findRow(kIdFollowAlbum))
             row->checked = s.followAlbum;
@@ -800,7 +847,8 @@ struct SettingsDialog::Impl {
                             ? L"正在检查翻译和罗马音…"
                             : s.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音" : L"";
             row->showHint = !row->hint.empty();
-            row->height = row->showHint ? kRowTallH : kRowH;
+            row->minHeight = row->showHint ? kRowTallH : kRowH;
+            row->height = row->minHeight;
             row->selected = s.preferRomanization ? 1 : 0;
             row->enabled = s.secondaryEnabled && s.secondaryAvailability == 0;
         }
@@ -814,7 +862,8 @@ struct SettingsDialog::Impl {
             row->hint = s.qqLocalLyricsPath.empty() ? std::wstring(L"未配置")
                                                     : s.qqLocalLyricsPath;
             row->showHint = true;
-            row->height = kRowTallH;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
             row->enabled = s.qqLocalLyricsEnabled;
         }
         layout();
@@ -826,7 +875,8 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdPickFont)) {
             row->hint = description;
             row->showHint = !description.empty();
-            row->height = kRowH;
+            row->minHeight = kRowH;
+            row->height = row->minHeight;
             layout();
             surface.invalidate();
         }
