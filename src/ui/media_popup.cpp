@@ -183,6 +183,7 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushText = nullptr;
     ID2D1SolidColorBrush* brushSecondary = nullptr;
     ID2D1SolidColorBrush* brushDisabled = nullptr;
+    ID2D1SolidColorBrush* brushProgressTrack = nullptr;
     ID2D1SolidColorBrush* brushControl = nullptr;
     ID2D1SolidColorBrush* brushControlHover = nullptr;
     ID2D1SolidColorBrush* brushControlPressed = nullptr;
@@ -285,6 +286,7 @@ struct MediaPopup::Impl {
         releaseBrush(brushText);
         releaseBrush(brushSecondary);
         releaseBrush(brushDisabled);
+        releaseBrush(brushProgressTrack);
         releaseBrush(brushControl);
         releaseBrush(brushControlHover);
         releaseBrush(brushControlPressed);
@@ -355,6 +357,7 @@ struct MediaPopup::Impl {
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
             FAILED(rt->CreateSolidColorBrush(p.textSecondary, &brushSecondary)) ||
             FAILED(rt->CreateSolidColorBrush(p.disabled, &brushDisabled)) ||
+            FAILED(rt->CreateSolidColorBrush(p.separator, &brushProgressTrack)) ||
             FAILED(rt->CreateSolidColorBrush(p.controlFill, &brushControl)) ||
             FAILED(rt->CreateSolidColorBrush(p.controlHover, &brushControlHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.controlPressed, &brushControlPressed)) ||
@@ -792,7 +795,7 @@ struct MediaPopup::Impl {
     }
 
     void drawProgress(ID2D1DeviceContext* rt, float w) {
-        if (!rt || !brushControl || !brushAccent || !brushSecondary || !fmtSource ||
+        if (!rt || !brushProgressTrack || !brushAccent || !brushSecondary || !fmtSource ||
             !fmtTimeRight)
             return;
 
@@ -801,7 +804,7 @@ struct MediaPopup::Impl {
         const float trackTop = 148.0f;
         const float trackBottom = 152.0f;
         const D2D1_RECT_F track = D2D1::RectF(left, trackTop, right, trackBottom);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(track, 2.0f, 2.0f), brushControl);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(track, 2.0f, 2.0f), brushProgressTrack);
 
         const int64_t displayPositionMs =
             media.durationMs > 0
