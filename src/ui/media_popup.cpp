@@ -37,7 +37,7 @@ constexpr UINT kCloseAnimationMs = 140;
 constexpr UINT kScrollTimerMs = 32;
 
 constexpr float kPopupWidthDip = 384.0f;
-constexpr float kPopupHeightDip = 176.0f;
+constexpr float kPopupHeightDip = 208.0f;
 constexpr float kPopupGapDip = 8.0f;
 constexpr float kPopupCornerDip = 12.0f;
 constexpr float kCoverSizeDip = 80.0f;
@@ -115,6 +115,28 @@ std::wstring sourceLabel(const std::wstring& source) {
     return L"音乐播放器";
 }
 
+std::wstring formatPlaybackTime(int64_t milliseconds) {
+    const int64_t totalSeconds = std::max<int64_t>(milliseconds, 0) / 1000;
+    const int64_t hours = totalSeconds / 3600;
+    const int64_t minutes = (totalSeconds / 60) % 60;
+    const int64_t seconds = totalSeconds % 60;
+    auto twoDigits = [](int64_t value) {
+        std::wstring text = std::to_wstring(value);
+        if (text.size() < 2)
+            text.insert(text.begin(), L'0');
+        return text;
+    };
+
+    if (hours > 0)
+        return std::to_wstring(hours) + L":" + twoDigits(minutes) + L":" +
+               twoDigits(seconds);
+    return twoDigits(totalSeconds / 60) + L":" + twoDigits(seconds);
+}
+
+std::wstring formatPlaybackDuration(int64_t milliseconds) {
+    return milliseconds > 0 ? formatPlaybackTime(milliseconds) : L"--:--";
+}
+
 } // namespace
 
 struct MediaPopup::Impl {
@@ -152,6 +174,7 @@ struct MediaPopup::Impl {
     int pressedButton = -1;
     std::function<void(MediaControl)> onControl;
     OverlayMediaInfo media;
+    int64_t positionMs = 0;
 
     DCompRenderer renderer;
     ID2D1SolidColorBrush* brushShadow = nullptr;
@@ -168,6 +191,7 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushTextOnAccent = nullptr;
 
     IDWriteTextFormat* fmtSource = nullptr;
+    IDWriteTextFormat* fmtTimeRight = nullptr;
     IDWriteTextFormat* fmtTitle = nullptr;
     IDWriteTextFormat* fmtArtist = nullptr;
     IDWriteTextFormat* fmtIcon = nullptr;
@@ -268,6 +292,7 @@ struct MediaPopup::Impl {
         releaseBrush(brushAccentHover);
         releaseBrush(brushTextOnAccent);
         releaseFormat(fmtSource);
+        releaseFormat(fmtTimeRight);
         releaseFormat(fmtTitle);
         releaseFormat(fmtArtist);
         releaseFormat(fmtIcon);
@@ -337,9 +362,14 @@ struct MediaPopup::Impl {
             FAILED(rt->CreateSolidColorBrush(p.accentHover, &brushAccentHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.textOnAccent, &brushTextOnAccent)) ||
             !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtSource) ||
+            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtTimeRight) ||
             !createTextFormat(16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtTitle) ||
             !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtArtist) ||
             !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIcon)) {
+            releaseDrawingResources();
+            return false;
+        }
+        if (FAILED(fmtTimeRight->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING))) {
             releaseDrawingResources();
             return false;
         }
@@ -761,6 +791,44 @@ struct MediaPopup::Impl {
                  D2D1::RectF(42.0f, 12.0f, 200.0f, 34.0f), brushText);
     }
 
+    void drawProgress(ID2D1DeviceContext* rt, float w) {
+        if (!rt || !brushControl || !brushAccent || !brushSecondary || !fmtSource ||
+            !fmtTimeRight)
+            return;
+
+        const float left = 16.0f;
+        const float right = std::max(left + 1.0f, w - 16.0f);
+        const float trackTop = 148.0f;
+        const float trackBottom = 152.0f;
+        const D2D1_RECT_F track = D2D1::RectF(left, trackTop, right, trackBottom);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(track, 2.0f, 2.0f), brushControl);
+
+        const int64_t displayPositionMs =
+            media.durationMs > 0
+                ? std::clamp(positionMs, int64_t{0}, media.durationMs)
+                : std::max<int64_t>(positionMs, 0);
+        if (media.durationMs > 0) {
+            const float fraction = static_cast<float>(
+                static_cast<double>(displayPositionMs) / static_cast<double>(media.durationMs));
+            const float fillRight = left + (right - left) * fraction;
+            if (fillRight > left)
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(left, trackTop, fillRight, trackBottom),
+                                      2.0f, 2.0f),
+                    brushAccent);
+        }
+
+        const float timeTop = 126.0f;
+        const float timeBottom = 144.0f;
+        constexpr float kTimeLabelWidth = 72.0f;
+        drawText(rt, formatPlaybackTime(displayPositionMs), fmtSource,
+                 D2D1::RectF(left, timeTop, left + kTimeLabelWidth, timeBottom),
+                 brushSecondary);
+        drawText(rt, formatPlaybackDuration(media.durationMs), fmtTimeRight,
+                 D2D1::RectF(right - kTimeLabelWidth, timeTop, right, timeBottom),
+                 brushSecondary);
+    }
+
     bool buttonEnabled(int index) const {
         if (!available)
             return false;
@@ -831,12 +899,12 @@ struct MediaPopup::Impl {
         const float cardH = kPopupHeightDip;
         const float infoW = textAreaWidth(w);
         updateScrollTimer(infoW);
-        buttonRects[0] = D2D1::RectF(w * 0.5f - 102.0f, cardOriginDip + 126.0f,
-                                     w * 0.5f - 66.0f, cardOriginDip + 162.0f);
-        buttonRects[1] = D2D1::RectF(w * 0.5f - 20.0f, cardOriginDip + 124.0f,
-                                     w * 0.5f + 20.0f, cardOriginDip + 164.0f);
-        buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, cardOriginDip + 126.0f,
-                                     w * 0.5f + 102.0f, cardOriginDip + 162.0f);
+        buttonRects[0] = D2D1::RectF(w * 0.5f - 102.0f, cardOriginDip + 164.0f,
+                                     w * 0.5f - 66.0f, cardOriginDip + 200.0f);
+        buttonRects[1] = D2D1::RectF(w * 0.5f - 20.0f, cardOriginDip + 162.0f,
+                                     w * 0.5f + 20.0f, cardOriginDip + 202.0f);
+        buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, cardOriginDip + 164.0f,
+                                     w * 0.5f + 102.0f, cardOriginDip + 200.0f);
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -869,6 +937,7 @@ struct MediaPopup::Impl {
                           D2D1::RectF(kPopupTextLeftDip, 78.0f, w - kPopupTextRightPaddingDip,
                                       102.0f),
                           artistScrollOffset, brushSecondary);
+        drawProgress(rt, w);
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i);
 
@@ -1277,6 +1346,7 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
     const bool changed = coverChanged || info.title != impl_->media.title ||
                          info.artist != impl_->media.artist ||
                          sourceChanged ||
+                         info.durationMs != impl_->media.durationMs ||
                          info.canPrev != impl_->media.canPrev ||
                          info.canPlayPause != impl_->media.canPlayPause ||
                          info.canNext != impl_->media.canNext ||
@@ -1305,6 +1375,15 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
     }
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+}
+
+void MediaPopup::setProgress(int64_t positionMs) {
+    const int64_t nextPositionMs = std::max<int64_t>(positionMs, 0);
+    if (impl_->positionMs == nextPositionMs)
+        return;
+    impl_->positionMs = nextPositionMs;
+    if (impl_->popupVisible)
+        impl_->renderOrDefer();
 }
 
 void MediaPopup::setAnchor(HWND anchor) {

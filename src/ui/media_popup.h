@@ -24,6 +24,7 @@ public:
     void setEnabled(bool enabled);
     void setBackgroundMode(MediaPopupBackground mode);
     void setMedia(const OverlayMediaInfo& info, bool available);
+    void setProgress(int64_t positionMs);
     void setAnchor(HWND anchor);
 
     void onAnchorEnter();

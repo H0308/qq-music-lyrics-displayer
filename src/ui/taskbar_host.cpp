@@ -456,6 +456,7 @@ struct TaskbarHost::Impl {
                                info.canNext != media.canNext;
         bool playingChanged = info.playing != media.playing;
         bool platformChanged = info.sourceAppUserModelId != media.sourceAppUserModelId;
+        bool durationChanged = info.durationMs != media.durationMs;
         media = info;
         if (thumbChanged)
             coverDirty = true;
@@ -467,7 +468,8 @@ struct TaskbarHost::Impl {
             songInfoDirty_ = true;
         if (thumbChanged || textChanged || playingChanged)
             vinylTickMs_ = monotonicNowMs();
-        return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged;
+        return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged ||
+               durationChanged;
     }
 
     // ---------- 窗口创建与定位 ----------
@@ -946,6 +948,7 @@ struct TaskbarHost::Impl {
             if (!patch.playing)
                 karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
         }
+        mediaPopup.setProgress(patch.actualPositionMs);
         if (media.playing != patch.playing) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
@@ -983,6 +986,7 @@ struct TaskbarHost::Impl {
         const bool wasVisible = visible;
         const bool mediaChanged = updateMediaInfo(frame.media);
         mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2);
+        mediaPopup.setProgress(frame.actualPositionMs);
 
         frameRevision_ = frame.frameRevision;
         requestGeneration_ = frame.requestGeneration;
@@ -3213,6 +3217,7 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
     impl_->mediaPopup.setMedia(info, impl_->sessionVisible_ && impl_->renderMode_ != 2);
+    impl_->mediaPopup.setProgress(impl_->positionMs_);
     if (impl_->updateMediaInfo(info))
         impl_->render();
 }

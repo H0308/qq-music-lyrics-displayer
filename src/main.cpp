@@ -522,6 +522,8 @@ struct App {
             mi.thumbnail = lastSmtcThumbnail;
         else
             mi.thumbnail = lastCover_;
+        // QQ 切歌时旧时间线会暂时残留，不能把上一首的总时长带进媒体卡片。
+        mi.durationMs = !snap.timelineStale && snap.durationMs > 0 ? snap.durationMs : 0;
         mi.canPrev = snap.canPrev;
         mi.canPlayPause = snap.canPlayPause;
         mi.canNext = snap.canNext;
