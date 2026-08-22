@@ -3093,6 +3093,8 @@ struct TaskbarHost::Impl {
         float lyricAreaW =
             std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
         const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
+        // 普通横向歌词只在播放中推进；暂停时保留偏移，恢复播放后从原位置继续。
+        const bool lyricMarqueePlaying = media.playing;
 
         if (songInfoVisible_) {
             marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
@@ -3130,10 +3132,10 @@ struct TaskbarHost::Impl {
                 lyricScrollOffset_ = 0.0f;
                 animating = true;
             }
-        } else if (!holdLyricScroll) {
+        } else if (lyricMarqueePlaying && !holdLyricScroll) {
             marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
         }
-        if (!holdLyricScroll)
+        if (lyricMarqueePlaying && !holdLyricScroll)
             marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
         scrollAnimating_ = animating;
     }
