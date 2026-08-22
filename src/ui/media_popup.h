@@ -21,6 +21,7 @@ public:
     void destroy();
 
     void setControlCallback(std::function<void(MediaControl)> cb);
+    void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setEnabled(bool enabled);
     void setBackgroundMode(MediaPopupBackground mode);
     void setMedia(const OverlayMediaInfo& info, bool available);

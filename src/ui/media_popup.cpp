@@ -172,7 +172,10 @@ struct MediaPopup::Impl {
 
     int hoverButton = -1;
     int pressedButton = -1;
+    bool pressedSource = false;
+    std::wstring pressedSourceAppUserModelId;
     std::function<void(MediaControl)> onControl;
+    std::function<void(const std::wstring&)> onSourceOpen;
     OverlayMediaInfo media;
     int64_t positionMs = 0;
 
@@ -1023,6 +1026,16 @@ struct MediaPopup::Impl {
         return -1;
     }
 
+    bool hitSource(float x, float y) const {
+        if (!available || media.sourceAppUserModelId.empty())
+            return false;
+        // 与 drawSource 的顶部来源行保持同一块可点击区域，给图标和名称都留出
+        // 一点点击余量，但不侵入下面的封面和歌曲标题区域。
+        return contains(D2D1::RectF(8.0f, cardOriginDip + 8.0f, 220.0f,
+                                     cardOriginDip + 40.0f),
+                        x, y);
+    }
+
     void trackMouseLeave() {
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme);
@@ -1142,6 +1155,16 @@ struct MediaPopup::Impl {
         switch (msg) {
         case WM_CREATE:
             return 0;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT) {
+                POINT point{};
+                if (GetCursorPos(&point) && ScreenToClient(hwnd, &point) &&
+                    hitSource(dip(point.x), dip(point.y))) {
+                    SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_MOUSEMOVE: {
             onPopupEnter();
             const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
@@ -1157,8 +1180,12 @@ struct MediaPopup::Impl {
             renderOrDefer();
             return 0;
         case WM_LBUTTONDOWN: {
-            const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
-            if (button >= 0) {
+            const float x = dip(GET_X_LPARAM(lp));
+            const float y = dip(GET_Y_LPARAM(lp));
+            pressedSource = hitSource(x, y);
+            pressedSourceAppUserModelId = pressedSource ? media.sourceAppUserModelId : L"";
+            const int button = pressedSource ? -1 : hitButton(x, y);
+            if (pressedSource || button >= 0) {
                 pressedButton = button;
                 SetCapture(hwnd);
                 renderOrDefer();
@@ -1166,18 +1193,32 @@ struct MediaPopup::Impl {
             return 0;
         }
         case WM_LBUTTONUP: {
-            const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
+            const float x = dip(GET_X_LPARAM(lp));
+            const float y = dip(GET_Y_LPARAM(lp));
+            const bool source = hitSource(x, y);
+            const int button = source ? -1 : hitButton(x, y);
             const int pressed = pressedButton;
+            const bool sourcePressed = pressedSource;
+            std::wstring sourceId = std::move(pressedSourceAppUserModelId);
             pressedButton = -1;
+            pressedSource = false;
+            pressedSourceAppUserModelId.clear();
             if (GetCapture() == hwnd)
                 ReleaseCapture();
             renderOrDefer();
-            if (pressed >= 0 && pressed == button && onControl)
+            if (sourcePressed && source && !sourceId.empty() &&
+                sourceId == media.sourceAppUserModelId && onSourceOpen) {
+                hideImmediate();
+                onSourceOpen(sourceId);
+            } else if (pressed >= 0 && pressed == button && onControl) {
                 onControl(static_cast<MediaControl>(pressed));
+            }
             return 0;
         }
         case WM_CAPTURECHANGED:
             pressedButton = -1;
+            pressedSource = false;
+            pressedSourceAppUserModelId.clear();
             renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
@@ -1315,6 +1356,10 @@ void MediaPopup::destroy() {
 
 void MediaPopup::setControlCallback(std::function<void(MediaControl)> cb) {
     impl_->onControl = std::move(cb);
+}
+
+void MediaPopup::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
+    impl_->onSourceOpen = std::move(cb);
 }
 
 void MediaPopup::setEnabled(bool enabled) {

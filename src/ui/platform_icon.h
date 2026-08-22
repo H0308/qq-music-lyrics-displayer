@@ -12,4 +12,7 @@ namespace platform_icon {
 bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
                           std::vector<BYTE>& pixels, UINT& width, UINT& height);
 
+// 激活媒体来源对应的播放器窗口；没有可见实例时再按来源标识启动它。
+bool launchSourceApp(const std::wstring& sourceAppUserModelId);
+
 } // namespace platform_icon

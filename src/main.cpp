@@ -13,6 +13,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_menu.h"
 #include "ui/fluent_theme.h"
+#include "ui/platform_icon.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
 #include "util/dominant_color.h"
@@ -600,6 +601,10 @@ struct App {
         }
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
+        host->setSourceOpenCallback([](const std::wstring& source) {
+            if (!platform_icon::launchSourceApp(source))
+                std::wprintf(L"[player] failed to activate source: %s\n", source.c_str());
+        });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)

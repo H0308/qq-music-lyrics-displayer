@@ -25,7 +25,7 @@ enum class MediaPopupBackground {
 struct OverlayMediaInfo {
     std::wstring title;
     std::wstring artist;
-    std::wstring sourceAppUserModelId; // SMTC 当前来源应用标识，用于平台图标
+    std::wstring sourceAppUserModelId; // SMTC 当前来源应用标识，用于平台图标和打开入口
     std::shared_ptr<const std::vector<uint8_t>> thumbnail; // 专辑封面图片字节
     int64_t durationMs = 0;             // 当前歌曲总时长；未知时为 0
     bool canPrev = false;

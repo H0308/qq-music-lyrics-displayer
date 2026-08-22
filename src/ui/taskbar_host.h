@@ -37,6 +37,7 @@ public:
     void applySpectrumPatch(const SpectrumPatch& patch) override;
     void setMediaInfo(const OverlayMediaInfo& info) override;
     void setControlCallback(std::function<void(MediaControl)> cb) override;
+    void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
 
     const std::vector<LyricLine>& lyrics() const override;
 

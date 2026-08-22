@@ -3,6 +3,7 @@
 #include <objbase.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <tlhelp32.h>
 
 #include <cstring>
@@ -64,18 +65,107 @@ std::wstring findProcessImagePath(const std::wstring& processName) {
     return result;
 }
 
+std::vector<std::wstring> sourceProcessCandidates(const std::wstring& source) {
+    if (source.empty())
+        return {};
+
+    if (_wcsicmp(source.c_str(), L"NeteaseBridge.exe") == 0)
+        return {L"cloudmusic.exe", L"NeteaseBridge.exe"};
+
+    const size_t slash = source.find_last_of(L"\\/");
+    if (slash != std::wstring::npos && slash + 1 < source.size())
+        return {source.substr(slash + 1)};
+    return {source};
+}
+
+DWORD findProcessId(const std::wstring& processName) {
+    if (processName.empty())
+        return 0;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    DWORD result = 0;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, processName.c_str()) == 0) {
+                result = entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+struct WindowSearchContext {
+    DWORD processId = 0;
+    HWND window = nullptr;
+};
+
+BOOL CALLBACK findVisibleProcessWindow(HWND window, LPARAM parameter) {
+    auto* context = reinterpret_cast<WindowSearchContext*>(parameter);
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (!context || processId != context->processId || !IsWindowVisible(window) ||
+        GetWindow(window, GW_OWNER) != nullptr)
+        return TRUE;
+
+    context->window = window;
+    return FALSE;
+}
+
+HWND findProcessWindow(DWORD processId) {
+    if (processId == 0)
+        return nullptr;
+    WindowSearchContext context{processId, nullptr};
+    EnumWindows(findVisibleProcessWindow, reinterpret_cast<LPARAM>(&context));
+    return context.window;
+}
+
+bool activateExistingWindow(DWORD processId) {
+    HWND window = findProcessWindow(processId);
+    if (!window)
+        return false;
+
+    ShowWindow(window, IsIconic(window) ? SW_RESTORE : SW_SHOW);
+    BringWindowToTop(window);
+    SetForegroundWindow(window);
+    return true;
+}
+
+bool executePath(const std::wstring& path) {
+    if (path.empty())
+        return false;
+    const HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr,
+                                           SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
+bool activateAppUserModelId(const std::wstring& appUserModelId) {
+    if (appUserModelId.empty())
+        return false;
+
+    IApplicationActivationManager* manager = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr,
+                                  CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&manager));
+    if (FAILED(hr) || !manager)
+        return false;
+
+    DWORD processId = 0;
+    hr = manager->ActivateApplication(appUserModelId.c_str(), nullptr, AO_NONE, &processId);
+    manager->Release();
+    return SUCCEEDED(hr);
+}
+
 std::wstring resolveSourceIconPath(const std::wstring& sourceAppUserModelId) {
     if (sourceAppUserModelId.empty())
         return {};
 
-    std::vector<std::wstring> candidates;
-    if (_wcsicmp(sourceAppUserModelId.c_str(), L"NeteaseBridge.exe") == 0) {
-        candidates.emplace_back(L"cloudmusic.exe");
-        candidates.emplace_back(L"NeteaseBridge.exe");
-    } else {
-        candidates.push_back(sourceAppUserModelId);
-    }
-    for (const auto& candidate : candidates) {
+    for (const auto& candidate : sourceProcessCandidates(sourceAppUserModelId)) {
         const std::wstring path = findProcessImagePath(candidate);
         if (!path.empty())
             return path;
@@ -203,6 +293,28 @@ bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
     if (shellIcon)
         DestroyIcon(shellIcon);
     return ok;
+}
+
+bool launchSourceApp(const std::wstring& sourceAppUserModelId) {
+    const auto candidates = sourceProcessCandidates(sourceAppUserModelId);
+    for (const auto& candidate : candidates) {
+        const DWORD processId = findProcessId(candidate);
+        if (processId != 0 && activateExistingWindow(processId))
+            return true;
+    }
+
+    // 当前桌面播放器的 SMTC 来源通常是 *.exe；如果它没有可见主窗口，
+    // 仍使用已运行进程的真实路径启动/唤醒单实例程序。
+    for (const auto& candidate : candidates) {
+        if (executePath(findProcessImagePath(candidate)))
+            return true;
+    }
+
+    // 对真正的 AUMID 保留系统激活路径，兼容以后接入的打包播放器。
+    if (activateAppUserModelId(sourceAppUserModelId))
+        return true;
+
+    return executePath(resolveSourceIconPath(sourceAppUserModelId));
 }
 
 } // namespace platform_icon

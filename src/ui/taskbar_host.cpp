@@ -3227,6 +3227,10 @@ void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
     impl_->mediaPopup.setControlCallback(std::move(cb));
 }
 
+void TaskbarHost::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
+    impl_->mediaPopup.setSourceOpenCallback(std::move(cb));
+}
+
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
     return impl_->lines;
 }
