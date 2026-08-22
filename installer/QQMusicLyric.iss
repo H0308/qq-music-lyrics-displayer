@@ -3,7 +3,7 @@
 ; 如果该文件不存在，脚本仍可编译，但生成的安装包要求目标系统已有
 ; Visual C++ x64 Redistributable；正式发布前应补齐该前置依赖。
 
-#define AppVersion "1.6.0"
+#define AppVersion "1.6.1"
 #define BuildDir "..\build\x64-Release"
 #define ProjectDir ExtractFileDir(ExtractFileDir(AddBackslash(SourcePath) + "QQMusicLyric.iss"))
 #define BuildDirPath AddBackslash(ProjectDir) + "build\x64-Release"

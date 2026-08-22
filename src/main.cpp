@@ -264,6 +264,7 @@ struct App {
 
     HWND trayHwnd = nullptr;
     UINT taskbarCreatedMsg_ = 0; // Explorer 重启广播（只有顶层窗口收得到，托盘窗口不能用 HWND_MESSAGE）
+    bool shutdownRequested_ = false;
 
     // 字体状态（作为字体选择器的记忆源）。hasUserFont_ 为 false 时各宿主使用各自的默认字体。
     bool hasUserFont_ = false;
@@ -610,6 +611,13 @@ struct App {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
         taskbarHost.reset();
         updateTrayIcon();
+    }
+
+    void requestQuit() {
+        if (shutdownRequested_)
+            return;
+        shutdownRequested_ = true;
+        PostQuitMessage(0);
     }
 
     void toggleTaskbar() {
@@ -1221,15 +1229,16 @@ bool App::createTrayWindow(HINSTANCE inst) {
 
 void App::destroyTray() {
     if (trayHwnd) {
+        HWND hwnd = trayHwnd;
+        trayHwnd = nullptr;
         // 先关闭可能打开的 Fluent 菜单（其窗口由托盘窗口所有）
         fluent::FluentMenu::dismiss();
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof(nid);
-        nid.hWnd = trayHwnd;
+        nid.hWnd = hwnd;
         nid.uID = kTrayIconId;
         Shell_NotifyIconW(NIM_DELETE, &nid);
-        DestroyWindow(trayHwnd);
-        trayHwnd = nullptr;
+        DestroyWindow(hwnd);
     }
 }
 
@@ -1727,7 +1736,7 @@ void App::onMenuCommand(int cmd) {
         showAbout();
         break;
     case kCmdExit:
-        PostQuitMessage(0);
+        requestQuit();
         break;
     }
 }
@@ -1965,7 +1974,7 @@ bool App::launchUpdateInstaller(const std::wstring& path) {
                                      SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32)
         return false;
-    PostQuitMessage(0);
+    requestQuit();
     return true;
 }
 
@@ -1978,6 +1987,17 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (!app)
         return DefWindowProcW(h, msg, wp, lp);
+    if (msg == WM_QUERYENDSESSION)
+        return TRUE;
+    if (msg == WM_ENDSESSION) {
+        if (wp)
+            app->requestQuit();
+        return 0;
+    }
+    if (msg == WM_CLOSE) {
+        app->requestQuit();
+        return 0;
+    }
     if (msg == WM_TIMER && wp == kTimerLyricDebounce) {
         KillTimer(h, kTimerLyricDebounce);
         app->onLyricDebounce();

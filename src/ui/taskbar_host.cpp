@@ -3364,11 +3364,26 @@ struct TaskbarHost::Impl {
                 onControl(static_cast<MediaControl>(btn));
             return 0;
         }
+        case WM_QUERYENDSESSION:
+            return TRUE;
+        case WM_ENDSESSION:
+            if (wp) {
+                quitting = true;
+                if (hwnd)
+                    DestroyWindow(hwnd);
+            }
+            return 0;
+        case WM_CLOSE:
+            quitting = true;
+            if (hwnd)
+                DestroyWindow(hwnd);
+            return 0;
         case WM_DESTROY:
             std::wprintf(L"[taskbar] WM_DESTROY (visible=%d)\n", visible ? 1 : 0);
             stopFrameTimer();
             stopProbe();
             releaseAll();
+            hwnd = nullptr;
             if (quitting)
                 PostQuitMessage(0);
             return 0;
