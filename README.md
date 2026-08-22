@@ -112,7 +112,7 @@
 
 ## 许可证
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE)
 
 ## 致谢
 
