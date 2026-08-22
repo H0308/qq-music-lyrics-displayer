@@ -667,44 +667,71 @@ struct ManualSearchDialog::Impl {
         }
     }
 
-    float karaokeProgressX(IDWriteTextLayout* layout, const LyricLine& line) const {
+    std::vector<D2D1_RECT_F> karaokeHighlightClips(IDWriteTextLayout* layout,
+                                                   const LyricLine& line) const {
+        std::vector<D2D1_RECT_F> clips;
         if (!layout || line.chars.empty() || line.text.empty())
-            return 0.0f;
-
-        UINT32 sungLength = 0;
-        const LyricChar* currentChar = nullptr;
-        for (const auto& character : line.chars) {
-            if (character.startMs > previewPositionMs)
-                break;
-            currentChar = &character;
-            sungLength += static_cast<UINT32>(character.text.size());
-        }
-        if (!currentChar || sungLength == 0)
-            return 0.0f;
+            return clips;
 
         const UINT32 textLength = static_cast<UINT32>(line.text.size());
-        sungLength = std::min(sungLength, textLength);
-        if (sungLength == 0)
-            return 0.0f;
-        const UINT32 charLength = std::min(static_cast<UINT32>(currentChar->text.size()), sungLength);
-        const UINT32 charOffset = sungLength - charLength;
+        UINT32 textOffset = 0;
+        auto appendClip = [&clips](const DWRITE_HIT_TEST_METRICS& metrics, float width) {
+            if (width <= 0.0f || metrics.height <= 0.0f)
+                return;
+            const D2D1_RECT_F clip =
+                D2D1::RectF(metrics.left, metrics.top, metrics.left + width,
+                             metrics.top + metrics.height);
+            // 同一视觉行的已唱片段合并成一块，避免每个字都 Push/Pop 一次裁剪区域。
+            for (auto& existing : clips) {
+                if (std::fabs(existing.top - clip.top) < 0.5f &&
+                    std::fabs(existing.bottom - clip.bottom) < 0.5f) {
+                    existing.left = std::min(existing.left, clip.left);
+                    existing.right = std::max(existing.right, clip.right);
+                    return;
+                }
+            }
+            clips.push_back(clip);
+        };
 
-        DWRITE_HIT_TEST_METRICS metrics{};
-        float startX = 0.0f;
-        float hitY = 0.0f;
-        if (FAILED(layout->HitTestTextPosition(charOffset, FALSE, &startX, &hitY, &metrics)))
-            return 0.0f;
+        std::vector<DWRITE_HIT_TEST_METRICS> metrics;
+        for (const auto& character : line.chars) {
+            const UINT32 tokenLength = static_cast<UINT32>(character.text.size());
+            if (tokenLength == 0)
+                continue;
+            if (textOffset >= textLength || character.startMs > previewPositionMs)
+                break;
 
-        float endX = startX;
-        if (FAILED(layout->HitTestTextPosition(sungLength - 1, TRUE, &endX, &hitY, &metrics)))
-            endX = startX;
+            const UINT32 rangeLength = std::min(tokenLength, textLength - textOffset);
+            const int64_t durationMs =
+                std::max<int64_t>(character.endMs - character.startMs, 1);
+            const float fraction = static_cast<float>(std::clamp(
+                static_cast<double>(previewPositionMs - character.startMs) /
+                    static_cast<double>(durationMs),
+                0.0, 1.0));
+            if (fraction > 0.0f && rangeLength > 0) {
+                metrics.resize(rangeLength + 1);
+                UINT32 actualCount = 0;
+                if (SUCCEEDED(layout->HitTestTextRange(
+                        textOffset, rangeLength, 0.0f, 0.0f, metrics.data(),
+                        static_cast<UINT32>(metrics.size()), &actualCount))) {
+                    float totalWidth = 0.0f;
+                    for (UINT32 i = 0; i < actualCount; ++i)
+                        totalWidth += std::max(0.0f, metrics[i].width);
 
-        const int64_t durationMs = std::max<int64_t>(currentChar->endMs - currentChar->startMs, 1);
-        const float fraction = static_cast<float>(std::clamp(
-            static_cast<double>(previewPositionMs - currentChar->startMs) /
-                static_cast<double>(durationMs),
-            0.0, 1.0));
-        return startX + (endX - startX) * fraction;
+                    float remainingWidth = totalWidth * fraction;
+                    for (UINT32 i = 0; i < actualCount && remainingWidth > 0.0f; ++i) {
+                        const float metricWidth = std::max(0.0f, metrics[i].width);
+                        if (metricWidth <= 0.0f)
+                            continue;
+                        const float highlightWidth = std::min(metricWidth, remainingWidth);
+                        appendClip(metrics[i], highlightWidth);
+                        remainingWidth -= metricWidth;
+                    }
+                }
+            }
+            textOffset += tokenLength;
+        }
+        return clips;
     }
 
     void drawCurrentLyric(fluent::FluentDialogSurface::Painter& painter, const LyricLine& line,
@@ -726,11 +753,11 @@ struct ManualSearchDialog::Impl {
 
         const D2D1_POINT_2F origin = D2D1::Point2F(rect.left, rect.top);
         painter.drawTextLayout(layout, origin, p.textSecondary);
-        const float progressX = karaokeProgressX(layout, line);
-        if (progressX > 0.0f) {
+        for (const auto& clip : karaokeHighlightClips(layout, line)) {
             painter.target()->PushAxisAlignedClip(
-                D2D1::RectF(rect.left, rect.top,
-                            std::min(rect.left + progressX, rect.right), rect.bottom),
+                D2D1::RectF(rect.left + clip.left, rect.top + clip.top,
+                            std::min(rect.right, rect.left + clip.right),
+                            std::min(rect.bottom, rect.top + clip.bottom)),
                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             painter.drawTextLayout(layout, origin, fluent::toD2D(RGB(49, 194, 124)));
             painter.target()->PopAxisAlignedClip();
