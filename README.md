@@ -85,7 +85,7 @@
 
 > QQ 音乐桌面版（`QQMusic.exe`）需要在 QQ 音乐设置中打开“显示系统媒体传输控件（SMTC）”；网易云音乐桌面版需要先按下方说明安装 BetterNCM 和 InfLink-rs。仅支持 Windows（推荐 Windows 11，频谱功能需 Windows 10 2004 及以上）。
 
-## 网易云音乐适配（Beta）
+## 网易云音乐适配
 
 网易云音乐桌面版需要额外的 SMTC 增强插件才能提供歌曲 ID 和可靠的播放进度。使用网易云音乐前必须安装 BetterNCM 和 InfLink-rs：
 
