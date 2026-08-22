@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <cwchar>
 #include <functional>
 #include <memory>
@@ -43,6 +44,7 @@ constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
 constexpr float kLyricPreviewGap = 3.0f; // 普通双行模式的核心行与下一行间距
 constexpr float kLyricPreviewOpacity = 0.90f; // 下一行预览透明度
+constexpr float kKaraokeScrollFollowMs = 100.0f; // 逐字歌词横向跟随时间常数
 constexpr float kLyricMainFontScale = 1.18f;
 constexpr float kLyricPreviewFontScale = 0.86f;
 constexpr float kLyricPreviewScale = kLyricPreviewFontScale / kLyricMainFontScale;
@@ -456,7 +458,18 @@ struct TaskbarHost::Impl {
     float karaokeProgX_ = 0.0f;      // 本帧实际使用的填充进度（平滑后）
     float karaokeSmoothX_ = 0.0f;    // 平滑状态
     int karaokeSmoothLine_ = -1;     // 平滑状态所属行号
+    bool karaokeEnteringLine_ = false; // 自然转场中的新行从首字平滑追赶真实位置
     ULONGLONG karaokeTick_ = 0;      // 上次平滑步进的时刻
+
+    struct KaraokeSpan {
+        int64_t startMs = 0;
+        int64_t endMs = 0;
+        float startX = 0.0f;
+        float endX = 0.0f;
+    };
+    std::vector<KaraokeSpan> karaokeSpans_;
+    int karaokeGeometryLine_ = -1;
+    const IDWriteTextLayout* karaokeGeometryLayout_ = nullptr;
 
     // 滚动字幕（歌名、歌手、歌词独立滚动）
     float titleWidth_ = 0.0f;
@@ -497,8 +510,10 @@ struct TaskbarHost::Impl {
     float outgoingLyricWidth_ = 0.0f;
     float outgoingLyricHeight_ = 0.0f;
     float outgoingLyricBlockHeight_ = 0.0f;
+    float outgoingLyricScrollOffset_ = 0.0f;
     float outgoingSecondaryWidth_ = 0.0f;
     float outgoingSecondaryHeight_ = 0.0f;
+    float outgoingSecondaryScrollOffset_ = 0.0f;
     float nextLyricWidth_ = 0.0f;
     float nextLyricHeight_ = 0.0f;
     ULONGLONG lyricTransitionStartMs_ = 0;
@@ -580,15 +595,24 @@ struct TaskbarHost::Impl {
     bool scrollAnimating_ = true;
     bool karaokeSettled_ = true;
     // 光晕/描边离屏缓存：glow+outline+本体三层只合成一次，滚动/淡变时做 DrawImage 平移，
-    // 避免每帧对主歌词重复 16+ 次 DrawTextLayout。布局或画刷重建时经 textFxGen_ 失效。
-    ID2D1BitmapRenderTarget* textFxCache_ = nullptr;
-    const IDWriteTextLayout* textFxKey_ = nullptr;
+    // 避免每帧对主歌词重复 16+ 次 DrawTextLayout。双行转场同时绘制旧/新布局，保留两个
+    // 缓存槽，避免两套布局在同一帧互相驱逐。布局、画刷或效果组合变化时经 textFxGen_ 失效。
+    struct TextFxCacheEntry {
+        ID2D1BitmapRenderTarget* target = nullptr;
+        const IDWriteTextLayout* layout = nullptr;
+        ID2D1Brush* brush = nullptr;
+        ID2D1Brush* outline = nullptr;
+        ID2D1Brush* glow = nullptr;
+        uint64_t generation = 0;
+        uint64_t lastUse = 0;
+        UINT dpi = 0;
+        float w = 0.0f;
+        float h = 0.0f;
+        float pad = 0.0f;
+    };
+    std::array<TextFxCacheEntry, 2> textFxCaches_{};
+    uint64_t textFxUse_ = 0;
     uint64_t textFxGen_ = 0;
-    uint64_t textFxCachedGen_ = 0;
-    UINT textFxDpi_ = 0;
-    float textFxW_ = 0.0f;
-    float textFxH_ = 0.0f;
-    float textFxPad_ = 0.0f;
 
     float scale() const { return static_cast<float>(dpi_) / 96.0f; }
     float dip(int px) const { return static_cast<float>(px) / scale(); }
@@ -1381,11 +1405,14 @@ struct TaskbarHost::Impl {
         r(brushVinylBase_);
         r(brushVinylGroove_);
         r(brushSpectrum_);
-        if (textFxCache_) {
-            textFxCache_->Release();
-            textFxCache_ = nullptr;
+        for (auto& cache : textFxCaches_) {
+            r(cache.target);
+            cache = {};
         }
-        textFxKey_ = nullptr;
+        textFxUse_ = 0;
+        karaokeSpans_.clear();
+        karaokeGeometryLine_ = -1;
+        karaokeGeometryLayout_ = nullptr;
         r(coverClip_);
         r(vinylCoverClip_);
         r(coverLayer_);
@@ -1631,6 +1658,8 @@ struct TaskbarHost::Impl {
             outgoingSecondaryLayout_ = nullptr;
         }
         outgoingLyricBlockHeight_ = 0.0f;
+        outgoingLyricScrollOffset_ = 0.0f;
+        outgoingSecondaryScrollOffset_ = 0.0f;
     }
 
     // 丢弃当前行过渡：清空待启动/进行中状态并释放旧布局，下一次排版直接提交最终行。
@@ -1643,6 +1672,7 @@ struct TaskbarHost::Impl {
         if (lyricTransitionDCompActive_)
             lyricTransitionDCompEnd_ = true;
         releaseOutgoingLyricLayouts();
+        karaokeEnteringLine_ = false;
     }
 
     // 行目标变化统一入口：动画进行中只记录最新目标（不重启当前动画），
@@ -1656,9 +1686,21 @@ struct TaskbarHost::Impl {
             textDirty_ = true;
             return;
         }
+        // 只有相邻自然换行才做空间转场。seek、快速切行或反向跳转不能把多次
+        // 280ms 动画串起来，否则画面会长期追不上真实歌词。
+        if (std::abs(newLine - previous) > 1) {
+            resetLyricTransition();
+            textDirty_ = true;
+            return;
+        }
         LyricTransitionTarget target{newLine, actualPositionMs,
                                      newLine > previous ? 1 : -1, revision};
         if (lyricTransitionActive_) {
+            if (target.direction != lyricTransitionDirection_) {
+                resetLyricTransition();
+                textDirty_ = true;
+                return;
+            }
             pendingTarget_ = target;
             pendingTargetValid_ = true;
             // 过渡版本跟随最新帧，避免被 updateScroll 的过期检查丢弃。
@@ -1674,7 +1716,7 @@ struct TaskbarHost::Impl {
     }
 
     // 行过渡收尾：先冻结动画再交换状态。释放旧布局、消费动画期间记录的最新目标；
-    // 新行逐字进度直接对齐真实播放位置，不再无条件从零追赶。
+    // 自然转场中的新行保留逐字追赶过程，避免收尾时又跳到真实位置。
     void finalizeLyricTransition(ULONGLONG now) {
         if (lyricTransitionDCompActive_)
             lyricTransitionDCompEnd_ = true;
@@ -1696,22 +1738,33 @@ struct TaskbarHost::Impl {
             karaokeSmoothLine_ = -1;
             karaokeSettled_ = false;
             karaokeTick_ = now;
+            karaokeEnteringLine_ = false;
             return;
         }
         transitionTargetValid_ = false;
         lyricTransitionRevision_ = 0;
 
         karaokeTick_ = now;
+        const bool preserveKaraokeEntry =
+            karaokeEnteringLine_ && karaokeSmoothLine_ == currentLine;
         karaokeSmoothLine_ = currentLine;
-        karaokeSettled_ = true; // 平滑值直接对齐真实目标，无需继续收敛
         if (const LyricLine* line = karaokeLine()) {
             int64_t charDur = 0;
             const float target = karaokeTargetX(*line, charDur);
-            karaokeSmoothX_ = target;
-            karaokeProgX_ = target;
+            if (preserveKaraokeEntry) {
+                karaokeProgX_ = karaokeSmoothX_;
+                karaokeSettled_ = std::fabs(target - karaokeSmoothX_) < 0.5f;
+            } else {
+                karaokeSmoothX_ = target;
+                karaokeProgX_ = target;
+                karaokeSettled_ = true; // 非自然切换直接对齐真实目标
+                karaokeEnteringLine_ = false;
+            }
         } else {
             karaokeSmoothX_ = 0.0f;
             karaokeProgX_ = 0.0f;
+            karaokeSettled_ = true;
+            karaokeEnteringLine_ = false;
         }
     }
 
@@ -1778,18 +1831,26 @@ struct TaskbarHost::Impl {
             return;
         textDirty_ = false;
         ++textFxGen_; // 布局指针重建，离屏缓存全部失效
+        karaokeSpans_.clear();
+        karaokeGeometryLine_ = -1;
+        karaokeGeometryLayout_ = nullptr;
 
         const bool doubleLineLyrics = useDoubleLineLyrics();
         // 准备阶段：先把当前布局移交为旧行，目标行布局构建完成后才记录动画起点，
         // 避免“新布局已替换但动画初始位置还没准备好”导致的文字瞬移。
         bool preparedTransition = false;
         if (lyricTransitionPending_ && lyricLayout_) {
+            // 保留旧行离场前的滚动位置。新布局后面会把 lyricScrollOffset_ 重置为 0，
+            // 不能让旧的超长歌词因此在转场第一帧跳回开头。
+            const float outgoingLyricOffset = lyricScrollOffset_;
+            const float outgoingSecondaryOffset = secondaryScrollOffset_;
             if (outgoingLyricLayout_)
                 outgoingLyricLayout_->Release();
             outgoingLyricLayout_ = lyricLayout_;
             lyricLayout_ = nullptr;
             outgoingLyricWidth_ = lyricWidth_;
             outgoingLyricHeight_ = lyricHeight_;
+            outgoingLyricScrollOffset_ = outgoingLyricOffset;
             outgoingLyricBlockHeight_ =
                 doubleLineLyrics
                     ? lyricHeight_ + kLyricPreviewGap +
@@ -1809,6 +1870,7 @@ struct TaskbarHost::Impl {
                 secondaryLayout_ = nullptr;
                 outgoingSecondaryWidth_ = secondaryWidth_;
                 outgoingSecondaryHeight_ = secondaryHeight_;
+                outgoingSecondaryScrollOffset_ = outgoingSecondaryOffset;
             }
             preparedTransition = true;
         } else {
@@ -1881,6 +1943,7 @@ struct TaskbarHost::Impl {
                 nextLyricHeight_ = m.height;
             }
         }
+        buildKaraokeGeometry(displayLine);
         if (preparedTransition) {
             if (lyricLayout_) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
@@ -1967,49 +2030,93 @@ struct TaskbarHost::Impl {
         return line;
     }
 
-    // 逐字填充目标进度 x（布局像素坐标）：已唱边界 + 当前字按字时长比例推进；
-    // durOut 输出当前字时长（ms），供平滑时间常数使用
-    float karaokeTargetX(const LyricLine& line, int64_t& durOut) const {
-        durOut = 0;
-        UINT32 sungLen = 0;
-        const LyricChar* curChar = nullptr;
-        for (const auto& c : line.chars) {
-            if (c.startMs > positionMs_)
-                break;
-            curChar = &c;
-            sungLen += (UINT32)c.text.size();
+    void buildKaraokeGeometry(int lineIndex) {
+        karaokeSpans_.clear();
+        karaokeGeometryLine_ = -1;
+        karaokeGeometryLayout_ = nullptr;
+        if (lineIndex < 0 || (size_t)lineIndex >= lines.size() || !lyricLayout_)
+            return;
+
+        const LyricLine& line = lines[(size_t)lineIndex];
+        if (line.chars.empty())
+            return;
+
+        UINT32 textOffset = 0;
+        karaokeSpans_.reserve(line.chars.size());
+        for (const LyricChar& c : line.chars) {
+            const UINT32 textLength = static_cast<UINT32>(c.text.size());
+            if (textLength == 0)
+                continue;
+
+            DWRITE_HIT_TEST_METRICS metrics{};
+            float startX = 0.0f;
+            float y = 0.0f;
+            if (FAILED(lyricLayout_->HitTestTextPosition(textOffset, FALSE, &startX, &y,
+                                                          &metrics))) {
+                textOffset += textLength;
+                continue;
+            }
+
+            float endX = startX;
+            if (FAILED(lyricLayout_->HitTestTextPosition(textOffset + textLength - 1, TRUE,
+                                                          &endX, &y, &metrics)))
+                endX = startX;
+            karaokeSpans_.push_back({c.startMs, c.endMs, startX, endX});
+            textOffset += textLength;
         }
-        if (!curChar)
+        karaokeGeometryLine_ = lineIndex;
+        karaokeGeometryLayout_ = lyricLayout_;
+    }
+
+    // 逐字填充目标进度 x（布局像素坐标）：已唱边界 + 当前 token 按时长比例推进；
+    // durOut 输出当前 token 时长（ms），供平滑时间常数使用。X 坐标在排版时缓存，
+    // 播放过程中只做时间定位，不再每帧调用 DirectWrite 命中测试。
+    float karaokeTargetX(const LyricLine& line, int64_t& durOut) const {
+        (void)line;
+        durOut = 0;
+        if (karaokeGeometryLine_ != currentLine || karaokeGeometryLayout_ != lyricLayout_ ||
+            karaokeSpans_.empty())
             return 0.0f;
-        UINT32 charOff = sungLen - (UINT32)curChar->text.size();
-        DWRITE_HIT_TEST_METRICS hm{};
-        float startX = 0.0f, hy = 0.0f;
-        if (FAILED(lyricLayout_->HitTestTextPosition(charOff, FALSE, &startX, &hy, &hm)))
+
+        auto it = std::upper_bound(
+            karaokeSpans_.begin(), karaokeSpans_.end(), positionMs_,
+            [](int64_t position, const KaraokeSpan& span) { return position < span.startMs; });
+        if (it == karaokeSpans_.begin())
             return 0.0f;
-        float endX = startX;
-        // 当前字结束位置 = 当前字最后一个字形的右边缘（sungLen-1 的 trailing edge）。
-        // 注意不能传 sungLen：那取到的是下一个字的右边缘，会多算一个字宽，
-        // 导致进入下一字时目标回跳、填充倒退
-        if (FAILED(lyricLayout_->HitTestTextPosition(sungLen - 1, TRUE, &endX, &hy, &hm)))
-            endX = startX;
-        durOut = std::max<int64_t>(curChar->endMs - curChar->startMs, 1);
+        --it;
+
+        durOut = std::max<int64_t>(it->endMs - it->startMs, 1);
         float frac =
-            (float)std::clamp((double)(positionMs_ - curChar->startMs) / (double)durOut, 0.0, 1.0);
-        return startX + (endX - startX) * frac;
+            (float)std::clamp((double)(positionMs_ - it->startMs) / (double)durOut, 0.0, 1.0);
+        return it->startX + (it->endX - it->startX) * frac;
     }
 
     // 平滑步进：过渡时间常数取当前字时长的 1/4（40~200ms），指数趋近目标，
     // 每个字的过渡快慢随其时长自然变化，且同步误差有界（约 τ）。
-    // SMTC 锚点校正造成的目标抖动经低通后不再闪烁；行切换或大幅 seek 时直接对齐
+    // SMTC 锚点校正造成的目标抖动经低通后不再闪烁；非自然切换或大幅 seek 直接对齐，
+    // 自然转场中的新行则从首字平滑追赶真实位置。
     float karaokeSmoothStep(const LyricLine& line) {
         int64_t charDur = 0;
         float target = karaokeTargetX(line, charDur);
+        if (!clientAnimations_) {
+            karaokeTick_ = monotonicNowMs();
+            karaokeSmoothLine_ = currentLine;
+            karaokeSmoothX_ = target;
+            karaokeProgX_ = target;
+            karaokeSettled_ = true;
+            karaokeEnteringLine_ = false;
+            return target;
+        }
         ULONGLONG now = monotonicNowMs();
         float dt = karaokeTick_ ? (float)(now - karaokeTick_) : 16.7f;
         karaokeTick_ = now;
         float gap = target - karaokeSmoothX_;
-        if (karaokeSmoothLine_ != currentLine || std::fabs(gap) > 100.0f) {
+        const bool lineChanged = karaokeSmoothLine_ != currentLine;
+        if (lineChanged) {
             karaokeSmoothLine_ = currentLine;
+            karaokeEnteringLine_ = lyricTransitionActive_;
+            karaokeSmoothX_ = karaokeEnteringLine_ ? 0.0f : target;
+        } else if (std::fabs(gap) > 100.0f && !karaokeEnteringLine_) {
             karaokeSmoothX_ = target;
         } else {
             float tau = std::clamp((float)charDur * 0.25f, 40.0f, 200.0f);
@@ -2018,6 +2125,8 @@ struct TaskbarHost::Impl {
         }
         karaokeProgX_ = karaokeSmoothX_;
         karaokeSettled_ = std::fabs(target - karaokeSmoothX_) < 0.5f;
+        if (karaokeSettled_ && !lyricTransitionActive_)
+            karaokeEnteringLine_ = false;
         return karaokeProgX_;
     }
 
@@ -2189,6 +2298,45 @@ struct TaskbarHost::Impl {
         return -1;
     }
 
+    struct LyricTransitionSample {
+        float progress = 1.0f;
+        float movement = 1.0f;
+        float fadeOut = 1.0f;
+        float fadeIn = 1.0f;
+    };
+
+    static float smoothStep(float t) {
+        t = std::clamp(t, 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    }
+
+    static float rangedSmoothStep(float t, float start, float end) {
+        if (end <= start)
+            return t >= end ? 1.0f : 0.0f;
+        return smoothStep((t - start) / (end - start));
+    }
+
+    LyricTransitionSample lyricTransitionSample() const {
+        LyricTransitionSample sample;
+        if (!lyricTransitionActive_ || lyricTransitionStartMs_ == 0)
+            return sample;
+
+        // applyPresentationFrame() 可以在定时器之外直接触发 render()。此时
+        // frameNowMs_ 仍可能早于刚设置的起点，不能用 ULONGLONG 直接相减。
+        ULONGLONG now = frameNowMs_;
+        if (now < lyricTransitionStartMs_)
+            now = monotonicNowMs();
+        if (now < lyricTransitionStartMs_)
+            now = lyricTransitionStartMs_;
+        sample.progress = std::clamp(
+            static_cast<float>(now - lyricTransitionStartMs_) / kLyricTransitionMs, 0.0f,
+            1.0f);
+        sample.movement = smoothStep(sample.progress);
+        sample.fadeOut = rangedSmoothStep(sample.progress, 0.08f, 0.90f);
+        sample.fadeIn = rangedSmoothStep(sample.progress, 0.14f, 1.0f);
+        return sample;
+    }
+
     // 绘制可滚动文本：容得下则按 alignment 对齐，容不下则向左无缝滚动。
     // outline/glow 非空时先画 8 方向光晕层和深色描边层，再画主文字。
     // karaokeBrush 非空时启用逐字高亮：整行先用 brush（未播放色）画一遍，
@@ -2200,23 +2348,33 @@ struct TaskbarHost::Impl {
     ID2D1Bitmap* textFxBitmap(IDWriteTextLayout* layout, float textW, float textH,
                               ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !layout)
+        if (!rt || !layout || !brush)
             return nullptr;
         constexpr float pad = 3.0f; // 覆盖 2.4 DIP 的光晕外扩和边缘抗锯齿
         const float wDip = textW + pad * 2.0f;
         const float hDip = textH + pad * 2.0f;
-        if (textFxCache_ && (textFxKey_ != layout || textFxCachedGen_ != textFxGen_ ||
-                             textFxDpi_ != dpi_ || textFxW_ != wDip || textFxH_ != hDip)) {
-            textFxCache_->Release();
-            textFxCache_ = nullptr;
-            textFxKey_ = nullptr;
+        TextFxCacheEntry* entry = nullptr;
+        for (auto& candidate : textFxCaches_) {
+            if (candidate.target && candidate.layout == layout && candidate.brush == brush &&
+                candidate.outline == outline && candidate.glow == glow &&
+                candidate.generation == textFxGen_ && candidate.dpi == dpi_ &&
+                candidate.w == wDip && candidate.h == hDip) {
+                entry = &candidate;
+                break;
+            }
         }
-        if (!textFxCache_) {
+        if (!entry) {
+            entry = &textFxCaches_[0];
+            if (textFxCaches_[1].lastUse < entry->lastUse)
+                entry = &textFxCaches_[1];
+            if (entry->target)
+                entry->target->Release();
+            *entry = {};
             if (FAILED(rt->CreateCompatibleRenderTarget(D2D1::SizeF(wDip, hDip),
-                                                        &textFxCache_)))
+                                                         &entry->target)))
                 return nullptr;
-            textFxCache_->SetAntialiasMode(rt->GetAntialiasMode());
-            textFxCache_->SetTextAntialiasMode(rt->GetTextAntialiasMode());
+            entry->target->SetAntialiasMode(rt->GetAntialiasMode());
+            entry->target->SetTextAntialiasMode(rt->GetTextAntialiasMode());
             static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
                                                   {0.7071f, 0.7071f},
                                                   {0.0f, 1.0f},
@@ -2225,33 +2383,37 @@ struct TaskbarHost::Impl {
                                                   {-0.7071f, -0.7071f},
                                                   {0.0f, -1.0f},
                                                   {0.7071f, -0.7071f}};
-            textFxCache_->BeginDraw();
-            textFxCache_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+            entry->target->BeginDraw();
+            entry->target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
             if (glow) {
                 for (auto& d : kDirs)
-                    textFxCache_->DrawTextLayout(
+                    entry->target->DrawTextLayout(
                         D2D1::Point2F(pad + d[0] * 2.4f, pad + d[1] * 2.4f), layout, glow);
             }
             if (outline) {
                 for (auto& d : kDirs)
-                    textFxCache_->DrawTextLayout(
+                    entry->target->DrawTextLayout(
                         D2D1::Point2F(pad + d[0] * 1.2f, pad + d[1] * 1.2f), layout, outline);
             }
-            textFxCache_->DrawTextLayout(D2D1::Point2F(pad, pad), layout, brush);
-            if (FAILED(textFxCache_->EndDraw())) {
-                textFxCache_->Release();
-                textFxCache_ = nullptr;
+            entry->target->DrawTextLayout(D2D1::Point2F(pad, pad), layout, brush);
+            if (FAILED(entry->target->EndDraw())) {
+                entry->target->Release();
+                *entry = {};
                 return nullptr;
             }
-            textFxKey_ = layout;
-            textFxCachedGen_ = textFxGen_;
-            textFxDpi_ = dpi_;
-            textFxW_ = wDip;
-            textFxH_ = hDip;
-            textFxPad_ = pad;
+            entry->layout = layout;
+            entry->brush = brush;
+            entry->outline = outline;
+            entry->glow = glow;
+            entry->generation = textFxGen_;
+            entry->dpi = dpi_;
+            entry->w = wDip;
+            entry->h = hDip;
+            entry->pad = pad;
         }
+        entry->lastUse = ++textFxUse_;
         ID2D1Bitmap* bmp = nullptr;
-        if (FAILED(textFxCache_->GetBitmap(&bmp)) || !bmp)
+        if (FAILED(entry->target->GetBitmap(&bmp)) || !bmp)
             return nullptr;
         return bmp;
     }
@@ -2261,7 +2423,8 @@ struct TaskbarHost::Impl {
                            ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
                            ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f,
                            float opacity = 1.0f,
-                           LyricAlignment alignment = LyricAlignment::Center) {
+                           LyricAlignment alignment = LyricAlignment::Center,
+                           bool singleCopy = false) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
@@ -2300,7 +2463,7 @@ struct TaskbarHost::Impl {
                                               {-0.7071f, -0.7071f},
                                               {0.0f, -1.0f},
                                               {0.7071f, -0.7071f}};
-        // 绘制起点：居中一个，或跑马灯首尾相接两个；逐字跟随滚动时只有一份、不循环
+        // 绘制起点：居中一个，或跑马灯首尾相接两个；逐字/转场入场时只有一份、不循环
         float bases[2];
         int n = 0;
         auto alignedBase = [&]() {
@@ -2315,7 +2478,7 @@ struct TaskbarHost::Impl {
                 return x + freeW * 0.5f;
             }
         };
-        if (karaokeBrush) {
+        if (karaokeBrush || singleCopy) {
             bases[n++] = (textW <= areaW) ? alignedBase() : x - offset;
         } else if (textW <= areaW) {
             bases[n++] = alignedBase();
@@ -2325,11 +2488,14 @@ struct TaskbarHost::Impl {
             bases[n++] = x - offset + loopW;
         }
         if (fxBmp) {
+            constexpr float textFxPad = 3.0f;
+            const float textFxW = textW + textFxPad * 2.0f;
+            const float textFxH = textH + textFxPad * 2.0f;
             for (int i = 0; i < n; ++i)
                 rt->DrawBitmap(fxBmp,
-                               D2D1::RectF(bases[i] - textFxPad_, y - textFxPad_,
-                                           bases[i] - textFxPad_ + textFxW_,
-                                           y - textFxPad_ + textFxH_),
+                               D2D1::RectF(bases[i] - textFxPad, y - textFxPad,
+                                           bases[i] - textFxPad + textFxW,
+                                           y - textFxPad + textFxH),
                                opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
             if (glow || outline) {
@@ -2369,21 +2535,23 @@ struct TaskbarHost::Impl {
                                 float areaW, float x, float y, float offset, ID2D1Brush* brush,
                                 ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
                                 ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f,
-                                float opacity = 1.0f) {
+                                float opacity = 1.0f, bool singleCopy = false) {
         drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
-                          karaokeBrush, karaokeX, opacity, lyricAlignment_);
+                          karaokeBrush, karaokeX, opacity, lyricAlignment_, singleCopy);
     }
 
     void drawScaledScrollingText(IDWriteTextLayout* layout, float textW, float textH,
                                  float areaW, float x, float y, float offset, ID2D1Brush* brush,
                                  float opacity, float scale, ID2D1Brush* outline = nullptr,
-                                 ID2D1Brush* glow = nullptr) {
+                                 ID2D1Brush* glow = nullptr,
+                                 ID2D1Brush* karaokeBrush = nullptr,
+                                 float karaokeX = 0.0f, bool singleCopy = false) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
         if (scale >= 0.999f) {
             drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
-                                   nullptr, 0.0f, opacity);
+                                   karaokeBrush, karaokeX, opacity, singleCopy);
             return;
         }
 
@@ -2395,7 +2563,7 @@ struct TaskbarHost::Impl {
         const D2D1_POINT_2F anchor = D2D1::Point2F(anchorX, y + textH * 0.5f);
         rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor));
         drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
-                               nullptr, 0.0f, opacity);
+                                karaokeBrush, karaokeX, opacity, singleCopy);
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
     }
 
@@ -2413,18 +2581,8 @@ struct TaskbarHost::Impl {
         ID2D1Brush* previewBrush = brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
                                                  : static_cast<ID2D1Brush*>(brushDim_);
         if (lyricTransitionActive_ && outgoingLyricLayout_) {
-            float transitionT = std::clamp(
-                static_cast<float>((frameNowMs_ ? frameNowMs_ : monotonicNowMs()) -
-                                   lyricTransitionStartMs_) /
-                    kLyricTransitionMs,
-                0.0f, 1.0f);
-            float movementT = transitionT * transitionT * (3.0f - 2.0f * transitionT);
-            auto smoothProgress = [](float t, float start, float end) {
-                float p = std::clamp((t - start) / (end - start), 0.0f, 1.0f);
-                return p * p * (3.0f - 2.0f * p);
-            };
-            float fadeOutT = smoothProgress(transitionT, 0.08f, 0.90f);
-            float fadeInT = smoothProgress(transitionT, 0.14f, 1.0f);
+            const LyricTransitionSample transition = lyricTransitionSample();
+            const float movementT = transition.movement;
             float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
                                        ? outgoingLyricBlockHeight_
                                        : outgoingLyricHeight_;
@@ -2440,6 +2598,8 @@ struct TaskbarHost::Impl {
             bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
             ID2D1Brush* incomingBrush =
                 incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : coreBrush;
+            float incomingProgX =
+                incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
             float incomingScale = kLyricPreviewScale +
                                   (1.0f - kLyricPreviewScale) * movementT;
             // y 是主字号布局的位置；缩小时校正半个缩放差，使视觉中心跟随位移而不跳动。
@@ -2448,14 +2608,20 @@ struct TaskbarHost::Impl {
 
             // 下一行在转场前已经位于核心行下方；转场从这个位置接入核心，避免跳变。
             drawLyricScrollingText(outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_,
-                                   lyricAreaW, lyricAreaX, outgoingY + oldShift, 0.0f, coreBrush,
-                                   nullptr, nullptr, nullptr, 0.0f, 1.0f - fadeOutT);
+                                   lyricAreaW, lyricAreaX, outgoingY + oldShift,
+                                   outgoingLyricScrollOffset_, coreBrush,
+                                   lyricOutline_ ? brushLyricOutline_ : nullptr,
+                                   lyricGlow_ ? brushLyricGlow_ : nullptr, nullptr, 0.0f,
+                                   1.0f - transition.fadeOut);
             drawScaledScrollingText(
                 lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, scaledIncomingY,
                 lyricScrollOffset_, incomingBrush,
-                kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * fadeInT, incomingScale,
+                kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * transition.fadeIn,
+                incomingScale,
                 lyricOutline_ ? brushLyricOutline_ : nullptr,
-                lyricGlow_ ? brushLyricGlow_ : nullptr);
+                lyricGlow_ ? brushLyricGlow_ : nullptr,
+                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+                incomingProgX, true);
             return;
         }
 
@@ -2481,7 +2647,9 @@ struct TaskbarHost::Impl {
     void drawTransitionTextTo(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textW,
                               float textH, float areaW, float x, float y, float offset,
                               ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
-                              ID2D1Brush* glow = nullptr) {
+                              ID2D1Brush* glow = nullptr,
+                              ID2D1Brush* karaokeBrush = nullptr,
+                              float karaokeX = 0.0f, bool singleCopy = false) {
         if (!rt || !layout || !brush || areaW <= 0.0f)
             return;
         D2D1_RECT_F clip{x, y, x + areaW, y + textH};
@@ -2500,7 +2668,9 @@ struct TaskbarHost::Impl {
                 return x + freeW * 0.5f;
             }
         };
-        if (textW <= areaW) {
+        if (karaokeBrush || singleCopy) {
+            bases[n++] = (textW <= areaW) ? alignedBase() : x - offset;
+        } else if (textW <= areaW) {
             bases[n++] = alignedBase();
         } else {
             float loopW = textW + kTextPadding * 2.0f;
@@ -2529,6 +2699,12 @@ struct TaskbarHost::Impl {
         }
         for (int i = 0; i < n; ++i)
             rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
+        if (karaokeBrush && karaokeX > 0.0f) {
+            rt->PushAxisAlignedClip(D2D1::RectF(bases[0], y, bases[0] + karaokeX, y + textH),
+                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->DrawTextLayout(D2D1::Point2F(bases[0], y), layout, karaokeBrush);
+            rt->PopAxisAlignedClip();
+        }
         rt->PopAxisAlignedClip();
     }
 
@@ -2549,20 +2725,31 @@ struct TaskbarHost::Impl {
                                             : static_cast<ID2D1Brush*>(brushText_);
         float mainOffset = 0.0f;
         float secondaryOffset = 0.0f;
+        ID2D1Brush* karaokeBrush = nullptr;
+        float karaokeX = 0.0f;
         if (!outgoing) {
             const LyricLine* incomingLine = karaokeLine();
             const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
             mainBrush = incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : mainBrush;
+            if (incomingKaraoke) {
+                karaokeBrush = brushLyric_;
+                karaokeX = karaokeSmoothStep(*incomingLine);
+            }
             mainOffset = lyricScrollOffset_;
             secondaryOffset = secondaryScrollOffset_;
+        } else {
+            mainOffset = outgoingLyricScrollOffset_;
+            secondaryOffset = outgoingSecondaryScrollOffset_;
         }
         ID2D1Brush* effectOutline = lyricOutline_ ? brushLyricOutline_ : nullptr;
         ID2D1Brush* effectGlow = lyricGlow_ ? brushLyricGlow_ : nullptr;
         drawTransitionTextTo(dc, main, mainW, mainH, lyricAreaW, lyricAreaX, y, mainOffset,
-                             mainBrush, effectOutline, effectGlow);
+                             mainBrush, effectOutline, effectGlow, karaokeBrush, karaokeX,
+                             !outgoing);
         if (secondary)
             drawTransitionTextTo(dc, secondary, secondaryW, secondaryH, lyricAreaW, lyricAreaX,
-                                 y + mainH + gap, secondaryOffset, brushDim_);
+                                 y + mainH + gap, secondaryOffset, brushDim_, nullptr, nullptr,
+                                 nullptr, 0.0f, !outgoing);
     }
 
     bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
@@ -2610,15 +2797,18 @@ struct TaskbarHost::Impl {
                                   float lyricBlockH) {
         // 图层增删不单独 Commit：改动挂起到 render() 末尾 present() 的 Commit，与承载
         // 歌词的底层新帧同批上屏，避免「图层已撤、底层新帧未上屏」的空窗闪烁。
-        if (lyricTransitionDCompEnd_ || (showControls && lyricTransitionDCompActive_)) {
+        if (lyricTransitionDCompEnd_ || (showControls && lyricTransitionDCompActive_) ||
+            (lyricTransitionDCompActive_ && karaokeLine())) {
             renderer.clearLyricTransitionLayers();
             lyricTransitionDCompActive_ = false;
             lyricTransitionDCompEnd_ = false;
         }
         if (showControls)
             return;
+        // 逐字高亮需要每帧跟随真实播放位置；DComp 快照是静态位图，不能在入场期间
+        // 更新填充边界，因此逐字歌词转场保留 D2D 路径，普通歌词仍使用合成器动画。
         if (!lyricTransitionDCompActive_ && lyricTransitionActive_ && !useDoubleLineLyrics() &&
-            outgoingLyricLayout_ && lyricLayout_) {
+            !karaokeLine() && outgoingLyricLayout_ && lyricLayout_) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
                 renderer.clearLyricTransitionLayers();
                 lyricTransitionDCompActive_ = false;
@@ -2750,30 +2940,18 @@ struct TaskbarHost::Impl {
             if (useDoubleLineLyrics()) {
                 drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h);
             } else if (!lyricTransitionDCompActive_) {
-                float transitionT = 1.0f;
-                if (lyricTransitionActive_) {
-                    transitionT = std::clamp(
-                        (static_cast<float>((frameNowMs_ ? frameNowMs_ : monotonicNowMs()) -
-                                            lyricTransitionStartMs_) /
-                         kLyricTransitionMs),
-                        0.0f, 1.0f);
-                }
                 if (lyricTransitionActive_ && outgoingLyricLayout_) {
                     // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
-                    float movementT = transitionT * transitionT * (3.0f - 2.0f * transitionT);
-                    // 淡出稍晚开始并留出余韵；新行略早进入，避免画面突然变空。
-                    auto smoothProgress = [](float t, float start, float end) {
-                        float p = std::clamp((t - start) / (end - start), 0.0f, 1.0f);
-                        return p * p * (3.0f - 2.0f * p);
-                    };
-                    float fadeOutT = smoothProgress(transitionT, 0.08f, 0.90f);
-                    float fadeInT = smoothProgress(transitionT, 0.14f, 1.0f);
+                    const LyricTransitionSample transition = lyricTransitionSample();
+                    const float movementT = transition.movement;
                     const LyricLine* incomingLine = karaokeLine();
                     bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
                     ID2D1Brush* incomingBrush =
                         incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_)
                                         : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
                                                                                 : brushText_);
+                    const float incomingProgX =
+                        incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
                     float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
                     float outgoingBlockH = outgoingLyricHeight_ + outgoingGap +
                                            outgoingSecondaryHeight_;
@@ -2785,28 +2963,32 @@ struct TaskbarHost::Impl {
                                      (1.0f - movementT);
                     drawLyricScrollingText(
                         outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
-                        lyricAreaX, outgoingY + oldShift, 0.0f,
-                        brushLyric_ ? brushLyric_ : brushText_, nullptr, nullptr, nullptr, 0.0f,
-                        1.0f - fadeOutT);
+                        lyricAreaX, outgoingY + oldShift, outgoingLyricScrollOffset_,
+                        brushLyric_ ? brushLyric_ : brushText_,
+                        lyricOutline_ ? brushLyricOutline_ : nullptr,
+                        lyricGlow_ ? brushLyricGlow_ : nullptr, nullptr, 0.0f,
+                        1.0f - transition.fadeOut);
                     if (outgoingSecondaryLayout_)
                         drawLyricScrollingText(outgoingSecondaryLayout_, outgoingSecondaryWidth_,
                                                outgoingSecondaryHeight_, lyricAreaW, lyricAreaX,
                                                outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
-                                               0.0f, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                                               1.0f - fadeOutT);
-                    // 过渡期间停用逐字填充，避免高亮进度和移动中的旧行叠加造成视觉噪声。
+                                               outgoingSecondaryScrollOffset_, brushDim_, nullptr,
+                                               nullptr, nullptr, 0.0f,
+                                               1.0f - transition.fadeOut);
+                    // 入场行同步显示真实播放位置的逐字填充，避免转场结束时突然跳色。
                     drawLyricScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW,
                                            lyricAreaX, lyricY + newShift, lyricScrollOffset_,
                                            incomingBrush,
                                            lyricOutline_ ? brushLyricOutline_ : nullptr,
                                            lyricGlow_ ? brushLyricGlow_ : nullptr,
-                                           nullptr, 0.0f, fadeInT);
+                                           incomingKaraoke ? brushLyric_ : nullptr, incomingProgX,
+                                           transition.fadeIn, true);
                     if (secondaryLayout_)
                         drawLyricScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
                                                lyricAreaW, lyricAreaX,
                                                lyricY + lyricHeight_ + secondaryGap + newShift,
                                                secondaryScrollOffset_, brushDim_, nullptr, nullptr,
-                                               nullptr, 0.0f, fadeInT);
+                                               nullptr, 0.0f, transition.fadeIn, true);
                 } else {
                     // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
                     // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
@@ -2871,6 +3053,13 @@ struct TaskbarHost::Impl {
         // 静止跳帧判定：本帧有任何滚动/转场在动就置 animating，供 onTimer 决定是否重绘
         bool animating = wasTransitioning;
         auto marquee = [&](float textW, float areaW, float speed, float& offset) {
+            if (!clientAnimations_) {
+                if (offset != 0.0f) {
+                    offset = 0.0f;
+                    animating = true;
+                }
+                return;
+            }
             if (textW <= areaW || areaW <= 0.0f) {
                 if (offset != 0.0f) {
                     offset = 0.0f;
@@ -2879,9 +3068,9 @@ struct TaskbarHost::Impl {
                 return;
             }
             float loopW = textW + kTextPadding * 2.0f;
-            offset += speed * dt;
-            if (offset >= loopW)
-                offset -= loopW;
+            offset = std::fmod(offset + speed * std::max(dt, 0.0f), loopW);
+            if (offset < 0.0f)
+                offset += loopW;
             animating = true;
         };
 
@@ -2903,37 +3092,49 @@ struct TaskbarHost::Impl {
         float lyricStart = lyricStartPadding();
         float lyricAreaW =
             std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
+        const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
 
         if (songInfoVisible_) {
             marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
             marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
         }
-        if (mouseOver_) {
+        if (mouseOver_ && controlsOnHover_) {
             scrollAnimating_ = animating;
             return;
         }
         // 逐字歌词：滚动位置跟随逐字填充进度，把当前唱到的位置保持在区域 30% 处，
         // 行尾为止不再循环；非逐字歌词保持原有无缝循环滚动
-        if (karaokeLine()) {
+        if (karaokeLine() && clientAnimations_) {
             const float before = lyricScrollOffset_;
-            if (lyricWidth_ > lyricAreaW) {
-                // karaokeProgX_ 由 render 每帧更新；行刚切换时还没对应进度，从头开始
-                float sungX = (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
-                float target =
-                    std::clamp(sungX - lyricAreaW * 0.3f, 0.0f, lyricWidth_ - lyricAreaW);
-                float diff = target - lyricScrollOffset_;
-                // ease-out 平滑跟随，避免跳动生硬
-                lyricScrollOffset_ =
-                    std::fabs(diff) < 0.5f ? target : lyricScrollOffset_ + diff * 0.15f;
-            } else {
-                lyricScrollOffset_ = 0.0f;
+            if (!holdLyricScroll) {
+                if (lyricWidth_ > lyricAreaW) {
+                    // karaokeProgX_ 由 render 每帧更新；行刚切换时还没对应进度，从头开始
+                    float sungX = (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
+                    float target =
+                        std::clamp(sungX - lyricAreaW * 0.3f, 0.0f, lyricWidth_ - lyricAreaW);
+                    float diff = target - lyricScrollOffset_;
+                    // 用时间常数而不是固定帧比例，保证 30/60/120Hz 下观感一致。
+                    const float followDtMs =
+                        std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
+                    const float alpha = 1.0f - std::exp(-followDtMs / kKaraokeScrollFollowMs);
+                    lyricScrollOffset_ =
+                        std::fabs(diff) < 0.5f ? target : lyricScrollOffset_ + diff * alpha;
+                } else {
+                    lyricScrollOffset_ = 0.0f;
+                }
             }
             if (lyricScrollOffset_ != before)
                 animating = true;
-        } else {
+        } else if (karaokeLine()) {
+            if (lyricScrollOffset_ != 0.0f) {
+                lyricScrollOffset_ = 0.0f;
+                animating = true;
+            }
+        } else if (!holdLyricScroll) {
             marquee(lyricWidth_, lyricAreaW, lyricScrollSpeed_, lyricScrollOffset_);
         }
-        marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
+        if (!holdLyricScroll)
+            marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
         scrollAnimating_ = animating;
     }
 
@@ -2979,12 +3180,34 @@ struct TaskbarHost::Impl {
         return std::clamp(1000 / hz, kTimerMinMs, kTimerMs);
     }
 
+    bool hasHighFrequencyAnimation() const {
+        if (lyricTransitionPending_ || lyricTransitionActive_)
+            return true;
+        if (media.playing && scrollAnimating_)
+            return true;
+        if (media.playing && clientAnimations_ && karaokeLine())
+            return true;
+        if (media.playing && clientAnimations_ && albumCoverVisible_ &&
+            albumCoverEffect_ == AlbumCoverEffect::Vinyl)
+            return true;
+        if (media.playing && spectrumVisible_) {
+            for (float v : spectrumBands_)
+                if (v > 0.01f)
+                    return true;
+        }
+        return false;
+    }
+
+    UINT desiredFrameMs() const {
+        return hasHighFrequencyAnimation() ? activeFrameMs() : kTimerPausedMs;
+    }
+
     // 帧定时器只在窗口可见时运行：隐藏后的固定间隔 tick（进度插值、滚动、
     // 快照读取）没有任何可见效果，可见性恢复由 SMTC 事件驱动（不依赖定时器）。
     void startFrameTimer() {
         if (!timerRunning_ && hwnd) {
             updateDisplayRefresh();
-            const UINT initialMs = activeFrameMs();
+            const UINT initialMs = desiredFrameMs();
             SetTimer(hwnd, kTimerId, initialMs, nullptr);
             timerRunning_ = true;
             timerMs_ = initialMs;
@@ -3017,10 +3240,7 @@ struct TaskbarHost::Impl {
         }
         // 帧定时器运行中则立即按新档位调整间隔（正常=跟随刷新率，低渲染=~30fps）
         if (timerRunning_) {
-            const UINT wantMs = (media.playing || lyricTransitionPending_ ||
-                                 lyricTransitionActive_)
-                                    ? activeFrameMs()
-                                    : kTimerPausedMs;
+            const UINT wantMs = desiredFrameMs();
             if (wantMs != timerMs_) {
                 SetTimer(hwnd, kTimerId, wantMs, nullptr);
                 timerMs_ = wantMs;
@@ -3067,13 +3287,10 @@ struct TaskbarHost::Impl {
     void onTimer() {
         if (tick)
             tick();
-        // 播放/行转场跟随当前显示器刷新率（封顶 ~125fps）；暂停时降到 ~30fps，
-        // 超长文本继续滚动，任务栏区域的合成开销减半。状态事件（悬停、恢复播放、seek）走
-        // 同步 render 路径，不依赖定时器，低档位下也不会延迟显示。
-        const UINT wantMs =
-            (media.playing || lyricTransitionPending_ || lyricTransitionActive_)
-                ? activeFrameMs()
-                : kTimerPausedMs;
+        // 只有可见动画源跟随当前显示器刷新率（封顶 ~125fps）；静态播放降到 ~30fps，
+        // 避免歌词没有动画时仍高频轮询和提交。状态事件（悬停、恢复播放、seek）走同步
+        // render 路径，不依赖定时器，低档位下也不会延迟显示。
+        const UINT wantMs = desiredFrameMs();
         if (timerRunning_ && wantMs != timerMs_) {
             SetTimer(hwnd, kTimerId, wantMs, nullptr);
             timerMs_ = wantMs;
