@@ -27,17 +27,20 @@ constexpr UINT_PTR kShowTimer = 1;
 constexpr UINT_PTR kHideTimer = 2;
 constexpr UINT_PTR kCloseTimer = 3;
 constexpr UINT_PTR kScrollTimer = 4;
+constexpr UINT_PTR kEnterTimer = 5;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
+constexpr UINT kOpenAnimationMs = 180;
 constexpr UINT kCloseAnimationMs = 140;
-constexpr UINT kScrollTimerMs = 16;
+// 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
+// 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
+constexpr UINT kScrollTimerMs = 32;
 
 constexpr float kPopupWidthDip = 384.0f;
 constexpr float kPopupHeightDip = 176.0f;
 constexpr float kPopupGapDip = 8.0f;
 constexpr float kPopupCornerDip = 12.0f;
 constexpr float kCoverSizeDip = 80.0f;
-constexpr float kPopupEnterOffsetDip = 8.0f;
 constexpr float kPopupTextLeftDip = 112.0f;
 constexpr float kPopupTextRightPaddingDip = 16.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
@@ -126,6 +129,8 @@ struct MediaPopup::Impl {
     bool popupHover = false;
     bool popupVisible = false;
     bool closing = false;
+    bool entering = false;
+    bool deferredRender = false;
     bool placedAbove = true;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
@@ -136,6 +141,12 @@ struct MediaPopup::Impl {
     bool textDirty = true;
     bool scrollTimerRunning = false;
     bool clientAnimations = true;
+    int cardScreenX = 0;
+    int cardScreenY = 0;
+    int cardWidthPx = 0;
+    int cardHeightPx = 0;
+    float cardOriginDip = 0.0f;
+    float animationTravelPx = 0.0f;
 
     int hoverButton = -1;
     int pressedButton = -1;
@@ -210,7 +221,10 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kCloseTimer);
         KillTimer(hwnd, kScrollTimer);
+        KillTimer(hwnd, kEnterTimer);
         scrollTimerRunning = false;
+        entering = false;
+        deferredRender = false;
     }
 
     void releaseDrawingResources() {
@@ -360,13 +374,12 @@ struct MediaPopup::Impl {
         if (backgroundMode != MediaPopupBackground::Frosted || !hwnd)
             return true;
 
-        RECT windowRect{};
-        if (!GetWindowRect(hwnd, &windowRect))
-            return false;
-        const int width = windowRect.right - windowRect.left;
-        const int height = windowRect.bottom - windowRect.top;
+        const int width = cardWidthPx;
+        const int height = cardHeightPx;
         if (width <= 0 || height <= 0)
             return false;
+        const RECT cardRect{cardScreenX, cardScreenY, cardScreenX + width,
+                            cardScreenY + height};
 
         // 首次显示时窗口本来是隐藏的；切换设置或主题时可能已经可见，
         // 临时隐藏它再抓取，避免把自己的卡片拍进背景图形成递归灰层。
@@ -380,10 +393,10 @@ struct MediaPopup::Impl {
         RECT anchorRect{};
         const bool anchorOverlaps = anchor && anchor != hwnd && IsWindow(anchor) &&
                                     IsWindowVisible(anchor) && GetWindowRect(anchor, &anchorRect) &&
-                                    anchorRect.left < windowRect.right &&
-                                    anchorRect.right > windowRect.left &&
-                                    anchorRect.top < windowRect.bottom &&
-                                    anchorRect.bottom > windowRect.top;
+                                    anchorRect.left < cardRect.right &&
+                                    anchorRect.right > cardRect.left &&
+                                    anchorRect.top < cardRect.bottom &&
+                                    anchorRect.bottom > cardRect.top;
         if (anchorOverlaps)
             ShowWindow(anchor, SW_HIDE);
         DwmFlush();
@@ -418,8 +431,8 @@ struct MediaPopup::Impl {
         if (memoryDc && dib) {
             oldBitmap = SelectObject(memoryDc, dib);
             if (oldBitmap && oldBitmap != HGDI_ERROR)
-                copied = BitBlt(memoryDc, 0, 0, width, height, screenDc, windowRect.left,
-                                windowRect.top, SRCCOPY | CAPTUREBLT) != FALSE;
+                copied = BitBlt(memoryDc, 0, 0, width, height, screenDc, cardRect.left,
+                                cardRect.top, SRCCOPY | CAPTUREBLT) != FALSE;
         }
         if (oldBitmap && oldBitmap != HGDI_ERROR)
             SelectObject(memoryDc, oldBitmap);
@@ -524,8 +537,8 @@ struct MediaPopup::Impl {
 
     void updateScrollTimer(float areaWidth) {
         const bool overflow = titleWidth > areaWidth || artistWidth > areaWidth;
-        const bool shouldRun = popupVisible && enabled && available && clientAnimations &&
-                               media.playing && overflow;
+        const bool shouldRun = popupVisible && !entering && !closing && enabled && available &&
+                               clientAnimations && media.playing && overflow;
         if (shouldRun) {
             if (!scrollTimerRunning) {
                 scrollTickMs = GetTickCount64();
@@ -815,21 +828,25 @@ struct MediaPopup::Impl {
         if (!rt)
             return false;
         const float w = dip(pxW);
-        const float h = dip(pxH);
+        const float cardH = kPopupHeightDip;
         const float infoW = textAreaWidth(w);
         updateScrollTimer(infoW);
-        buttonRects[0] = D2D1::RectF(w * 0.5f - 102.0f, 126.0f, w * 0.5f - 66.0f, 162.0f);
-        buttonRects[1] = D2D1::RectF(w * 0.5f - 20.0f, 124.0f, w * 0.5f + 20.0f, 164.0f);
-        buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, 126.0f, w * 0.5f + 102.0f, 162.0f);
+        buttonRects[0] = D2D1::RectF(w * 0.5f - 102.0f, cardOriginDip + 126.0f,
+                                     w * 0.5f - 66.0f, cardOriginDip + 162.0f);
+        buttonRects[1] = D2D1::RectF(w * 0.5f - 20.0f, cardOriginDip + 124.0f,
+                                     w * 0.5f + 20.0f, cardOriginDip + 164.0f);
+        buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, cardOriginDip + 126.0f,
+                                     w * 0.5f + 102.0f, cardOriginDip + 162.0f);
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-        drawBackdrop(rt, w, h);
+        rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
+        drawBackdrop(rt, w, cardH);
 
         const bool frosted = backgroundMode == MediaPopupBackground::Frosted;
-        const D2D1_RECT_F card = frosted ? D2D1::RectF(0.0f, 0.0f, w, h)
-                                         : D2D1::RectF(1.0f, 1.0f, w - 1.0f, h - 3.0f);
+        const D2D1_RECT_F card = frosted ? D2D1::RectF(0.0f, 0.0f, w, cardH)
+                                         : D2D1::RectF(1.0f, 1.0f, w - 1.0f, cardH - 3.0f);
         if (!frosted) {
             rt->FillRoundedRectangle(
                 D2D1::RoundedRect(D2D1::RectF(card.left, card.top + 3.0f, card.right,
@@ -855,6 +872,7 @@ struct MediaPopup::Impl {
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i);
 
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             releaseDrawingResources();
@@ -909,7 +927,19 @@ struct MediaPopup::Impl {
         }
         y = std::clamp(y, workTop, std::max(workTop, workBottom - popupH));
 
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, popupW, popupH,
+        // 承载窗口只覆盖“卡片终点到歌词宿主边缘”的可见路径，另一侧保持在
+        // 宿主边缘之外。这样卡片会从歌词窗口边缘露出，而不是从屏幕边缘露出。
+        const int anchorEdgeY = placedAbove ? anchorRect.top : anchorRect.bottom;
+        const int hostY = placedAbove ? y : anchorEdgeY;
+        const int cardLocalY = placedAbove ? 0 : y - anchorEdgeY;
+        const int travel = placedAbove ? anchorEdgeY - y : cardLocalY + popupH;
+        cardScreenX = x;
+        cardScreenY = y;
+        cardWidthPx = popupW;
+        cardHeightPx = popupH;
+        animationTravelPx = static_cast<float>(travel);
+        cardOriginDip = dip(cardLocalY);
+        SetWindowPos(hwnd, HWND_TOPMOST, x, hostY, popupW, travel,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     }
 
@@ -933,41 +963,60 @@ struct MediaPopup::Impl {
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
     }
 
+    void renderOrDefer() {
+        if (entering || closing) {
+            deferredRender = true;
+            return;
+        }
+        render();
+    }
+
     void showPopup() {
         if (!hwnd || !enabled || !available)
             return;
         KillTimer(hwnd, kShowTimer);
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kCloseTimer);
+        KillTimer(hwnd, kScrollTimer);
+        KillTimer(hwnd, kEnterTimer);
+        scrollTimerRunning = false;
+        deferredRender = false;
+        entering = true;
+        closing = false;
         reposition();
         if (backgroundMode == MediaPopupBackground::Frosted)
             backdropDirty = true;
-        if (!render())
+        if (!render()) {
+            entering = false;
             return;
+        }
 
         // 窗口本身保持固定位置，只让 DirectComposition 根视觉做位移动画。
         // 透明度始终为 1，避免淡入淡出时出现第二层背板。
         renderer.resetRoot();
-        const float offset = kPopupEnterOffsetDip * scale();
-        const float fromY = placedAbove ? offset : -offset;
+        const float fromY = placedAbove ? animationTravelPx : -animationTravelPx;
         if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f,
-                                  1.0f, 1.0f, 0.18f)) {
+                                  1.0f, 1.0f,
+                                  static_cast<float>(kOpenAnimationMs) / 1000.0f)) {
             renderer.resetRoot();
         }
         renderer.commit();
-        closing = false;
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         popupVisible = true;
-        updateScrollTimer(textAreaWidth(kPopupWidthDip));
+        SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
     }
 
     void hideAnimated() {
         if (!popupVisible || closing)
             return;
         KillTimer(hwnd, kHideTimer);
+        KillTimer(hwnd, kEnterTimer);
+        KillTimer(hwnd, kScrollTimer);
+        scrollTimerRunning = false;
+        entering = false;
+        deferredRender = false;
         closing = true;
-        const float offset = kPopupEnterOffsetDip * scale();
-        const float toY = placedAbove ? offset : -offset;
+        const float toY = placedAbove ? animationTravelPx : -animationTravelPx;
         if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, toY,
                                   1.0f, 1.0f,
                                   static_cast<float>(kCloseAnimationMs) / 1000.0f)) {
@@ -1026,21 +1075,21 @@ struct MediaPopup::Impl {
             const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
             if (button != hoverButton) {
                 hoverButton = button;
-                render();
+                renderOrDefer();
             }
             return 0;
         }
         case WM_MOUSELEAVE:
             hoverButton = -1;
             onPopupLeave();
-            render();
+            renderOrDefer();
             return 0;
         case WM_LBUTTONDOWN: {
             const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
             if (button >= 0) {
                 pressedButton = button;
                 SetCapture(hwnd);
-                render();
+                renderOrDefer();
             }
             return 0;
         }
@@ -1050,19 +1099,28 @@ struct MediaPopup::Impl {
             pressedButton = -1;
             if (GetCapture() == hwnd)
                 ReleaseCapture();
-            render();
+            renderOrDefer();
             if (pressed >= 0 && pressed == button && onControl)
                 onControl(static_cast<MediaControl>(pressed));
             return 0;
         }
         case WM_CAPTURECHANGED:
             pressedButton = -1;
-            render();
+            renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_NCHITTEST:
+        {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &point);
+            const float x = dip(point.x);
+            const float y = dip(point.y);
+            if (x < 0.0f || x > kPopupWidthDip || y < cardOriginDip ||
+                y > cardOriginDip + kPopupHeightDip)
+                return HTTRANSPARENT;
             return HTCLIENT;
+        }
         case WM_TIMER:
             if (wp == kShowTimer) {
                 KillTimer(hwnd, kShowTimer);
@@ -1078,7 +1136,19 @@ struct MediaPopup::Impl {
                     hideImmediate();
                 else if (closing)
                     showPopup();
+            } else if (wp == kEnterTimer) {
+                KillTimer(hwnd, kEnterTimer);
+                entering = false;
+                if (popupVisible && !closing) {
+                    if (deferredRender) {
+                        deferredRender = false;
+                        render();
+                    }
+                    updateScrollTimer(textAreaWidth(kPopupWidthDip));
+                }
             } else if (wp == kScrollTimer) {
+                if (entering || closing || !popupVisible)
+                    return 0;
                 advanceTextScroll();
                 render();
             }
@@ -1107,7 +1177,7 @@ struct MediaPopup::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             BeginPaint(hwnd, &ps);
-            render();
+            renderOrDefer();
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1192,8 +1262,12 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
-    if (impl_->popupVisible)
-        impl_->render();
+    if (impl_->popupVisible) {
+        if (impl_->entering || impl_->closing)
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    }
 }
 
 void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
@@ -1223,8 +1297,12 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
         impl_->hideImmediate();
         return;
     }
-    if (changed && impl_->popupVisible)
-        impl_->render();
+    if (changed && impl_->popupVisible) {
+        if (impl_->entering || impl_->closing)
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    }
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
