@@ -24,6 +24,8 @@ constexpr int kIdCandidateList = 104;
 constexpr int kIdApplyButton = 105;
 constexpr int kIdCancelButton = 106;
 constexpr int kIdPreview = 107;
+constexpr int kIdPreviewRomanization = 108;
+constexpr int kIdPreviewTranslation = 109;
 constexpr int kIdAdvanceButton = 110;
 constexpr int kIdDelayButton = 111;
 
@@ -45,6 +47,12 @@ constexpr DWORD kPreviewResumeDelayMs = 2000;
 constexpr int kPreviewWheelLinesPerNotch = 3;
 constexpr float kLyricTextWidthDip = 240.0f;
 constexpr float kLyricRowHeightDip = 50.0f;
+constexpr float kPreviewSecondaryLineHeight = 18.0f;
+constexpr float kPreviewSecondaryGap = 2.0f;
+constexpr float kPreviewToggleSize = 28.0f;
+constexpr float kPreviewToggleGap = 6.0f;
+constexpr float kPreviewToggleMargin = 10.0f;
+constexpr float kPreviewToggleTextGap = 10.0f;
 
 constexpr UINT kMsgCandidatesReady = WM_APP + 10;
 constexpr UINT kMsgPreviewLyricReady = WM_APP + 11;
@@ -127,6 +135,10 @@ struct ManualSearchDialog::Impl {
     std::vector<LyricLine> previewLines;
     SongInfo previewInfo;
     std::wstring previewCapabilityLabel;
+    bool previewHasTranslation = false;
+    bool previewHasRomanization = false;
+    bool previewShowTranslation = false;
+    bool previewShowRomanization = false;
     int64_t previewOffsetMs = 0;
     int64_t playbackPositionMs = 0;
     int64_t previewPositionMs = 0;
@@ -151,6 +163,8 @@ struct ManualSearchDialog::Impl {
     D2D1_RECT_F compatibilityRect{};
     D2D1_RECT_F candidateListRect{};
     D2D1_RECT_F previewRect{};
+    D2D1_RECT_F previewRomanizationRect{};
+    D2D1_RECT_F previewTranslationRect{};
     D2D1_RECT_F advanceRect{};
     D2D1_RECT_F delayRect{};
     D2D1_RECT_F applyRect{};
@@ -440,6 +454,31 @@ struct ManualSearchDialog::Impl {
         const float rightW = std::max(0.0f, w - rightX - pad);
         candidateListRect = D2D1::RectF(pad, contentTop, pad + listW, contentTop + contentH);
         previewRect = D2D1::RectF(rightX, contentTop, rightX + rightW, contentTop + contentH);
+        previewRomanizationRect = {};
+        previewTranslationRect = {};
+        const int previewToggleCount = (previewHasRomanization ? 1 : 0) +
+                                       (previewHasTranslation ? 1 : 0);
+        if (previewToggleCount > 0) {
+            const float toggleRailHeight =
+                previewToggleCount * kPreviewToggleSize +
+                (previewToggleCount - 1) * kPreviewToggleGap;
+            const float toggleBottom = previewRect.bottom - kPreviewToggleMargin;
+            const float toggleTop =
+                std::max(previewRect.top + previewContentTop(), toggleBottom - toggleRailHeight);
+            const float toggleRight = previewRect.right - kPreviewToggleMargin;
+            float nextTop = toggleTop;
+            if (previewHasRomanization) {
+                previewRomanizationRect =
+                    D2D1::RectF(toggleRight - kPreviewToggleSize, nextTop, toggleRight,
+                                 nextTop + kPreviewToggleSize);
+                nextTop += kPreviewToggleSize + kPreviewToggleGap;
+            }
+            if (previewHasTranslation) {
+                previewTranslationRect =
+                    D2D1::RectF(toggleRight - kPreviewToggleSize, nextTop, toggleRight,
+                                 nextTop + kPreviewToggleSize);
+            }
+        }
 
         const float timingW = 100.0f;
         advanceRect = D2D1::RectF(pad, buttonY, pad + timingW, buttonY + buttonH);
@@ -569,17 +608,19 @@ struct ManualSearchDialog::Impl {
     }
 
     void updatePreviewCapability() {
-        bool hasTranslation = false;
-        bool hasRomanization = false;
+        previewHasTranslation = false;
+        previewHasRomanization = false;
         for (const auto& line : previewLines) {
-            hasTranslation = hasTranslation || !line.translation.empty();
-            hasRomanization = hasRomanization || !line.romanization.empty();
+            previewHasTranslation = previewHasTranslation || !line.translation.empty();
+            previewHasRomanization = previewHasRomanization || !line.romanization.empty();
         }
-        if (hasTranslation && hasRomanization)
+        previewShowTranslation = previewShowTranslation && previewHasTranslation;
+        previewShowRomanization = previewShowRomanization && previewHasRomanization;
+        if (previewHasTranslation && previewHasRomanization)
             previewCapabilityLabel = L"[支持翻译 + 罗马音]";
-        else if (hasTranslation)
+        else if (previewHasTranslation)
             previewCapabilityLabel = L"[支持翻译]";
-        else if (hasRomanization)
+        else if (previewHasRomanization)
             previewCapabilityLabel = L"[支持罗马音]";
         else
             previewCapabilityLabel.clear();
@@ -589,9 +630,18 @@ struct ManualSearchDialog::Impl {
         return previewCapabilityLabel.empty() ? 0.0f : 27.0f;
     }
 
+    int previewSecondaryLineCount() const {
+        return (previewShowRomanization ? 1 : 0) + (previewShowTranslation ? 1 : 0);
+    }
+
+    float previewLyricRowHeight() const {
+        return kLyricRowHeightDip +
+               previewSecondaryLineCount() * (kPreviewSecondaryLineHeight + kPreviewSecondaryGap);
+    }
+
     int visiblePreviewRows(float height) const {
         const float availableHeight = std::max(0.0f, height - previewContentTop());
-        return std::max(1, static_cast<int>(std::floor(availableHeight / kLyricRowHeightDip)));
+        return std::max(1, static_cast<int>(std::floor(availableHeight / previewLyricRowHeight())));
     }
 
     int visiblePreviewRows() const {
@@ -626,6 +676,7 @@ struct ManualSearchDialog::Impl {
         previewLines = lines;
         updatePreviewCapability();
         resetPreviewView();
+        layout();
         surface.invalidate();
     }
 
@@ -764,6 +815,64 @@ struct ManualSearchDialog::Impl {
         }
     }
 
+    void drawPreviewLyricLine(fluent::FluentDialogSurface::Painter& painter,
+                              const LyricLine& line, const D2D1_RECT_F& rowRect, bool current) {
+        const auto& p = fluent::palette();
+        const int secondaryCount = previewSecondaryLineCount();
+        const float mainHeight = kLyricRowHeightDip;
+        const float contentHeight =
+            mainHeight + secondaryCount * (kPreviewSecondaryLineHeight + kPreviewSecondaryGap);
+        const float top = rowRect.top +
+                          std::max(0.0f, (rowRect.bottom - rowRect.top - contentHeight) * 0.5f);
+        const D2D1_RECT_F mainRect =
+            D2D1::RectF(rowRect.left, top, rowRect.right, top + mainHeight);
+        if (current) {
+            drawCurrentLyric(painter, line, mainRect);
+        } else {
+            painter.drawText(line.text, painter.textFormat(14.0f, 400, true), mainRect, p.text);
+        }
+
+        float secondaryTop = mainRect.bottom + kPreviewSecondaryGap;
+        auto drawSecondary = [&](const std::wstring& text) {
+            if (!text.empty()) {
+                painter.drawTrimmedText(
+                    text, painter.textFormat(12.0f, 400, true, true),
+                    D2D1::RectF(rowRect.left, secondaryTop, rowRect.right,
+                                secondaryTop + kPreviewSecondaryLineHeight),
+                    p.textSecondary);
+            }
+            secondaryTop += kPreviewSecondaryLineHeight + kPreviewSecondaryGap;
+        };
+        if (previewShowRomanization)
+            drawSecondary(line.romanization);
+        if (previewShowTranslation)
+            drawSecondary(line.translation);
+    }
+
+    void drawPreviewToggleButton(fluent::FluentDialogSurface::Painter& painter,
+                                 const D2D1_RECT_F& rect, const wchar_t* label, bool checked,
+                                 int id) {
+        const auto& p = fluent::palette();
+        const bool hovered = hoverId == id;
+        const bool pressed = pressedId == id;
+        const bool showFill = hovered || pressed;
+        const D2D1_COLOR_F border = checked || hovered || pressed ? p.accent : p.cardStroke;
+        const D2D1_COLOR_F textColor = checked ? p.accent : (hovered ? p.text : p.textSecondary);
+        if (showFill) {
+            painter.fillRoundRect(pressed ? p.controlPressed : p.controlHover, rect,
+                                  fluent::metrics::controlRadius);
+        }
+        painter.strokeRoundRect(border, rect, 1.0f, fluent::metrics::controlRadius);
+        if (focusedId == id && focusVisible) {
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
+                            rect.bottom - 1.5f),
+                1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
+        }
+        painter.drawText(label, painter.textFormat(13.0f, 600, true, true), rect, textColor);
+    }
+
     void drawTextField(fluent::FluentDialogSurface::Painter& painter,
                        const D2D1_RECT_F& rect, const TextField& field, int id) {
         const auto& p = fluent::palette();
@@ -816,6 +925,10 @@ struct ManualSearchDialog::Impl {
     bool isEnabled(int id) const {
         if (id == kIdSearchButton)
             return !searching;
+        if (id == kIdPreviewRomanization)
+            return previewHasRomanization;
+        if (id == kIdPreviewTranslation)
+            return previewHasTranslation;
         if (id == kIdApplyButton || id == kIdAdvanceButton || id == kIdDelayButton)
             return !previewLines.empty();
         return id != 0;
@@ -970,12 +1083,19 @@ struct ManualSearchDialog::Impl {
         }
         const int top = std::clamp(previewTopLine, 0, maxTop);
         const int count = std::min(visible, total - top);
-        const float lyricBlockHeight = visible * kLyricRowHeightDip;
+        const float lyricRowHeight = previewLyricRowHeight();
+        const float lyricBlockHeight = visible * lyricRowHeight;
         const float availableHeight = std::max(0.0f, height - contentTop);
         const float lyricTop = previewRect.top + contentTop +
                                std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
-        const float lyricWidth = std::min(kLyricTextWidthDip, std::max(0.0f, width - 24.0f));
-        const float lyricLeft = previewRect.left + (width - lyricWidth) * 0.5f;
+        const bool hasToggleRail = previewHasRomanization || previewHasTranslation;
+        const float lyricLeftLimit = previewRect.left + 12.0f;
+        const float lyricRightLimit = previewRect.right - 12.0f -
+                                      (hasToggleRail ? kPreviewToggleSize + kPreviewToggleTextGap
+                                                     : 0.0f);
+        const float lyricAreaWidth = std::max(0.0f, lyricRightLimit - lyricLeftLimit);
+        const float lyricWidth = std::min(kLyricTextWidthDip, lyricAreaWidth);
+        const float lyricLeft = lyricLeftLimit + (lyricAreaWidth - lyricWidth) * 0.5f;
         const float lyricRight = lyricLeft + lyricWidth;
 
         painter.target()->PushAxisAlignedClip(
@@ -984,17 +1104,19 @@ struct ManualSearchDialog::Impl {
         for (int i = 0; i < count; ++i) {
             const int lineIndex = top + i;
             const bool current = previewCurrentLine >= 0 && lineIndex == previewCurrentLine;
-            const D2D1_RECT_F rect =
-                D2D1::RectF(lyricLeft, lyricTop + i * kLyricRowHeightDip, lyricRight,
-                            lyricTop + (i + 1) * kLyricRowHeightDip);
-            if (current) {
-                drawCurrentLyric(painter, previewLines[lineIndex], rect);
-            } else {
-                painter.drawText(previewLines[lineIndex].text,
-                                 painter.textFormat(14.0f, 400, true), rect, p.text);
-            }
+            const D2D1_RECT_F rect = D2D1::RectF(
+                lyricLeft, lyricTop + i * lyricRowHeight, lyricRight,
+                lyricTop + (i + 1) * lyricRowHeight);
+            drawPreviewLyricLine(painter, previewLines[lineIndex], rect, current);
         }
         painter.target()->PopAxisAlignedClip();
+
+        if (previewHasRomanization)
+            drawPreviewToggleButton(painter, previewRomanizationRect, L"音",
+                                    previewShowRomanization, kIdPreviewRomanization);
+        if (previewHasTranslation)
+            drawPreviewToggleButton(painter, previewTranslationRect, L"译", previewShowTranslation,
+                                    kIdPreviewTranslation);
     }
 
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
@@ -1032,6 +1154,10 @@ struct ManualSearchDialog::Impl {
             return kIdSearchButton;
         if (contains(candidateListRect, x, y))
             return kIdCandidateList;
+        if (previewHasRomanization && contains(previewRomanizationRect, x, y))
+            return kIdPreviewRomanization;
+        if (previewHasTranslation && contains(previewTranslationRect, x, y))
+            return kIdPreviewTranslation;
         if (contains(previewRect, x, y))
             return kIdPreview;
         if (contains(advanceRect, x, y))
@@ -1047,7 +1173,8 @@ struct ManualSearchDialog::Impl {
 
     std::vector<int> focusOrder() const {
         std::vector<int> order{kIdTitleEdit, kIdArtistEdit, kIdSearchButton,
-                               kIdCandidateList, kIdAdvanceButton, kIdDelayButton,
+                               kIdCandidateList, kIdPreviewRomanization,
+                               kIdPreviewTranslation, kIdAdvanceButton, kIdDelayButton,
                                kIdApplyButton, kIdCancelButton};
         order.erase(std::remove_if(order.begin(), order.end(),
                                    [this](int id) { return !isEnabled(id); }),
@@ -1089,6 +1216,16 @@ struct ManualSearchDialog::Impl {
             break;
         case kIdDelayButton:
             shiftPreviewTimes(500);
+            break;
+        case kIdPreviewRomanization:
+            previewShowRomanization = !previewShowRomanization;
+            syncPreviewToCurrentLine();
+            surface.invalidate();
+            break;
+        case kIdPreviewTranslation:
+            previewShowTranslation = !previewShowTranslation;
+            syncPreviewToCurrentLine();
+            surface.invalidate();
             break;
         case kIdApplyButton:
             applySelection();
