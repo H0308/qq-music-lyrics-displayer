@@ -283,6 +283,12 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
     if (swapchain_ && hwnd != hwnd_) {
         // 窗口重建（Explorer 重启后 createWindow）：DComp 目标绑在原 HWND 上，必须重建
         releaseLyricTransitionLayers();
+        if (rootOpacity_) {
+            if (visual_)
+                visual_->SetEffect(nullptr);
+            rootOpacity_->Release();
+            rootOpacity_ = nullptr;
+        }
         if (visual_) {
             visual_->Release();
             visual_ = nullptr;
@@ -322,6 +328,12 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
             hr = dcomp_->CreateVisual(&visual_);
         if (SUCCEEDED(hr))
             hr = visual_->SetContent(swapchain_);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateEffectGroup(&rootOpacity_);
+        if (SUCCEEDED(hr))
+            hr = rootOpacity_->SetOpacity(1.0f);
+        if (SUCCEEDED(hr))
+            hr = visual_->SetEffect(rootOpacity_);
         if (SUCCEEDED(hr))
             hr = target_->SetRoot(visual_);
         if (SUCCEEDED(hr))
@@ -546,6 +558,57 @@ void DCompRenderer::clearLyricTransitionLayers() {
     releaseLyricTransitionLayers();
 }
 
+bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
+                                float fromOpacity, float toOpacity, float durationSec) {
+    if (!dcomp_ || !visual_ || !rootOpacity_ || durationSec <= 0.0f)
+        return false;
+
+    const double duration = static_cast<double>(durationSec);
+    IDCompositionAnimation* xAnim = nullptr;
+    IDCompositionAnimation* yAnim = nullptr;
+    IDCompositionAnimation* opacityAnim = nullptr;
+    HRESULT hr = dcomp_->CreateAnimation(&xAnim);
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateAnimation(&yAnim);
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateAnimation(&opacityAnim);
+    if (SUCCEEDED(hr))
+        hr = addSmoothStep(xAnim, 0.0, duration, fromX, toX) ? S_OK : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = addSmoothStep(yAnim, 0.0, duration, fromY, toY) ? S_OK : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity) ? S_OK : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = xAnim->End(duration, toX);
+    if (SUCCEEDED(hr))
+        hr = yAnim->End(duration, toY);
+    if (SUCCEEDED(hr))
+        hr = opacityAnim->End(duration, toOpacity);
+    if (SUCCEEDED(hr))
+        hr = visual_->SetOffsetX(xAnim);
+    if (SUCCEEDED(hr))
+        hr = visual_->SetOffsetY(yAnim);
+    if (SUCCEEDED(hr))
+        hr = rootOpacity_->SetOpacity(opacityAnim);
+
+    if (xAnim)
+        xAnim->Release();
+    if (yAnim)
+        yAnim->Release();
+    if (opacityAnim)
+        opacityAnim->Release();
+    return SUCCEEDED(hr);
+}
+
+void DCompRenderer::resetRoot() {
+    if (!visual_)
+        return;
+    visual_->SetOffsetX(0.0f);
+    visual_->SetOffsetY(0.0f);
+    if (rootOpacity_)
+        rootOpacity_->SetOpacity(1.0f);
+}
+
 void DCompRenderer::commit() {
     if (dcomp_)
         dcomp_->Commit();
@@ -560,6 +623,9 @@ void DCompRenderer::discard() {
             p = nullptr;
         }
     };
+    if (visual_ && rootOpacity_)
+        visual_->SetEffect(nullptr);
+    release(rootOpacity_);
     release(visual_);
     release(target_);
     release(swapchain_);

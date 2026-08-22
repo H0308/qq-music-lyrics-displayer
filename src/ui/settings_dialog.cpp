@@ -24,6 +24,7 @@ constexpr int kIdCoverEffect = 413;
 constexpr int kIdSpectrum = 414;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
+constexpr int kIdHoverControlStyle = 417;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -269,6 +270,10 @@ struct SettingsDialog::Impl {
                  state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
         addToggle(0, kIdSpectrum, L"频谱", state.spectrumOn);
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
+        addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
+                 L"内嵌控件保持当前样式；媒体卡片在任务栏外展开，歌词保持显示",
+                 {L"内嵌控件", L"媒体卡片"}, state.hoverControlStyle, state.hoverControls,
+                 kRowTallH);
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -667,6 +672,12 @@ struct SettingsDialog::Impl {
             row->checked = !row->checked;
             if (actions.onHoverControls)
                 actions.onHoverControls(row->checked);
+            if (auto* style = findRow(kIdHoverControlStyle))
+                style->enabled = row->checked;
+            break;
+        case kIdHoverControlStyle:
+            if (actions.onHoverControlStyle)
+                actions.onHoverControlStyle(row->selected);
             break;
         case kIdRenderMode:
             if (actions.onRenderMode)
@@ -744,6 +755,10 @@ struct SettingsDialog::Impl {
             row->checked = s.spectrumOn;
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
+        if (auto* row = findRow(kIdHoverControlStyle)) {
+            row->selected = s.hoverControlStyle;
+            row->enabled = s.hoverControls;
+        }
         if (auto* row = findRow(kIdRenderMode))
             row->selected = s.renderMode;
         if (auto* row = findRow(kIdPickFont)) {

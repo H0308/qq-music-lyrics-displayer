@@ -297,6 +297,7 @@ struct App {
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
     bool hoverPlaybackControls_ = true;
+    HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止（仅驻留内存）
     int renderMode_ = 0;
 
@@ -427,6 +428,13 @@ struct App {
         hoverPlaybackControls_ = on;
         if (taskbarHost)
             taskbarHost->setControlsOnHover(on);
+        saveSettings();
+    }
+
+    void applyHoverControlStyle(int style) {
+        hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
+        if (taskbarHost)
+            taskbarHost->setHoverControlStyle(hoverControlStyle_);
         saveSettings();
     }
 
@@ -594,6 +602,7 @@ struct App {
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setLyricAlignment(lyricAlignment_);
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
+        taskbarHost->setHoverControlStyle(hoverControlStyle_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -1044,6 +1053,9 @@ void App::loadSettings() {
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         renderMode_ = std::clamp(j.value("renderMode", 0), 0, 2);
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
+        hoverControlStyle_ = j.value("hoverControlStyle", 0) == 1
+                                 ? HoverControlStyle::Popup
+                                 : HoverControlStyle::Inline;
         spectrumOn_ = j.value("spectrum", false);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
@@ -1100,6 +1112,7 @@ void App::saveSettings() {
         j["taskbarPosition"] = taskbarPosition_;
         j["renderMode"] = renderMode_;
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
+        j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
         j["spectrum"] = spectrumOn_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
@@ -1854,6 +1867,7 @@ SettingsState App::currentSettingsState() const {
     st.spectrumOn = spectrumOn_;
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
+    st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = doubleLineLyricsEnabled_;
     st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
@@ -1881,6 +1895,7 @@ SettingsActions App::buildSettingsActions() {
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
+    act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onPickFont = [this] { pickFont(); };
     act.onFontColorEffect = [this] { showFontColorDialog(); };
     act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };

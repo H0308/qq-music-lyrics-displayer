@@ -1,13 +1,14 @@
 #include "taskbar_host.h"
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
+#include "media_control_icons.h"
+#include "media_popup.h"
+#include "platform_icon.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
 #include <gdiplus.h>
 #include <objbase.h>
-#include <shellapi.h>
-#include <tlhelp32.h>
 #include <uiautomation.h>
 #include <windowsx.h>
 
@@ -90,176 +91,6 @@ private:
     ULONG_PTR token_ = 0;
 };
 GdiplusInit g_gdiplusInit;
-
-std::wstring findProcessImagePath(const std::wstring& processName) {
-    if (processName.empty())
-        return {};
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return {};
-
-    PROCESSENTRY32W entry{};
-    entry.dwSize = sizeof(entry);
-    std::wstring result;
-    if (Process32FirstW(snapshot, &entry)) {
-        do {
-            if (_wcsicmp(entry.szExeFile, processName.c_str()) != 0)
-                continue;
-
-            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
-                                         entry.th32ProcessID);
-            if (!process)
-                continue;
-            wchar_t path[32768]{};
-            DWORD length = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
-            if (QueryFullProcessImageNameW(process, 0, path, &length))
-                result.assign(path, length);
-            CloseHandle(process);
-            if (!result.empty())
-                break;
-        } while (Process32NextW(snapshot, &entry));
-    }
-    CloseHandle(snapshot);
-    return result;
-}
-
-std::wstring resolveSourceIconPath(const std::wstring& sourceAppUserModelId) {
-    if (sourceAppUserModelId.empty())
-        return {};
-
-    // 网易云的增强会话可能由桥接器发布，但平台图标应优先取网易云客户端本体。
-    std::vector<std::wstring> candidates;
-    if (_wcsicmp(sourceAppUserModelId.c_str(), L"NeteaseBridge.exe") == 0) {
-        candidates.emplace_back(L"cloudmusic.exe");
-        candidates.emplace_back(L"NeteaseBridge.exe");
-    } else {
-        candidates.push_back(sourceAppUserModelId);
-    }
-    for (const auto& candidate : candidates) {
-        std::wstring path = findProcessImagePath(candidate);
-        if (!path.empty())
-            return path;
-    }
-
-    // 兼容 SMTC 直接返回本地可访问路径的来源标识。
-    DWORD attributes = GetFileAttributesW(sourceAppUserModelId.c_str());
-    if (attributes != INVALID_FILE_ATTRIBUTES &&
-        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        return sourceAppUserModelId;
-    return {};
-}
-
-void clearIconBlackMatte(std::vector<BYTE>& pixels, UINT width, UINT height) {
-    if (pixels.empty() || width == 0 || height == 0)
-        return;
-
-    const size_t pixelCount = static_cast<size_t>(width) * height;
-    std::vector<BYTE> cleared(pixelCount, 0);
-    std::vector<size_t> pending;
-    pending.reserve(pixelCount);
-
-    auto nearBlack = [&](size_t index) {
-        const BYTE* p = pixels.data() + index * 4;
-        return p[3] != 0 && p[0] <= 48 && p[1] <= 48 && p[2] <= 48;
-    };
-    auto enqueue = [&](size_t index) {
-        if (!cleared[index] && nearBlack(index)) {
-            cleared[index] = 1;
-            pending.push_back(index);
-        }
-    };
-
-    for (UINT x = 0; x < width; ++x) {
-        enqueue(x);
-        enqueue(static_cast<size_t>(height - 1) * width + x);
-    }
-    for (UINT y = 0; y < height; ++y) {
-        enqueue(static_cast<size_t>(y) * width);
-        enqueue(static_cast<size_t>(y) * width + width - 1);
-    }
-
-    while (!pending.empty()) {
-        const size_t index = pending.back();
-        pending.pop_back();
-        const UINT x = static_cast<UINT>(index % width);
-        const UINT y = static_cast<UINT>(index / width);
-        if (x > 0)
-            enqueue(index - 1);
-        if (x + 1 < width)
-            enqueue(index + 1);
-        if (y > 0)
-            enqueue(index - width);
-        if (y + 1 < height)
-            enqueue(index + width);
-    }
-
-    for (size_t i = 0; i < pixelCount; ++i) {
-        BYTE* p = pixels.data() + i * 4;
-        if (cleared[i] || p[3] == 0)
-            p[0] = p[1] = p[2] = p[3] = 0;
-    }
-}
-
-bool readIconPixels(HICON icon, std::vector<BYTE>& pixels, UINT& width, UINT& height) {
-    if (!icon)
-        return false;
-
-    std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromHICON(icon));
-    if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok)
-        return false;
-
-    width = bitmap->GetWidth();
-    height = bitmap->GetHeight();
-    if (width == 0 || height == 0)
-        return false;
-
-    Gdiplus::BitmapData data{};
-    Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
-    if (bitmap->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &data) !=
-        Gdiplus::Ok)
-        return false;
-
-    pixels.resize(static_cast<size_t>(width) * height * 4);
-    const BYTE* base = static_cast<const BYTE*>(data.Scan0);
-    const LONG stride = data.Stride;
-    const LONG rowStride = stride >= 0 ? stride : -stride;
-    for (UINT y = 0; y < height; ++y) {
-        const UINT sourceRow = stride >= 0 ? y : height - 1 - y;
-        std::memcpy(pixels.data() + static_cast<size_t>(y) * width * 4,
-                    base + static_cast<size_t>(sourceRow) * rowStride,
-                    static_cast<size_t>(width) * 4);
-    }
-    bitmap->UnlockBits(&data);
-
-    // Direct2D 使用预乘 Alpha；同时清理透明像素的残留 RGB 和黑色不透明底边。
-    clearIconBlackMatte(pixels, width, height);
-    return true;
-}
-
-bool readSourceIconPixels(const std::wstring& path, std::vector<BYTE>& pixels, UINT& width,
-                          UINT& height) {
-    HICON largeIcon = nullptr;
-    HICON smallIcon = nullptr;
-    ExtractIconExW(path.c_str(), 0, &largeIcon, &smallIcon, 1);
-    HICON icon = largeIcon ? largeIcon : smallIcon;
-    HICON shellIcon = nullptr;
-    if (!icon) {
-        SHFILEINFOW info{};
-        if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info), SHGFI_ICON | SHGFI_LARGEICON))
-            shellIcon = info.hIcon;
-        icon = shellIcon;
-    }
-
-    const bool ok = readIconPixels(icon, pixels, width, height);
-    if (largeIcon)
-        DestroyIcon(largeIcon);
-    if (smallIcon)
-        DestroyIcon(smallIcon);
-    if (shellIcon)
-        DestroyIcon(shellIcon);
-    return ok;
-}
 
 // 读取注册表 DWORD，失败返回默认值
 template <class T>
@@ -450,6 +281,8 @@ struct TaskbarHost::Impl {
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
     bool controlsOnHover_ = true;
+    HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
+    MediaPopup mediaPopup;
     bool quitting = false;
 
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
@@ -581,9 +414,7 @@ struct TaskbarHost::Impl {
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1EllipseGeometry* vinylCoverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
-    ID2D1PathGeometry* icoPlay_ = nullptr;   // 播放（右向三角）
-    ID2D1PathGeometry* icoPrev_ = nullptr;   // 上一首（左向三角 + 左侧竖条）
-    ID2D1PathGeometry* icoNext_ = nullptr;   // 下一首（右向三角 + 右侧竖条）
+    media_control::Geometry controlGeometry;
     bool textDirty_ = true;
     bool songInfoDirty_ = true; // 标题/歌手布局独立重建，换行不触碰歌曲信息
     bool geomDirty_ = true;
@@ -694,6 +525,8 @@ struct TaskbarHost::Impl {
         }
 
         hwnd = h;
+        if (!mediaPopup.create(inst, hwnd))
+            std::wprintf(L"[taskbar] media popup creation failed\n");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         return true;
@@ -811,6 +644,7 @@ struct TaskbarHost::Impl {
         // 把窗口提到任务栏子窗口最前面，避免被其他任务栏子窗口盖住
         SetWindowPos(hwnd, HWND_TOP, pt.x, pt.y, pxW, pxH,
                      SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        mediaPopup.setAnchor(hwnd);
     }
 
     bool detectChanges() {
@@ -1025,6 +859,22 @@ struct TaskbarHost::Impl {
         if (controlsOnHover_ == on)
             return;
         controlsOnHover_ = on;
+        const bool popupEnabled = on && hoverControlStyle_ == HoverControlStyle::Popup;
+        mediaPopup.setEnabled(popupEnabled);
+        if (popupEnabled && mouseOver_)
+            mediaPopup.onAnchorEnter();
+        render();
+    }
+
+    void setHoverControlStyle(HoverControlStyle style) {
+        if (hoverControlStyle_ == style)
+            return;
+        hoverControlStyle_ = style;
+        const bool popupEnabled = controlsOnHover_ &&
+                                  hoverControlStyle_ == HoverControlStyle::Popup;
+        mediaPopup.setEnabled(popupEnabled);
+        if (popupEnabled && mouseOver_)
+            mediaPopup.onAnchorEnter();
         render();
     }
 
@@ -1095,6 +945,7 @@ struct TaskbarHost::Impl {
         if (media.playing != patch.playing) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
+            mediaPopup.setMedia(media, sessionVisible_ && renderMode_ != 2);
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
             render();
         }
@@ -1127,6 +978,7 @@ struct TaskbarHost::Impl {
         const bool sceneChanged = frame.scene != scene_;
         const bool wasVisible = visible;
         const bool mediaChanged = updateMediaInfo(frame.media);
+        mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2);
 
         frameRevision_ = frame.frameRevision;
         requestGeneration_ = frame.requestGeneration;
@@ -1416,9 +1268,7 @@ struct TaskbarHost::Impl {
         r(coverClip_);
         r(vinylCoverClip_);
         r(coverLayer_);
-        r(icoPlay_);
-        r(icoPrev_);
-        r(icoNext_);
+        media_control::release(controlGeometry);
         if (coverBmp) {
             coverBmp->Release();
             coverBmp = nullptr;
@@ -1591,14 +1441,11 @@ struct TaskbarHost::Impl {
         if (!platformIconVisible_ || media.sourceAppUserModelId.empty())
             return;
 
-        const std::wstring path = resolveSourceIconPath(media.sourceAppUserModelId);
-        if (path.empty())
-            return;
-
         std::vector<BYTE> pixels;
         UINT width = 0;
         UINT height = 0;
-        if (!readSourceIconPixels(path, pixels, width, height))
+        if (!platform_icon::readSourceIconPixels(media.sourceAppUserModelId, pixels, width,
+                                                 height))
             return;
 
         auto* rt = renderer.renderTarget();
@@ -2155,18 +2002,7 @@ struct TaskbarHost::Impl {
             vinylCoverClip_->Release();
             vinylCoverClip_ = nullptr;
         }
-        if (icoPlay_) {
-            icoPlay_->Release();
-            icoPlay_ = nullptr;
-        }
-        if (icoPrev_) {
-            icoPrev_->Release();
-            icoPrev_ = nullptr;
-        }
-        if (icoNext_) {
-            icoNext_->Release();
-            icoNext_ = nullptr;
-        }
+        media_control::release(controlGeometry);
 
         float s = coverSize();
         D2D1_ROUNDED_RECT rr{D2D1::RectF(0, 0, s, s), 4.0f, 4.0f};
@@ -2175,43 +2011,8 @@ struct TaskbarHost::Impl {
             D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s), vinylInnerRadius(s)};
         d2d->CreateEllipseGeometry(coverEllipse, &vinylCoverClip_);
 
-        // 绘制带圆角的三角形：dir=1 向右，dir=-1 向左
-        auto makeRoundedTriangle = [&](int dir, ID2D1PathGeometry** out) {
-            float tipX = dir * 0.55f;
-            float baseX = -dir * 0.35f;
-            constexpr float rad = 0.10f;
-            float ux = dir * 0.8739f;
-            float uy = 0.4856f;
-            D2D1_POINT_2F tip = {tipX, 0.0f};
-            D2D1_POINT_2F baseTop = {baseX, -0.5f};
-            D2D1_POINT_2F baseBottom = {baseX, 0.5f};
-            if (FAILED(d2d->CreatePathGeometry(out)))
-                return;
-            ID2D1GeometrySink* sink = nullptr;
-            if (FAILED((*out)->Open(&sink)))
-                return;
-            sink->BeginFigure({baseTop.x + rad * ux, baseTop.y + rad * uy},
-                              D2D1_FIGURE_BEGIN_FILLED);
-            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                baseTop, {baseTop.x, baseTop.y + rad}));
-            sink->AddLine({baseBottom.x, baseBottom.y - rad});
-            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                baseBottom, {baseBottom.x + rad * ux, baseBottom.y - rad * uy}));
-            sink->AddLine({tip.x - rad * ux, tip.y + rad * uy});
-            sink->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
-                tip, {tip.x - rad * ux, tip.y - rad * uy}));
-            sink->AddLine({baseTop.x + rad * ux, baseTop.y + rad * uy});
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            sink->Close();
-            sink->Release();
-        };
-
-        // 播放 / 下一首：右向圆角三角
-        makeRoundedTriangle(1, &icoPlay_);
-        // 上一首：左向圆角三角
-        makeRoundedTriangle(-1, &icoPrev_);
-        // 下一首与播放同形，绘制时直接使用
-        makeRoundedTriangle(1, &icoNext_);
+        if (!media_control::create(d2d, controlGeometry))
+            geomDirty_ = true;
     }
 
     // ---------- 渲染 ----------
@@ -2223,52 +2024,11 @@ struct TaskbarHost::Impl {
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
         ID2D1SolidColorBrush* brush = enabled ? brushBtn_ : brushBtnDisabled_;
 
-        if (idx == 1) {
-            // 播放/暂停：使用系统风格纯色图标
-            if (media.playing) {
-                // 暂停：两根圆角竖条
-                float w = r * 0.22f;
-                float gap = r * 0.20f;
-                float h = r * 0.55f;
-                float barR = w * 0.45f;
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(c.x - gap - w, c.y - h, c.x - gap, c.y + h), barR,
-                                      barR),
-                    brush);
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(c.x + gap, c.y - h, c.x + gap + w, c.y + h), barR,
-                                      barR),
-                    brush);
-            } else if (icoPlay_) {
-                rt->SetTransform(D2D1::Matrix3x2F::Scale(r * 1.4f, r * 1.4f) *
-                                 D2D1::Matrix3x2F::Translation(c.x + r * 0.05f, c.y));
-                rt->FillGeometry(icoPlay_, brush);
-                rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            }
-        } else {
-            // 上一首/下一首：圆角三角 + 圆角竖条
-            ID2D1PathGeometry* g = idx == 0 ? icoPrev_ : icoNext_;
-            float sc = r * 1.4f;
-            float barW = 0.16f * sc;
-            float barH = 1.0f * sc;
-            float barR = barW * 0.45f;
-            float barX = idx == 0 ? c.x - 0.72f * sc : c.x + 0.56f * sc;
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(barX, c.y - barH * 0.5f, barX + barW,
-                                              c.y + barH * 0.5f),
-                                  barR, barR),
-                brush);
-            if (g) {
-                rt->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc) *
-                                 D2D1::Matrix3x2F::Translation(c.x, c.y));
-                rt->FillGeometry(g, brush);
-                rt->SetTransform(D2D1::Matrix3x2F::Identity());
-            }
-        }
+        media_control::draw(rt, controlGeometry, idx, media.playing, c, r, brush);
     }
 
     int hitButton(float x, float y) const {
-        if (!controlsOnHover_ || !mouseOver_)
+        if (!controlsOnHover_ || !mouseOver_ || hoverControlStyle_ != HoverControlStyle::Inline)
             return -1;
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -2874,7 +2634,8 @@ struct TaskbarHost::Impl {
         float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
         float lyricY = h * 0.5f - lyricBlockH * 0.5f;
         // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
-        bool showControls = mouseOver_ && controlsOnHover_;
+        bool showControls = mouseOver_ && controlsOnHover_ &&
+                            hoverControlStyle_ == HoverControlStyle::Inline;
         // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
         bool showSpectrum = spectrumVisible_ && !showControls;
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
@@ -3100,7 +2861,7 @@ struct TaskbarHost::Impl {
             marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
             marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
         }
-        if (mouseOver_ && controlsOnHover_) {
+        if (mouseOver_ && controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Inline) {
             scrollAnimating_ = animating;
             return;
         }
@@ -3228,6 +2989,7 @@ struct TaskbarHost::Impl {
         if (mode == renderMode_)
             return;
         renderMode_ = mode;
+        mediaPopup.setMedia(media, mode != 2 && sessionVisible_);
         if (mode == 2) {
             // 完全停止：隐藏窗口、停帧定时器、释放 GPU 设备链。此后 SMTC 事件仍更新
             // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
@@ -3346,6 +3108,8 @@ struct TaskbarHost::Impl {
         case WM_MOUSEMOVE: {
             bool wasOver = mouseOver_;
             mouseOver_ = true;
+            if (controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Popup)
+                mediaPopup.onAnchorEnter();
             if (!wasOver)
                 render();
             trackMouseLeave();
@@ -3354,6 +3118,7 @@ struct TaskbarHost::Impl {
         case WM_MOUSELEAVE:
             mouseOver_ = false;
             trackingLeave_ = false;
+            mediaPopup.onAnchorLeave();
             render();
             return 0;
         case WM_LBUTTONUP: {
@@ -3382,6 +3147,7 @@ struct TaskbarHost::Impl {
             std::wprintf(L"[taskbar] WM_DESTROY (visible=%d)\n", visible ? 1 : 0);
             stopFrameTimer();
             stopProbe();
+            mediaPopup.destroy();
             releaseAll();
             hwnd = nullptr;
             if (quitting)
@@ -3442,12 +3208,14 @@ void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
+    impl_->mediaPopup.setMedia(info, impl_->sessionVisible_ && impl_->renderMode_ != 2);
     if (impl_->updateMediaInfo(info))
         impl_->render();
 }
 
 void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
-    impl_->onControl = std::move(cb);
+    impl_->onControl = cb;
+    impl_->mediaPopup.setControlCallback(std::move(cb));
 }
 
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
@@ -3469,6 +3237,7 @@ void TaskbarHost::hide() {
         impl_->stopFrameTimer();
         ShowWindow(impl_->hwnd, SW_HIDE);
     }
+    impl_->mediaPopup.hideImmediate();
 }
 
 void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
@@ -3558,6 +3327,10 @@ void TaskbarHost::setLyricAlignment(LyricAlignment alignment) {
 
 void TaskbarHost::setControlsOnHover(bool on) {
     impl_->setControlsOnHover(on);
+}
+
+void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
+    impl_->setHoverControlStyle(style);
 }
 
 void TaskbarHost::setSongInfoVisible(bool on) {

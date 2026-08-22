@@ -91,6 +91,10 @@ public:
     bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
                            float toOpacity, float durationSec);
     void clearLyricTransitionLayers();
+    // 弹出式宿主的根视觉动画：只改变合成器位移和透明度，不触发布局。
+    bool animateRoot(float fromX, float toX, float fromY, float toY,
+                     float fromOpacity, float toOpacity, float durationSec);
+    void resetRoot();
     void commit();
 
     // 释放全部资源。
@@ -123,6 +127,7 @@ private:
     IDCompositionDevice* dcomp_ = nullptr;
     IDCompositionTarget* target_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
+    IDCompositionEffectGroup* rootOpacity_ = nullptr;
     LyricLayer lyricLayers_[2];
     ID2D1Bitmap1* backBmp_ = nullptr;
     HWND hwnd_ = nullptr;
