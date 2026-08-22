@@ -6,8 +6,10 @@
 #include "platform_icon.h"
 
 #include <d2d1.h>
+#include <d2d1effects.h>
 #include <dwrite.h>
 #include <gdiplus.h>
+#include <dwmapi.h>
 #include <objbase.h>
 #include <windowsx.h>
 
@@ -40,6 +42,10 @@ constexpr float kPopupTextLeftDip = 112.0f;
 constexpr float kPopupTextRightPaddingDip = 16.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
 constexpr float kPopupInfoScrollSpeed = 10.0f;
+// d2d1effects.h 只声明这个 GUID；当前工程的链接配置不提供其外部定义，
+// 这里保留 Direct2D 标准 Gaussian Blur CLSID 的内部定义。
+constexpr CLSID kGaussianBlurClsid = {
+    0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
 
 class GdiplusInit {
 public:
@@ -122,6 +128,9 @@ struct MediaPopup::Impl {
     bool closing = false;
     bool placedAbove = true;
     bool themeDirty = true;
+    MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
+    bool materialNeedsApply = true;
+    bool backdropDirty = true;
     bool coverDirty = true;
     bool sourceIconDirty = true;
     bool textDirty = true;
@@ -164,6 +173,10 @@ struct MediaPopup::Impl {
     ID2D1Bitmap* sourceIconBmp = nullptr;
     ID2D1RoundedRectangleGeometry* coverClip = nullptr;
     ID2D1Layer* coverLayer = nullptr;
+    ID2D1Bitmap* backdropBmp = nullptr;
+    ID2D1Effect* backdropBlur = nullptr;
+    ID2D1RoundedRectangleGeometry* backdropClip = nullptr;
+    ID2D1Layer* backdropLayer = nullptr;
     media_control::Geometry controlGeometry;
     D2D1_RECT_F buttonRects[3]{};
 
@@ -205,12 +218,29 @@ struct MediaPopup::Impl {
         renderer.discard();
         themeDirty = true;
         coverDirty = true;
+        materialNeedsApply = true;
+    }
+
+    void applyWindowMaterial() {
+        if (!hwnd)
+            return;
+
+        // 这个窗口使用 WS_EX_NOREDIRECTIONBITMAP，卡片圆角、边框和背景全部
+        // 在同一个 D2D 交换链里绘制。不要再给 HWND 设置 DWM 圆角/边框/材质，
+        // 否则系统会保留一层窗口级底板，根视觉位移动画时就会和内容错开。
+        // 这里只关闭系统自己的显示/隐藏过渡，动画由 DirectComposition 统一负责。
+        BOOL disableTransitions = TRUE;
+        DwmSetWindowAttribute(hwnd, DWMWA_TRANSITIONS_FORCEDISABLED, &disableTransitions,
+                              sizeof(disableTransitions));
     }
 
     void releaseVisualResources() {
         releaseBitmap(coverBmp);
         releaseBitmap(sourceIconBmp);
+        releaseBitmap(backdropBmp);
+        releaseCom(backdropBlur);
         sourceIconDirty = true;
+        backdropDirty = true;
         releaseBrush(brushShadow);
         releaseBrush(brushBackground);
         releaseBrush(brushStroke);
@@ -237,6 +267,8 @@ struct MediaPopup::Impl {
         releaseCom(coverClip);
         media_control::release(controlGeometry);
         releaseCom(coverLayer);
+        releaseCom(backdropClip);
+        releaseCom(backdropLayer);
     }
 
     void releaseAll() {
@@ -271,9 +303,15 @@ struct MediaPopup::Impl {
             return false;
 
         const auto& p = fluent::palette();
+        D2D1_COLOR_F cardFill = p.cardFillSolid;
+        if (backgroundMode == MediaPopupBackground::Frosted) {
+            // 截图模糊已经是卡片底图，前景只保留一层很薄的 tint，避免再次变成灰蒙蒙。
+            cardFill = p.cardFill;
+            cardFill.a = fluent::isDarkMode() ? 0.10f : 0.16f;
+        }
         if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.20f),
                                               &brushShadow)) ||
-            FAILED(rt->CreateSolidColorBrush(p.cardFillSolid, &brushBackground)) ||
+            FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
             FAILED(rt->CreateSolidColorBrush(p.textSecondary, &brushSecondary)) ||
@@ -298,12 +336,138 @@ struct MediaPopup::Impl {
                                                                kCoverSizeDip),
                                                    10.0f, 10.0f),
                                  &coverClip)) ||
-            FAILED(rt->CreateLayer(&coverLayer)) || !media_control::create(factory, controlGeometry)) {
+            FAILED(rt->CreateLayer(&coverLayer)) ||
+            FAILED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, kPopupWidthDip, kPopupHeightDip),
+                                  kPopupCornerDip, kPopupCornerDip),
+                &backdropClip)) ||
+            FAILED(rt->CreateLayer(&backdropLayer)) ||
+            !media_control::create(factory, controlGeometry)) {
             releaseDrawingResources();
             return false;
         }
 
         themeDirty = false;
+        return true;
+    }
+
+    bool captureBackdrop() {
+        if (!backdropDirty)
+            return true;
+        backdropDirty = false;
+        releaseCom(backdropBlur);
+        releaseBitmap(backdropBmp);
+        if (backgroundMode != MediaPopupBackground::Frosted || !hwnd)
+            return true;
+
+        RECT windowRect{};
+        if (!GetWindowRect(hwnd, &windowRect))
+            return false;
+        const int width = windowRect.right - windowRect.left;
+        const int height = windowRect.bottom - windowRect.top;
+        if (width <= 0 || height <= 0)
+            return false;
+
+        // 首次显示时窗口本来是隐藏的；切换设置或主题时可能已经可见，
+        // 临时隐藏它再抓取，避免把自己的卡片拍进背景图形成递归灰层。
+        const bool restoreVisible = IsWindowVisible(hwnd) != FALSE;
+        if (restoreVisible) {
+            ShowWindow(hwnd, SW_HIDE);
+        }
+
+        // 锚点就是任务栏内嵌歌词窗口。弹出卡片覆盖它时，如果直接抓屏，
+        // 内嵌歌词的背景/强调色会被当作后方材质，形成底部第二块面板。
+        RECT anchorRect{};
+        const bool anchorOverlaps = anchor && anchor != hwnd && IsWindow(anchor) &&
+                                    IsWindowVisible(anchor) && GetWindowRect(anchor, &anchorRect) &&
+                                    anchorRect.left < windowRect.right &&
+                                    anchorRect.right > windowRect.left &&
+                                    anchorRect.top < windowRect.bottom &&
+                                    anchorRect.bottom > windowRect.top;
+        if (anchorOverlaps)
+            ShowWindow(anchor, SW_HIDE);
+        DwmFlush();
+
+        auto restoreWindows = [&]() {
+            if (anchorOverlaps)
+                ShowWindow(anchor, SW_SHOWNA);
+            if (restoreVisible)
+                ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        };
+
+        HDC screenDc = GetDC(nullptr);
+        if (!screenDc) {
+            restoreWindows();
+            return false;
+        }
+
+        BITMAPINFO bitmapInfo{};
+        bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
+        bitmapInfo.bmiHeader.biWidth = width;
+        bitmapInfo.bmiHeader.biHeight = -height;
+        bitmapInfo.bmiHeader.biPlanes = 1;
+        bitmapInfo.bmiHeader.biBitCount = 32;
+        bitmapInfo.bmiHeader.biCompression = BI_RGB;
+
+        void* pixels = nullptr;
+        HBITMAP dib = CreateDIBSection(screenDc, &bitmapInfo, DIB_RGB_COLORS, &pixels,
+                                       nullptr, 0);
+        HDC memoryDc = dib ? CreateCompatibleDC(screenDc) : nullptr;
+        HGDIOBJ oldBitmap = nullptr;
+        bool copied = false;
+        if (memoryDc && dib) {
+            oldBitmap = SelectObject(memoryDc, dib);
+            if (oldBitmap && oldBitmap != HGDI_ERROR)
+                copied = BitBlt(memoryDc, 0, 0, width, height, screenDc, windowRect.left,
+                                windowRect.top, SRCCOPY | CAPTUREBLT) != FALSE;
+        }
+        if (oldBitmap && oldBitmap != HGDI_ERROR)
+            SelectObject(memoryDc, oldBitmap);
+        if (memoryDc)
+            DeleteDC(memoryDc);
+        ReleaseDC(nullptr, screenDc);
+        restoreWindows();
+        if (!copied || !pixels) {
+            if (dib)
+                DeleteObject(dib);
+            return false;
+        }
+
+        auto* rt = renderer.renderTarget();
+        if (!rt) {
+            DeleteObject(dib);
+            return false;
+        }
+        const auto props = D2D1::BitmapProperties1(
+            D2D1_BITMAP_OPTIONS_NONE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
+            static_cast<float>(dpi), static_cast<float>(dpi));
+        ID2D1Bitmap1* captured = nullptr;
+        if (FAILED(rt->CreateBitmap(D2D1::SizeU(static_cast<UINT>(width),
+                                                static_cast<UINT>(height)),
+                                    pixels, static_cast<UINT>(width * 4), &props, &captured)) ||
+            !captured) {
+            DeleteObject(dib);
+            return false;
+        }
+        DeleteObject(dib);
+        backdropBmp = captured;
+
+        ID2D1Effect* blur = nullptr;
+        HRESULT hr = rt->CreateEffect(kGaussianBlurClsid, &blur);
+        if (SUCCEEDED(hr))
+            blur->SetInput(0, backdropBmp);
+        if (SUCCEEDED(hr))
+            hr = blur->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, 16.0f);
+        if (SUCCEEDED(hr))
+            hr = blur->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
+                                D2D1_GAUSSIANBLUR_OPTIMIZATION_BALANCED);
+        if (SUCCEEDED(hr))
+            hr = blur->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_HARD);
+        if (SUCCEEDED(hr))
+            backdropBlur = blur;
+        else
+            releaseCom(blur);
         return true;
     }
 
@@ -531,6 +695,30 @@ struct MediaPopup::Impl {
         rt->PopAxisAlignedClip();
     }
 
+    void drawBackdrop(ID2D1DeviceContext* rt, float w, float h) {
+        if (backgroundMode != MediaPopupBackground::Frosted ||
+            (!backdropBlur && !backdropBmp))
+            return;
+
+        const bool clipped = backdropClip && backdropLayer;
+        if (clipped) {
+            rt->PushLayer(D2D1::LayerParameters1(
+                              D2D1::InfiniteRect(), backdropClip,
+                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),
+                          backdropLayer);
+        }
+        if (backdropBlur) {
+            const D2D1_POINT_2F offset = D2D1::Point2F(0.0f, 0.0f);
+            rt->DrawImage(backdropBlur, &offset, nullptr, D2D1_INTERPOLATION_MODE_LINEAR,
+                          D2D1_COMPOSITE_MODE_SOURCE_OVER);
+        } else {
+            rt->DrawBitmap(backdropBmp, D2D1::RectF(0.0f, 0.0f, w, h), 1.0f,
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        }
+        if (clipped)
+            rt->PopLayer();
+    }
+
     void drawCover(ID2D1DeviceContext* rt) {
         const D2D1_RECT_F rect = D2D1::RectF(16.0f, 44.0f, 16.0f + kCoverSizeDip,
                                              44.0f + kCoverSizeDip);
@@ -606,9 +794,17 @@ struct MediaPopup::Impl {
             return false;
         if (!renderer.bind(hwnd, pxW, pxH))
             return false;
+        if (materialNeedsApply) {
+            // 必须在 DirectComposition target 绑定到 HWND 后再设置材质，
+            // 否则绑定过程可能重建窗口合成表面并覆盖背景效果。
+            applyWindowMaterial();
+            materialNeedsApply = false;
+        }
         renderer.setDpi(dpi);
         if (!createResources())
             return false;
+        if (backgroundMode == MediaPopupBackground::Frosted)
+            captureBackdrop();
         buildTextLayouts();
         if (coverDirty)
             decodeCover();
@@ -629,13 +825,18 @@ struct MediaPopup::Impl {
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        drawBackdrop(rt, w, h);
 
-        const D2D1_RECT_F card = D2D1::RectF(1.0f, 1.0f, w - 1.0f, h - 3.0f);
-        rt->FillRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(card.left, card.top + 3.0f, card.right,
-                                          card.bottom + 3.0f),
-                              kPopupCornerDip, kPopupCornerDip),
-            brushShadow);
+        const bool frosted = backgroundMode == MediaPopupBackground::Frosted;
+        const D2D1_RECT_F card = frosted ? D2D1::RectF(0.0f, 0.0f, w, h)
+                                         : D2D1::RectF(1.0f, 1.0f, w - 1.0f, h - 3.0f);
+        if (!frosted) {
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(card.left, card.top + 3.0f, card.right,
+                                              card.bottom + 3.0f),
+                                  kPopupCornerDip, kPopupCornerDip),
+                brushShadow);
+        }
         rt->FillRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
                                  brushBackground);
         rt->DrawRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
@@ -739,18 +940,25 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kCloseTimer);
         reposition();
+        if (backgroundMode == MediaPopupBackground::Frosted)
+            backdropDirty = true;
         if (!render())
             return;
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        popupVisible = true;
-        closing = false;
-        updateScrollTimer(textAreaWidth(kPopupWidthDip));
+
+        // 窗口本身保持固定位置，只让 DirectComposition 根视觉做位移动画。
+        // 透明度始终为 1，避免淡入淡出时出现第二层背板。
         renderer.resetRoot();
         const float offset = kPopupEnterOffsetDip * scale();
         const float fromY = placedAbove ? offset : -offset;
-        if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f, 0.0f, 1.0f, 0.18f))
+        if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f,
+                                  1.0f, 1.0f, 0.18f)) {
             renderer.resetRoot();
+        }
         renderer.commit();
+        closing = false;
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        popupVisible = true;
+        updateScrollTimer(textAreaWidth(kPopupWidthDip));
     }
 
     void hideAnimated() {
@@ -760,8 +968,9 @@ struct MediaPopup::Impl {
         closing = true;
         const float offset = kPopupEnterOffsetDip * scale();
         const float toY = placedAbove ? offset : -offset;
-        if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, toY, 1.0f, 0.0f,
-                                  kCloseAnimationMs / 1000.0f)) {
+        if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, toY,
+                                  1.0f, 1.0f,
+                                  static_cast<float>(kCloseAnimationMs) / 1000.0f)) {
             hideImmediate();
             return;
         }
@@ -941,7 +1150,7 @@ bool MediaPopup::create(HINSTANCE inst, HWND anchor) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+    const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
     impl_->hwnd = CreateWindowExW(exStyle, kWndClassName, L"QQMusicLyricMediaPopup",
                                   WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
@@ -974,6 +1183,17 @@ void MediaPopup::setEnabled(bool enabled) {
         impl_->hideImmediate();
     else if (impl_->anchorHover && impl_->available && !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+}
+
+void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
+    if (impl_->backgroundMode == mode)
+        return;
+    impl_->backgroundMode = mode;
+    if (!impl_->hwnd)
+        return;
+    impl_->releaseDrawingResources();
+    if (impl_->popupVisible)
+        impl_->render();
 }
 
 void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {

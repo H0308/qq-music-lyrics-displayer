@@ -15,6 +15,12 @@
 // 底部控制条操作
 enum class MediaControl { Prev = 0, PlayPause = 1, Next = 2 };
 
+// 悬浮媒体卡片的背景材质
+enum class MediaPopupBackground {
+    Solid,
+    Frosted,
+};
+
 // 底部控制条显示的媒体信息
 struct OverlayMediaInfo {
     std::wstring title;

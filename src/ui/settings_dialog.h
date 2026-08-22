@@ -16,6 +16,7 @@ struct SettingsState {
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
+    int mediaPopupBackground = 0; // 0 纯色 1 磨砂玻璃
     bool followAlbum = false;
     bool doubleLineLyrics = false;
     int lyricAlignment = 0; // 0 左对齐 1 居中 2 右对齐
@@ -38,6 +39,7 @@ struct SettingsActions {
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;
+    std::function<void(int)> onMediaPopupBackground;
     std::function<void()> onPickFont;
     std::function<void()> onFontColorEffect;
     std::function<void(bool)> onFollowAlbum;

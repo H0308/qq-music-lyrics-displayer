@@ -298,6 +298,7 @@ struct App {
     int taskbarPosition_ = 0;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
+    MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
     // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止（仅驻留内存）
     int renderMode_ = 0;
 
@@ -435,6 +436,14 @@ struct App {
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
         if (taskbarHost)
             taskbarHost->setHoverControlStyle(hoverControlStyle_);
+        saveSettings();
+    }
+
+    void applyMediaPopupBackground(int mode) {
+        mediaPopupBackground_ = mode == 1 ? MediaPopupBackground::Frosted
+                                          : MediaPopupBackground::Solid;
+        if (taskbarHost)
+            taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
         saveSettings();
     }
 
@@ -603,6 +612,7 @@ struct App {
         taskbarHost->setLyricAlignment(lyricAlignment_);
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setHoverControlStyle(hoverControlStyle_);
+        taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -1056,6 +1066,10 @@ void App::loadSettings() {
         hoverControlStyle_ = j.value("hoverControlStyle", 0) == 1
                                  ? HoverControlStyle::Popup
                                  : HoverControlStyle::Inline;
+        mediaPopupBackground_ = j.value("mediaPopupBackground", std::string("solid")) ==
+                                        "frosted"
+                                    ? MediaPopupBackground::Frosted
+                                    : MediaPopupBackground::Solid;
         spectrumOn_ = j.value("spectrum", false);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
@@ -1113,6 +1127,9 @@ void App::saveSettings() {
         j["renderMode"] = renderMode_;
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
+        j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
+                                         ? "frosted"
+                                         : "solid";
         j["spectrum"] = spectrumOn_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
@@ -1868,6 +1885,7 @@ SettingsState App::currentSettingsState() const {
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
+    st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = doubleLineLyricsEnabled_;
     st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
@@ -1896,6 +1914,7 @@ SettingsActions App::buildSettingsActions() {
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
+    act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
     act.onPickFont = [this] { pickFont(); };
     act.onFontColorEffect = [this] { showFontColorDialog(); };
     act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };

@@ -22,6 +22,7 @@ public:
 
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setEnabled(bool enabled);
+    void setBackgroundMode(MediaPopupBackground mode);
     void setMedia(const OverlayMediaInfo& info, bool available);
     void setAnchor(HWND anchor);
 

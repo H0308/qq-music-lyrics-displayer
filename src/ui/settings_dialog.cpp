@@ -25,6 +25,7 @@ constexpr int kIdSpectrum = 414;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
+constexpr int kIdMediaPopupBackground = 418;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -274,6 +275,10 @@ struct SettingsDialog::Impl {
                  L"内嵌控件保持当前样式；媒体卡片在任务栏外展开，歌词保持显示",
                  {L"内嵌控件", L"媒体卡片"}, state.hoverControlStyle, state.hoverControls,
                  kRowTallH);
+        addRadio(0, kIdMediaPopupBackground, L"媒体卡片背景",
+                 L"纯色保持当前外观；磨砂玻璃使用 Windows 系统背景材质",
+                 {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
+                 state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -674,10 +679,22 @@ struct SettingsDialog::Impl {
                 actions.onHoverControls(row->checked);
             if (auto* style = findRow(kIdHoverControlStyle))
                 style->enabled = row->checked;
+            if (auto* background = findRow(kIdMediaPopupBackground)) {
+                const auto* style = findRow(kIdHoverControlStyle);
+                background->enabled = row->checked && style && style->selected == 1;
+            }
             break;
         case kIdHoverControlStyle:
             if (actions.onHoverControlStyle)
                 actions.onHoverControlStyle(row->selected);
+            if (auto* background = findRow(kIdMediaPopupBackground)) {
+                const auto* controls = findRow(kIdHoverControls);
+                background->enabled = controls && controls->checked && row->selected == 1;
+            }
+            break;
+        case kIdMediaPopupBackground:
+            if (actions.onMediaPopupBackground)
+                actions.onMediaPopupBackground(row->selected);
             break;
         case kIdRenderMode:
             if (actions.onRenderMode)
@@ -758,6 +775,10 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdHoverControlStyle)) {
             row->selected = s.hoverControlStyle;
             row->enabled = s.hoverControls;
+        }
+        if (auto* row = findRow(kIdMediaPopupBackground)) {
+            row->selected = s.mediaPopupBackground;
+            row->enabled = s.hoverControls && s.hoverControlStyle == 1;
         }
         if (auto* row = findRow(kIdRenderMode))
             row->selected = s.renderMode;

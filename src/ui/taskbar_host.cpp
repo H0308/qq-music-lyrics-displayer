@@ -878,6 +878,10 @@ struct TaskbarHost::Impl {
         render();
     }
 
+    void setMediaPopupBackground(MediaPopupBackground mode) {
+        mediaPopup.setBackgroundMode(mode);
+    }
+
     void setSpectrumVisible(bool on) {
         if (spectrumVisible_ == on)
             return;
@@ -3331,6 +3335,10 @@ void TaskbarHost::setControlsOnHover(bool on) {
 
 void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
     impl_->setHoverControlStyle(style);
+}
+
+void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {
+    impl_->setMediaPopupBackground(mode);
 }
 
 void TaskbarHost::setSongInfoVisible(bool on) {

@@ -59,6 +59,8 @@ public:
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
+    // 媒体卡片背景：当前纯色或 Windows 系统磨砂材质。
+    void setMediaPopupBackground(MediaPopupBackground mode);
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
     void setPlatformIconVisible(bool on);
