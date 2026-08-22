@@ -634,9 +634,30 @@ struct ManualSearchDialog::Impl {
         return (previewShowRomanization ? 1 : 0) + (previewShowTranslation ? 1 : 0);
     }
 
+    float previewSecondaryHeight() const {
+        return previewSecondaryLineCount() *
+               (kPreviewSecondaryLineHeight + kPreviewSecondaryGap);
+    }
+
     float previewLyricRowHeight() const {
-        return kLyricRowHeightDip +
-               previewSecondaryLineCount() * (kPreviewSecondaryLineHeight + kPreviewSecondaryGap);
+        return kLyricRowHeightDip + previewSecondaryHeight();
+    }
+
+    float measurePreviewMainHeight(fluent::FluentDialogSurface::Painter& painter,
+                                   const std::wstring& text, float width) const {
+        if (text.empty())
+            return kLyricRowHeightDip;
+
+        auto* format = painter.textFormat(15.0f, 700, true);
+        auto* layout = painter.textLayout(text, format, width, 10000.0f);
+        if (!layout)
+            return kLyricRowHeightDip;
+
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED(layout->GetMetrics(&metrics)))
+            return kLyricRowHeightDip;
+        return std::max(kLyricRowHeightDip,
+                        static_cast<float>(std::ceil(std::max(0.0f, metrics.height))));
     }
 
     int visiblePreviewRows(float height) const {
@@ -655,7 +676,7 @@ struct ManualSearchDialog::Impl {
             return;
         }
         const int visible = visiblePreviewRows();
-        const int maxTop = std::max(0, total - visible);
+        const int maxTop = std::max(0, total - 1);
         if (previewCurrentLine < 0)
             previewTopLine = 0;
         else
@@ -692,8 +713,7 @@ struct ManualSearchDialog::Impl {
     void scrollPreviewBy(int lines) {
         if (previewLines.empty())
             return;
-        const int visible = visiblePreviewRows();
-        const int maxTop = std::max(0, static_cast<int>(previewLines.size()) - visible);
+        const int maxTop = std::max(0, static_cast<int>(previewLines.size()) - 1);
         previewTopLine = std::clamp(previewTopLine + lines, 0, maxTop);
         previewManualScroll = true;
         previewLastScrollTick = GetTickCount();
@@ -816,10 +836,10 @@ struct ManualSearchDialog::Impl {
     }
 
     void drawPreviewLyricLine(fluent::FluentDialogSurface::Painter& painter,
-                              const LyricLine& line, const D2D1_RECT_F& rowRect, bool current) {
+                              const LyricLine& line, const D2D1_RECT_F& rowRect,
+                              float mainHeight, bool current) {
         const auto& p = fluent::palette();
         const int secondaryCount = previewSecondaryLineCount();
-        const float mainHeight = kLyricRowHeightDip;
         const float contentHeight =
             mainHeight + secondaryCount * (kPreviewSecondaryLineHeight + kPreviewSecondaryGap);
         const float top = rowRect.top +
@@ -1072,22 +1092,6 @@ struct ManualSearchDialog::Impl {
                                          previewRect.right - 12.0f, previewRect.top + 27.0f),
                              p.textSecondary);
 
-        const int total = static_cast<int>(previewLines.size());
-        const int visible = visiblePreviewRows(height);
-        const int maxTop = std::max(0, total - visible);
-        if (!previewManualScroll) {
-            if (previewCurrentLine >= 0)
-                previewTopLine = std::clamp(previewCurrentLine - visible / 2, 0, maxTop);
-            else
-                previewTopLine = std::clamp(previewTopLine, 0, maxTop);
-        }
-        const int top = std::clamp(previewTopLine, 0, maxTop);
-        const int count = std::min(visible, total - top);
-        const float lyricRowHeight = previewLyricRowHeight();
-        const float lyricBlockHeight = visible * lyricRowHeight;
-        const float availableHeight = std::max(0.0f, height - contentTop);
-        const float lyricTop = previewRect.top + contentTop +
-                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
         const bool hasToggleRail = previewHasRomanization || previewHasTranslation;
         const float lyricLeftLimit = previewRect.left + 12.0f;
         const float lyricRightLimit = previewRect.right - 12.0f -
@@ -1098,16 +1102,67 @@ struct ManualSearchDialog::Impl {
         const float lyricLeft = lyricLeftLimit + (lyricAreaWidth - lyricWidth) * 0.5f;
         const float lyricRight = lyricLeft + lyricWidth;
 
+        const int total = static_cast<int>(previewLines.size());
+        const int visibleEstimate = visiblePreviewRows(height);
+        const int maxTop = std::max(0, total - 1);
+        if (!previewManualScroll) {
+            if (previewCurrentLine >= 0)
+                previewTopLine =
+                    std::clamp(previewCurrentLine - visibleEstimate / 2, 0, maxTop);
+            else
+                previewTopLine = std::clamp(previewTopLine, 0, maxTop);
+        }
+        const float availableHeight = std::max(0.0f, height - contentTop);
+
+        std::vector<float> mainHeights(total, kLyricRowHeightDip);
+        std::vector<float> rowHeights(total, previewLyricRowHeight());
+        std::vector<bool> measured(total, false);
+        auto ensureRowMetric = [&](int index) {
+            if (!measured[index]) {
+                mainHeights[index] =
+                    measurePreviewMainHeight(painter, previewLines[index].text, lyricWidth);
+                rowHeights[index] = mainHeights[index] + previewSecondaryHeight();
+                measured[index] = true;
+            }
+            return rowHeights[index];
+        };
+        auto countRowsFrom = [&](int start, float& blockHeight) {
+            blockHeight = 0.0f;
+            int count = 0;
+            for (int index = start; index < total; ++index) {
+                const float rowHeight = ensureRowMetric(index);
+                if (count > 0 && blockHeight + rowHeight > availableHeight)
+                    break;
+                blockHeight += rowHeight;
+                ++count;
+            }
+            return std::max(1, count);
+        };
+
+        int top = std::clamp(previewTopLine, 0, maxTop);
+        float lyricBlockHeight = 0.0f;
+        int count = countRowsFrom(top, lyricBlockHeight);
+        if (!previewManualScroll && previewCurrentLine >= top + count) {
+            top = std::clamp(previewCurrentLine, 0, maxTop);
+            count = countRowsFrom(top, lyricBlockHeight);
+        }
+        previewTopLine = top;
+        const float lyricTop = previewRect.top + contentTop +
+                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
+
         painter.target()->PushAxisAlignedClip(
             D2D1::RectF(previewRect.left, previewRect.top, previewRect.right, previewRect.bottom),
             D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        float rowTop = lyricTop;
         for (int i = 0; i < count; ++i) {
             const int lineIndex = top + i;
             const bool current = previewCurrentLine >= 0 && lineIndex == previewCurrentLine;
-            const D2D1_RECT_F rect = D2D1::RectF(
-                lyricLeft, lyricTop + i * lyricRowHeight, lyricRight,
-                lyricTop + (i + 1) * lyricRowHeight);
-            drawPreviewLyricLine(painter, previewLines[lineIndex], rect, current);
+            const float rowHeight = ensureRowMetric(lineIndex);
+            const D2D1_RECT_F rect =
+                D2D1::RectF(lyricLeft, rowTop, lyricRight, rowTop + rowHeight);
+            drawPreviewLyricLine(painter, previewLines[lineIndex], rect,
+                                 mainHeights[lineIndex], current);
+            rowTop += rowHeight;
         }
         painter.target()->PopAxisAlignedClip();
 
