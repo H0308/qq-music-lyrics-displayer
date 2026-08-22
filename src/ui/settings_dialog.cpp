@@ -34,6 +34,7 @@ constexpr int kIdSecondaryType = 433;
 constexpr int kIdQqLocalLyricsEnabled = 434;
 constexpr int kIdQqLocalLyricsPath = 435;
 constexpr int kIdQqLocalLyricsPersistOrder = 436;
+constexpr int kIdContentScrollBar = 401;
 
 constexpr float kWindowW = 760.0f;
 constexpr float kWindowH = 552.0f;
@@ -44,6 +45,12 @@ constexpr float kNavW = 176.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
 constexpr float kRowGap = 8.0f;
+constexpr float kScrollBarWidth = 3.0f;
+constexpr float kScrollBarHitWidth = 12.0f;
+constexpr float kScrollBarInset = 8.0f;
+constexpr float kScrollBarOutsideGap = 8.0f;
+constexpr float kScrollMinThumbHeight = 24.0f;
+constexpr float kScrollWheelDip = 72.0f;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
@@ -99,6 +106,14 @@ struct SettingsDialog::Impl {
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, 3> navItemRects{};
     std::array<D2D1_RECT_F, 3> pageTitleRects{};
+    D2D1_RECT_F contentViewportRect{};
+    D2D1_RECT_F scrollTrackRect{};
+    D2D1_RECT_F scrollThumbRect{};
+    float contentHeight = 0.0f;
+    float contentScroll = 0.0f;
+    float contentMaxScroll = 0.0f;
+    bool scrollDragging = false;
+    float scrollDragOffset = 0.0f;
 
     int hoverId = 0;
     int hoverOption = -1;
@@ -176,10 +191,74 @@ struct SettingsDialog::Impl {
     }
 
     Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
-                   const wchar_t* controlText) {
-        Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, kRowH);
+                   const wchar_t* controlText, float height = kRowH) {
+        Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, height);
         row.controlText = controlText ? controlText : L"";
         return row;
+    }
+
+    D2D1_RECT_F scrollBarHitRect() const {
+        if (contentMaxScroll <= 0.0f || scrollTrackRect.bottom <= scrollTrackRect.top)
+            return {};
+        const float extra = std::max(0.0f, (kScrollBarHitWidth - kScrollBarWidth) * 0.5f);
+        return D2D1::RectF(scrollTrackRect.left - extra, scrollTrackRect.top - 4.0f,
+                           scrollTrackRect.right + extra, scrollTrackRect.bottom + 4.0f);
+    }
+
+    void updateScrollBarGeometry() {
+        scrollTrackRect = {};
+        scrollThumbRect = {};
+        if (contentMaxScroll <= 0.0f)
+            return;
+
+        const float trackTop = contentViewportRect.top + kScrollBarInset;
+        const float trackBottom = contentViewportRect.bottom - kScrollBarInset;
+        const float trackHeight = std::max(0.0f, trackBottom - trackTop);
+        const float viewportHeight =
+            std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
+        if (trackHeight <= 0.0f || viewportHeight <= 0.0f)
+            return;
+
+        const float thumbHeight = std::min(
+            trackHeight, std::max(kScrollMinThumbHeight,
+                                  trackHeight * viewportHeight / std::max(1.0f, contentHeight)));
+        const float usable = std::max(0.0f, trackHeight - thumbHeight);
+        const float thumbTop =
+            trackTop + contentScroll / std::max(1.0f, contentMaxScroll) * usable;
+        const float trackLeft = contentViewportRect.right + kScrollBarOutsideGap;
+        scrollTrackRect =
+            D2D1::RectF(trackLeft, trackTop, trackLeft + kScrollBarWidth, trackBottom);
+        scrollThumbRect = D2D1::RectF(scrollTrackRect.left, thumbTop, scrollTrackRect.right,
+                                      thumbTop + thumbHeight);
+    }
+
+    void setContentScroll(float offset) {
+        const float next = std::clamp(offset, 0.0f, contentMaxScroll);
+        if (std::fabs(next - contentScroll) < 0.01f)
+            return;
+        contentScroll = next;
+        layout();
+        surface.invalidate();
+    }
+
+    void scrollFromPointer(float y) {
+        if (contentMaxScroll <= 0.0f)
+            return;
+        const float trackHeight = scrollTrackRect.bottom - scrollTrackRect.top;
+        const float thumbHeight = scrollThumbRect.bottom - scrollThumbRect.top;
+        const float usable = trackHeight - thumbHeight;
+        if (usable <= 0.0f)
+            return;
+        const float thumbTop = std::clamp(y - scrollDragOffset, scrollTrackRect.top,
+                                          scrollTrackRect.bottom - thumbHeight);
+        const float ratio = (thumbTop - scrollTrackRect.top) / usable;
+        setContentScroll(ratio * contentMaxScroll);
+    }
+
+    void scrollBy(float delta) {
+        if (contentMaxScroll <= 0.0f)
+            return;
+        setContentScroll(contentScroll + delta);
     }
 
     void createControls() {
@@ -215,13 +294,15 @@ struct SettingsDialog::Impl {
         Row& persistOrder = addRow(2, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
                                    L"切换版本持久化",
                                    L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
-                                   40.0f, kRowH);
+                                   40.0f, kRowTallH);
         persistOrder.checked = state.qqLocalLyricsPersistOrder;
+        persistOrder.enabled = state.qqLocalLyricsEnabled;
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
-        addButton(2, kIdQqLocalLyricsPath, L"本地歌词目录", localPathHint.c_str(),
-                  L"选择文件夹…");
+        Row& localPath = addButton(2, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
+                                   localPathHint.c_str(), L"选择文件夹…", kRowTallH);
+        localPath.enabled = state.qqLocalLyricsEnabled;
     }
 
     void layout() {
@@ -242,7 +323,24 @@ struct SettingsDialog::Impl {
         const float contentW = std::max(20.0f, w - contentX - 24.0f);
         pageTitleRects[activePage] =
             D2D1::RectF(contentX, 14.0f, contentX + contentW, 42.0f);
-        float y = 14.0f + 28.0f + 16.0f;
+        const float contentTop = 14.0f + 28.0f + 16.0f;
+        const float contentBottom = std::max(contentTop, h - 12.0f);
+        contentViewportRect =
+            D2D1::RectF(contentX, contentTop, contentX + contentW, contentBottom);
+
+        float contentEnd = contentTop;
+        for (const auto& row : rows[activePage])
+            contentEnd += row.height + kRowGap;
+        if (!rows[activePage].empty())
+            contentEnd -= kRowGap;
+        contentHeight = std::max(0.0f, contentEnd - contentTop);
+        const float viewportHeight =
+            std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
+        contentMaxScroll = std::max(0.0f, contentHeight - viewportHeight);
+        contentScroll = std::clamp(contentScroll, 0.0f, contentMaxScroll);
+        updateScrollBarGeometry();
+
+        float y = contentTop - contentScroll;
         for (auto& page : rows) {
             for (auto& row : page) {
                 row.cardRect = D2D1::RectF(0, 0, 0, 0);
@@ -288,6 +386,7 @@ struct SettingsDialog::Impl {
         pressedId = 0;
         pressedOption = -1;
         focusedId = kIdNav;
+        contentScroll = 0.0f;
         layout();
         if (hwnd)
             surface.invalidate();
@@ -444,18 +543,32 @@ struct SettingsDialog::Impl {
         }
     }
 
+    void drawScrollBar(fluent::FluentDialogSurface::Painter& painter) {
+        if (contentMaxScroll <= 0.0f || scrollThumbRect.bottom <= scrollThumbRect.top)
+            return;
+        const auto& p = fluent::palette();
+        const bool active = hoverId == kIdContentScrollBar ||
+                            pressedId == kIdContentScrollBar || scrollDragging;
+        painter.fillRoundRect(active ? p.accent : p.textSecondary, scrollThumbRect,
+                              kScrollBarWidth * 0.5f);
+    }
+
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
         const auto& p = fluent::palette();
         drawNav(painter);
         painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
                          pageTitleRects[activePage], p.text);
+
+        painter.target()->PushAxisAlignedClip(
+            contentViewportRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         for (auto& row : rows[activePage]) {
             painter.fillRoundRect(p.cardFill, row.cardRect, fluent::metrics::cardRadius);
             painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
-            painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect, p.text);
+            painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect,
+                             row.enabled ? p.text : p.disabled);
             if (row.showHint)
                 painter.drawText(row.hint, painter.textFormat(12.0f, 400), row.hintRect,
-                                 p.textSecondary);
+                                 row.enabled ? p.textSecondary : p.disabled);
             if (row.kind == ControlKind::Toggle)
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
@@ -463,6 +576,8 @@ struct SettingsDialog::Impl {
             else
                 drawButton(painter, row);
         }
+        painter.target()->PopAxisAlignedClip();
+        drawScrollBar(painter);
     }
 
     int hitTest(float x, float y, int* option = nullptr) const {
@@ -475,6 +590,8 @@ struct SettingsDialog::Impl {
                 return kIdNav;
             }
         }
+        if (contains(scrollBarHitRect(), x, y))
+            return kIdContentScrollBar;
         for (const auto& row : rows[activePage]) {
             if (!contains(row.controlRect, x, y))
                 continue;
@@ -590,6 +707,10 @@ struct SettingsDialog::Impl {
             break;
         case kIdQqLocalLyricsEnabled:
             row->checked = !row->checked;
+            if (auto* persist = findRow(kIdQqLocalLyricsPersistOrder))
+                persist->enabled = row->checked;
+            if (auto* path = findRow(kIdQqLocalLyricsPath))
+                path->enabled = row->checked;
             if (actions.onQqLocalLyricsEnabled)
                 actions.onQqLocalLyricsEnabled(row->checked);
             break;
@@ -649,13 +770,16 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdQqLocalLyricsEnabled))
             row->checked = s.qqLocalLyricsEnabled;
-        if (auto* row = findRow(kIdQqLocalLyricsPersistOrder))
+        if (auto* row = findRow(kIdQqLocalLyricsPersistOrder)) {
             row->checked = s.qqLocalLyricsPersistOrder;
+            row->enabled = s.qqLocalLyricsEnabled;
+        }
         if (auto* row = findRow(kIdQqLocalLyricsPath)) {
             row->hint = s.qqLocalLyricsPath.empty() ? std::wstring(L"未配置")
                                                     : s.qqLocalLyricsPath;
             row->showHint = true;
-            row->height = kRowH;
+            row->height = kRowTallH;
+            row->enabled = s.qqLocalLyricsEnabled;
         }
         layout();
         surface.invalidate();
@@ -725,6 +849,15 @@ struct SettingsDialog::Impl {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
             TrackMouseEvent(&tme);
             const float s = surface.dipScale();
+            if (scrollDragging) {
+                scrollFromPointer(GET_Y_LPARAM(lp) / s);
+                if (hoverId != kIdContentScrollBar || hoverOption != -1) {
+                    hoverId = kIdContentScrollBar;
+                    hoverOption = -1;
+                    surface.invalidate();
+                }
+                return 0;
+            }
             int option = -1;
             const int id = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
             if (id != hoverId || option != hoverOption) {
@@ -735,8 +868,10 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_MOUSELEAVE:
-            hoverId = 0;
-            hoverOption = -1;
+            if (!scrollDragging) {
+                hoverId = 0;
+                hoverOption = -1;
+            }
             surface.invalidate();
             return 0;
         case WM_LBUTTONDOWN: {
@@ -746,8 +881,16 @@ struct SettingsDialog::Impl {
             int option = -1;
             pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
             pressedOption = option;
-            if (pressedId != 0)
+            if (pressedId != 0 && pressedId != kIdContentScrollBar)
                 focusedId = pressedId;
+            if (pressedId == kIdContentScrollBar) {
+                const float y = GET_Y_LPARAM(lp) / s;
+                scrollDragOffset = contains(scrollThumbRect, GET_X_LPARAM(lp) / s, y)
+                                        ? y - scrollThumbRect.top
+                                        : (scrollThumbRect.bottom - scrollThumbRect.top) * 0.5f;
+                scrollDragging = true;
+                scrollFromPointer(y);
+            }
             if (pressedId != 0)
                 SetCapture(hwnd);
             surface.invalidate();
@@ -761,8 +904,14 @@ struct SettingsDialog::Impl {
             const int pressedOptionValue = pressedOption;
             pressedId = 0;
             pressedOption = -1;
+            const bool wasScroll = scrollDragging || pressed == kIdContentScrollBar;
+            scrollDragging = false;
             if (GetCapture() == hwnd)
                 ReleaseCapture();
+            if (wasScroll) {
+                surface.invalidate();
+                return 0;
+            }
             if (pressed == kIdNav && hit == kIdNav && option >= 0)
                 showPage(option);
             else if (pressed != 0 && pressed == hit) {
@@ -785,10 +934,21 @@ struct SettingsDialog::Impl {
         case WM_CAPTURECHANGED:
             pressedId = 0;
             pressedOption = -1;
+            scrollDragging = false;
             surface.invalidate();
             return 0;
-        case WM_MOUSEWHEEL:
+        case WM_MOUSEWHEEL: {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &point);
+            const float s = surface.dipScale();
+            if (contains(contentViewportRect, point.x / s, point.y / s) &&
+                contentMaxScroll > 0.0f) {
+                const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                scrollBy(-static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA) *
+                         kScrollWheelDip);
+            }
             return 0;
+        }
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB;
         case WM_KEYDOWN:
@@ -809,6 +969,19 @@ struct SettingsDialog::Impl {
                         next = 0;
                     showPage(next);
                 }
+                return 0;
+            }
+            if (wp == VK_PRIOR || wp == VK_NEXT || wp == VK_HOME || wp == VK_END) {
+                if (wp == VK_PRIOR)
+                    scrollBy(-std::max(0.0f, contentViewportRect.bottom -
+                                             contentViewportRect.top - kRowGap));
+                else if (wp == VK_NEXT)
+                    scrollBy(std::max(0.0f, contentViewportRect.bottom -
+                                      contentViewportRect.top - kRowGap));
+                else if (wp == VK_HOME)
+                    setContentScroll(0.0f);
+                else
+                    setContentScroll(contentMaxScroll);
                 return 0;
             }
             if (wp == VK_LEFT || wp == VK_RIGHT) {
