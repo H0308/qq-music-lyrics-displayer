@@ -43,6 +43,8 @@ constexpr float kCornerRadius = 8.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
+constexpr float kSongTransitionMs = 220.0f; // 切歌时新内容滑入时长
+constexpr float kSongTransitionTravelDip = 24.0f; // 切歌时新内容的水平入场距离
 constexpr float kLyricPreviewGap = 3.0f; // 普通双行模式的核心行与下一行间距
 constexpr float kLyricPreviewOpacity = 0.90f; // 下一行预览透明度
 constexpr float kKaraokeScrollFollowMs = 100.0f; // 逐字歌词横向跟随时间常数
@@ -369,6 +371,7 @@ struct TaskbarHost::Impl {
     bool pendingTargetValid_ = false;
     bool lyricTransitionDCompActive_ = false;
     bool lyricTransitionDCompEnd_ = false;
+    bool songTransitionPending_ = false;
     ULONGLONG frameNowMs_ = 0;
     ID2D1SolidColorBrush* brushBg_ = nullptr;
     ID2D1SolidColorBrush* brushText_ = nullptr;
@@ -984,6 +987,15 @@ struct TaskbarHost::Impl {
         const bool statusChanged = frame.statusText != statusText;
         const bool sceneChanged = frame.scene != scene_;
         const bool wasVisible = visible;
+        const bool mediaIdentityChanged =
+            frame.media.title != media.title || frame.media.artist != media.artist ||
+            frame.media.sourceAppUserModelId != media.sourceAppUserModelId ||
+            frame.media.thumbnail != media.thumbnail;
+        const bool confirmedDurationChange = media.durationMs > 0 &&
+                                             frame.media.durationMs > 0 &&
+                                             media.durationMs != frame.media.durationMs;
+        const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
+                                 (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
         mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2);
         mediaPopup.setProgress(frame.actualPositionMs);
@@ -996,6 +1008,10 @@ struct TaskbarHost::Impl {
             karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
         positionMs_ = frame.actualPositionMs;
         statusText = frame.statusText;
+
+        // 只对已有曲目之间的切换做入场动画；首次显示、同曲刷新和会话关闭保持即时提交。
+        songTransitionPending_ = songChanged && frame.visible && renderMode_ != 2 &&
+                                 clientAnimations_;
 
         if (trackChanged || lyricsChanged) {
             lines = frame.lyrics;
@@ -1034,8 +1050,8 @@ struct TaskbarHost::Impl {
                 ShowWindow(hwnd, SW_HIDE);
         }
 
-        if (visible && (wasVisible != visible || mediaChanged || lyricsChanged || lineChanged ||
-                        statusChanged || sceneChanged))
+        if (visible && (wasVisible != visible || trackChanged || mediaChanged || lyricsChanged ||
+                        lineChanged || statusChanged || sceneChanged))
             render();
     }
 
@@ -2788,6 +2804,14 @@ struct TaskbarHost::Impl {
             return;
         }
         if (SUCCEEDED(hr)) {
+            if (songTransitionPending_) {
+                songTransitionPending_ = false;
+                renderer.resetRoot();
+                const float travel = kSongTransitionTravelDip * scale();
+                if (!renderer.animateRoot(travel, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                          kSongTransitionMs / 1000.0f))
+                    renderer.resetRoot();
+            }
             // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
             if (!renderer.present())
                 discardDeviceResources();
