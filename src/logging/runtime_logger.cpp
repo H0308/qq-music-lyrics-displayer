@@ -6,6 +6,7 @@
 #include <pdhmsg.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <atomic>
@@ -34,7 +35,9 @@ constexpr wchar_t kLogExtension[] = L".log";
 constexpr size_t kBufferedBytesLimit = 64 * 1024;
 constexpr auto kFlushInterval = std::chrono::milliseconds(1000);
 constexpr auto kSampleInterval = std::chrono::milliseconds(1000);
+constexpr auto kResourceLogInterval = std::chrono::seconds(5);
 constexpr auto kCleanupInterval = std::chrono::hours(1);
+constexpr uint64_t kResourceMemoryDeltaBytes = 1024ull * 1024ull;
 
 std::atomic<RuntimeLogger*> g_activeLogger{nullptr};
 
@@ -211,6 +214,10 @@ struct ResourceSample {
     double cpu = -1.0;
     double gpu = -1.0;
     uint64_t memory = 0;
+    uint64_t commit = 0;
+    DWORD handles = 0;
+    DWORD threads = 0;
+    bool processCountsValid = false;
 };
 
 class ResourceSampler {
@@ -234,8 +241,37 @@ public:
         if (GetProcessMemoryInfo(GetCurrentProcess(),
                                  reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),
                                  sizeof(memory)))
+        {
             result.memory = static_cast<uint64_t>(memory.PrivateWorkingSetSize);
+            result.commit = static_cast<uint64_t>(memory.PrivateUsage);
+        }
         return result;
+    }
+
+    void addProcessCounts(ResourceSample& result) const {
+        DWORD handleCount = 0;
+        const bool handlesValid = GetProcessHandleCount(GetCurrentProcess(), &handleCount) != 0;
+
+        DWORD threadCount = 0;
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        bool threadsValid = snapshot != INVALID_HANDLE_VALUE;
+        if (threadsValid) {
+            THREADENTRY32 entry{};
+            entry.dwSize = sizeof(entry);
+            if (Thread32First(snapshot, &entry)) {
+                do {
+                    if (entry.th32OwnerProcessID == GetCurrentProcessId())
+                        ++threadCount;
+                } while (Thread32Next(snapshot, &entry));
+            } else {
+                threadsValid = false;
+            }
+            CloseHandle(snapshot);
+        }
+
+        result.handles = handleCount;
+        result.threads = threadCount;
+        result.processCountsValid = handlesValid && threadsValid;
     }
 
 private:
@@ -379,8 +415,11 @@ struct RuntimeLogger::Impl {
     void run() {
         ResourceSampler resources;
         auto nextSample = std::chrono::steady_clock::now();
+        auto nextResourceLog = nextSample;
         auto nextCleanup = std::chrono::steady_clock::now();
         auto nextFlush = std::chrono::steady_clock::now() + kFlushInterval;
+        bool hasResourceLog = false;
+        uint64_t lastLoggedMemory = 0;
 
         for (;;) {
             std::unique_lock<std::recursive_mutex> lock(mutex);
@@ -404,12 +443,46 @@ struct RuntimeLogger::Impl {
             lock.unlock();
 
             if (now >= nextSample) {
-                const ResourceSample sample = resources.sample();
+                ResourceSample sample = resources.sample();
                 {
                     std::lock_guard<std::recursive_mutex> stateLock(mutex);
                     snapshot.cpuPercent = sample.cpu;
                     snapshot.gpuPercent = sample.gpu;
                     snapshot.memoryBytes = sample.memory;
+                }
+
+                const uint64_t memoryDelta =
+                    sample.memory >= lastLoggedMemory ? sample.memory - lastLoggedMemory
+                                                       : lastLoggedMemory - sample.memory;
+                const bool intervalDue = now >= nextResourceLog;
+                const bool memoryChanged = hasResourceLog && sample.memory > 0 &&
+                                            lastLoggedMemory > 0 &&
+                                            memoryDelta >= kResourceMemoryDeltaBytes;
+                if (!hasResourceLog || intervalDue || memoryChanged) {
+                    resources.addProcessCounts(sample);
+                    const double privateMb =
+                        static_cast<double>(sample.memory) / (1024.0 * 1024.0);
+                    const double commitMb =
+                        static_cast<double>(sample.commit) / (1024.0 * 1024.0);
+                    const double deltaMb =
+                        hasResourceLog
+                            ? static_cast<double>(static_cast<int64_t>(sample.memory) -
+                                                  static_cast<int64_t>(lastLoggedMemory)) /
+                                  (1024.0 * 1024.0)
+                            : 0.0;
+                    const wchar_t* reason =
+                        !hasResourceLog ? L"initial" : intervalDue ? L"interval" : L"memory-change";
+                    runtime_log::writef(
+                        L"[resource][snapshot] reason=%s private=%.1fMB delta=%+.1fMB "
+                        L"commit=%.1fMB handles=%lu threads=%lu detail=%s",
+                        reason, privateMb, deltaMb, commitMb,
+                        static_cast<unsigned long>(sample.handles),
+                        static_cast<unsigned long>(sample.threads),
+                        sample.processCountsValid ? L"ok" : L"partial");
+                    hasResourceLog = true;
+                    if (sample.memory > 0)
+                        lastLoggedMemory = sample.memory;
+                    nextResourceLog = now + kResourceLogInterval;
                 }
                 nextSample = now + kSampleInterval;
             }

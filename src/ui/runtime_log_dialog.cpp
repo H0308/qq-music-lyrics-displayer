@@ -1,6 +1,6 @@
 #include "runtime_log_dialog.h"
 
-#include "resource.h"
+#include "ui/app_icon.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
@@ -534,7 +534,7 @@ bool RuntimeLogDialog::create(HINSTANCE inst, HWND parent, runtime_log::RuntimeL
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricRuntimeLogDialog";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -550,6 +550,8 @@ bool RuntimeLogDialog::create(HINSTANCE inst, HWND parent, runtime_log::RuntimeL
     const int y = work.top + ((work.bottom - work.top) - height) / 2;
     impl_->hwnd = CreateWindowExW(kDialogExStyle, wc.lpszClassName, L"运行日志", kDialogStyle,
                                   x, y, width, height, nullptr, nullptr, inst, impl_.get());
+    if (impl_->hwnd)
+        app_icon::applyWindowIcon(impl_->hwnd);
     return impl_->hwnd != nullptr;
 }
 
