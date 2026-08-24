@@ -1,4 +1,5 @@
 #include "taskbar_host.h"
+#include "logging/runtime_logger.h"
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
@@ -529,12 +530,12 @@ struct TaskbarHost::Impl {
 
         // 嵌入任务栏；失败则仍可作为独立分层窗口存在
         if (!SetParent(h, taskbar_)) {
-            std::wprintf(L"[taskbar] SetParent failed, fallback to popup\n");
+            runtime_log::writef(L"[taskbar] SetParent failed, fallback to popup");
         }
 
         hwnd = h;
         if (!mediaPopup.create(inst, hwnd))
-            std::wprintf(L"[taskbar] media popup creation failed\n");
+            runtime_log::writef(L"[taskbar] media popup creation failed");
         mediaPopup.setSpectrumDemandCallback([this](bool demand) {
             mediaPopupSpectrumDemand_ = demand;
             if (onMediaPopupSpectrumDemand)
@@ -1441,9 +1442,9 @@ struct TaskbarHost::Impl {
     // 此时只剩野句柄，必须整体重建；若幸存（崩溃非正常退出）则重新附着即可。
     // 歌词/媒体/字体等状态都保存在 Impl 成员里，重建窗口后原样恢复
     void onTaskbarCreated() {
-        std::wprintf(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d\n",
-                     hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, visible ? 1 : 0,
-                     timerRunning_ ? 1 : 0);
+        runtime_log::writef(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d",
+                            hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, visible ? 1 : 0,
+                            timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
                 SetParent(hwnd, taskbar_);
@@ -3107,7 +3108,7 @@ struct TaskbarHost::Impl {
             if (!renderer.present())
                 discardDeviceResources();
         } else {
-            std::wprintf(L"[taskbar] EndDraw failed: 0x%08X\n", hr);
+            runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
         }
     }
 
@@ -3481,7 +3482,7 @@ struct TaskbarHost::Impl {
                 DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            std::wprintf(L"[taskbar] WM_DESTROY (visible=%d)\n", visible ? 1 : 0);
+            runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", visible ? 1 : 0);
             stopFrameTimer();
             stopProbe();
             mediaPopup.destroy();

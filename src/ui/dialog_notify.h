@@ -13,4 +13,5 @@ enum class DialogKind : WPARAM {
     ManualSearch = 3,
     FontPicker = 4,
     FontColor = 5,
+    RuntimeLog = 6,
 };

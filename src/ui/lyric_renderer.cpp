@@ -1,5 +1,7 @@
 #include "lyric_renderer.h"
 
+#include "logging/runtime_logger.h"
+
 #include <cstdio>
 #include <iterator>
 
@@ -374,11 +376,11 @@ void DCompRenderer::releaseBackBuffer() {
 
 bool DCompRenderer::bind(HWND hwnd, int width, int height) {
     if (!createFactories() || !createDevice()) {
-        std::wprintf(L"[dcomp] device create failed\n");
+        runtime_log::writef(L"[dcomp] device create failed");
         return false;
     }
     if (!ensureSwapchain(hwnd, width, height)) {
-        std::wprintf(L"[dcomp] swapchain bind failed (hwnd=%p %dx%d)\n", hwnd, width, height);
+        runtime_log::writef(L"[dcomp] swapchain bind failed (hwnd=%p %dx%d)", hwnd, width, height);
         return false;
     }
     return true;
@@ -390,7 +392,7 @@ bool DCompRenderer::present() {
     releaseBackBuffer(); // Present 前解绑后备缓冲
     HRESULT hr = swapchain_->Present(0, 0);
     if (FAILED(hr)) {
-        std::wprintf(L"[dcomp] Present failed: 0x%08X\n", static_cast<unsigned>(hr));
+        runtime_log::writef(L"[dcomp] Present failed: 0x%08X", static_cast<unsigned>(hr));
         return false;
     }
     if (dcomp_)

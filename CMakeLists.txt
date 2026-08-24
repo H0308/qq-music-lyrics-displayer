@@ -21,6 +21,7 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 
 add_executable(QQMusicLyric
     src/main.cpp
+    src/logging/runtime_logger.cpp
     src/media/smtc_monitor.cpp
     src/media/smtc/smtc_common.cpp
     src/media/smtc/qq_music_smtc_adapter.cpp
@@ -45,6 +46,7 @@ add_executable(QQMusicLyric
     src/ui/color_picker_dialog.cpp
     src/ui/font_color_dialog.cpp
     src/ui/settings_dialog.cpp
+    src/ui/runtime_log_dialog.cpp
     src/util/base64.cpp
     src/util/dominant_color.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/resource.rc
@@ -86,5 +88,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     comctl32
     windowscodecs
     advapi32
+    pdh
+    psapi
     winmm
 )

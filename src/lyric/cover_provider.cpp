@@ -1,5 +1,7 @@
 #include "cover_provider.h"
 
+#include "logging/runtime_logger.h"
+
 #include <curl/curl.h>
 
 #include <algorithm>
@@ -140,13 +142,15 @@ void CoverProvider::requestAsync(const std::wstring& albummid, ReadyCallback cb)
 
         bool ok = rc == CURLE_OK && code == 200 && !data.empty();
         if (!ok) {
-            std::wprintf(L"[cover] download failed: url=%S, curl=%d, http=%ld, size=%zu, magic=%S\n",
-                         url.str().c_str(), (int)rc, code, data.size(), magic);
+            runtime_log::writef(
+                L"[cover] download failed: url=%S, curl=%d, http=%ld, size=%zu, magic=%S",
+                url.str().c_str(), (int)rc, code, data.size(), magic);
             data.clear();
         } else {
-            std::wprintf(L"[cover] download ok: url=%S, type=%S, size=%zu, magic=%S\n",
-                         url.str().c_str(), contentType.empty() ? "(none)" : contentType.c_str(),
-                         data.size(), magic);
+            runtime_log::writef(
+                L"[cover] download ok: url=%S, type=%S, size=%zu, magic=%S",
+                url.str().c_str(), contentType.empty() ? "(none)" : contentType.c_str(),
+                data.size(), magic);
         }
 
         {

@@ -2,6 +2,7 @@
 #include "qrc_decoder.h"
 
 #include "util/base64.h"
+#include "logging/runtime_logger.h"
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -1346,7 +1347,7 @@ void filterLocalSecondary(std::vector<LyricLine>& lines, bool romanization) {
 bool loadLocalLyricBundle(const LocalLyricBundle& bundle, std::vector<LyricLine>& out) {
     if (!decodeLocalLyricFile(bundle.originalPath, out) || out.empty()) {
         const std::wstring path = bundle.originalPath.wstring();
-        std::wprintf(L"[lyric][local-decode-failed][QQ] file=\"%ls\"\n", path.c_str());
+        runtime_log::writef(L"[lyric][local-decode-failed][QQ] file=\"%ls\"", path.c_str());
         return false;
     }
 
@@ -2089,8 +2090,8 @@ struct LyricProvider::Impl {
             impl->qqLocalIndex = std::move(index);
             impl->qqLocalIndexBuilding = false;
             impl->qqLocalIndexRefreshedAt = std::chrono::steady_clock::now();
-            std::wprintf(L"[lyric][local-index][QQ] root=\"%ls\" bundles=%zu\n",
-                         root.c_str(), impl->qqLocalIndex->bundles.size());
+            runtime_log::writef(L"[lyric][local-index][QQ] root=\"%ls\" bundles=%zu",
+                                root.c_str(), impl->qqLocalIndex->bundles.size());
             impl->qqLocalIndexCv.notify_all();
         });
         workers.push_back(std::move(worker));
@@ -2145,9 +2146,9 @@ struct LyricProvider::Impl {
             return false;
         const bool hit = lookupLocalLyric(*index, title, artist, out);
         if (!hit) {
-            std::wprintf(L"[lyric][local-no-match][QQ] title=\"%ls\" artist=\"%ls\" "
-                         L"indexed-bundles=%zu\n",
-                         title.c_str(), artist.c_str(), index->bundles.size());
+            runtime_log::writef(L"[lyric][local-no-match][QQ] title=\"%ls\" artist=\"%ls\" "
+                                L"indexed-bundles=%zu",
+                                title.c_str(), artist.c_str(), index->bundles.size());
         }
         return hit;
     }
@@ -2436,8 +2437,8 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
     const std::wstring key = makeKey(title, artist, durationMs);
     uint64_t gen = ++impl_->generation;
     bool localConfigured = false;
-    std::wprintf(L"[lyric][request][QQ] title=\"%ls\" artist=\"%ls\" duration=%lldms\n",
-                 title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
+    runtime_log::writef(L"[lyric][request][QQ] title=\"%ls\" artist=\"%ls\" duration=%lldms",
+                        title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         impl_->lastLoadWasLocal = false;
@@ -2448,8 +2449,8 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             impl_->lastLoadWasManual = true;
             impl_->current = std::move(manual.lines);
             impl_->currentSongInfo = std::move(manual.info);
-            std::wprintf(L"[lyric][source=manual][QQ] title=\"%ls\" artist=\"%ls\"\n",
-                         title.c_str(), artist.c_str());
+            runtime_log::writef(L"[lyric][source=manual][QQ] title=\"%ls\" artist=\"%ls\"",
+                                title.c_str(), artist.c_str());
             if (cb) cb(true);
             return;
         }
@@ -2460,8 +2461,9 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             if (impl_->cacheGet(key, cached)) {
                 impl_->current = std::move(cached.lines);
                 impl_->currentSongInfo = std::move(cached.info);
-                std::wprintf(L"[lyric][source=online-cache][QQ] title=\"%ls\" artist=\"%ls\"\n",
-                             title.c_str(), artist.c_str());
+                runtime_log::writef(
+                    L"[lyric][source=online-cache][QQ] title=\"%ls\" artist=\"%ls\"",
+                    title.c_str(), artist.c_str());
                 if (cb) cb(true);
                 return;
             }
@@ -2496,18 +2498,19 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
                 if (impl->cacheGet(key, cached)) {
                     result = std::move(cached.lines);
                     info = std::move(cached.info);
-                    std::wprintf(L"[lyric][source=online-cache][QQ] title=\"%ls\" "
-                                 L"artist=\"%ls\"\n",
-                                 title.c_str(), artist.c_str());
+                    runtime_log::writef(
+                        L"[lyric][source=online-cache][QQ] title=\"%ls\" artist=\"%ls\"",
+                        title.c_str(), artist.c_str());
                     return true;
                 }
             }
-            std::wprintf(L"[lyric][source=online][QQ] fetching title=\"%ls\" artist=\"%ls\"\n",
-                         title.c_str(), artist.c_str());
+            runtime_log::writef(L"[lyric][source=online][QQ] fetching title=\"%ls\" artist=\"%ls\"",
+                                title.c_str(), artist.c_str());
             const bool ok = impl->fetch(title, artist, durationMs, result, info);
-            std::wprintf(L"[lyric][source=online][QQ] result=%ls title=\"%ls\" "
-                         L"artist=\"%ls\" lines=%zu\n",
-                         ok ? L"success" : L"failed", title.c_str(), artist.c_str(), result.size());
+            runtime_log::writef(L"[lyric][source=online][QQ] result=%ls title=\"%ls\" "
+                                L"artist=\"%ls\" lines=%zu",
+                                ok ? L"success" : L"failed", title.c_str(), artist.c_str(),
+                                result.size());
             return ok;
         };
 
@@ -2519,13 +2522,13 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             if (localHit) {
                 // 本地 QRC 没有在线 songmid；不把旧歌的封面标识带到当前歌曲。
                 info = SongInfo{};
-                std::wprintf(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
-                             L"lines=%zu\n",
-                             title.c_str(), artist.c_str(), result.size());
+                runtime_log::writef(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
+                                    L"lines=%zu",
+                                    title.c_str(), artist.c_str(), result.size());
             } else {
-                std::wprintf(L"[lyric][local-miss][QQ] title=\"%ls\" artist=\"%ls\" "
-                             L"fallback=online\n",
-                             title.c_str(), artist.c_str());
+                runtime_log::writef(L"[lyric][local-miss][QQ] title=\"%ls\" artist=\"%ls\" "
+                                    L"fallback=online",
+                                    title.c_str(), artist.c_str());
                 ok = loadOnline();
             }
         } else {
@@ -2542,9 +2545,10 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
                 localHit = impl->lookupLocalLyrics(title, artist, result);
                 ok = localHit;
                 if (localHit)
-                    std::wprintf(L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
-                                 L"fallback=online lines=%zu\n",
-                                 title.c_str(), artist.c_str(), result.size());
+                    runtime_log::writef(
+                        L"[lyric][source=local][QQ] title=\"%ls\" artist=\"%ls\" "
+                        L"fallback=online lines=%zu",
+                        title.c_str(), artist.c_str(), result.size());
             }
         }
 

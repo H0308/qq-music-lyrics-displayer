@@ -9,6 +9,7 @@
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
 #include "ui/settings_dialog.h"
+#include "ui/runtime_log_dialog.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_menu.h"
@@ -17,6 +18,7 @@
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
 #include "util/dominant_color.h"
+#include "logging/runtime_logger.h"
 #include "resource.h"
 
 #include <windows.h>
@@ -80,6 +82,7 @@ constexpr UINT kCmdLyricAlignRight = 125;
 constexpr UINT kCmdHoverPlaybackControls = 126;
 constexpr UINT kCmdSettings = 127;
 constexpr UINT kCmdSwitchLyricSource = 128;
+constexpr UINT kCmdRuntimeLog = 129;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
@@ -295,6 +298,7 @@ bool snapshotMatchesTrackKey(const SmtcSnapshot& snap, const std::wstring& key) 
 
 struct App {
     DWORD mainThread = GetCurrentThreadId();
+    runtime_log::RuntimeLogger runtimeLogger_;
     SmtcMonitor monitor;
     LyricProvider provider;
     CoverProvider coverProvider;
@@ -304,6 +308,7 @@ struct App {
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
     std::unique_ptr<SettingsDialog> settingsDialog;
+    std::unique_ptr<RuntimeLogDialog> runtimeLogDialog;
     std::wstring currentKey;
     std::wstring currentTitle;
     std::wstring currentArtist;
@@ -400,6 +405,8 @@ struct App {
     int updatePromptFocusedId_ = kUpdatePromptAbout;
     bool updatePromptFocusVisible_ = false;
     std::wstring settingsPath_;
+    std::wstring logDirectory_;
+    int logRetentionDays_ = 30;
     bool qqLocalLyricsEnabled_ = false;
     bool qqLocalLyricsPersistOrder_ = false;
     std::wstring qqLocalLyricsPath_;
@@ -413,6 +420,36 @@ struct App {
 
     const wchar_t* notRunningStatus() const {
         return lastPlayer_ == SmtcPlayerType::NetEase ? L"网易云音乐未运行" : L"QQ 音乐未运行";
+    }
+
+    void updateRuntimeLogState(const SmtcSnapshot& snap) {
+        if (!snap.sessionAlive) {
+            runtimeLogger_.setPlayback({}, {}, 0, false);
+            runtimeLogger_.setLyricSource(L"未加载");
+            runtimeLogger_.setCoverLoaded(false);
+            return;
+        }
+
+        const std::wstring title = snap.title.empty() ? currentTitle : snap.title;
+        const std::wstring artist = snap.artist.empty() ? currentArtist : snap.artist;
+        const int64_t durationMs = !snap.timelineStale
+                                       ? (snap.durationMs > 0 ? snap.durationMs
+                                                              : currentDurationMs)
+                                       : 0;
+        runtimeLogger_.setPlayback(title, artist, durationMs, true);
+        if (lyricLoading_)
+            runtimeLogger_.setLyricSource(L"加载中…");
+        else if (currentLyricsFromManual_)
+            runtimeLogger_.setLyricSource(L"手动搜索");
+        else if (currentLyricsFromLocal_)
+            runtimeLogger_.setLyricSource(L"本地歌词");
+        else if (!currentLyrics_.empty())
+            runtimeLogger_.setLyricSource(L"在线歌词");
+        else
+            runtimeLogger_.setLyricSource(L"暂无歌词");
+        runtimeLogger_.setCoverLoaded(
+            (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) ||
+            (lastCover_ && !lastCover_->empty()));
     }
 
     void updateLyricCapabilities(const std::vector<LyricLine>& lines) {
@@ -563,6 +600,7 @@ struct App {
         refresh(fontPickerDialog ? fontPickerDialog->hwnd() : nullptr);
         if (fontColorDialog)
             fontColorDialog->refreshTheme();
+        refresh(runtimeLogDialog ? runtimeLogDialog->hwnd() : nullptr);
         refresh(updatePromptHwnd_);
     }
 
@@ -736,14 +774,14 @@ struct App {
         if (taskbarHost) return true;
         auto host = std::make_unique<TaskbarHost>();
         if (!host->create(inst)) {
-            std::wprintf(L"failed to create taskbar host\n");
+            runtime_log::writef(L"failed to create taskbar host");
             return false;
         }
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setSourceOpenCallback([](const std::wstring& source) {
             if (!platform_icon::launchSourceApp(source))
-                std::wprintf(L"[player] failed to activate source: %s\n", source.c_str());
+                runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
         taskbarHost = std::move(host);
         taskbarHost->setMediaPopupSpectrumDemandCallback([this](bool demand) {
@@ -790,6 +828,8 @@ struct App {
         if (shutdownRequested_)
             return;
         shutdownRequested_ = true;
+        runtimeLogger_.write(L"[lifecycle] quit requested");
+        runtimeLogger_.flushSync();
         PostQuitMessage(0);
     }
 
@@ -836,7 +876,8 @@ struct App {
             lyricLoading_ = false;
             updateLyricCapabilities(currentLyrics_);
             publishPresentationFrame(snap, true, true);
-            std::wprintf(L"[lyric] manual override applied: %s\n", currentKey.c_str());
+            runtime_log::writef(L"[lyric] manual override applied: %s", currentKey.c_str());
+            updateRuntimeLogState(snap);
             // 手动选择后同样兜底封面
             if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
                 const std::wstring albummid = provider.songInfo().albummid;
@@ -885,6 +926,7 @@ struct App {
         currentLyricsFromManual_ = false;
         lyricRequestStale_ = snap.timelineStale;
         ++requestGeneration_;
+        updateRuntimeLogState(snap);
         const std::wstring requestKey = currentKey;
         const uint64_t generation = requestGeneration_;
         auto postLyricResult = [this, requestKey, generation](bool ok) {
@@ -939,7 +981,7 @@ struct App {
             spectrumSessionAlive_ = false;
             spectrumSessionKey_.clear();
             if (!currentKey.empty() || lastStatus != PlaybackStatus::Stopped)
-                std::wprintf(L"[smtc] %s session closed\n", playerName(lastPlayer_));
+                runtime_log::writef(L"[smtc] %s session closed", playerName(lastPlayer_));
             currentKey.clear();
             currentTitle.clear();
             currentArtist.clear();
@@ -956,6 +998,7 @@ struct App {
             lastSmtcThumbnail.reset();
             hasAlbumColor_ = false;
             publishPresentationFrame(snap, false, true);
+            updateRuntimeLogState(snap);
             return;
         }
         lastPlayer_ = snap.player;
@@ -981,8 +1024,8 @@ struct App {
         const std::wstring key = makeTrackKey(snap);
         const bool trackChanged = key != currentKey && !snap.title.empty();
         if (snap.status != lastStatus) {
-            std::wprintf(L"[smtc] %s status: %s\n", playerName(snap.player),
-                         statusName(snap.status));
+            runtime_log::writef(L"[smtc] %s status: %s", playerName(snap.player),
+                                statusName(snap.status));
             lastStatus = snap.status;
         }
         if (trackChanged) {
@@ -991,13 +1034,13 @@ struct App {
             currentArtist = snap.artist;
             currentDurationMs = snap.durationMs;
             if (snap.player == SmtcPlayerType::NetEase) {
-                std::wprintf(L"[smtc] %s track: %s - %s [%s] (%lld ms)\n",
-                             playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
-                             snap.neteaseSongId.c_str(), snap.durationMs);
+                runtime_log::writef(L"[smtc] %s track: %s - %s [%s] (%lld ms)",
+                                    playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
+                                    snap.neteaseSongId.c_str(), snap.durationMs);
             } else {
-                std::wprintf(L"[smtc] %s track: %s - %s (%lld ms)\n",
-                             playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
-                             snap.durationMs);
+                runtime_log::writef(L"[smtc] %s track: %s - %s (%lld ms)",
+                                    playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
+                                    snap.durationMs);
             }
             lastCover_.reset();
             if (snap.thumbnail && !snap.thumbnail->empty())
@@ -1026,8 +1069,11 @@ struct App {
             } else {
                 startLyricRequest(snap);
             }
-        } else if (snap.thumbnail && !snap.thumbnail->empty()) {
-            lastCover_ = snap.thumbnail;
+        } else {
+            if (!snap.timelineStale && snap.durationMs > 0)
+                currentDurationMs = snap.durationMs;
+            if (snap.thumbnail && !snap.thumbnail->empty())
+                lastCover_ = snap.thumbnail;
         }
         // 时间线从残留恢复可信（stale 1→0）：若当前歌词请求是在不可信期间发出的
         // （等待超时被迫发出），用可信时长立即重发，覆盖可能已被时长过滤淘汰的结果。
@@ -1038,6 +1084,7 @@ struct App {
         }
         publishPresentationFrame(snap, !trackChanged, trackChanged);
         tryExtractAlbumColor();
+        updateRuntimeLogState(snap);
     }
 
     void onLyricReady(std::unique_ptr<LyricPayload> payload) {
@@ -1055,14 +1102,15 @@ struct App {
                                       provider.lastLoadWasLocal();
             currentLyricsFromManual_ = provider.lastLoadWasManual();
             updateLyricCapabilities(currentLyrics_);
-            std::wprintf(L"[lyric] loaded %zu lines: %s\n", currentLyrics_.size(),
-                         currentKey.c_str());
+            runtime_log::writef(L"[lyric] loaded %zu lines: %s", currentLyrics_.size(),
+                                currentKey.c_str());
             // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
             if (snap.player == SmtcPlayerType::QQMusic &&
                 (!lastSmtcThumbnail || lastSmtcThumbnail->empty())) {
                 const std::wstring albummid = provider.songInfo().albummid;
                 if (albummid.empty()) {
-                    std::wprintf(L"[cover] no albummid from search: %s\n", currentKey.c_str());
+                    runtime_log::writef(L"[cover] no albummid from search: %s",
+                                        currentKey.c_str());
                 } else {
                     const std::wstring key = currentKey;
                     const uint64_t generation = requestGeneration_;
@@ -1085,13 +1133,15 @@ struct App {
                 // 可信后由 onSmtcChanged 的重试分支用正确时长重发。
                 lyricLoading_ = true;
                 publishPresentationFrame(snap, false);
+                updateRuntimeLogState(snap);
                 return;
             }
             currentLyrics_.clear();
             updateLyricCapabilities({});
-            std::wprintf(L"[lyric] not found: %s\n", currentKey.c_str());
+            runtime_log::writef(L"[lyric] not found: %s", currentKey.c_str());
         }
         publishPresentationFrame(snap, true, true);
+        updateRuntimeLogState(snap);
     }
 
     void onCoverReady(std::unique_ptr<CoverPayload> payload) {
@@ -1102,10 +1152,11 @@ struct App {
         if (!snapshotMatchesTrackKey(snap, currentKey))
             return;
         if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
-        std::wprintf(L"[cover] loaded from API: %s\n", currentKey.c_str());
+        runtime_log::writef(L"[cover] loaded from API: %s", currentKey.c_str());
         lastCover_ = payload->cover;
         publishPresentationFrame(snap, true);
         tryExtractAlbumColor();
+        updateRuntimeLogState(snap);
     }
 
     // 30fps：插值进度 -> 二分定位当前行
@@ -1151,6 +1202,10 @@ struct App {
     void updateTrayIcon();
     void showTrayMenu();
     void onMenuCommand(int cmd);
+    void showRuntimeLog();
+    void initializeRuntimeLogger();
+    void setLogDirectory(const std::wstring& path);
+    void setLogRetentionDays(int days);
     void showSettings();
     SettingsState currentSettingsState() const;
     SettingsActions buildSettingsActions();
@@ -1191,6 +1246,8 @@ void App::loadSettings() {
     if (dir.empty())
         return;
     settingsPath_ = dir + L"\\settings.json";
+    logDirectory_ = runtime_log::RuntimeLogger::defaultDirectory();
+    bool migrateLegacyLogDirectory = false;
     provider.setManualOverrideDir(dir + L"\\manual_lyrics");
     provider.setQqLyricOrderDir(dir + L"\\manual_lyrics_settings");
     fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
@@ -1201,6 +1258,13 @@ void App::loadSettings() {
         auto j = nlohmann::json::parse(f, nullptr, false);
         if (j.is_discarded())
             return;
+        const std::wstring configuredLogDirectory =
+            wideOf(j.value("logDirectory", utf8Of(logDirectory_)));
+        if (configuredLogDirectory == runtime_log::RuntimeLogger::legacyDefaultDirectory())
+            migrateLegacyLogDirectory = true;
+        else if (!configuredLogDirectory.empty())
+            logDirectory_ = configuredLogDirectory;
+        logRetentionDays_ = std::clamp(j.value("logRetentionDays", 30), 0, 3650);
         hasUserFont_ = j.value("hasUserFont", false);
         std::wstring fam = wideOf(j.value("fontFamily", std::string()));
         if (!fam.empty())
@@ -1314,6 +1378,8 @@ void App::loadSettings() {
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
     } catch (...) {
     }
+    if (migrateLegacyLogDirectory)
+        saveSettings();
 }
 
 void App::saveSettings() {
@@ -1374,10 +1440,51 @@ void App::saveSettings() {
         j["qqLocalLyricsEnabled"] = qqLocalLyricsEnabled_;
         j["qqLocalLyricsPersistOrder"] = qqLocalLyricsPersistOrder_;
         j["qqLocalLyricsPath"] = utf8Of(qqLocalLyricsPath_);
+        j["logDirectory"] = utf8Of(logDirectory_);
+        j["logRetentionDays"] = logRetentionDays_;
         std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
     } catch (...) {
     }
+}
+
+void App::initializeRuntimeLogger() {
+    if (logDirectory_.empty())
+        logDirectory_ = runtime_log::RuntimeLogger::defaultDirectory();
+    runtimeLogger_.start(logDirectory_, logRetentionDays_);
+    logDirectory_ = runtimeLogger_.directory();
+    logRetentionDays_ = runtimeLogger_.retentionDays();
+    updateRuntimeLogState(monitor.snapshot());
+}
+
+void App::setLogDirectory(const std::wstring& path) {
+    if (path.empty())
+        return;
+    runtimeLogger_.setDirectory(path);
+    logDirectory_ = runtimeLogger_.directory();
+    saveSettings();
+}
+
+void App::setLogRetentionDays(int days) {
+    logRetentionDays_ = std::clamp(days, 0, 3650);
+    runtimeLogger_.setRetentionDays(logRetentionDays_);
+    saveSettings();
+}
+
+void App::showRuntimeLog() {
+    if (runtimeLogDialog && !runtimeLogDialog->isOpen())
+        runtimeLogDialog.reset();
+    if (!runtimeLogDialog) {
+        runtimeLogDialog = std::make_unique<RuntimeLogDialog>();
+        if (!runtimeLogDialog->create(
+                GetModuleHandleW(nullptr), trayHwnd, &runtimeLogger_,
+                [this](const std::wstring& path) { setLogDirectory(path); },
+                [this](int days) { setLogRetentionDays(days); })) {
+            runtimeLogDialog.reset();
+            return;
+        }
+    }
+    runtimeLogDialog->show();
 }
 
 void App::pickQqLocalLyricsPath() {
@@ -1901,6 +2008,7 @@ void App::showTrayMenu() {
                 currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词");
     }
     addSeparator();
+    addItem(kCmdRuntimeLog, L"运行日志");
     // 其余设置项集中到设置页
     addItem(kCmdSettings, L"设置…");
     addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
@@ -1951,6 +2059,9 @@ void App::onMenuCommand(int cmd) {
         else if (!currentLyricsFromManual_)
             reloadCurrentQqLyrics(false, true, qqLocalLyricsPersistOrder_);
         break;
+    case kCmdRuntimeLog:
+        showRuntimeLog();
+        break;
     case kCmdSecondaryLyric:
         applySecondaryEnabled(!secondaryLyricEnabled_);
         break;
@@ -1984,9 +2095,9 @@ void App::onMenuCommand(int cmd) {
     case kCmdAutoStart: {
         bool enable = !autoStartEnabled();
         if (setAutoStart(enable))
-            std::wprintf(L"[autostart] %s\n", enable ? L"enabled" : L"disabled");
+            runtime_log::writef(L"[autostart] %s", enable ? L"enabled" : L"disabled");
         else
-            std::wprintf(L"[autostart] failed to %s\n", enable ? L"enable" : L"disable");
+            runtime_log::writef(L"[autostart] failed to %s", enable ? L"enable" : L"disable");
         break;
     }
     case kCmdAbout:
@@ -2048,8 +2159,8 @@ void App::tryExtractAlbumColor() {
         return;
     albumColor_ = *color;
     hasAlbumColor_ = true;
-    std::wprintf(L"[color] album dominant: #%02X%02X%02X : %s\n", GetRValue(albumColor_),
-                 GetGValue(albumColor_), GetBValue(albumColor_), currentKey.c_str());
+    runtime_log::writef(L"[color] album dominant: #%02X%02X%02X : %s", GetRValue(albumColor_),
+                        GetGValue(albumColor_), GetBValue(albumColor_), currentKey.c_str());
     currentFrame_.media.hasDominantColor = true;
     currentFrame_.media.dominantColor = albumColor_;
     if (taskbarHost)
@@ -2230,6 +2341,9 @@ void App::onDialogClosed(DialogKind kind) {
     case DialogKind::FontColor:
         resetIfClosed(fontColorDialog);
         break;
+    case DialogKind::RuntimeLog:
+        resetIfClosed(runtimeLogDialog);
+        break;
     }
 }
 
@@ -2379,12 +2493,13 @@ int main() {
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
     app.loadSettings();
+    app.initializeRuntimeLogger();
     // 无命令行参数时始终开启任务栏歌词（沿用原"所有宿主都关闭则强制任务栏"的行为，
     // 避免用户关闭后找不到显示入口；运行中仍可通过托盘菜单随时关闭）
     if (!hasModeFlag)
         wantTaskbar = true;
     if (!app.createTrayWindow(inst)) {
-        std::wprintf(L"failed to create tray window\n");
+        runtime_log::writef(L"failed to create tray window");
         return 1;
     }
     // 关于窗口保持隐藏，用于在程序启动后自动检查更新；用户打开关于时会再次检查。
@@ -2408,17 +2523,17 @@ int main() {
                                     app.buildSettingsActions()))
         app.settingsDialog.reset();
     if (wantTaskbar && !app.createTaskbar(inst)) {
-        std::wprintf(L"failed to create taskbar window\n");
+        runtime_log::writef(L"failed to create taskbar window");
         return 1;
     }
     if (!app.taskbarHost) {
-        std::wprintf(L"no host enabled\n");
+        runtime_log::writef(L"no host enabled");
         return 1;
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
 
-    std::wprintf(L"QQMusicLyric started, waiting for QQ Music or NetEase Music...\n");
+    runtime_log::writef(L"QQMusicLyric started, waiting for QQ Music or NetEase Music...");
 
     MSG msg;
     while (GetMessageW(&msg, nullptr, 0, 0)) {
@@ -2462,6 +2577,8 @@ int main() {
     }
     app.closeUpdatePrompt();
     app.destroyTray();
+    app.runtimeLogger_.write(L"[lifecycle] message loop ended");
+    app.runtimeLogger_.flushSync();
     timeEndPeriod(1);
     return 0;
 }
