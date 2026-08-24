@@ -440,9 +440,9 @@ struct App {
         if (lyricLoading_)
             runtimeLogger_.setLyricSource(L"加载中…");
         else if (currentLyricsFromManual_)
-            runtimeLogger_.setLyricSource(L"手动搜索");
+            runtimeLogger_.setLyricSource(L"本地歌词（手动搜索）");
         else if (currentLyricsFromLocal_)
-            runtimeLogger_.setLyricSource(L"本地歌词");
+            runtimeLogger_.setLyricSource(L"本地歌词（QQ音乐本地）");
         else if (!currentLyrics_.empty())
             runtimeLogger_.setLyricSource(L"在线歌词");
         else
