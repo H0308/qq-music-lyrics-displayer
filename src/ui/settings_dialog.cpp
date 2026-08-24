@@ -1,6 +1,6 @@
 #include "settings_dialog.h"
 
-#include "resource.h"
+#include "ui/app_icon.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
@@ -1407,7 +1407,7 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricSettingsDialog";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -1425,6 +1425,8 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricSettingsDialog", L"设置",
                                   kDialogStyle, x, y, w, h, nullptr, nullptr, inst,
                                   impl_.get());
+    if (impl_->hwnd)
+        app_icon::applyWindowIcon(impl_->hwnd);
     return impl_->hwnd != nullptr;
 }
 

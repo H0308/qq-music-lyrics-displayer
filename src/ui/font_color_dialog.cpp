@@ -1,6 +1,6 @@
 #include "font_color_dialog.h"
 
-#include "resource.h"
+#include "ui/app_icon.h"
 #include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
@@ -550,10 +550,15 @@ struct FontColorDialog::Impl {
     }
 
     void refreshTheme() {
-        if (hwnd)
+        if (hwnd) {
             SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
-        if (picker && picker->isOpen())
-            SendMessageW(picker->hwnd(), WM_THEMECHANGED, 0, 0);
+            app_icon::applyWindowIcon(hwnd);
+        }
+        if (picker && picker->isOpen()) {
+            const HWND pickerHwnd = picker->hwnd();
+            SendMessageW(pickerHwnd, WM_THEMECHANGED, 0, 0);
+            app_icon::applyWindowIcon(pickerHwnd);
+        }
     }
 
     void openPicker(int swatchId) {
@@ -973,7 +978,7 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricFontColor";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -993,6 +998,8 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontColor",
                                   L"字体颜色与效果", kDialogStyle, x, y, w, h,
                                   nullptr, nullptr, inst, impl_.get());
+    if (impl_->hwnd)
+        app_icon::applyWindowIcon(impl_->hwnd);
     return impl_->hwnd != nullptr;
 }
 

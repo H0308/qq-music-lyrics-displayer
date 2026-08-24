@@ -1,6 +1,6 @@
 #include "ui/manual_search_dialog.h"
 
-#include "resource.h"
+#include "ui/app_icon.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
@@ -1773,7 +1773,7 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricManualSearch";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -1791,6 +1791,8 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricManualSearch", L"手动搜索歌词",
                                   kDialogStyle, x, y, width, height, nullptr, nullptr, inst,
                                   impl_.get());
+    if (impl_->hwnd)
+        app_icon::applyWindowIcon(impl_->hwnd);
     return impl_->hwnd != nullptr;
 }
 

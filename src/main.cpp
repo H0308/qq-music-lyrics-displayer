@@ -4,6 +4,7 @@
 #include "ui/font_style.h"
 #include "ui/lyric_window.h"
 #include "ui/taskbar_host.h"
+#include "ui/app_icon.h"
 #include "ui/about_dialog.h"
 #include "ui/manual_search_dialog.h"
 #include "ui/font_picker_dialog.h"
@@ -19,7 +20,6 @@
 #include "media/audio_spectrum.h"
 #include "util/dominant_color.h"
 #include "logging/runtime_logger.h"
-#include "resource.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -452,6 +452,52 @@ struct App {
             (lastCover_ && !lastCover_->empty()));
     }
 
+    void logLyricsCreated(const wchar_t* source) {
+        if (!currentLyrics_.empty())
+            runtime_log::writef(L"[resource][event] lyrics-created source=%s lines=%zu", source,
+                                currentLyrics_.size());
+    }
+
+    void releaseCurrentLyrics() {
+        if (!currentLyrics_.empty()) {
+            const wchar_t* source = currentLyricsFromManual_
+                                        ? L"manual"
+                                        : currentLyricsFromLocal_ ? L"local" : L"online";
+            runtime_log::writef(L"[resource][event] lyrics-released source=%s lines=%zu", source,
+                                currentLyrics_.size());
+        }
+        currentLyrics_.clear();
+        currentLyricsFromLocal_ = false;
+        currentLyricsFromManual_ = false;
+        updateLyricCapabilities({});
+    }
+
+    void logCoverCreated(const wchar_t* source,
+                         const std::shared_ptr<const std::vector<uint8_t>>& cover) {
+        if (cover && !cover->empty())
+            runtime_log::writef(L"[resource][event] cover-created source=%s bytes=%zu", source,
+                                cover->size());
+    }
+
+    void releaseCurrentCover() {
+        const bool hasSmtcCover = lastSmtcThumbnail && !lastSmtcThumbnail->empty();
+        const bool hasApiCover = lastCover_ && !lastCover_->empty() &&
+                                 (!lastSmtcThumbnail || lastCover_ != lastSmtcThumbnail);
+        if (hasSmtcCover)
+            runtime_log::writef(L"[resource][event] cover-released source=smtc bytes=%zu",
+                                lastSmtcThumbnail->size());
+        if (hasApiCover)
+            runtime_log::writef(L"[resource][event] cover-released source=api bytes=%zu",
+                                lastCover_->size());
+        lastCover_.reset();
+        lastSmtcThumbnail.reset();
+    }
+
+    void releaseCurrentResources() {
+        releaseCurrentLyrics();
+        releaseCurrentCover();
+    }
+
     void updateLyricCapabilities(const std::vector<LyricLine>& lines) {
         currentHasTranslation_ = false;
         currentHasRomanization_ = false;
@@ -591,21 +637,25 @@ struct App {
 
     void refreshThemeWindows() {
         auto refresh = [](HWND hwnd) {
-            if (hwnd)
+            if (hwnd) {
                 SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+                app_icon::applyWindowIcon(hwnd);
+            }
         };
         refresh(settingsDialog ? settingsDialog->hwnd() : nullptr);
         refresh(aboutDialog ? aboutDialog->hwnd() : nullptr);
         refresh(manualSearchDialog ? manualSearchDialog->hwnd() : nullptr);
         refresh(fontPickerDialog ? fontPickerDialog->hwnd() : nullptr);
-        if (fontColorDialog)
+        if (fontColorDialog) {
             fontColorDialog->refreshTheme();
+        }
         refresh(runtimeLogDialog ? runtimeLogDialog->hwnd() : nullptr);
         refresh(updatePromptHwnd_);
     }
 
     void refreshTheme() {
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
+        updateTrayIcon();
         if (taskbarHost) {
             taskbarHost->refreshTheme();
             applyFontAppearance();
@@ -870,11 +920,13 @@ struct App {
             // 手动覆盖是新的内容事务，使仍在队列中的自动歌词/封面结果失效。
             ++requestGeneration_;
             cancelLyricDebounce(); // 防止挂起的切歌防抖请求到点后覆盖手动选择
+            releaseCurrentLyrics();
             currentLyrics_ = provider.lines();
             currentLyricsFromLocal_ = false;
             currentLyricsFromManual_ = true;
             lyricLoading_ = false;
             updateLyricCapabilities(currentLyrics_);
+            logLyricsCreated(L"manual");
             publishPresentationFrame(snap, true, true);
             runtime_log::writef(L"[lyric] manual override applied: %s", currentKey.c_str());
             updateRuntimeLogState(snap);
@@ -990,12 +1042,7 @@ struct App {
             lyricLoading_ = false;
             cancelLyricDebounce();
             ++requestGeneration_;
-            currentLyrics_.clear();
-            currentLyricsFromLocal_ = false;
-            currentLyricsFromManual_ = false;
-            updateLyricCapabilities({});
-            lastCover_.reset();
-            lastSmtcThumbnail.reset();
+            releaseCurrentResources();
             hasAlbumColor_ = false;
             publishPresentationFrame(snap, false, true);
             updateRuntimeLogState(snap);
@@ -1020,15 +1067,17 @@ struct App {
             spectrumSessionKey_.clear();
         }
 
-        lastSmtcThumbnail = snap.thumbnail;
         const std::wstring key = makeTrackKey(snap);
         const bool trackChanged = key != currentKey && !snap.title.empty();
+        const bool newSmtcThumbnail = snap.thumbnail && !snap.thumbnail->empty() &&
+                                      (!lastSmtcThumbnail || lastSmtcThumbnail != snap.thumbnail);
         if (snap.status != lastStatus) {
             runtime_log::writef(L"[smtc] %s status: %s", playerName(snap.player),
                                 statusName(snap.status));
             lastStatus = snap.status;
         }
         if (trackChanged) {
+            releaseCurrentResources();
             currentKey = key;
             currentTitle = snap.title;
             currentArtist = snap.artist;
@@ -1042,14 +1091,11 @@ struct App {
                                     playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
                                     snap.durationMs);
             }
-            lastCover_.reset();
-            if (snap.thumbnail && !snap.thumbnail->empty())
+            if (snap.thumbnail && !snap.thumbnail->empty()) {
                 lastCover_ = snap.thumbnail;
+                logCoverCreated(L"smtc", lastCover_);
+            }
             hasAlbumColor_ = false;
-            currentLyrics_.clear();
-            currentLyricsFromLocal_ = false;
-            currentLyricsFromManual_ = false;
-            updateLyricCapabilities({});
             // 跟随专辑开启时不回退配置色：沿用上一首的专辑色直到新封面取色完成，
             // 避免歌词加载窗口期配置色闪一下再切回专辑色
             lyricLoading_ = true;
@@ -1072,9 +1118,22 @@ struct App {
         } else {
             if (!snap.timelineStale && snap.durationMs > 0)
                 currentDurationMs = snap.durationMs;
+            if (newSmtcThumbnail) {
+                if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) {
+                    runtime_log::writef(
+                        L"[resource][event] cover-released source=smtc bytes=%zu",
+                        lastSmtcThumbnail->size());
+                } else if (lastCover_ && !lastCover_->empty() && lastCover_ != snap.thumbnail) {
+                    runtime_log::writef(
+                        L"[resource][event] cover-released source=api bytes=%zu",
+                        lastCover_->size());
+                }
+                logCoverCreated(L"smtc", snap.thumbnail);
+            }
             if (snap.thumbnail && !snap.thumbnail->empty())
                 lastCover_ = snap.thumbnail;
         }
+        lastSmtcThumbnail = snap.thumbnail;
         // 时间线从残留恢复可信（stale 1→0）：若当前歌词请求是在不可信期间发出的
         // （等待超时被迫发出），用可信时长立即重发，覆盖可能已被时长过滤淘汰的结果。
         if (!trackChanged && snap.player == SmtcPlayerType::QQMusic &&
@@ -1102,6 +1161,9 @@ struct App {
                                       provider.lastLoadWasLocal();
             currentLyricsFromManual_ = provider.lastLoadWasManual();
             updateLyricCapabilities(currentLyrics_);
+            logLyricsCreated(currentLyricsFromManual_
+                                 ? L"manual"
+                                 : currentLyricsFromLocal_ ? L"local" : L"online");
             runtime_log::writef(L"[lyric] loaded %zu lines: %s", currentLyrics_.size(),
                                 currentKey.c_str());
             // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
@@ -1125,8 +1187,6 @@ struct App {
                 }
             }
         } else {
-            currentLyricsFromLocal_ = false;
-            currentLyricsFromManual_ = false;
             if (lyricRequestStale_) {
                 // 时间线不可信期间发出的请求：失败大概率是旧时长触发候选的 15 秒
                 // 时长过滤，不能据此判定「暂无歌词」。保持「加载中」，等新时间线
@@ -1136,8 +1196,7 @@ struct App {
                 updateRuntimeLogState(snap);
                 return;
             }
-            currentLyrics_.clear();
-            updateLyricCapabilities({});
+            releaseCurrentLyrics();
             runtime_log::writef(L"[lyric] not found: %s", currentKey.c_str());
         }
         publishPresentationFrame(snap, true, true);
@@ -1154,6 +1213,7 @@ struct App {
         if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
         runtime_log::writef(L"[cover] loaded from API: %s", currentKey.c_str());
         lastCover_ = payload->cover;
+        logCoverCreated(L"api", lastCover_);
         publishPresentationFrame(snap, true);
         tryExtractAlbumColor();
         updateRuntimeLogState(snap);
@@ -1563,10 +1623,7 @@ void App::reloadCurrentQqLyrics(bool forceOnline, bool forceLocal, bool persistO
         return;
 
     cancelLyricDebounce();
-    currentLyrics_.clear();
-    currentLyricsFromLocal_ = false;
-    currentLyricsFromManual_ = false;
-    updateLyricCapabilities(currentLyrics_);
+    releaseCurrentLyrics();
     lyricLoading_ = true;
     startLyricRequest(snap, forceOnline, forceLocal, persistOrder);
     publishPresentationFrame(snap, false, true);
@@ -1615,9 +1672,7 @@ void App::updateTrayIcon() {
     nid.uID = kTrayIconId;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = kTrayMsg;
-    nid.hIcon = static_cast<HICON>(
-        LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 0, 0,
-                   LR_DEFAULTSIZE | LR_SHARED));
+    nid.hIcon = app_icon::taskbarIcon();
     lstrcpyW(nid.szTip, L"QQ 音乐歌词");
     Shell_NotifyIconW(NIM_MODIFY, &nid);
     // 首次创建时 MODIFY 不会生效，用 ADD
@@ -1645,7 +1700,7 @@ void App::showUpdatePrompt(const std::wstring& latestVersion) {
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"QQMusicLyricUpdatePrompt";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -1667,6 +1722,7 @@ void App::showUpdatePrompt(const std::wstring& latestVersion) {
         updatePromptLatestVersion_.clear();
         return;
     }
+    app_icon::applyWindowIcon(hwnd);
 
     ShowWindow(hwnd, SW_SHOWNORMAL);
     UpdateWindow(hwnd);

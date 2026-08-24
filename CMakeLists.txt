@@ -9,7 +9,7 @@ find_package(CURL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 
-# 生成资源脚本（嵌入应用图标）
+# 生成资源脚本（嵌入深浅主题 ICO 图标）
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
                ${CMAKE_CURRENT_BINARY_DIR}/resource.rc @ONLY)
 
@@ -17,7 +17,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
 # 显式声明依赖，否则改清单/图标后资源不会重编（曾导致 Debug 静默使用过期清单）
 set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
     PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo.ico")
+    "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-dark.ico;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-light.ico")
 
 add_executable(QQMusicLyric
     src/main.cpp
@@ -34,6 +34,7 @@ add_executable(QQMusicLyric
     src/ui/lyric_renderer.cpp
     src/ui/media_control_icons.cpp
     src/ui/media_popup.cpp
+    src/ui/app_icon.cpp
     src/ui/platform_icon.cpp
     src/ui/fluent_dialog_surface.cpp
     src/ui/taskbar_host.cpp

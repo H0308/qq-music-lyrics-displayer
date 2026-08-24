@@ -1,9 +1,9 @@
 #include "color_picker_dialog.h"
 
+#include "ui/app_icon.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
-#include "resource.h"
 
 #include <windowsx.h>
 
@@ -527,7 +527,7 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricColorPicker";
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APPICON));
+    wc.hIcon = app_icon::windowIcon();
     RegisterClassExW(&wc);
 
     RECT work{};
@@ -554,6 +554,7 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    app_icon::applyWindowIcon(impl_->hwnd);
     return true;
 }
 

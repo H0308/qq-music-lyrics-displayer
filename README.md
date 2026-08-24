@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="asset/logo.png" width="96" alt="logo">
+  <img src="asset/logo-dark.png" width="96" alt="logo">
   <h1>QQ 音乐/网易云任务栏歌词</h1>
   <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 11 任务栏——滚动歌词、逐字高亮、播放控制、音频频谱，程序本体为 C++ 原生实现，无 Electron。</p>
 </div>

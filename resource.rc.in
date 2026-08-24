@@ -1,5 +1,6 @@
-// 应用程序图标，ID 与 src/resource.h 中的 IDI_APPICON 保持一致
-101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/asset/logo.ico"
+// 深浅主题 ICO 图标；运行时由 src/ui/app_icon.cpp 按主题选择。
+101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/asset/logo-dark.ico"
+102 ICON "@CMAKE_CURRENT_SOURCE_DIR@/asset/logo-light.ico"
 
 // 应用程序清单（comctl32 v6 主题、supportedOS）
 1 24 "@CMAKE_CURRENT_SOURCE_DIR@/app.manifest"
