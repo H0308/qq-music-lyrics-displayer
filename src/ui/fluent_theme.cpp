@@ -29,9 +29,12 @@ namespace {
 
 constexpr int kDwmWcpRound = 2;      // DWMWCP_ROUND
 constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
-constexpr int kDwmsbtNone = 1;           // DWMSBT_NONE
+constexpr int kDwmsbtNone = 1;       // DWMSBT_NONE
 constexpr int kDwmsbtMainWindow = 2;      // DWMSBT_MAINWINDOW (Mica)
 constexpr int kDwmsbtTransientWindow = 3; // DWMSBT_TRANSIENTWINDOW (Acrylic)
+
+ThemeMode gTaskbarThemeMode = ThemeMode::FollowSystem;
+ThemeMode gWindowThemeMode = ThemeMode::FollowApp;
 
 IDWriteFontFallback* createUiFontFallback() {
     IDWriteFactory* factory = nullptr;
@@ -99,11 +102,52 @@ bool readLightThemeValue(const wchar_t* name, bool& light) {
     return true;
 }
 
-bool isSystemDarkMode() {
+bool detectAppDarkMode() {
+    bool light = true;
+    if (readLightThemeValue(L"AppsUseLightTheme", light))
+        return !light;
+
+    // 注册表不可用时，UISettings 是 Windows 对 Win32 应用推荐的主题来源。
+    try {
+        winrt::Windows::UI::ViewManagement::UISettings settings;
+        auto foreground = settings.GetColorValue(
+            winrt::Windows::UI::ViewManagement::UIColorType::Foreground);
+        int brightness = 5 * static_cast<int>(foreground.G) +
+                         2 * static_cast<int>(foreground.R) +
+                         static_cast<int>(foreground.B);
+        return brightness > 8 * 128;
+    } catch (...) {
+        // 旧系统或 COM 初始化异常时保留注册表回退。
+        DWORD value = 1; // 默认浅色
+        DWORD size = sizeof(value);
+        if (RegGetValueW(
+                HKEY_CURRENT_USER,
+                L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS)
+            return value == 0;
+        return false;
+    }
+}
+
+bool detectSystemDarkMode() {
     bool light = true;
     if (readLightThemeValue(L"SystemUsesLightTheme", light))
         return !light;
-    return isDarkMode();
+    return detectAppDarkMode();
+}
+
+bool isDarkForMode(ThemeMode mode) {
+    switch (mode) {
+    case ThemeMode::FollowSystem:
+        return detectSystemDarkMode();
+    case ThemeMode::FollowApp:
+        return detectAppDarkMode();
+    case ThemeMode::Dark:
+        return true;
+    case ThemeMode::Light:
+    default:
+        return false;
+    }
 }
 
 // 半透明色叠在底色上的等效不透明色
@@ -178,31 +222,18 @@ void applyAccent(Palette& p) {
 
 } // namespace
 
-bool isDarkMode() {
-    bool light = true;
-    if (readLightThemeValue(L"AppsUseLightTheme", light))
-        return !light;
+void setThemeModes(ThemeMode taskbarMode, ThemeMode windowMode) {
+    gTaskbarThemeMode = taskbarMode;
+    gWindowThemeMode = windowMode;
+}
 
-    // 注册表不可用时，UISettings 是 Windows 对 Win32 应用推荐的主题来源。
-    try {
-        winrt::Windows::UI::ViewManagement::UISettings settings;
-        auto foreground = settings.GetColorValue(
-            winrt::Windows::UI::ViewManagement::UIColorType::Foreground);
-        int brightness = 5 * static_cast<int>(foreground.G) +
-                         2 * static_cast<int>(foreground.R) +
-                         static_cast<int>(foreground.B);
-        return brightness > 8 * 128;
-    } catch (...) {
-        // 旧系统或 COM 初始化异常时保留注册表回退。
-        DWORD value = 1; // 默认浅色
-        DWORD size = sizeof(value);
-        if (RegGetValueW(
-                HKEY_CURRENT_USER,
-                L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS)
-            return value == 0;
-        return false;
-    }
+bool isDarkMode() {
+    return isDarkMode(ThemeTarget::Window);
+}
+
+bool isDarkMode(ThemeTarget target) {
+    return isDarkForMode(target == ThemeTarget::Taskbar ? gTaskbarThemeMode
+                                                         : gWindowThemeMode);
 }
 
 COLORREF accentColor() {
@@ -222,6 +253,10 @@ D2D1_COLOR_F toD2D(COLORREF c, float alpha) {
 }
 
 const Palette& palette() {
+    return palette(ThemeTarget::Window);
+}
+
+const Palette& palette(ThemeTarget target) {
     static Palette light = [] {
         Palette p = makeLight();
         applyAccent(p);
@@ -232,7 +267,7 @@ const Palette& palette() {
         applyAccent(p);
         return p;
     }();
-    return isDarkMode() ? dark : light;
+    return isDarkMode(target) ? dark : light;
 }
 
 void applyRoundCorners(HWND hwnd, bool smallCorners) {
@@ -268,16 +303,11 @@ void suppressBorder(HWND hwnd) {
 
 bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     applyRoundCorners(hwnd, false);
-    bool dark = isDarkMode();
-    // 深色模式下由应用自己绘制根背景。DWM 材质使用的是系统主题，不能保证和
-    // 应用主题一致；保留它会把透明的深色文字/控件落到白色客户区上。
-    bool applied = !dark && applyBackdrop(hwnd, transientWindow);
-    // 在设置系统背景材质后再次设置标题栏主题，避免材质沿用旧的浅色状态。
+    const bool dark = isDarkMode(ThemeTarget::Window);
+    // 深浅色都使用系统材质；先同步标题栏主题，
+    // 这样 Mica/Acrylic 在用户固定深色且 Windows 当前为浅色时仍能保持一致。
     applyDarkCaption(hwnd, dark);
-
-    // 浅色应用跟随深色系统时同样不能使用原生材质，否则会出现相反的主题错配。
-    if (applied && dark != isSystemDarkMode())
-        applied = false;
+    bool applied = applyBackdrop(hwnd, transientWindow);
 
     if (!applied)
         clearBackdrop(hwnd);
@@ -298,12 +328,13 @@ bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow) {
 }
 
 COLORREF fallbackBgColor() {
-    return isDarkMode() ? RGB(32, 32, 32) : RGB(243, 243, 243);
+    return isDarkMode(ThemeTarget::Window) ? RGB(32, 32, 32) : RGB(243, 243, 243);
 }
 
 void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop) {
-    // 深色模式必须绘制应用自己的不透明底色，即使 DWM 之前曾成功设置过材质。
-    if (backdrop && !isDarkMode())
+    // 只要系统材质已应用，就不能用 GDI 纯色覆盖 DWM 背景；
+    // 无材质时才绘制首帧回退底色。
+    if (backdrop)
         return;
 
     RECT rc{};

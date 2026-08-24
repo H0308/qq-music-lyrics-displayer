@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/fluent_theme.h"
+
 #include <windows.h>
 
 #include <functional>
@@ -19,6 +21,8 @@ struct SettingsState {
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
     int mediaPopupBackground = 0; // 0 纯色 1 磨砂玻璃
+    fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
+    fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
     bool followAlbum = false;
     bool doubleLineLyrics = false;
     int lyricAlignment = 0; // 0 左对齐 1 居中 2 右对齐
@@ -44,6 +48,8 @@ struct SettingsActions {
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;
     std::function<void(int)> onMediaPopupBackground;
+    std::function<void(fluent::ThemeMode)> onTaskbarTheme;
+    std::function<void(fluent::ThemeMode)> onWindowTheme;
     std::function<void()> onPickFont;
     std::function<void()> onFontColorEffect;
     std::function<void(bool)> onFollowAlbum;

@@ -31,6 +31,8 @@ constexpr int kIdMediaPopupBackground = 418;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
+constexpr int kIdTaskbarTheme = 424;
+constexpr int kIdWindowTheme = 425;
 constexpr int kIdDoubleLine = 430;
 constexpr int kIdAlignment = 431;
 constexpr int kIdSecondaryOn = 432;
@@ -48,7 +50,9 @@ constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip
 constexpr float kNavW = 176.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
-constexpr float kHintTopOffset = 36.0f;
+constexpr float kTitleMinHeight = 22.0f;
+constexpr float kTitleTopPadding = 12.0f;
+constexpr float kTitleHintGap = 2.0f;
 constexpr float kHintBottomPadding = 8.0f;
 constexpr float kHintTextSize = 12.0f;
 constexpr float kHintMeasureHeight = 10000.0f;
@@ -68,6 +72,34 @@ float estimateRadioWidth(const std::vector<std::wstring>& options) {
     for (const auto& option : options)
         w += 16.0f + 8.0f + static_cast<float>(option.size()) * 14.0f + 20.0f;
     return w > 0.0f ? w - 20.0f : 0.0f;
+}
+
+fluent::ThemeMode themeModeFromIndex(int index) {
+    switch (index) {
+    case 1:
+        return fluent::ThemeMode::FollowApp;
+    case 2:
+        return fluent::ThemeMode::Light;
+    case 3:
+        return fluent::ThemeMode::Dark;
+    case 0:
+    default:
+        return fluent::ThemeMode::FollowSystem;
+    }
+}
+
+int themeModeIndex(fluent::ThemeMode mode) {
+    switch (mode) {
+    case fluent::ThemeMode::FollowApp:
+        return 1;
+    case fluent::ThemeMode::Light:
+        return 2;
+    case fluent::ThemeMode::Dark:
+        return 3;
+    case fluent::ThemeMode::FollowSystem:
+    default:
+        return 0;
+    }
 }
 
 } // namespace
@@ -97,6 +129,7 @@ struct SettingsDialog::Impl {
         float controlW = 0.0f;
         float minHeight = kRowH;
         float height = kRowH;
+        float titleHeight = kTitleMinHeight;
         D2D1_RECT_F cardRect{};
         D2D1_RECT_F labelRect{};
         D2D1_RECT_F hintRect{};
@@ -299,6 +332,14 @@ struct SettingsDialog::Impl {
                  L"纯色保持当前外观；磨砂玻璃使用 Windows 系统背景材质",
                  {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
+        addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
+             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
+                 true, kRowTallH);
+        addRadio(0, kIdWindowTheme, L"对话框与悬浮窗主题",
+             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
+                 true, kRowTallH);
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -343,17 +384,13 @@ struct SettingsDialog::Impl {
         localPath.enabled = state.qqLocalLyricsEnabled;
     }
 
-    float measureHintHeight(fluent::FluentDialogSurface::Painter& painter,
-                            const Row& row) const {
-        if (!row.showHint || row.hint.empty())
+    float measureTextHeight(fluent::FluentDialogSurface::Painter& painter,
+                            const std::wstring& text, float width, float textSize) const {
+        if (text.empty() || width <= 0.0f)
             return 0.0f;
 
-        const float width = row.hintRect.right - row.hintRect.left;
-        if (width <= 0.0f)
-            return 0.0f;
-
-        auto* format = painter.textFormat(kHintTextSize, 400);
-        auto* textLayout = painter.textLayout(row.hint, format, width, kHintMeasureHeight);
+        auto* format = painter.textFormat(textSize, 400);
+        auto* textLayout = painter.textLayout(text, format, width, kHintMeasureHeight);
         if (!textLayout)
             return 0.0f;
 
@@ -363,17 +400,36 @@ struct SettingsDialog::Impl {
         return static_cast<float>(std::ceil(std::max(0.0f, metrics.height)));
     }
 
+    float measureHintHeight(fluent::FluentDialogSurface::Painter& painter,
+                            const Row& row) const {
+        if (!row.showHint || row.hint.empty())
+            return 0.0f;
+        return measureTextHeight(painter, row.hint, row.hintRect.right - row.hintRect.left,
+                                 kHintTextSize);
+    }
+
     void updateHintHeights(fluent::FluentDialogSurface::Painter& painter) {
         bool changed = false;
         for (auto& row : rows[activePage]) {
+            const float labelW = row.labelRect.right - row.labelRect.left;
+            const float measuredTitleHeight =
+                measureTextHeight(painter, row.text, labelW, 14.0f);
+            const float titleHeight =
+                std::max(kTitleMinHeight, measuredTitleHeight);
             float requiredHeight = row.minHeight;
             if (row.showHint && !row.hint.empty()) {
                 const float hintHeight = measureHintHeight(painter, row);
                 if (hintHeight > 0.0f)
                     requiredHeight = std::max(
-                        requiredHeight, kHintTopOffset + hintHeight + kHintBottomPadding);
+                        requiredHeight, kTitleTopPadding + titleHeight + kTitleHintGap +
+                                            hintHeight + kHintBottomPadding);
+            } else if (measuredTitleHeight > 0.0f) {
+                requiredHeight = std::max(requiredHeight, kTitleTopPadding + titleHeight +
+                                                           kHintBottomPadding);
             }
-            if (std::fabs(row.height - requiredHeight) > 0.5f) {
+            if (std::fabs(row.titleHeight - titleHeight) > 0.5f ||
+                std::fabs(row.height - requiredHeight) > 0.5f) {
+                row.titleHeight = titleHeight;
                 row.height = requiredHeight;
                 changed = true;
             }
@@ -435,14 +491,17 @@ struct SettingsDialog::Impl {
             const float controlX = contentX + contentW - 16.0f - row.controlW;
             const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
             if (row.showHint) {
-                row.labelRect = D2D1::RectF(innerX, y + 12.0f, innerX + labelW, y + 34.0f);
-                // 提示区域跟随行高扩展，避免多行小字继续绘制到下一张卡片。
-                const float hintTop = y + kHintTopOffset;
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                                            titleTop + row.titleHeight);
+                // 提示区域从标题实际高度之后开始，避免窄窗口下标题换行后侵入提示文字。
+                const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
                 row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
                                            y + rowH - 8.0f);
             } else {
-                row.labelRect = D2D1::RectF(innerX, y + (rowH - 22.0f) / 2.0f,
-                                           innerX + labelW, y + (rowH - 22.0f) / 2.0f + 22.0f);
+                const float titleTop = y + (rowH - row.titleHeight) / 2.0f;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                                            titleTop + row.titleHeight);
             }
             const float controlH = row.kind == ControlKind::Button
                                        ? fluent::metrics::controlHeight
@@ -834,6 +893,14 @@ struct SettingsDialog::Impl {
             if (actions.onMediaPopupBackground)
                 actions.onMediaPopupBackground(row->selected);
             break;
+        case kIdTaskbarTheme:
+            if (actions.onTaskbarTheme)
+                actions.onTaskbarTheme(themeModeFromIndex(row->selected));
+            break;
+        case kIdWindowTheme:
+            if (actions.onWindowTheme)
+                actions.onWindowTheme(themeModeFromIndex(row->selected));
+            break;
         case kIdRenderMode:
             if (actions.onRenderMode)
                 actions.onRenderMode(row->selected);
@@ -926,6 +993,10 @@ struct SettingsDialog::Impl {
             row->selected = s.mediaPopupBackground;
             row->enabled = s.hoverControls && s.hoverControlStyle == 1;
         }
+        if (auto* row = findRow(kIdTaskbarTheme))
+            row->selected = themeModeIndex(s.taskbarThemeMode);
+        if (auto* row = findRow(kIdWindowTheme))
+            row->selected = themeModeIndex(s.windowThemeMode);
         if (auto* row = findRow(kIdRenderMode))
             row->selected = s.renderMode;
         if (auto* row = findRow(kIdPickFont)) {

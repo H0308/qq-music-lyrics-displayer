@@ -10,6 +10,21 @@
 // 系统深/浅色检测、DWM 圆角/Mica/深色标题栏、统一调色板与字体。
 namespace fluent {
 
+// 主题跟随来源：系统模式读取 SystemUsesLightTheme，应用模式读取
+// AppsUseLightTheme；Light/Dark 用于用户固定选择。
+enum class ThemeMode {
+    FollowSystem,
+    FollowApp,
+    Light,
+    Dark,
+};
+
+// 需要独立主题来源的渲染面。
+enum class ThemeTarget {
+    Taskbar,
+    Window,
+};
+
 // 普通桌面窗口统一使用的紧凑密度尺寸（单位：DIP）。
 // 这些尺寸对应文档中的 4/8/12/16/24 间距等级，避免各窗口各自漂移。
 namespace metrics {
@@ -22,15 +37,19 @@ inline constexpr float controlRadius = 6.0f;
 inline constexpr float cardRadius = 8.0f;
 } // namespace metrics
 
-// 系统当前是否为深色模式（优先读取 UISettings 前景色，注册表仅作回退）
+// 设置任务栏歌词和普通窗口各自的主题模式。
+void setThemeModes(ThemeMode taskbarMode, ThemeMode windowMode);
+
+// 解析后的主题：无参数版本兼容普通窗口，任务栏使用显式 target。
 bool isDarkMode();
+bool isDarkMode(ThemeTarget target);
 
 // 系统强调色（取不到时回退 Win11 默认蓝）
 COLORREF accentColor();
 
 D2D1_COLOR_F toD2D(COLORREF c, float alpha = 1.0f);
 
-// Fluent 调色板（按当前系统主题返回）
+// Fluent 调色板（按普通窗口主题返回）；任务栏宿主使用显式 target。
 struct Palette {
     D2D1_COLOR_F text;           // 主文字
     D2D1_COLOR_F textSecondary;  // 次要文字（提示/状态）
@@ -54,6 +73,7 @@ struct Palette {
     D2D1_COLOR_F editText;       // EDIT 真控件文字色
 };
 const Palette& palette();
+const Palette& palette(ThemeTarget target);
 
 // ---- DWM Win11 窗口元素 ----
 void applyRoundCorners(HWND hwnd, bool smallCorners = false);

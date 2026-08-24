@@ -178,6 +178,33 @@ int spectrumStyleIndex(SpectrumStyle style) {
     }
 }
 
+fluent::ThemeMode themeModeFromConfig(const std::string& value,
+                                      fluent::ThemeMode fallback) {
+    if (value == "system")
+        return fluent::ThemeMode::FollowSystem;
+    if (value == "app")
+        return fluent::ThemeMode::FollowApp;
+    if (value == "light")
+        return fluent::ThemeMode::Light;
+    if (value == "dark")
+        return fluent::ThemeMode::Dark;
+    return fallback;
+}
+
+const char* themeModeConfigName(fluent::ThemeMode mode) {
+    switch (mode) {
+    case fluent::ThemeMode::FollowApp:
+        return "app";
+    case fluent::ThemeMode::Light:
+        return "light";
+    case fluent::ThemeMode::Dark:
+        return "dark";
+    case fluent::ThemeMode::FollowSystem:
+    default:
+        return "system";
+    }
+}
+
 // %APPDATA%\QQMusicLyric（不存在则创建）
 std::wstring configDir() {
     PWSTR p = nullptr;
@@ -333,6 +360,9 @@ struct App {
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
+    // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
+    fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
+    fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
     // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止（仅驻留内存）
     int renderMode_ = 0;
 
@@ -497,6 +527,39 @@ struct App {
                                           : MediaPopupBackground::Solid;
         if (taskbarHost)
             taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        saveSettings();
+    }
+
+    void refreshThemeWindows() {
+        auto refresh = [](HWND hwnd) {
+            if (hwnd)
+                SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        };
+        refresh(settingsDialog ? settingsDialog->hwnd() : nullptr);
+        refresh(aboutDialog ? aboutDialog->hwnd() : nullptr);
+        refresh(manualSearchDialog ? manualSearchDialog->hwnd() : nullptr);
+        refresh(fontPickerDialog ? fontPickerDialog->hwnd() : nullptr);
+        if (fontColorDialog)
+            fontColorDialog->refreshTheme();
+        refresh(updatePromptHwnd_);
+    }
+
+    void refreshTheme() {
+        fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
+        if (taskbarHost)
+            taskbarHost->refreshTheme();
+        refreshThemeWindows();
+    }
+
+    void applyTaskbarTheme(fluent::ThemeMode mode) {
+        taskbarThemeMode_ = mode;
+        refreshTheme();
+        saveSettings();
+    }
+
+    void applyWindowTheme(fluent::ThemeMode mode) {
+        windowThemeMode_ = mode;
+        refreshTheme();
         saveSettings();
     }
 
@@ -1098,6 +1161,7 @@ void App::loadSettings() {
     settingsPath_ = dir + L"\\settings.json";
     provider.setManualOverrideDir(dir + L"\\manual_lyrics");
     provider.setQqLyricOrderDir(dir + L"\\manual_lyrics_settings");
+    fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
     try {
         std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
         if (!f)
@@ -1131,6 +1195,13 @@ void App::loadSettings() {
                                         "frosted"
                                     ? MediaPopupBackground::Frosted
                                     : MediaPopupBackground::Solid;
+        taskbarThemeMode_ = themeModeFromConfig(
+            j.value("taskbarTheme", std::string("system")),
+            fluent::ThemeMode::FollowSystem);
+        windowThemeMode_ = themeModeFromConfig(
+            j.value("windowTheme", std::string("app")),
+            fluent::ThemeMode::FollowApp);
+        fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
         spectrumOn_ = j.value("spectrum", false);
         spectrumStyle_ = spectrumStyleFromConfig(
             j.value("spectrumStyle", std::string("default")));
@@ -1194,6 +1265,8 @@ void App::saveSettings() {
         j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
                                          ? "frosted"
                                          : "solid";
+        j["taskbarTheme"] = themeModeConfigName(taskbarThemeMode_);
+        j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
         j["spectrumStyle"] = spectrumStyleConfigName(spectrumStyle_);
         j["spectrumOpacity"] = spectrumOpacity_;
@@ -1954,6 +2027,8 @@ SettingsState App::currentSettingsState() const {
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
+    st.taskbarThemeMode = taskbarThemeMode_;
+    st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = doubleLineLyricsEnabled_;
     st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
@@ -1985,6 +2060,8 @@ SettingsActions App::buildSettingsActions() {
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
+    act.onTaskbarTheme = [this](fluent::ThemeMode mode) { applyTaskbarTheme(mode); };
+    act.onWindowTheme = [this](fluent::ThemeMode mode) { applyWindowTheme(mode); };
     act.onPickFont = [this] { pickFont(); };
     act.onFontColorEffect = [this] { showFontColorDialog(); };
     act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };
@@ -2091,6 +2168,10 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (!app)
         return DefWindowProcW(h, msg, wp, lp);
+    if (msg == WM_SETTINGCHANGE || msg == WM_THEMECHANGED) {
+        app->refreshTheme();
+        return 0;
+    }
     if (msg == WM_QUERYENDSESSION)
         return TRUE;
     if (msg == WM_ENDSESSION) {

@@ -454,6 +454,13 @@ struct FontColorDialog::Impl {
         picker.reset();
     }
 
+    void refreshTheme() {
+        if (hwnd)
+            SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        if (picker && picker->isOpen())
+            SendMessageW(picker->hwnd(), WM_THEMECHANGED, 0, 0);
+    }
+
     void openPicker(int swatchId) {
         closePicker();
         picker = std::make_unique<ColorPickerDialog>();
@@ -843,6 +850,10 @@ bool FontColorDialog::isOpen() const {
 
 HWND FontColorDialog::hwnd() const {
     return impl_->hwnd;
+}
+
+void FontColorDialog::refreshTheme() {
+    impl_->refreshTheme();
 }
 
 bool FontColorDialog::isDialogMessage(MSG* msg) {

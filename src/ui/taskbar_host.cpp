@@ -120,13 +120,6 @@ bool isTaskbarCenterAlign() {
                     L"TaskbarAl", 1) != 0;
 }
 
-bool isSystemLightTheme() {
-    // 1 = 浅色，0 = 深色（默认）
-    return regDword(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                    L"SystemUsesLightTheme", 0) != 0;
-}
-
 // 以下两个函数都是【阻塞型跨进程调用】（GetWindowText = 同步 SendMessage，UIA = 阻塞 COM），
 // 只允许在探测工作线程上调用。若放在 UI 线程，explorer 同时向我们的任务栏子窗口
 // 发消息时会形成双向死等（WER: AppHangXProcB1，explorer 挂起、对方是本进程）
@@ -490,7 +483,7 @@ struct TaskbarHost::Impl {
         start_ = FindWindowExW(taskbar_, nullptr, L"Start", nullptr);
         dpi_ = GetDpiForWindow(taskbar_);
         centerAlign_ = isTaskbarCenterAlign();
-        lightTheme_ = isSystemLightTheme();
+        lightTheme_ = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         updateRects();
         return true;
     }
@@ -667,7 +660,7 @@ struct TaskbarHost::Impl {
             GetWindowRect(notify_, &rcNotify);
         UINT dpi = GetDpiForWindow(taskbar_);
         bool center = isTaskbarCenterAlign();
-        bool light = isSystemLightTheme();
+        bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         bool themeChanged = light != lightTheme_;
 
         RECT rcStart{};
@@ -1495,6 +1488,18 @@ struct TaskbarHost::Impl {
         layoutDirty_ = true;
         coverDirty = true;
         platformIconDirty = true;
+    }
+
+    void refreshTheme() {
+        const bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
+        if (light != lightTheme_) {
+            lightTheme_ = light;
+            discardDeviceResources();
+        }
+        // 媒体卡片属于普通悬浮窗，使用 Window 主题，而不是任务栏主题。
+        mediaPopup.refreshTheme();
+        if (visible)
+            render();
     }
 
     void releaseAll() {
@@ -3565,6 +3570,10 @@ void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
 
 void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {
     impl_->setMediaPopupBackground(mode);
+}
+
+void TaskbarHost::refreshTheme() {
+    impl_->refreshTheme();
 }
 
 void TaskbarHost::setSongInfoVisible(bool on) {

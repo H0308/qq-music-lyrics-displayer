@@ -344,12 +344,12 @@ struct MediaPopup::Impl {
         if (!rt)
             return false;
 
-        const auto& p = fluent::palette();
+        const auto& p = fluent::palette(fluent::ThemeTarget::Window);
         D2D1_COLOR_F cardFill = p.cardFillSolid;
         if (backgroundMode == MediaPopupBackground::Frosted) {
             // 截图模糊已经是卡片底图，前景只保留一层很薄的 tint，避免再次变成灰蒙蒙。
             cardFill = p.cardFill;
-            cardFill.a = fluent::isDarkMode() ? 0.10f : 0.16f;
+            cardFill.a = fluent::isDarkMode(fluent::ThemeTarget::Window) ? 0.10f : 0.16f;
         }
         if (FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
@@ -1372,6 +1372,16 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
         else
             impl_->render();
     }
+}
+
+void MediaPopup::refreshTheme() {
+    impl_->releaseDrawingResources();
+    if (!impl_->hwnd || !impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
 }
 
 void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {

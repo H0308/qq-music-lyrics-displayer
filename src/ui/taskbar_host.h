@@ -69,6 +69,8 @@ public:
     void setHoverControlStyle(HoverControlStyle style);
     // 媒体卡片背景：当前纯色或 Windows 系统磨砂材质。
     void setMediaPopupBackground(MediaPopupBackground mode);
+    // 主题模式或 Windows 外观发生变化时重建任务栏与媒体卡片资源。
+    void refreshTheme();
     void setSongInfoVisible(bool on);
     void setAlbumCoverVisible(bool on);
     void setPlatformIconVisible(bool on);

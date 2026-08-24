@@ -52,6 +52,7 @@ public:
     void destroy();
     bool isOpen() const;
     HWND hwnd() const;
+    void refreshTheme();
 
     // 主消息循环转发：自身或内嵌取色器消费了该消息时返回 true
     bool isDialogMessage(MSG* msg);
