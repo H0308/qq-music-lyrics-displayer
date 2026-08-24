@@ -14,30 +14,37 @@
 // 确定后才通过回调一次性应用，取消/关闭不影响实际歌词。
 class FontColorDialog {
 public:
-    // 打开时的外观快照。glowOn/outlineOn/unplayedAlphaPct 可在对话框内修改；
-    // 字体 只用于预览（仍在“字体…”对话框中调整）
-    struct State {
-        COLORREF played = 0;
-        COLORREF unplayed = 0;
-        int unplayedAlphaPct = 100;
-        COLORREF glowColor = 0;
-        COLORREF outlineColor = 0;
+    // 一套深色或浅色模式下的歌词颜色与效果。
+    struct ThemeState {
+        COLORREF played = RGB(49, 194, 124);
+        COLORREF unplayed = RGB(49, 194, 124);
+        int unplayedAlphaPct = 45;
+        COLORREF glowColor = RGB(49, 194, 124);
+        COLORREF outlineColor = RGB(0, 0, 0);
         bool glowOn = false;
         bool outlineOn = false;
+    };
+
+    // 打开时的外观快照。对话框内修改只落在工作副本和预览上；
+    // 字体只用于预览（仍在“字体…”对话框中调整）。
+    struct State {
+        bool global = false; // 开启后两种主题共用同一套配置
+        bool hasGlobalTheme = false; // 是否已经初始化过全局共享配置
+        ThemeState light;
+        ThemeState dark;
+        ThemeState globalTheme; // 全局模式正在使用的共享配置
         std::wstring fontFamily;   // 预览用字体族，空则用 UI 默认字体
         LyricFontStyle fontStyle = LyricFontStyle::Normal; // 预览用字体样式
         float lyricFontSize = 14.0f; // 预览用歌词字号（与实际任务栏渲染字号一致）
     };
 
-    // 确定时回传的四个颜色、两个效果开关和未播放不透明度
+    // 确定时回传全局开关、两种主题各自的配置，以及全局模式的共享配置。
     struct Result {
-        COLORREF played;
-        COLORREF unplayed;
-        int unplayedAlphaPct;
-        COLORREF glowColor;
-        COLORREF outlineColor;
-        bool glowOn;
-        bool outlineOn;
+        bool global;
+        bool hasGlobalTheme;
+        ThemeState light;
+        ThemeState dark;
+        ThemeState globalTheme;
     };
     using ApplyCallback = std::function<void(const Result&)>;
 

@@ -153,7 +153,8 @@ SpectrumStyle spectrumStyleFromConfig(const std::string& value) {
         return SpectrumStyle::DreamyWave;
     }
     if (value == "background-wave") {
-        return SpectrumStyle::BackgroundWave;
+        // 旧版本的背景波浪是“梦幻波浪 + 背景开关”的组合。
+        return SpectrumStyle::DreamyWave;
     }
     return SpectrumStyle::Default;
 }
@@ -162,7 +163,6 @@ const char* spectrumStyleConfigName(SpectrumStyle style) {
     switch (style) {
     case SpectrumStyle::Bars: return "bars";
     case SpectrumStyle::DreamyWave: return "dreamy-wave";
-    case SpectrumStyle::BackgroundWave: return "background-wave";
     case SpectrumStyle::Default:
     default: return "default";
     }
@@ -172,7 +172,6 @@ int spectrumStyleIndex(SpectrumStyle style) {
     switch (style) {
     case SpectrumStyle::Bars: return 1;
     case SpectrumStyle::DreamyWave: return 2;
-    case SpectrumStyle::BackgroundWave: return 3;
     case SpectrumStyle::Default:
     default: return 0;
     }
@@ -333,16 +332,14 @@ struct App {
     float fontSize_ = 16.0f;
     LyricFontStyle fontStyle_ = LyricFontStyle::Normal;
 
-    // 歌词外观（两宿主通用，新建宿主时应用）
-    COLORREF lyricColor_ = RGB(49, 194, 124);        // 已播放颜色，默认 QQ 绿
-    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124); // 逐字未播放颜色
-    int lyricUnplayedAlphaPct_ = 45;                  // 逐字未播放不透明度（%）
-    bool lyricGlow_ = false;                          // 光晕开关（任务栏独有）
-    bool lyricOutline_ = false;                       // 描边开关（任务栏独有）
-    COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色
-    COLORREF lyricOutlineColor_ = RGB(0, 0, 0);       // 描边颜色
+    // 歌词外观可按任务栏深浅色模式分别保存，也可通过全局开关共用一套配置。
+    bool lyricAppearanceGlobal_ = false;
+    bool hasGlobalLyricAppearance_ = false;
+    FontColorDialog::ThemeState lightLyricAppearance_;
+    FontColorDialog::ThemeState darkLyricAppearance_;
+    FontColorDialog::ThemeState globalLyricAppearance_;
 
-    // 已播放颜色跟随专辑封面主色调：开启时覆盖 lyricColor_，关闭后恢复配置色
+    // 已播放颜色跟随专辑封面主色调：开启时覆盖当前主题的已播放配置色。
     bool lyricFollowAlbum_ = false;
     // 总开关与类型选择独立于当前歌曲能力；缺少所选内容时暂不显示，后续自动恢复。
     bool secondaryLyricEnabled_ = true;
@@ -372,6 +369,7 @@ struct App {
     AudioSpectrum spectrum_;
     bool spectrumOn_ = false;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    bool spectrumBackground_ = false;
     int spectrumOpacity_ = 40;
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
@@ -471,10 +469,16 @@ struct App {
     void applySpectrumStyle(int style) {
         spectrumStyle_ = style == 1 ? SpectrumStyle::Bars
                                      : style == 2 ? SpectrumStyle::DreamyWave
-                                                   : style == 3 ? SpectrumStyle::BackgroundWave
                                                    : SpectrumStyle::Default;
         if (taskbarHost)
             taskbarHost->setSpectrumStyle(spectrumStyle_);
+        saveSettings();
+    }
+
+    void applySpectrumBackground(bool on) {
+        spectrumBackground_ = on;
+        if (taskbarHost)
+            taskbarHost->setSpectrumBackground(on);
         saveSettings();
     }
 
@@ -564,8 +568,10 @@ struct App {
 
     void refreshTheme() {
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
-        if (taskbarHost)
+        if (taskbarHost) {
             taskbarHost->refreshTheme();
+            applyFontAppearance();
+        }
         refreshThemeWindows();
     }
 
@@ -747,10 +753,7 @@ struct App {
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
-        taskbarHost->setFontColors(lyricColor_, lyricUnplayedColor_, lyricUnplayedAlphaPct_);
-        taskbarHost->setFontGlow(lyricGlow_);
-        taskbarHost->setFontOutline(lyricOutline_);
-        taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
+        applyFontAppearance();
         taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
@@ -767,6 +770,7 @@ struct App {
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setRenderMode(renderMode_);
         taskbarHost->setSpectrumStyle(spectrumStyle_);
+        taskbarHost->setSpectrumBackground(spectrumBackground_);
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         syncSpectrumWithMode();
         updateTrayIcon();
@@ -1171,8 +1175,10 @@ struct App {
     void applyQqLocalLyricsPath(const std::wstring& path);
     void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
                                bool persistOrder = false);
+    void applyFontAppearance();
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
+    const FontColorDialog::ThemeState& currentLyricAppearance() const;
     void tryExtractAlbumColor();
     void loadSettings();
     void saveSettings();
@@ -1201,16 +1207,53 @@ void App::loadSettings() {
             fontFamily_ = fam;
         fontSize_ = (float)j.value("fontSize", 16.0);
         fontStyle_ = fontStyleOf(j.value("fontStyle", std::string("normal")));
-        lyricColor_ = (COLORREF)j.value("lyricColor", (unsigned)RGB(49, 194, 124));
-        // 未播放色默认跟随已播放色：老配置升级后视觉与之前完全一致
-        lyricUnplayedColor_ = (COLORREF)j.value("lyricUnplayedColor", (unsigned)lyricColor_);
-        lyricUnplayedAlphaPct_ = std::clamp(j.value("lyricUnplayedAlpha", 45), 5, 100);
-        // 光晕色默认跟随已播放色、描边色默认纯黑：老配置升级后视觉与之前完全一致
-        lyricGlowColor_ = (COLORREF)j.value("lyricGlowColor", (unsigned)lyricColor_);
-        lyricOutlineColor_ = (COLORREF)j.value("lyricOutlineColor", (unsigned)RGB(0, 0, 0));
-        lyricGlow_ = j.value("lyricGlow", false);
-        // 老配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它，视觉不变
-        lyricOutline_ = j.value("lyricOutline", lyricGlow_);
+        FontColorDialog::ThemeState legacyAppearance;
+        legacyAppearance.played =
+            (COLORREF)j.value("lyricColor", (unsigned)legacyAppearance.played);
+        // 未播放色默认跟随已播放色：旧配置进入双主题后视觉保持一致。
+        legacyAppearance.unplayed =
+            (COLORREF)j.value("lyricUnplayedColor", (unsigned)legacyAppearance.played);
+        legacyAppearance.unplayedAlphaPct =
+            std::clamp(j.value("lyricUnplayedAlpha", legacyAppearance.unplayedAlphaPct), 5, 100);
+        // 光晕色默认跟随已播放色、描边色默认纯黑：旧配置进入双主题后视觉保持一致。
+        legacyAppearance.glowColor =
+            (COLORREF)j.value("lyricGlowColor", (unsigned)legacyAppearance.played);
+        legacyAppearance.outlineColor =
+            (COLORREF)j.value("lyricOutlineColor", (unsigned)legacyAppearance.outlineColor);
+        legacyAppearance.glowOn = j.value("lyricGlow", legacyAppearance.glowOn);
+        // 旧配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它。
+        legacyAppearance.outlineOn = j.value("lyricOutline", legacyAppearance.glowOn);
+
+        auto loadAppearance = [&j](const char* suffix,
+                                   FontColorDialog::ThemeState fallback) {
+            const std::string suffixValue = suffix;
+            fallback.played = static_cast<COLORREF>(j.value(
+                "lyricColor" + suffixValue, static_cast<unsigned>(fallback.played)));
+            fallback.unplayed = static_cast<COLORREF>(j.value(
+                "lyricUnplayedColor" + suffixValue,
+                static_cast<unsigned>(fallback.unplayed)));
+            fallback.unplayedAlphaPct = std::clamp(
+                j.value("lyricUnplayedAlpha" + suffixValue, fallback.unplayedAlphaPct), 5, 100);
+            fallback.glowColor = static_cast<COLORREF>(j.value(
+                "lyricGlowColor" + suffixValue, static_cast<unsigned>(fallback.glowColor)));
+            fallback.outlineColor = static_cast<COLORREF>(j.value(
+                "lyricOutlineColor" + suffixValue,
+                static_cast<unsigned>(fallback.outlineColor)));
+            fallback.glowOn = j.value("lyricGlow" + suffixValue, fallback.glowOn);
+            fallback.outlineOn = j.value("lyricOutline" + suffixValue, fallback.outlineOn);
+            return fallback;
+        };
+        lightLyricAppearance_ = loadAppearance("Light", legacyAppearance);
+        darkLyricAppearance_ = loadAppearance("Dark", legacyAppearance);
+        hasGlobalLyricAppearance_ = j.contains("lyricColorGlobal");
+        globalLyricAppearance_ = loadAppearance("Global", lightLyricAppearance_);
+        lyricAppearanceGlobal_ = j.value("lyricAppearanceGlobal", false);
+        if (lyricAppearanceGlobal_ && !hasGlobalLyricAppearance_) {
+            globalLyricAppearance_ = fluent::isDarkMode(fluent::ThemeTarget::Taskbar)
+                                         ? darkLyricAppearance_
+                                         : lightLyricAppearance_;
+            hasGlobalLyricAppearance_ = true;
+        }
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
         renderMode_ = std::clamp(j.value("renderMode", 0), 0, 2);
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
@@ -1231,8 +1274,11 @@ void App::loadSettings() {
             fluent::ThemeMode::FollowApp);
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
         spectrumOn_ = j.value("spectrum", false);
-        spectrumStyle_ = spectrumStyleFromConfig(
-            j.value("spectrumStyle", std::string("default")));
+        const std::string spectrumStyleValue =
+            j.value("spectrumStyle", std::string("default"));
+        spectrumStyle_ = spectrumStyleFromConfig(spectrumStyleValue);
+        spectrumBackground_ = j.value("spectrumBackground",
+                                       spectrumStyleValue == "background-wave");
         spectrumOpacity_ = std::clamp(j.value("spectrumOpacity", 40), 0, 100);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
@@ -1279,13 +1325,24 @@ void App::saveSettings() {
         j["fontFamily"] = utf8Of(fontFamily_);
         j["fontSize"] = fontSize_;
         j["fontStyle"] = fontStyleName(fontStyle_);
-        j["lyricColor"] = (unsigned)lyricColor_;
-        j["lyricUnplayedColor"] = (unsigned)lyricUnplayedColor_;
-        j["lyricUnplayedAlpha"] = lyricUnplayedAlphaPct_;
-        j["lyricGlowColor"] = (unsigned)lyricGlowColor_;
-        j["lyricOutlineColor"] = (unsigned)lyricOutlineColor_;
-        j["lyricGlow"] = lyricGlow_;
-        j["lyricOutline"] = lyricOutline_;
+        auto saveAppearance = [&j](const char* suffix,
+                                   const FontColorDialog::ThemeState& appearance) {
+            const std::string suffixValue = suffix;
+            j["lyricColor" + suffixValue] = static_cast<unsigned>(appearance.played);
+            j["lyricUnplayedColor" + suffixValue] =
+                static_cast<unsigned>(appearance.unplayed);
+            j["lyricUnplayedAlpha" + suffixValue] = appearance.unplayedAlphaPct;
+            j["lyricGlowColor" + suffixValue] = static_cast<unsigned>(appearance.glowColor);
+            j["lyricOutlineColor" + suffixValue] =
+                static_cast<unsigned>(appearance.outlineColor);
+            j["lyricGlow" + suffixValue] = appearance.glowOn;
+            j["lyricOutline" + suffixValue] = appearance.outlineOn;
+        };
+        j["lyricAppearanceGlobal"] = lyricAppearanceGlobal_;
+        saveAppearance("Light", lightLyricAppearance_);
+        saveAppearance("Dark", darkLyricAppearance_);
+        if (hasGlobalLyricAppearance_)
+            saveAppearance("Global", globalLyricAppearance_);
         j["taskbarPosition"] = taskbarPosition_;
         j["renderMode"] = renderMode_;
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
@@ -1299,6 +1356,7 @@ void App::saveSettings() {
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
         j["spectrumStyle"] = spectrumStyleConfigName(spectrumStyle_);
+        j["spectrumBackground"] = spectrumBackground_;
         j["spectrumOpacity"] = spectrumOpacity_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
@@ -1968,8 +2026,15 @@ void App::pickFont() {
     fontPickerDialog->show();
 }
 
+const FontColorDialog::ThemeState& App::currentLyricAppearance() const {
+    if (lyricAppearanceGlobal_)
+        return globalLyricAppearance_;
+    return fluent::isDarkMode(fluent::ThemeTarget::Taskbar) ? darkLyricAppearance_
+                                                             : lightLyricAppearance_;
+}
+
 COLORREF App::effectivePlayedColor() const {
-    return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : lyricColor_;
+    return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : currentLyricAppearance().played;
 }
 
 // 当前曲目还没提取过时，从有效封面提取主色调；它同时供歌词颜色和媒体卡片背景使用。
@@ -1993,8 +2058,20 @@ void App::tryExtractAlbumColor() {
 }
 
 void App::applyFontColors() {
+    const auto& appearance = currentLyricAppearance();
     for (auto* h : hosts())
-        h->setFontColors(effectivePlayedColor(), lyricUnplayedColor_, lyricUnplayedAlphaPct_);
+        h->setFontColors(effectivePlayedColor(), appearance.unplayed,
+                         appearance.unplayedAlphaPct);
+}
+
+void App::applyFontAppearance() {
+    const auto& appearance = currentLyricAppearance();
+    applyFontColors();
+    if (taskbarHost) {
+        taskbarHost->setFontGlow(appearance.glowOn);
+        taskbarHost->setFontOutline(appearance.outlineOn);
+        taskbarHost->setFontGlowColors(appearance.glowColor, appearance.outlineColor);
+    }
 }
 
 void App::showFontColorDialog() {
@@ -2006,13 +2083,11 @@ void App::showFontColorDialog() {
     }
     fontColorDialog = std::make_unique<FontColorDialog>();
     FontColorDialog::State st{};
-    st.played = lyricColor_;
-    st.unplayed = lyricUnplayedColor_;
-    st.unplayedAlphaPct = lyricUnplayedAlphaPct_;
-    st.glowColor = lyricGlowColor_;
-    st.outlineColor = lyricOutlineColor_;
-    st.glowOn = lyricGlow_;
-    st.outlineOn = lyricOutline_;
+    st.global = lyricAppearanceGlobal_;
+    st.hasGlobalTheme = hasGlobalLyricAppearance_;
+    st.light = lightLyricAppearance_;
+    st.dark = darkLyricAppearance_;
+    st.globalTheme = globalLyricAppearance_;
     st.fontFamily = fontFamily_;
     st.fontStyle = fontStyle_;
     // 与任务栏实际渲染字号一致：setFont 钳制 9..18，绘制时放大 1.18 倍
@@ -2023,19 +2098,12 @@ void App::showFontColorDialog() {
         return;
     }
     fontColorDialog->setApplyCallback([this](const FontColorDialog::Result& r) {
-        lyricColor_ = r.played;
-        lyricUnplayedColor_ = r.unplayed;
-        lyricUnplayedAlphaPct_ = r.unplayedAlphaPct;
-        lyricGlowColor_ = r.glowColor;
-        lyricOutlineColor_ = r.outlineColor;
-        lyricGlow_ = r.glowOn;
-        lyricOutline_ = r.outlineOn;
-        applyFontColors();
-        if (taskbarHost) {
-            taskbarHost->setFontGlow(lyricGlow_);
-            taskbarHost->setFontOutline(lyricOutline_);
-            taskbarHost->setFontGlowColors(lyricGlowColor_, lyricOutlineColor_);
-        }
+        lyricAppearanceGlobal_ = r.global;
+        hasGlobalLyricAppearance_ = r.hasGlobalTheme;
+        lightLyricAppearance_ = r.light;
+        darkLyricAppearance_ = r.dark;
+        globalLyricAppearance_ = r.globalTheme;
+        applyFontAppearance();
         saveSettings();
     });
     fontColorDialog->show();
@@ -2056,6 +2124,7 @@ SettingsState App::currentSettingsState() const {
     st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
     st.spectrumOn = spectrumOn_;
     st.spectrumStyle = spectrumStyleIndex(spectrumStyle_);
+    st.spectrumBackground = spectrumBackground_;
     st.spectrumOpacity = spectrumOpacity_;
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
@@ -2091,6 +2160,7 @@ SettingsActions App::buildSettingsActions() {
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
+    act.onSpectrumBackground = [this](bool on) { applySpectrumBackground(on); };
     act.onSpectrumOpacity = [this](int percent) { applySpectrumOpacity(percent); };
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
