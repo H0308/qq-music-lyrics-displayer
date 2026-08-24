@@ -180,7 +180,6 @@ struct MediaPopup::Impl {
     int64_t positionMs = 0;
 
     DCompRenderer renderer;
-    ID2D1SolidColorBrush* brushShadow = nullptr;
     ID2D1SolidColorBrush* brushBackground = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;
     ID2D1SolidColorBrush* brushText = nullptr;
@@ -283,7 +282,6 @@ struct MediaPopup::Impl {
         releaseCom(backdropBlur);
         sourceIconDirty = true;
         backdropDirty = true;
-        releaseBrush(brushShadow);
         releaseBrush(brushBackground);
         releaseBrush(brushStroke);
         releaseBrush(brushText);
@@ -353,9 +351,7 @@ struct MediaPopup::Impl {
             cardFill = p.cardFill;
             cardFill.a = fluent::isDarkMode() ? 0.10f : 0.16f;
         }
-        if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.20f),
-                                              &brushShadow)) ||
-            FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
+        if (FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
             FAILED(rt->CreateSolidColorBrush(p.textSecondary, &brushSecondary)) ||
@@ -918,16 +914,7 @@ struct MediaPopup::Impl {
         rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
         drawBackdrop(rt, w, cardH);
 
-        const bool frosted = backgroundMode == MediaPopupBackground::Frosted;
-        const D2D1_RECT_F card = frosted ? D2D1::RectF(0.0f, 0.0f, w, cardH)
-                                         : D2D1::RectF(1.0f, 1.0f, w - 1.0f, cardH - 3.0f);
-        if (!frosted) {
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(card.left, card.top + 3.0f, card.right,
-                                              card.bottom + 3.0f),
-                                  kPopupCornerDip, kPopupCornerDip),
-                brushShadow);
-        }
+        const D2D1_RECT_F card = D2D1::RectF(0.0f, 0.0f, w, cardH);
         rt->FillRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
                                  brushBackground);
         rt->DrawRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
