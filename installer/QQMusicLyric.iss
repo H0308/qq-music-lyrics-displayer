@@ -38,8 +38,8 @@ OutputBaseFilename=QQMusicLyric-{#AppVersion}-Setup
 SetupIconFile=..\asset\logo-dark.ico
 UninstallDisplayIcon={app}\QQMusicLyric.exe
 UninstallDisplayName=QQMusicLyric
-CloseApplications=yes
-CloseApplicationsFilter=QQMusicLyric.exe
+; 不自动关闭正在运行的程序，用户必须先自行退出 QQMusicLyric 后再继续安装。
+CloseApplications=no
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
