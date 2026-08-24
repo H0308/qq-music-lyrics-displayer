@@ -1187,6 +1187,41 @@ struct TaskbarHost::Impl {
         }
 
         const float originalOpacity = brushSpectrum_->GetOpacity();
+        const D2D1_COLOR_F spectrumColor = brushSpectrum_->GetColor();
+        const D2D1_GRADIENT_STOP fadeStops[] = {
+            {0.00f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b, 0.00f)},
+            {0.017f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a * 0.38f)},
+            {0.033f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a * 0.78f)},
+            {0.05f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a)},
+            {0.95f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a)},
+            {0.967f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a * 0.78f)},
+            {0.983f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
+                                 spectrumColor.a * 0.38f)},
+            {1.00f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b, 0.00f)},
+        };
+        ID2D1GradientStopCollection* fadeStopCollection = nullptr;
+        ID2D1LinearGradientBrush* fadeBrush = nullptr;
+        if (SUCCEEDED(rt->CreateGradientStopCollection(fadeStops, _countof(fadeStops),
+                                                        &fadeStopCollection)) &&
+            fadeStopCollection) {
+            rt->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(x, 0.0f),
+                                                     D2D1::Point2F(x + width, 0.0f)),
+                fadeStopCollection, &fadeBrush);
+        }
+        if (fadeStopCollection)
+            fadeStopCollection->Release();
+
+        ID2D1Brush* waveBrush = fadeBrush ? static_cast<ID2D1Brush*>(fadeBrush)
+                                          : static_cast<ID2D1Brush*>(brushSpectrum_);
+        auto setWaveOpacity = [&](float opacity) {
+            waveBrush->SetOpacity(originalOpacity * opacityScale * opacity);
+        };
         auto drawFilledWave = [&](const auto& points, float opacity) {
             auto* d2d = renderer.d2d();
             if (!d2d)
@@ -1210,15 +1245,15 @@ struct TaskbarHost::Impl {
             const HRESULT closeHr = sink->Close();
             sink->Release();
             if (SUCCEEDED(closeHr)) {
-                brushSpectrum_->SetOpacity(originalOpacity * opacityScale * opacity);
-                rt->FillGeometry(geometry, brushSpectrum_);
+                setWaveOpacity(opacity);
+                rt->FillGeometry(geometry, waveBrush);
             }
             geometry->Release();
         };
         auto drawCurve = [&](const auto& points, float opacity, float strokeWidth) {
-            brushSpectrum_->SetOpacity(originalOpacity * opacityScale * opacity);
+            setWaveOpacity(opacity);
             for (int i = 1; i < sampleCount; ++i)
-                rt->DrawLine(points[i - 1], points[i], brushSpectrum_, strokeWidth);
+                rt->DrawLine(points[i - 1], points[i], waveBrush, strokeWidth);
         };
 
         // 先铺后景到前景的连续波面，避免波峰下方出现大片空白。
@@ -1227,12 +1262,14 @@ struct TaskbarHost::Impl {
         drawFilledWave(frontWave, 0.76f);
 
         // 这条线与柱状图的柱底严格共用 baseY，切换样式时视觉基准不跳动。
-        brushSpectrum_->SetOpacity(originalOpacity * opacityScale * 0.16f);
+        setWaveOpacity(0.16f);
         rt->DrawLine(D2D1::Point2F(x, baseY), D2D1::Point2F(x + width, baseY),
-                     brushSpectrum_, 0.8f);
+                     waveBrush, 0.8f);
         drawCurve(frontWave, 0.07f, 3.8f);
-        drawCurve(frontWave, 0.90f, 1.35f);
+        drawCurve(frontWave, 0.36f, 1.0f);
         brushSpectrum_->SetOpacity(originalOpacity);
+        if (fadeBrush)
+            fadeBrush->Release();
     }
 
     void drawDreamyWaveSpectrum(float x, float h) {
