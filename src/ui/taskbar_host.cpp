@@ -410,6 +410,7 @@ struct TaskbarHost::Impl {
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    bool spectrumBackground_ = false;
     int spectrumOpacityPct_ = 40;
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
@@ -911,12 +912,26 @@ struct TaskbarHost::Impl {
         mediaPopup.setAutoTextContrast(on);
     }
 
+    bool backgroundWaveEnabled() const {
+        return spectrumBackground_ && spectrumStyle_ == SpectrumStyle::DreamyWave;
+    }
+
     void setSpectrumStyle(SpectrumStyle style) {
         if (spectrumStyle_ == style)
             return;
-        const bool wasBackground = spectrumStyle_ == SpectrumStyle::BackgroundWave;
+        const bool wasBackground = backgroundWaveEnabled();
         spectrumStyle_ = style;
-        if (spectrumVisible_ && wasBackground != (spectrumStyle_ == SpectrumStyle::BackgroundWave))
+        if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
+            adjustPosition();
+        render();
+    }
+
+    void setSpectrumBackground(bool on) {
+        if (spectrumBackground_ == on)
+            return;
+        const bool wasBackground = backgroundWaveEnabled();
+        spectrumBackground_ = on;
+        if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
             adjustPosition();
         render();
     }
@@ -926,7 +941,7 @@ struct TaskbarHost::Impl {
         if (spectrumOpacityPct_ == next)
             return;
         spectrumOpacityPct_ = next;
-        if (spectrumStyle_ == SpectrumStyle::BackgroundWave)
+        if (backgroundWaveEnabled())
             render();
     }
 
@@ -964,6 +979,15 @@ struct TaskbarHost::Impl {
         if (albumCoverVisible_ == on)
             return;
         albumCoverVisible_ = on;
+        if (!on) {
+            platformIconDirty = true;
+            if (platformIconBmp) {
+                platformIconBmp->Release();
+                platformIconBmp = nullptr;
+            }
+        } else if (platformIconVisible_) {
+            platformIconDirty = true;
+        }
         textDirty_ = true;
         adjustPosition();
         render();
@@ -1115,7 +1139,7 @@ struct TaskbarHost::Impl {
 
     // 频谱开启时窗口整体加宽的宽度：频谱簇 + 与歌词区间的间距
     float spectrumExtraW() const {
-        return spectrumVisible_ && spectrumStyle_ != SpectrumStyle::BackgroundWave
+        return spectrumVisible_ && !backgroundWaveEnabled()
                    ? spectrumClusterW() + kTextPadding
                    : 0.0f;
     }
@@ -1325,9 +1349,6 @@ struct TaskbarHost::Impl {
         case SpectrumStyle::DreamyWave:
             drawDreamyWaveSpectrum(x, h);
             break;
-        case SpectrumStyle::BackgroundWave:
-            drawBackgroundWaveSpectrum(x, h, spectrumClusterW());
-            break;
         case SpectrumStyle::Default:
         default:
             drawDefaultSpectrum(x, h);
@@ -1394,7 +1415,8 @@ struct TaskbarHost::Impl {
 
     void drawPlatformIcon(float coverX, float coverY, float s) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !platformIconVisible_ || !platformIconBmp || s <= 0.0f)
+        if (!rt || !albumCoverVisible_ || !platformIconVisible_ || !platformIconBmp ||
+            s <= 0.0f)
             return;
 
         const float iconSize = std::max(1.0f, std::min(s * 0.50f, 13.0f));
@@ -1724,7 +1746,7 @@ struct TaskbarHost::Impl {
             platformIconBmp->Release();
             platformIconBmp = nullptr;
         }
-        if (!platformIconVisible_ || media.sourceAppUserModelId.empty())
+        if (!albumCoverVisible_ || !platformIconVisible_ || media.sourceAppUserModelId.empty())
             return;
 
         std::vector<BYTE> pixels;
@@ -2922,8 +2944,7 @@ struct TaskbarHost::Impl {
         // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
         bool showControls = mouseOver_ && controlsOnHover_ &&
                             hoverControlStyle_ == HoverControlStyle::Inline;
-        const bool backgroundSpectrum = spectrumVisible_ &&
-                                         spectrumStyle_ == SpectrumStyle::BackgroundWave;
+        const bool backgroundSpectrum = spectrumVisible_ && backgroundWaveEnabled();
         // 独立频谱占用歌词区右端；背景波浪不改变窗口宽度和歌词布局。
         bool showSpectrum = spectrumVisible_ && !showControls && !backgroundSpectrum;
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
@@ -3700,6 +3721,10 @@ void TaskbarHost::setSpectrumVisible(bool on) {
 
 void TaskbarHost::setSpectrumStyle(SpectrumStyle style) {
     impl_->setSpectrumStyle(style);
+}
+
+void TaskbarHost::setSpectrumBackground(bool on) {
+    impl_->setSpectrumBackground(on);
 }
 
 void TaskbarHost::setSpectrumOpacity(int percent) {

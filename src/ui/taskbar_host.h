@@ -24,7 +24,6 @@ enum class SpectrumStyle {
     Default,
     Bars,
     DreamyWave,
-    BackgroundWave,
 };
 
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
@@ -90,6 +89,7 @@ public:
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;
     void setSpectrumStyle(SpectrumStyle style);
+    void setSpectrumBackground(bool on);
     void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);
     void setSpectrumBands(const std::array<float, kSpectrumBands>& bands);

@@ -15,7 +15,8 @@ struct SettingsState {
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
     bool spectrumOn = false;
-    int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪 3 背景波浪
+    int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
+    bool spectrumBackground = false; // 将梦幻波浪作为歌曲信息和歌词背景
     int spectrumOpacity = 40; // 背景波浪透明度（0~100）
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
@@ -45,6 +46,7 @@ struct SettingsActions {
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;
+    std::function<void(bool)> onSpectrumBackground;
     std::function<void(int)> onSpectrumOpacity;
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;

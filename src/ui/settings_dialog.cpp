@@ -24,6 +24,7 @@ constexpr int kIdCoverEffect = 413;
 constexpr int kIdSpectrum = 414;
 constexpr int kIdSpectrumStyle = 419;
 constexpr int kIdSpectrumOpacity = 423;
+constexpr int kIdSpectrumBackground = 428;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
@@ -344,7 +345,9 @@ struct SettingsDialog::Impl {
                  true, kRowTallH);
         addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
         addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
-        addToggle(0, kIdPlatformIcon, L"显示平台图标", state.platformIconVisible);
+        Row& platformIcon = addToggle(0, kIdPlatformIcon, L"显示平台图标",
+                                       state.platformIconVisible);
+        platformIcon.enabled = state.albumCoverVisible;
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
@@ -373,11 +376,14 @@ struct SettingsDialog::Impl {
 
         addToggle(1, kIdSpectrum, L"频谱", state.spectrumOn);
         addRadio(1, kIdSpectrumStyle, L"频谱样式", nullptr,
-                 {L"默认", L"柱状图", L"梦幻波浪", L"背景波浪"}, state.spectrumStyle,
+                 {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
                  state.spectrumOn,
                  kRowH);
+        Row& spectrumBackground =
+            addToggle(1, kIdSpectrumBackground, L"背景波浪", state.spectrumBackground);
+        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2;
         addSlider(1, kIdSpectrumOpacity, L"背景透明度", state.spectrumOpacity,
-                  state.spectrumOn && state.spectrumStyle == 3);
+                  state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground);
 
         addButton(2, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
         addButton(2, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
@@ -866,6 +872,8 @@ struct SettingsDialog::Impl {
                 actions.onAlbumCoverVisible(row->checked);
             if (auto* effect = findRow(kIdCoverEffect))
                 effect->enabled = row->checked;
+            if (auto* platformIcon = findRow(kIdPlatformIcon))
+                platformIcon->enabled = row->checked;
             break;
         case kIdPlatformIcon:
             row->checked = !row->checked;
@@ -880,19 +888,40 @@ struct SettingsDialog::Impl {
             row->checked = !row->checked;
             if (auto* style = findRow(kIdSpectrumStyle))
                 style->enabled = row->checked;
+            if (auto* background = findRow(kIdSpectrumBackground))
+                background->enabled = row->checked &&
+                                      findRow(kIdSpectrumStyle) &&
+                                      findRow(kIdSpectrumStyle)->selected == 2;
             if (auto* opacity = findRow(kIdSpectrumOpacity))
                 opacity->enabled = row->checked &&
+                                   findRow(kIdSpectrumBackground) &&
+                                   findRow(kIdSpectrumBackground)->checked &&
                                    findRow(kIdSpectrumStyle) &&
-                                   findRow(kIdSpectrumStyle)->selected == 3;
+                                   findRow(kIdSpectrumStyle)->selected == 2;
             if (actions.onSpectrum)
                 actions.onSpectrum(row->checked);
             break;
         case kIdSpectrumStyle:
+            if (auto* background = findRow(kIdSpectrumBackground))
+                background->enabled = row->selected == 2 &&
+                                      findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
             if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = row->selected == 3 &&
+                opacity->enabled = row->selected == 2 &&
+                                   findRow(kIdSpectrumBackground) &&
+                                   findRow(kIdSpectrumBackground)->checked &&
                                    findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
             if (actions.onSpectrumStyle)
                 actions.onSpectrumStyle(row->selected);
+            break;
+        case kIdSpectrumBackground:
+            row->checked = !row->checked;
+            if (auto* opacity = findRow(kIdSpectrumOpacity))
+                opacity->enabled = row->checked &&
+                                   findRow(kIdSpectrumStyle) &&
+                                   findRow(kIdSpectrumStyle)->selected == 2 &&
+                                   findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
+            if (actions.onSpectrumBackground)
+                actions.onSpectrumBackground(row->checked);
             break;
         case kIdSpectrumOpacity:
             if (actions.onSpectrumOpacity)
@@ -1000,8 +1029,10 @@ struct SettingsDialog::Impl {
             row->checked = s.songInfoVisible;
         if (auto* row = findRow(kIdAlbumCover))
             row->checked = s.albumCoverVisible;
-        if (auto* row = findRow(kIdPlatformIcon))
+        if (auto* row = findRow(kIdPlatformIcon)) {
             row->checked = s.platformIconVisible;
+            row->enabled = s.albumCoverVisible;
+        }
         if (auto* row = findRow(kIdCoverEffect)) {
             row->selected = s.coverEffectVinyl ? 1 : 0;
             row->enabled = s.albumCoverVisible;
@@ -1009,12 +1040,16 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdSpectrum))
             row->checked = s.spectrumOn;
         if (auto* row = findRow(kIdSpectrumStyle)) {
-            row->selected = std::clamp(s.spectrumStyle, 0, 3);
+            row->selected = std::clamp(s.spectrumStyle, 0, 2);
             row->enabled = s.spectrumOn;
+        }
+        if (auto* row = findRow(kIdSpectrumBackground)) {
+            row->checked = s.spectrumBackground;
+            row->enabled = s.spectrumOn && s.spectrumStyle == 2;
         }
         if (auto* row = findRow(kIdSpectrumOpacity)) {
             row->value = std::clamp(s.spectrumOpacity, 0, 100);
-            row->enabled = s.spectrumOn && s.spectrumStyle == 3;
+            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground;
         }
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
