@@ -2,6 +2,7 @@
 
 #include "lyric_window.h"
 
+#include <array>
 #include <functional>
 #include <memory>
 
@@ -24,9 +25,14 @@ public:
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setEnabled(bool enabled);
     void setBackgroundMode(MediaPopupBackground mode);
+    void setFollowAlbumBackground(bool on);
     void refreshTheme();
     void setMedia(const OverlayMediaInfo& info, bool available);
     void setProgress(int64_t positionMs);
+    void setSpectrumBands(const std::array<float, kPresentationSpectrumBands>& bands);
+    void setSpectrumDemandCallback(std::function<void(bool)> cb);
+    bool needsAnimation() const;
+    void advanceAnimation(ULONGLONG nowMs);
     void setAnchor(HWND anchor);
 
     void onAnchorEnter();

@@ -28,6 +28,7 @@ constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
 constexpr int kIdMediaPopupBackground = 418;
+constexpr int kIdMediaPopupFollowAlbum = 426;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -227,6 +228,18 @@ struct SettingsDialog::Impl {
         return row;
     }
 
+    void updateMediaPopupBackgroundRowsEnabled() {
+        const auto* controls = findRow(kIdHoverControls);
+        const auto* style = findRow(kIdHoverControlStyle);
+        const bool popupEnabled = controls && controls->checked && style &&
+                                  style->selected == 1;
+        auto* background = findRow(kIdMediaPopupBackground);
+        if (background)
+            background->enabled = popupEnabled;
+        if (auto* followAlbum = findRow(kIdMediaPopupFollowAlbum))
+            followAlbum->enabled = popupEnabled && background && background->selected == 1;
+    }
+
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height) {
         Row& row = addRow(page, id, ControlKind::Radio, text, hint,
@@ -332,6 +345,12 @@ struct SettingsDialog::Impl {
                  L"纯色保持当前外观；磨砂玻璃使用 Windows 系统背景材质",
                  {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
+        Row& followAlbum = addRow(
+            0, kIdMediaPopupFollowAlbum, ControlKind::Toggle, L"磨砂背景跟随专辑",
+            L"根据专辑主色和频谱实时变化，并带有轻微呼吸、渐变和光晕效果", 40.0f,
+            kRowTallH);
+        followAlbum.checked = state.mediaPopupFollowAlbum;
+        updateMediaPopupBackgroundRowsEnabled();
         addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
@@ -876,22 +895,22 @@ struct SettingsDialog::Impl {
                 actions.onHoverControls(row->checked);
             if (auto* style = findRow(kIdHoverControlStyle))
                 style->enabled = row->checked;
-            if (auto* background = findRow(kIdMediaPopupBackground)) {
-                const auto* style = findRow(kIdHoverControlStyle);
-                background->enabled = row->checked && style && style->selected == 1;
-            }
+            updateMediaPopupBackgroundRowsEnabled();
             break;
         case kIdHoverControlStyle:
             if (actions.onHoverControlStyle)
                 actions.onHoverControlStyle(row->selected);
-            if (auto* background = findRow(kIdMediaPopupBackground)) {
-                const auto* controls = findRow(kIdHoverControls);
-                background->enabled = controls && controls->checked && row->selected == 1;
-            }
+            updateMediaPopupBackgroundRowsEnabled();
             break;
         case kIdMediaPopupBackground:
             if (actions.onMediaPopupBackground)
                 actions.onMediaPopupBackground(row->selected);
+            updateMediaPopupBackgroundRowsEnabled();
+            break;
+        case kIdMediaPopupFollowAlbum:
+            row->checked = !row->checked;
+            if (actions.onMediaPopupFollowAlbum)
+                actions.onMediaPopupFollowAlbum(row->checked);
             break;
         case kIdTaskbarTheme:
             if (actions.onTaskbarTheme)
@@ -991,8 +1010,10 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdMediaPopupBackground)) {
             row->selected = s.mediaPopupBackground;
-            row->enabled = s.hoverControls && s.hoverControlStyle == 1;
         }
+        if (auto* row = findRow(kIdMediaPopupFollowAlbum))
+            row->checked = s.mediaPopupFollowAlbum;
+        updateMediaPopupBackgroundRowsEnabled();
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);
         if (auto* row = findRow(kIdWindowTheme))

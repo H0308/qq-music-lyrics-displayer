@@ -360,6 +360,7 @@ struct App {
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
+    bool mediaPopupFollowAlbum_ = false;
     // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
     fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
@@ -373,6 +374,7 @@ struct App {
     int spectrumOpacity_ = 40;
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
+    bool mediaPopupSpectrumDemand_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
     bool platformIconVisible_ = false;
@@ -482,17 +484,18 @@ struct App {
         saveSettings();
     }
 
-    // 频谱实际启停 = 用户开关 && 正常渲染模式 && 宿主存在；低渲染/完全停止模式下
-    // 强制暂停捕获线程与绘制（频谱是持续动画源，开着就等于没省），切回正常模式自动恢复
+    // 频谱实际启停 = 用户开关或媒体卡片展开需求 && 正常渲染模式 && 宿主存在；
+    // 卡片只在真正展开且播放时申请捕获，低渲染/完全停止模式仍强制暂停。
     void syncSpectrumWithMode() {
-        const bool active = spectrumOn_ && renderMode_ == 0 && taskbarHost != nullptr;
+        const bool active = (spectrumOn_ || mediaPopupSpectrumDemand_) && renderMode_ == 0 &&
+                            taskbarHost != nullptr;
         if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
             if (*processName)
                 spectrum_.setTargetProcessName(std::wstring(processName));
             spectrum_.start();
-            taskbarHost->setSpectrumVisible(true);
+            taskbarHost->setSpectrumVisible(spectrumOn_);
         } else {
             spectrum_.stop();
             if (taskbarHost)
@@ -527,6 +530,13 @@ struct App {
                                           : MediaPopupBackground::Solid;
         if (taskbarHost)
             taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        saveSettings();
+    }
+
+    void applyMediaPopupFollowAlbum(bool on) {
+        mediaPopupFollowAlbum_ = on;
+        if (taskbarHost)
+            taskbarHost->setMediaPopupFollowAlbum(on);
         saveSettings();
     }
 
@@ -568,7 +578,6 @@ struct App {
         if (on) {
             tryExtractAlbumColor(); // 立即用当前封面取色
         } else {
-            hasAlbumColor_ = false; // 下次开启时重新提取
             applyFontColors();      // 恢复配置色
         }
         saveSettings();
@@ -638,6 +647,8 @@ struct App {
             mi.thumbnail = lastSmtcThumbnail;
         else
             mi.thumbnail = lastCover_;
+        mi.hasDominantColor = hasAlbumColor_;
+        mi.dominantColor = albumColor_;
         // QQ 切歌时旧时间线会暂时残留，不能把上一首的总时长带进媒体卡片。
         mi.durationMs = !snap.timelineStale && snap.durationMs > 0 ? snap.durationMs : 0;
         mi.canPrev = snap.canPrev;
@@ -721,6 +732,10 @@ struct App {
                 std::wprintf(L"[player] failed to activate source: %s\n", source.c_str());
         });
         taskbarHost = std::move(host);
+        taskbarHost->setMediaPopupSpectrumDemandCallback([this](bool demand) {
+            mediaPopupSpectrumDemand_ = demand;
+            syncSpectrumWithMode();
+        });
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
@@ -735,6 +750,7 @@ struct App {
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setHoverControlStyle(hoverControlStyle_);
         taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -743,16 +759,17 @@ struct App {
         taskbarHost->setRenderMode(renderMode_);
         taskbarHost->setSpectrumStyle(spectrumStyle_);
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
-        taskbarHost->setSpectrumVisible(spectrumOn_ && renderMode_ == 0);
-        if (spectrumOn_ && renderMode_ == 0)
-            spectrum_.start();
+        syncSpectrumWithMode();
         updateTrayIcon();
         return true;
     }
 
     void destroyTaskbar() {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
-        taskbarHost.reset();
+        mediaPopupSpectrumDemand_ = false;
+        // 先移出所有权，MediaPopup 销毁时的需求回调不能再回写正在析构的宿主。
+        auto host = std::move(taskbarHost);
+        host.reset();
         updateTrayIcon();
     }
 
@@ -932,7 +949,7 @@ struct App {
         const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
         if (*spectrumProcess) {
             spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
-            if (spectrumOn_ && renderMode_ == 0)
+            if ((spectrumOn_ || mediaPopupSpectrumDemand_) && renderMode_ == 0)
                 spectrum_.start();
             // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
             std::wstring spectrumKey = makeTrackKey(snap);
@@ -1103,7 +1120,7 @@ struct App {
             // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
             h->applyPlaybackPatch(playback);
         }
-        if (spectrumOn_ && taskbarHost) {
+        if (taskbarHost && (spectrumOn_ || mediaPopupSpectrumDemand_)) {
             SpectrumPatch spectrumPatch;
             spectrumPatch.frameRevision = currentFrame_.frameRevision;
             spectrumPatch.requestGeneration = currentFrame_.requestGeneration;
@@ -1195,6 +1212,7 @@ void App::loadSettings() {
                                         "frosted"
                                     ? MediaPopupBackground::Frosted
                                     : MediaPopupBackground::Solid;
+        mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
         taskbarThemeMode_ = themeModeFromConfig(
             j.value("taskbarTheme", std::string("system")),
             fluent::ThemeMode::FollowSystem);
@@ -1265,6 +1283,7 @@ void App::saveSettings() {
         j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
                                          ? "frosted"
                                          : "solid";
+        j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
         j["taskbarTheme"] = themeModeConfigName(taskbarThemeMode_);
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
@@ -1942,9 +1961,9 @@ COLORREF App::effectivePlayedColor() const {
     return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : lyricColor_;
 }
 
-// 开关开启且当前曲目还没提取过时，从有效封面提取主色调作为已播放颜色
+// 当前曲目还没提取过时，从有效封面提取主色调；它同时供歌词颜色和媒体卡片背景使用。
 void App::tryExtractAlbumColor() {
-    if (!lyricFollowAlbum_ || hasAlbumColor_)
+    if (hasAlbumColor_)
         return;
     if (!lastCover_ || lastCover_->empty())
         return;
@@ -1955,6 +1974,10 @@ void App::tryExtractAlbumColor() {
     hasAlbumColor_ = true;
     std::wprintf(L"[color] album dominant: #%02X%02X%02X : %s\n", GetRValue(albumColor_),
                  GetGValue(albumColor_), GetBValue(albumColor_), currentKey.c_str());
+    currentFrame_.media.hasDominantColor = true;
+    currentFrame_.media.dominantColor = albumColor_;
+    if (taskbarHost)
+        taskbarHost->setMediaInfo(currentFrame_.media);
     applyFontColors();
 }
 
@@ -2027,6 +2050,7 @@ SettingsState App::currentSettingsState() const {
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
+    st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
     st.taskbarThemeMode = taskbarThemeMode_;
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
@@ -2060,6 +2084,7 @@ SettingsActions App::buildSettingsActions() {
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
+    act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
     act.onTaskbarTheme = [this](fluent::ThemeMode mode) { applyTaskbarTheme(mode); };
     act.onWindowTheme = [this](fluent::ThemeMode mode) { applyWindowTheme(mode); };
     act.onPickFont = [this] { pickFont(); };

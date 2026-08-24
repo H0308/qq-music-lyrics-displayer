@@ -21,6 +21,7 @@ struct SettingsState {
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
     int mediaPopupBackground = 0; // 0 纯色 1 磨砂玻璃
+    bool mediaPopupFollowAlbum = false; // 磨砂背景跟随专辑
     fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
     bool followAlbum = false;
@@ -48,6 +49,7 @@ struct SettingsActions {
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;
     std::function<void(int)> onMediaPopupBackground;
+    std::function<void(bool)> onMediaPopupFollowAlbum;
     std::function<void(fluent::ThemeMode)> onTaskbarTheme;
     std::function<void(fluent::ThemeMode)> onWindowTheme;
     std::function<void()> onPickFont;

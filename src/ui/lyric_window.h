@@ -27,6 +27,8 @@ struct OverlayMediaInfo {
     std::wstring artist;
     std::wstring sourceAppUserModelId; // SMTC 当前来源应用标识，用于平台图标和打开入口
     std::shared_ptr<const std::vector<uint8_t>> thumbnail; // 专辑封面图片字节
+    bool hasDominantColor = false;          // 当前封面是否已提取到专辑主色
+    COLORREF dominantColor = RGB(49, 194, 124); // 媒体卡片动态背景使用的专辑主色
     int64_t durationMs = 0;             // 当前歌曲总时长；未知时为 0
     bool canPrev = false;
     bool canPlayPause = false;

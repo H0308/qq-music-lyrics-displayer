@@ -14,6 +14,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -35,6 +36,10 @@ constexpr UINT kCloseAnimationMs = 140;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
+// 动态背景跟随任务栏宿主的高频帧推进；这里只保留很慢的呼吸周期，避免抢走
+// 卡片文字和进度信息的视觉注意力。
+constexpr float kBackgroundBreathPeriodMs = 2600.0f;
+constexpr float kBackgroundEnergySmoothingMs = 120.0f;
 
 constexpr float kPopupWidthDip = 384.0f;
 constexpr float kPopupHeightDip = 208.0f;
@@ -137,6 +142,11 @@ std::wstring formatPlaybackDuration(int64_t milliseconds) {
     return milliseconds > 0 ? formatPlaybackTime(milliseconds) : L"--:--";
 }
 
+D2D1_COLOR_F colorFromRef(COLORREF color, float alpha) {
+    return D2D1::ColorF(GetRValue(color) / 255.0f, GetGValue(color) / 255.0f,
+                        GetBValue(color) / 255.0f, alpha);
+}
+
 } // namespace
 
 struct MediaPopup::Impl {
@@ -156,6 +166,7 @@ struct MediaPopup::Impl {
     bool placedAbove = true;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
+    bool followAlbumBackground = false;
     bool materialNeedsApply = true;
     bool backdropDirty = true;
     bool coverDirty = true;
@@ -163,6 +174,8 @@ struct MediaPopup::Impl {
     bool textDirty = true;
     bool scrollTimerRunning = false;
     bool clientAnimations = true;
+    bool dynamicBackgroundDirty = true;
+    bool spectrumDemandNotified = false;
     int cardScreenX = 0;
     int cardScreenY = 0;
     int cardWidthPx = 0;
@@ -176,8 +189,13 @@ struct MediaPopup::Impl {
     std::wstring pressedSourceAppUserModelId;
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
+    std::function<void(bool)> onSpectrumDemandChanged;
     OverlayMediaInfo media;
     int64_t positionMs = 0;
+    std::array<float, kPresentationSpectrumBands> spectrumBands{};
+    float backgroundEnergy = 0.0f;
+    float backgroundPhase = 0.0f;
+    ULONGLONG backgroundTickMs = 0;
 
     DCompRenderer renderer;
     ID2D1SolidColorBrush* brushBackground = nullptr;
@@ -192,6 +210,8 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushAccent = nullptr;
     ID2D1SolidColorBrush* brushAccentHover = nullptr;
     ID2D1SolidColorBrush* brushTextOnAccent = nullptr;
+    ID2D1LinearGradientBrush* brushDynamicGradient = nullptr;
+    ID2D1RadialGradientBrush* brushDynamicGlow = nullptr;
 
     IDWriteTextFormat* fmtSource = nullptr;
     IDWriteTextFormat* fmtTimeRight = nullptr;
@@ -217,6 +237,22 @@ struct MediaPopup::Impl {
     ID2D1Layer* backdropLayer = nullptr;
     media_control::Geometry controlGeometry;
     D2D1_RECT_F buttonRects[3]{};
+
+    bool dynamicBackgroundEnabled() const {
+        return followAlbumBackground && backgroundMode == MediaPopupBackground::Frosted;
+    }
+
+    void resetDynamicBackgroundAnimation() {
+        backgroundEnergy = 0.0f;
+        backgroundPhase = 0.0f;
+        backgroundTickMs = 0;
+    }
+
+    void releaseDynamicBackgroundResources() {
+        releaseCom(brushDynamicGradient);
+        releaseCom(brushDynamicGlow);
+        dynamicBackgroundDirty = true;
+    }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -294,6 +330,7 @@ struct MediaPopup::Impl {
         releaseBrush(brushAccent);
         releaseBrush(brushAccentHover);
         releaseBrush(brushTextOnAccent);
+        releaseDynamicBackgroundResources();
         releaseFormat(fmtSource);
         releaseFormat(fmtTimeRight);
         releaseFormat(fmtTitle);
@@ -394,6 +431,50 @@ struct MediaPopup::Impl {
         }
 
         themeDirty = false;
+        return true;
+    }
+
+    bool createDynamicBackgroundResources() {
+        if (!dynamicBackgroundEnabled())
+            return false;
+        if (!dynamicBackgroundDirty && brushDynamicGradient && brushDynamicGlow)
+            return true;
+
+        releaseCom(brushDynamicGradient);
+        releaseCom(brushDynamicGlow);
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return false;
+
+        const COLORREF color = media.hasDominantColor ? media.dominantColor
+                                                       : fluent::accentColor();
+        const D2D1_GRADIENT_STOP stops[] = {
+            {0.0f, colorFromRef(color, 0.44f)},
+            {0.56f, colorFromRef(color, 0.22f)},
+            {1.0f, colorFromRef(color, 0.0f)},
+        };
+        ID2D1GradientStopCollection* collection = nullptr;
+        if (FAILED(rt->CreateGradientStopCollection(stops, _countof(stops), &collection)) ||
+            !collection) {
+            return false;
+        }
+
+        const auto linear = D2D1::LinearGradientBrushProperties(
+            D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(kPopupWidthDip, kPopupHeightDip));
+        HRESULT hr = rt->CreateLinearGradientBrush(linear, collection, &brushDynamicGradient);
+        if (SUCCEEDED(hr)) {
+            const auto radial = D2D1::RadialGradientBrushProperties(
+                D2D1::Point2F(kPopupWidthDip * 0.74f, kPopupHeightDip * 0.28f),
+                D2D1::Point2F(0.0f, 0.0f), kPopupWidthDip * 0.72f, kPopupHeightDip * 0.92f);
+            hr = rt->CreateRadialGradientBrush(radial, collection, &brushDynamicGlow);
+        }
+        collection->Release();
+        if (FAILED(hr) || !brushDynamicGradient || !brushDynamicGlow) {
+            releaseCom(brushDynamicGradient);
+            releaseCom(brushDynamicGlow);
+            return false;
+        }
+        dynamicBackgroundDirty = false;
         return true;
     }
 
@@ -525,6 +606,77 @@ struct MediaPopup::Impl {
             artistScrollOffset = 0.0f;
             scrollTickMs = 0;
         }
+    }
+
+    bool spectrumDemand() const {
+        return dynamicBackgroundEnabled() && popupVisible && available && media.playing;
+    }
+
+    void notifySpectrumDemand() {
+        const bool demand = spectrumDemand();
+        if (spectrumDemandNotified == demand)
+            return;
+        spectrumDemandNotified = demand;
+        if (onSpectrumDemandChanged)
+            onSpectrumDemandChanged(demand);
+    }
+
+    float spectrumEnergy() const {
+        float bass = 0.0f;
+        float mid = 0.0f;
+        float treble = 0.0f;
+        float peak = 0.0f;
+        for (int i = 0; i < kPresentationSpectrumBands; ++i) {
+            const float value = std::clamp(spectrumBands[static_cast<size_t>(i)], 0.0f, 1.0f);
+            peak = std::max(peak, value);
+            if (i < 4)
+                bass += value;
+            else if (i < 8)
+                mid += value;
+            else
+                treble += value;
+        }
+        bass /= 4.0f;
+        mid /= 4.0f;
+        treble /= 4.0f;
+        return std::clamp(bass * 0.52f + mid * 0.30f + treble * 0.12f + peak * 0.06f,
+                          0.0f, 1.0f);
+    }
+
+    bool needsAnimation() const {
+        return dynamicBackgroundEnabled() && popupVisible && available &&
+               (media.playing || backgroundEnergy > 0.01f);
+    }
+
+    void advanceAnimation(ULONGLONG nowMs) {
+        if (!dynamicBackgroundEnabled() || !popupVisible || !available)
+            return;
+        if (backgroundTickMs == 0)
+            backgroundTickMs = nowMs;
+        const ULONGLONG elapsedMs = nowMs >= backgroundTickMs ? nowMs - backgroundTickMs : 0;
+        backgroundTickMs = nowMs;
+        const float dtMs = std::clamp(static_cast<float>(elapsedMs), 0.0f, 100.0f);
+
+        const float targetEnergy = media.playing ? spectrumEnergy() : 0.0f;
+        const float smoothing =
+            dtMs > 0.0f ? 1.0f - std::exp(-dtMs / kBackgroundEnergySmoothingMs) : 0.0f;
+        const float previousEnergy = backgroundEnergy;
+        backgroundEnergy += (targetEnergy - backgroundEnergy) * smoothing;
+        if (std::fabs(backgroundEnergy) < 0.0005f)
+            backgroundEnergy = 0.0f;
+
+        const bool breathing = media.playing && clientAnimations;
+        if (breathing && dtMs > 0.0f) {
+            backgroundPhase = std::fmod(
+                backgroundPhase + dtMs / kBackgroundBreathPeriodMs, 1.0f);
+            if (backgroundPhase < 0.0f)
+                backgroundPhase += 1.0f;
+        } else if (!media.playing) {
+            backgroundPhase = 0.0f;
+        }
+
+        if (breathing || std::fabs(backgroundEnergy - previousEnergy) > 0.0005f)
+            renderOrDefer();
     }
 
     void buildTextLayouts() {
@@ -764,6 +916,30 @@ struct MediaPopup::Impl {
             rt->PopLayer();
     }
 
+    void drawDynamicBackground(ID2D1DeviceContext* rt, float w, float h) {
+        if (!dynamicBackgroundEnabled() || !rt || !brushDynamicGradient || !brushDynamicGlow)
+            return;
+
+        const float breath = clientAnimations && media.playing
+                                 ? 0.5f + 0.5f * std::sin(backgroundPhase * 6.2831853f)
+                                 : 0.0f;
+        const float strength = std::clamp(backgroundEnergy * 0.72f + breath * 0.28f,
+                                           0.0f, 1.0f);
+        brushDynamicGradient->SetStartPoint(D2D1::Point2F(0.0f, 0.0f));
+        brushDynamicGradient->SetEndPoint(D2D1::Point2F(w, h));
+        brushDynamicGradient->SetOpacity(0.42f + strength * 0.18f);
+        brushDynamicGlow->SetCenter(D2D1::Point2F(w * 0.74f, h * 0.28f));
+        brushDynamicGlow->SetGradientOriginOffset(D2D1::Point2F(-w * 0.05f, -h * 0.06f));
+        brushDynamicGlow->SetRadiusX(w * 0.72f);
+        brushDynamicGlow->SetRadiusY(h * 0.92f);
+        brushDynamicGlow->SetOpacity(0.14f + strength * 0.22f);
+
+        const auto card = D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, h),
+                                             kPopupCornerDip, kPopupCornerDip);
+        rt->FillRoundedRectangle(card, brushDynamicGradient);
+        rt->FillRoundedRectangle(card, brushDynamicGlow);
+    }
+
     void drawCover(ID2D1DeviceContext* rt) {
         const D2D1_RECT_F rect = D2D1::RectF(16.0f, 44.0f, 16.0f + kCoverSizeDip,
                                              44.0f + kCoverSizeDip);
@@ -886,6 +1062,8 @@ struct MediaPopup::Impl {
         renderer.setDpi(dpi);
         if (!createResources())
             return false;
+        if (dynamicBackgroundEnabled())
+            createDynamicBackgroundResources();
         if (backgroundMode == MediaPopupBackground::Frosted)
             captureBackdrop();
         buildTextLayouts();
@@ -917,6 +1095,7 @@ struct MediaPopup::Impl {
         const D2D1_RECT_F card = D2D1::RectF(0.0f, 0.0f, w, cardH);
         rt->FillRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
                                  brushBackground);
+        drawDynamicBackground(rt, w, cardH);
         rt->DrawRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
                                  brushStroke, 1.0f);
 
@@ -1075,6 +1254,7 @@ struct MediaPopup::Impl {
         renderer.commit();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         popupVisible = true;
+        notifySpectrumDemand();
         SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
     }
 
@@ -1128,11 +1308,13 @@ struct MediaPopup::Impl {
     }
 
     void hideImmediate() {
+        popupVisible = false;
+        closing = false;
+        resetDynamicBackgroundAnimation();
+        notifySpectrumDemand();
         if (!hwnd)
             return;
         killTimers();
-        popupVisible = false;
-        closing = false;
         ShowWindow(hwnd, SW_HIDE);
         renderer.resetRoot();
         renderer.commit();
@@ -1363,6 +1545,11 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     if (impl_->backgroundMode == mode)
         return;
     impl_->backgroundMode = mode;
+    if (mode != MediaPopupBackground::Frosted) {
+        impl_->resetDynamicBackgroundAnimation();
+        impl_->releaseDynamicBackgroundResources();
+    }
+    impl_->notifySpectrumDemand();
     if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
@@ -1372,6 +1559,24 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
         else
             impl_->render();
     }
+}
+
+void MediaPopup::setFollowAlbumBackground(bool on) {
+    if (impl_->followAlbumBackground == on)
+        return;
+    impl_->followAlbumBackground = on;
+    impl_->resetDynamicBackgroundAnimation();
+    if (!on)
+        impl_->releaseDynamicBackgroundResources();
+    else
+        impl_->dynamicBackgroundDirty = true;
+    impl_->notifySpectrumDemand();
+    if (!impl_->hwnd || !impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
 }
 
 void MediaPopup::refreshTheme() {
@@ -1388,9 +1593,13 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
     const bool coverChanged = info.thumbnail != impl_->media.thumbnail;
     const bool sourceChanged = info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
     const bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
+    const bool dominantColorChanged =
+        info.hasDominantColor != impl_->media.hasDominantColor ||
+        (info.hasDominantColor && info.dominantColor != impl_->media.dominantColor);
     const bool changed = coverChanged || info.title != impl_->media.title ||
                          info.artist != impl_->media.artist ||
                          sourceChanged ||
+                         dominantColorChanged ||
                          info.durationMs != impl_->media.durationMs ||
                          info.canPrev != impl_->media.canPrev ||
                          info.canPlayPause != impl_->media.canPlayPause ||
@@ -1402,6 +1611,8 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
         impl_->coverDirty = true;
     if (sourceChanged)
         impl_->sourceIconDirty = true;
+    if (dominantColorChanged)
+        impl_->dynamicBackgroundDirty = true;
     if (textChanged) {
         impl_->textDirty = true;
         impl_->titleScrollOffset = 0.0f;
@@ -1420,6 +1631,7 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
     }
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    impl_->notifySpectrumDemand();
 }
 
 void MediaPopup::setProgress(int64_t positionMs) {
@@ -1429,6 +1641,25 @@ void MediaPopup::setProgress(int64_t positionMs) {
     impl_->positionMs = nextPositionMs;
     if (impl_->popupVisible)
         impl_->renderOrDefer();
+}
+
+void MediaPopup::setSpectrumBands(
+    const std::array<float, kPresentationSpectrumBands>& bands) {
+    impl_->spectrumBands = bands;
+}
+
+void MediaPopup::setSpectrumDemandCallback(std::function<void(bool)> cb) {
+    impl_->onSpectrumDemandChanged = std::move(cb);
+    impl_->spectrumDemandNotified = false;
+    impl_->notifySpectrumDemand();
+}
+
+bool MediaPopup::needsAnimation() const {
+    return impl_->needsAnimation();
+}
+
+void MediaPopup::advanceAnimation(ULONGLONG nowMs) {
+    impl_->advanceAnimation(nowMs);
 }
 
 void MediaPopup::setAnchor(HWND anchor) {
