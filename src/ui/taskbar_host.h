@@ -72,6 +72,8 @@ public:
     void setMediaPopupBackground(MediaPopupBackground mode);
     // 是否让磨砂背景跟随当前专辑主色和频谱变化。
     void setMediaPopupFollowAlbum(bool on);
+    // 是否根据磨砂卡片背后的应用明暗自动切换黑白文字。
+    void setMediaPopupAutoTextContrast(bool on);
     // 主题模式或 Windows 外观发生变化时重建任务栏与媒体卡片资源。
     void refreshTheme();
     void setSongInfoVisible(bool on);

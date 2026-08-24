@@ -907,6 +907,10 @@ struct TaskbarHost::Impl {
         mediaPopup.setFollowAlbumBackground(on);
     }
 
+    void setMediaPopupAutoTextContrast(bool on) {
+        mediaPopup.setAutoTextContrast(on);
+    }
+
     void setSpectrumStyle(SpectrumStyle style) {
         if (spectrumStyle_ == style)
             return;
@@ -3660,6 +3664,10 @@ void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {
 
 void TaskbarHost::setMediaPopupFollowAlbum(bool on) {
     impl_->setMediaPopupFollowAlbum(on);
+}
+
+void TaskbarHost::setMediaPopupAutoTextContrast(bool on) {
+    impl_->setMediaPopupAutoTextContrast(on);
 }
 
 void TaskbarHost::refreshTheme() {

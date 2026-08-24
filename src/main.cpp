@@ -361,6 +361,7 @@ struct App {
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
     bool mediaPopupFollowAlbum_ = false;
+    bool mediaPopupAutoTextContrast_ = false;
     // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
     fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
@@ -537,6 +538,13 @@ struct App {
         mediaPopupFollowAlbum_ = on;
         if (taskbarHost)
             taskbarHost->setMediaPopupFollowAlbum(on);
+        saveSettings();
+    }
+
+    void applyMediaPopupAutoTextContrast(bool on) {
+        mediaPopupAutoTextContrast_ = on;
+        if (taskbarHost)
+            taskbarHost->setMediaPopupAutoTextContrast(on);
         saveSettings();
     }
 
@@ -751,6 +759,7 @@ struct App {
         taskbarHost->setHoverControlStyle(hoverControlStyle_);
         taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
         taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
+        taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -1213,6 +1222,7 @@ void App::loadSettings() {
                                     ? MediaPopupBackground::Frosted
                                     : MediaPopupBackground::Solid;
         mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
+        mediaPopupAutoTextContrast_ = j.value("mediaPopupAutoTextContrast", false);
         taskbarThemeMode_ = themeModeFromConfig(
             j.value("taskbarTheme", std::string("system")),
             fluent::ThemeMode::FollowSystem);
@@ -1284,6 +1294,7 @@ void App::saveSettings() {
                                          ? "frosted"
                                          : "solid";
         j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
+        j["mediaPopupAutoTextContrast"] = mediaPopupAutoTextContrast_;
         j["taskbarTheme"] = themeModeConfigName(taskbarThemeMode_);
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
@@ -2051,6 +2062,7 @@ SettingsState App::currentSettingsState() const {
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
+    st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
     st.taskbarThemeMode = taskbarThemeMode_;
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
@@ -2085,6 +2097,7 @@ SettingsActions App::buildSettingsActions() {
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
     act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
+    act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };
     act.onTaskbarTheme = [this](fluent::ThemeMode mode) { applyTaskbarTheme(mode); };
     act.onWindowTheme = [this](fluent::ThemeMode mode) { applyWindowTheme(mode); };
     act.onPickFont = [this] { pickFont(); };

@@ -147,6 +147,34 @@ D2D1_COLOR_F colorFromRef(COLORREF color, float alpha) {
                         GetBValue(color) / 255.0f, alpha);
 }
 
+float srgbChannelToLinear(BYTE value) {
+    const float channel = static_cast<float>(value) / 255.0f;
+    return channel <= 0.04045f
+               ? channel / 12.92f
+               : std::pow((channel + 0.055f) / 1.055f, 2.4f);
+}
+
+float backdropLuminance(const void* pixels, int width, int height) {
+    if (!pixels || width <= 0 || height <= 0)
+        return 0.0f;
+
+    const auto* bytes = static_cast<const BYTE*>(pixels);
+    const int step = std::max(1, std::min(width, height) / 96);
+    double total = 0.0;
+    int samples = 0;
+    for (int y = 0; y < height; y += step) {
+        for (int x = 0; x < width; x += step) {
+            const BYTE* pixel = bytes + (static_cast<size_t>(y) * width + x) * 4;
+            const float blue = srgbChannelToLinear(pixel[0]);
+            const float green = srgbChannelToLinear(pixel[1]);
+            const float red = srgbChannelToLinear(pixel[2]);
+            total += 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+            ++samples;
+        }
+    }
+    return samples > 0 ? static_cast<float>(total / samples) : 0.0f;
+}
+
 } // namespace
 
 struct MediaPopup::Impl {
@@ -167,6 +195,7 @@ struct MediaPopup::Impl {
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
     bool followAlbumBackground = false;
+    bool autoTextContrast = false;
     bool materialNeedsApply = true;
     bool backdropDirty = true;
     bool coverDirty = true;
@@ -252,6 +281,40 @@ struct MediaPopup::Impl {
         releaseCom(brushDynamicGradient);
         releaseCom(brushDynamicGlow);
         dynamicBackgroundDirty = true;
+    }
+
+    void resetBackdropTextColors() {
+        const auto& p = fluent::palette(fluent::ThemeTarget::Window);
+        if (brushText)
+            brushText->SetColor(p.text);
+        if (brushSecondary)
+            brushSecondary->SetColor(p.textSecondary);
+        if (brushDisabled)
+            brushDisabled->SetColor(p.disabled);
+    }
+
+    void applyBackdropTextContrast(float luminance) {
+        if (!autoTextContrast) {
+            resetBackdropTextColors();
+            return;
+        }
+        const float blackContrast = (luminance + 0.05f) / 0.05f;
+        const float whiteContrast = 1.05f / (luminance + 0.05f);
+        const bool useBlack = blackContrast >= whiteContrast;
+        const D2D1_COLOR_F text = useBlack ? D2D1::ColorF(D2D1::ColorF::Black)
+                                            : D2D1::ColorF(D2D1::ColorF::White);
+        const D2D1_COLOR_F secondary =
+            useBlack ? D2D1::ColorF(D2D1::ColorF::Black, 0.70f)
+                     : D2D1::ColorF(D2D1::ColorF::White, 0.72f);
+        const D2D1_COLOR_F disabled =
+            useBlack ? D2D1::ColorF(D2D1::ColorF::Black, 0.42f)
+                     : D2D1::ColorF(D2D1::ColorF::White, 0.46f);
+        if (brushText)
+            brushText->SetColor(text);
+        if (brushSecondary)
+            brushSecondary->SetColor(secondary);
+        if (brushDisabled)
+            brushDisabled->SetColor(disabled);
     }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -484,6 +547,7 @@ struct MediaPopup::Impl {
         backdropDirty = false;
         releaseCom(backdropBlur);
         releaseBitmap(backdropBmp);
+        resetBackdropTextColors();
         if (backgroundMode != MediaPopupBackground::Frosted || !hwnd)
             return true;
 
@@ -559,6 +623,8 @@ struct MediaPopup::Impl {
             return false;
         }
 
+        const float sampledLuminance = backdropLuminance(pixels, width, height);
+
         auto* rt = renderer.renderTarget();
         if (!rt) {
             DeleteObject(dib);
@@ -578,6 +644,7 @@ struct MediaPopup::Impl {
         }
         DeleteObject(dib);
         backdropBmp = captured;
+        applyBackdropTextContrast(sampledLuminance);
 
         ID2D1Effect* blur = nullptr;
         HRESULT hr = rt->CreateEffect(kGaussianBlurClsid, &blur);
@@ -1571,6 +1638,22 @@ void MediaPopup::setFollowAlbumBackground(bool on) {
     else
         impl_->dynamicBackgroundDirty = true;
     impl_->notifySpectrumDemand();
+    if (!impl_->hwnd || !impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
+}
+
+void MediaPopup::setAutoTextContrast(bool on) {
+    if (impl_->autoTextContrast == on)
+        return;
+    impl_->autoTextContrast = on;
+    if (on)
+        impl_->backdropDirty = true;
+    else
+        impl_->resetBackdropTextColors();
     if (!impl_->hwnd || !impl_->popupVisible)
         return;
     if (impl_->entering || impl_->closing)

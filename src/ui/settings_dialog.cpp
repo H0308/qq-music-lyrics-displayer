@@ -29,6 +29,7 @@ constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
 constexpr int kIdMediaPopupBackground = 418;
 constexpr int kIdMediaPopupFollowAlbum = 426;
+constexpr int kIdMediaPopupAutoTextContrast = 427;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -238,6 +239,8 @@ struct SettingsDialog::Impl {
             background->enabled = popupEnabled;
         if (auto* followAlbum = findRow(kIdMediaPopupFollowAlbum))
             followAlbum->enabled = popupEnabled && background && background->selected == 1;
+        if (auto* autoTextContrast = findRow(kIdMediaPopupAutoTextContrast))
+            autoTextContrast->enabled = popupEnabled && background && background->selected == 1;
     }
 
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
@@ -331,6 +334,14 @@ struct SettingsDialog::Impl {
     }
 
     void createControls() {
+        addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
+             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
+                 true, kRowTallH);
+        addRadio(0, kIdWindowTheme, L"对话框与悬浮窗主题",
+             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
+                 true, kRowTallH);
         addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
         addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
         addToggle(0, kIdPlatformIcon, L"显示平台图标", state.platformIconVisible);
@@ -347,18 +358,16 @@ struct SettingsDialog::Impl {
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
         Row& followAlbum = addRow(
             0, kIdMediaPopupFollowAlbum, ControlKind::Toggle, L"磨砂背景跟随专辑",
-            L"根据专辑主色和频谱实时变化，并带有轻微呼吸、渐变和光晕效果", 40.0f,
+            L"根据专辑主题颜色实时改变磨砂玻璃颜色", 40.0f,
             kRowTallH);
         followAlbum.checked = state.mediaPopupFollowAlbum;
+        Row& autoTextContrast = addRow(
+            0, kIdMediaPopupAutoTextContrast, ControlKind::Toggle,
+            L"磨砂媒体卡片字体颜色动态变化",
+            L"根据卡片背后应用的明暗，自动切换黑色或白色文字以提高可读性", 40.0f,
+            kRowTallH);
+        autoTextContrast.checked = state.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
-        addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
-             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
-                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
-                 true, kRowTallH);
-        addRadio(0, kIdWindowTheme, L"对话框与悬浮窗主题",
-             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
-                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
-                 true, kRowTallH);
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -912,6 +921,11 @@ struct SettingsDialog::Impl {
             if (actions.onMediaPopupFollowAlbum)
                 actions.onMediaPopupFollowAlbum(row->checked);
             break;
+        case kIdMediaPopupAutoTextContrast:
+            row->checked = !row->checked;
+            if (actions.onMediaPopupAutoTextContrast)
+                actions.onMediaPopupAutoTextContrast(row->checked);
+            break;
         case kIdTaskbarTheme:
             if (actions.onTaskbarTheme)
                 actions.onTaskbarTheme(themeModeFromIndex(row->selected));
@@ -1013,6 +1027,8 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdMediaPopupFollowAlbum))
             row->checked = s.mediaPopupFollowAlbum;
+        if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
+            row->checked = s.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);

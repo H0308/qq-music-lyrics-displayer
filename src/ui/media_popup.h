@@ -26,6 +26,7 @@ public:
     void setEnabled(bool enabled);
     void setBackgroundMode(MediaPopupBackground mode);
     void setFollowAlbumBackground(bool on);
+    void setAutoTextContrast(bool on);
     void refreshTheme();
     void setMedia(const OverlayMediaInfo& info, bool available);
     void setProgress(int64_t positionMs);
