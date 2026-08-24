@@ -28,7 +28,9 @@ public:
     void setFollowAlbumBackground(bool on);
     void setAutoTextContrast(bool on);
     void refreshTheme();
-    void setMedia(const OverlayMediaInfo& info, bool available);
+    // animateSongTransition 只由完整展示帧在确认切歌时传入；媒体字段异步补齐不触发转场。
+    void setMedia(const OverlayMediaInfo& info, bool available,
+                  bool animateSongTransition = false);
     void setProgress(int64_t positionMs);
     void setSpectrumBands(const std::array<float, kPresentationSpectrumBands>& bands);
     void setSpectrumDemandCallback(std::function<void(bool)> cb);

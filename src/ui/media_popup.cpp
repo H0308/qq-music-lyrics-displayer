@@ -33,6 +33,8 @@ constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
 constexpr UINT kCloseAnimationMs = 140;
+constexpr float kSongTransitionMs = 220.0f;
+constexpr float kSongTransitionTravelDip = 24.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
@@ -203,6 +205,7 @@ struct MediaPopup::Impl {
     bool textDirty = true;
     bool scrollTimerRunning = false;
     bool clientAnimations = true;
+    bool songTransitionPending = false;
     bool dynamicBackgroundDirty = true;
     bool spectrumDemandNotified = false;
     int cardScreenX = 0;
@@ -1186,7 +1189,19 @@ struct MediaPopup::Impl {
             releaseDrawingResources();
             return false;
         }
-        if (FAILED(hr) || !renderer.present()) {
+        if (FAILED(hr)) {
+            releaseDrawingResources();
+            return false;
+        }
+        if (songTransitionPending) {
+            songTransitionPending = false;
+            renderer.resetRoot();
+            const float travel = kSongTransitionTravelDip * scale();
+            if (!renderer.animateRoot(travel, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                      kSongTransitionMs / 1000.0f))
+                renderer.resetRoot();
+        }
+        if (!renderer.present()) {
             releaseDrawingResources();
             return false;
         }
@@ -1672,7 +1687,8 @@ void MediaPopup::refreshTheme() {
         impl_->render();
 }
 
-void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
+void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
+                          bool animateSongTransition) {
     const bool coverChanged = info.thumbnail != impl_->media.thumbnail;
     const bool sourceChanged = info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
     const bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
@@ -1688,6 +1704,7 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
                          info.canPlayPause != impl_->media.canPlayPause ||
                          info.canNext != impl_->media.canNext ||
                          info.playing != impl_->media.playing;
+    impl_->songTransitionPending = false;
     impl_->media = info;
     impl_->available = available;
     if (coverChanged)
@@ -1706,6 +1723,9 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available) {
         impl_->hideImmediate();
         return;
     }
+    impl_->songTransitionPending = animateSongTransition && changed && impl_->popupVisible &&
+                                   !impl_->entering && !impl_->closing &&
+                                   impl_->clientAnimations;
     if (changed && impl_->popupVisible) {
         if (impl_->entering || impl_->closing)
             impl_->deferredRender = true;

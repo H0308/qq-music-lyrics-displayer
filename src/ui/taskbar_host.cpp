@@ -1073,7 +1073,7 @@ struct TaskbarHost::Impl {
         const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
                                  (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
-        mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2);
+        mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2, songChanged);
         mediaPopup.setProgress(frame.actualPositionMs);
 
         frameRevision_ = frame.frameRevision;
