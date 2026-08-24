@@ -22,6 +22,8 @@ constexpr int kIdAlbumCover = 411;
 constexpr int kIdPlatformIcon = 412;
 constexpr int kIdCoverEffect = 413;
 constexpr int kIdSpectrum = 414;
+constexpr int kIdSpectrumStyle = 419;
+constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
@@ -74,6 +76,7 @@ struct SettingsDialog::Impl {
     enum class ControlKind {
         Toggle,
         Radio,
+        Slider,
         Button,
     };
 
@@ -88,6 +91,9 @@ struct SettingsDialog::Impl {
         bool checked = false;
         bool enabled = true;
         int selected = -1;
+        int value = 0;
+        int minValue = 0;
+        int maxValue = 100;
         float controlW = 0.0f;
         float minHeight = kRowH;
         float height = kRowH;
@@ -107,12 +113,12 @@ struct SettingsDialog::Impl {
     int activePage = 0;
 
     fluent::FluentDialogSurface surface;
-    std::array<std::wstring, 3> navItems{L"显示", L"字体与颜色", L"歌词"};
-    std::array<std::wstring, 3> pageTitles{L"显示", L"字体与颜色", L"歌词"};
-    std::vector<Row> rows[3];
+    std::array<std::wstring, 4> navItems{L"显示", L"频谱", L"字体与颜色", L"歌词"};
+    std::array<std::wstring, 4> pageTitles{L"显示", L"频谱", L"字体与颜色", L"歌词"};
+    std::vector<Row> rows[4];
     D2D1_RECT_F navRect{};
-    std::array<D2D1_RECT_F, 3> navItemRects{};
-    std::array<D2D1_RECT_F, 3> pageTitleRects{};
+    std::array<D2D1_RECT_F, 4> navItemRects{};
+    std::array<D2D1_RECT_F, 4> pageTitleRects{};
     D2D1_RECT_F contentViewportRect{};
     D2D1_RECT_F scrollTrackRect{};
     D2D1_RECT_F scrollThumbRect{};
@@ -198,6 +204,15 @@ struct SettingsDialog::Impl {
         return row;
     }
 
+    Row& addSlider(int page, int id, const wchar_t* text, int value, bool enabled) {
+        Row& row = addRow(page, id, ControlKind::Slider, text, nullptr, 216.0f, kRowH);
+        row.value = std::clamp(value, 0, 100);
+        row.minValue = 0;
+        row.maxValue = 100;
+        row.enabled = enabled;
+        return row;
+    }
+
     Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
                    const wchar_t* controlText, float height = kRowH) {
         Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, height);
@@ -275,7 +290,6 @@ struct SettingsDialog::Impl {
         addToggle(0, kIdPlatformIcon, L"显示平台图标", state.platformIconVisible);
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
-        addToggle(0, kIdSpectrum, L"频谱", state.spectrumOn);
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
@@ -288,26 +302,34 @@ struct SettingsDialog::Impl {
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
-        addButton(1, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
-        addButton(1, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
-        addToggle(1, kIdFollowAlbum, L"已播放颜色跟随专辑", state.followAlbum);
+        addToggle(1, kIdSpectrum, L"频谱", state.spectrumOn);
+        addRadio(1, kIdSpectrumStyle, L"频谱样式", nullptr,
+                 {L"默认", L"柱状图", L"梦幻波浪", L"背景波浪"}, state.spectrumStyle,
+                 state.spectrumOn,
+                 kRowH);
+        addSlider(1, kIdSpectrumOpacity, L"背景透明度", state.spectrumOpacity,
+                  state.spectrumOn && state.spectrumStyle == 3);
 
-        addToggle(2, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
-        addRadio(2, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
+        addButton(2, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
+        addButton(2, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
+        addToggle(2, kIdFollowAlbum, L"已播放颜色跟随专辑", state.followAlbum);
+
+        addToggle(3, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
+        addRadio(3, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
                  state.lyricAlignment, true, kRowH);
-        addToggle(2, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
+        addToggle(3, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
                                             ? L"正在检查翻译和罗马音…"
                                             : state.secondaryAvailability == 2
                                                   ? L"当前歌曲无翻译或罗马音"
                                                   : L"";
-        addRadio(2, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
+        addRadio(3, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
                  {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
                  state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
-        addToggle(2, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
+        addToggle(3, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
-        Row& persistOrder = addRow(2, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
+        Row& persistOrder = addRow(3, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
                                    L"切换版本持久化",
                                    L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
                                    40.0f, kRowTallH);
@@ -316,7 +338,7 @@ struct SettingsDialog::Impl {
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
-        Row& localPath = addButton(2, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
+        Row& localPath = addButton(3, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
     }
@@ -368,7 +390,7 @@ struct SettingsDialog::Impl {
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
         navRect = D2D1::RectF(12.0f, 12.0f, 12.0f + kNavW, std::max(12.0f, h - 12.0f));
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * 32.0f,
                                           navRect.right, navRect.top + (i + 1) * 32.0f);
             pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
@@ -433,7 +455,7 @@ struct SettingsDialog::Impl {
     }
 
     void showPage(int page) {
-        if (page < 0 || page >= 3 || page == activePage)
+        if (page < 0 || page >= 4 || page == activePage)
             return;
         activePage = page;
         hoverId = 0;
@@ -459,7 +481,7 @@ struct SettingsDialog::Impl {
                 1.5f, fluent::metrics::cardRadius - 1.0f);
         }
         auto* format = painter.textFormat(13.0f, 400, false, true);
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             const bool selected = i == activePage;
             const bool hovered = hoverId == kIdNav && hoverOption == i;
             if (selected)
@@ -549,6 +571,43 @@ struct SettingsDialog::Impl {
         }
     }
 
+    void drawSlider(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+        const auto& p = fluent::palette();
+        const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
+        constexpr float valueW = 38.0f;
+        constexpr float trackH = 4.0f;
+        const float trackLeft = row.controlRect.left;
+        const float trackRight = row.controlRect.right - valueW;
+        const float range = static_cast<float>(std::max(1, row.maxValue - row.minValue));
+        const float t = std::clamp(
+            (static_cast<float>(row.value - row.minValue) / range), 0.0f, 1.0f);
+        const float knobX = trackLeft + (trackRight - trackLeft) * t;
+        const D2D1_RECT_F track =
+            D2D1::RectF(trackLeft, centerY - trackH * 0.5f, trackRight,
+                        centerY + trackH * 0.5f);
+        const D2D1_RECT_F filled =
+            D2D1::RectF(track.left, track.top, knobX, track.bottom);
+        painter.fillRoundRect(row.enabled ? p.controlFill : p.listHover, track, trackH * 0.5f);
+        if (knobX > track.left)
+            painter.fillRoundRect(row.enabled ? p.accent : p.disabled, filled, trackH * 0.5f);
+        if (auto* br = painter.brush(row.enabled
+                                         ? (hoverId == row.id ? p.accentHover : p.accent)
+                                         : p.disabled)) {
+            painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), 7.0f, 7.0f),
+                                                       br);
+        }
+        painter.drawText(std::to_wstring(row.value) + L"%",
+                         painter.textFormat(12.0f, 400, false, true),
+                         D2D1::RectF(trackRight + 6.0f, row.controlRect.top,
+                                     row.controlRect.right, row.controlRect.bottom),
+                         row.enabled ? p.textSecondary : p.disabled);
+        if (focusedId == row.id && focusVisible && row.enabled)
+            painter.strokeRoundRect(p.accent,
+                                    D2D1::RectF(track.left - 3.0f, track.top - 5.0f,
+                                                track.right + 3.0f, track.bottom + 5.0f),
+                                    1.0f, 5.0f);
+    }
+
     void drawRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
         const auto& p = fluent::palette();
         auto* format = painter.textFormat(13.0f, 400, false, true);
@@ -629,6 +688,8 @@ struct SettingsDialog::Impl {
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
                 drawRadio(painter, row);
+            else if (row.kind == ControlKind::Slider)
+                drawSlider(painter, row);
             else
                 drawButton(painter, row);
         }
@@ -639,7 +700,7 @@ struct SettingsDialog::Impl {
     int hitTest(float x, float y, int* option = nullptr) const {
         if (option)
             *option = -1;
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 4; ++i) {
             if (contains(navItemRects[i], x, y)) {
                 if (option)
                     *option = i;
@@ -686,6 +747,20 @@ struct SettingsDialog::Impl {
         surface.invalidate();
     }
 
+    void updateSliderFromPointer(Row& row, float x) {
+        constexpr float valueW = 38.0f;
+        const float left = row.controlRect.left;
+        const float right = row.controlRect.right - valueW;
+        const float ratio = std::clamp((x - left) / std::max(1.0f, right - left), 0.0f, 1.0f);
+        const int value = row.minValue + static_cast<int>(std::lround(
+                                                   ratio * (row.maxValue - row.minValue)));
+        if (value == row.value)
+            return;
+        row.value = std::clamp(value, row.minValue, row.maxValue);
+        onCommand(row.id);
+        surface.invalidate();
+    }
+
     void onCommand(int id) {
         if (id == kIdNav)
             return;
@@ -716,8 +791,25 @@ struct SettingsDialog::Impl {
             break;
         case kIdSpectrum:
             row->checked = !row->checked;
+            if (auto* style = findRow(kIdSpectrumStyle))
+                style->enabled = row->checked;
+            if (auto* opacity = findRow(kIdSpectrumOpacity))
+                opacity->enabled = row->checked &&
+                                   findRow(kIdSpectrumStyle) &&
+                                   findRow(kIdSpectrumStyle)->selected == 3;
             if (actions.onSpectrum)
                 actions.onSpectrum(row->checked);
+            break;
+        case kIdSpectrumStyle:
+            if (auto* opacity = findRow(kIdSpectrumOpacity))
+                opacity->enabled = row->selected == 3 &&
+                                   findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
+            if (actions.onSpectrumStyle)
+                actions.onSpectrumStyle(row->selected);
+            break;
+        case kIdSpectrumOpacity:
+            if (actions.onSpectrumOpacity)
+                actions.onSpectrumOpacity(row->value);
             break;
         case kIdHoverControls:
             row->checked = !row->checked;
@@ -816,6 +908,14 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdSpectrum))
             row->checked = s.spectrumOn;
+        if (auto* row = findRow(kIdSpectrumStyle)) {
+            row->selected = std::clamp(s.spectrumStyle, 0, 3);
+            row->enabled = s.spectrumOn;
+        }
+        if (auto* row = findRow(kIdSpectrumOpacity)) {
+            row->value = std::clamp(s.spectrumOpacity, 0, 100);
+            row->enabled = s.spectrumOn && s.spectrumStyle == 3;
+        }
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
         if (auto* row = findRow(kIdHoverControlStyle)) {
@@ -944,6 +1044,13 @@ struct SettingsDialog::Impl {
                 }
                 return 0;
             }
+            if (pressedId != 0) {
+                Row* row = findRow(pressedId);
+                if (row && row->kind == ControlKind::Slider && row->enabled) {
+                    updateSliderFromPointer(*row, GET_X_LPARAM(lp) / s);
+                    return 0;
+                }
+            }
             int option = -1;
             const int id = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
             if (id != hoverId || option != hoverOption) {
@@ -967,6 +1074,11 @@ struct SettingsDialog::Impl {
             int option = -1;
             pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
             pressedOption = option;
+            if (pressedId != 0) {
+                Row* row = findRow(pressedId);
+                if (row && row->kind == ControlKind::Slider && row->enabled)
+                    updateSliderFromPointer(*row, GET_X_LPARAM(lp) / s);
+            }
             if (pressedId != 0 && pressedId != kIdContentScrollBar)
                 focusedId = pressedId;
             if (pressedId == kIdContentScrollBar) {
@@ -1009,6 +1121,8 @@ struct SettingsDialog::Impl {
                             row->selected = pressedOptionValue;
                             onCommand(pressed);
                         }
+                    } else if (row->kind == ControlKind::Slider) {
+                        onCommand(pressed);
                     } else {
                         onCommand(pressed);
                     }
@@ -1051,7 +1165,7 @@ struct SettingsDialog::Impl {
                     int next = activePage + (wp == VK_DOWN ? 1 : -1);
                     if (next < 0)
                         next = 2;
-                    if (next >= 3)
+                    if (next >= 4)
                         next = 0;
                     showPage(next);
                 }
@@ -1072,7 +1186,13 @@ struct SettingsDialog::Impl {
             }
             if (wp == VK_LEFT || wp == VK_RIGHT) {
                 Row* row = findRow(focusedId);
-                if (row && row->kind == ControlKind::Radio && row->enabled && !row->options.empty()) {
+                if (row && row->kind == ControlKind::Slider && row->enabled) {
+                    const int direction = wp == VK_LEFT ? -1 : 1;
+                    row->value = std::clamp(row->value + direction, row->minValue,
+                                            row->maxValue);
+                    onCommand(row->id);
+                } else if (row && row->kind == ControlKind::Radio && row->enabled &&
+                           !row->options.empty()) {
                     int direction = wp == VK_LEFT ? -1 : 1;
                     row->selected = (row->selected + direction +
                                      static_cast<int>(row->options.size())) %

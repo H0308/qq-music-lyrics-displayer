@@ -145,6 +145,39 @@ const wchar_t* fontStyleLabel(LyricFontStyle style) {
     }
 }
 
+SpectrumStyle spectrumStyleFromConfig(const std::string& value) {
+    if (value == "bars" || value == "rounded-bars") {
+        return SpectrumStyle::Bars;
+    }
+    if (value == "dreamy-wave") {
+        return SpectrumStyle::DreamyWave;
+    }
+    if (value == "background-wave") {
+        return SpectrumStyle::BackgroundWave;
+    }
+    return SpectrumStyle::Default;
+}
+
+const char* spectrumStyleConfigName(SpectrumStyle style) {
+    switch (style) {
+    case SpectrumStyle::Bars: return "bars";
+    case SpectrumStyle::DreamyWave: return "dreamy-wave";
+    case SpectrumStyle::BackgroundWave: return "background-wave";
+    case SpectrumStyle::Default:
+    default: return "default";
+    }
+}
+
+int spectrumStyleIndex(SpectrumStyle style) {
+    switch (style) {
+    case SpectrumStyle::Bars: return 1;
+    case SpectrumStyle::DreamyWave: return 2;
+    case SpectrumStyle::BackgroundWave: return 3;
+    case SpectrumStyle::Default:
+    default: return 0;
+    }
+}
+
 // %APPDATA%\QQMusicLyric（不存在则创建）
 std::wstring configDir() {
     PWSTR p = nullptr;
@@ -306,6 +339,8 @@ struct App {
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
     bool spectrumOn_ = false;
+    SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    int spectrumOpacity_ = 40;
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
@@ -397,6 +432,23 @@ struct App {
     void applySpectrumOn(bool on) {
         spectrumOn_ = on;
         syncSpectrumWithMode();
+        saveSettings();
+    }
+
+    void applySpectrumStyle(int style) {
+        spectrumStyle_ = style == 1 ? SpectrumStyle::Bars
+                                     : style == 2 ? SpectrumStyle::DreamyWave
+                                                   : style == 3 ? SpectrumStyle::BackgroundWave
+                                                   : SpectrumStyle::Default;
+        if (taskbarHost)
+            taskbarHost->setSpectrumStyle(spectrumStyle_);
+        saveSettings();
+    }
+
+    void applySpectrumOpacity(int percent) {
+        spectrumOpacity_ = std::clamp(percent, 0, 100);
+        if (taskbarHost)
+            taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         saveSettings();
     }
 
@@ -626,6 +678,8 @@ struct App {
         taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setRenderMode(renderMode_);
+        taskbarHost->setSpectrumStyle(spectrumStyle_);
+        taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         taskbarHost->setSpectrumVisible(spectrumOn_ && renderMode_ == 0);
         if (spectrumOn_ && renderMode_ == 0)
             spectrum_.start();
@@ -1078,6 +1132,9 @@ void App::loadSettings() {
                                     ? MediaPopupBackground::Frosted
                                     : MediaPopupBackground::Solid;
         spectrumOn_ = j.value("spectrum", false);
+        spectrumStyle_ = spectrumStyleFromConfig(
+            j.value("spectrumStyle", std::string("default")));
+        spectrumOpacity_ = std::clamp(j.value("spectrumOpacity", 40), 0, 100);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
@@ -1138,6 +1195,8 @@ void App::saveSettings() {
                                          ? "frosted"
                                          : "solid";
         j["spectrum"] = spectrumOn_;
+        j["spectrumStyle"] = spectrumStyleConfigName(spectrumStyle_);
+        j["spectrumOpacity"] = spectrumOpacity_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
@@ -1889,6 +1948,8 @@ SettingsState App::currentSettingsState() const {
     st.platformIconVisible = platformIconVisible_;
     st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
     st.spectrumOn = spectrumOn_;
+    st.spectrumStyle = spectrumStyleIndex(spectrumStyle_);
+    st.spectrumOpacity = spectrumOpacity_;
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
@@ -1918,6 +1979,8 @@ SettingsActions App::buildSettingsActions() {
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
+    act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
+    act.onSpectrumOpacity = [this](int percent) { applySpectrumOpacity(percent); };
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };

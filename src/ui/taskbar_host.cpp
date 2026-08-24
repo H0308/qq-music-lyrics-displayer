@@ -54,8 +54,10 @@ constexpr float kLyricPreviewScale = kLyricPreviewFontScale / kLyricMainFontScal
 constexpr float kMinFont = 9.0f;
 constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
-constexpr float kSpectrumBarW = 7.0f;  // 频谱柱宽
-constexpr float kSpectrumGap = 6.0f;   // 频谱柱间隙
+constexpr float kSpectrumBarW = 5.0f;  // 频谱柱宽
+constexpr float kSpectrumGap = 3.0f;   // 频谱柱间隙
+constexpr float kSpectrumBottomPadding = 1.0f;
+constexpr float kSpectrumBarRadius = 2.0f; // 轻微圆角，保持柱状感
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylHaloWidth = 2.5f;
 constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
@@ -412,6 +414,8 @@ struct TaskbarHost::Impl {
     ULONGLONG vinylTickMs_ = 0;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
+    SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    int spectrumOpacityPct_ = 40;
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
@@ -587,9 +591,10 @@ struct TaskbarHost::Impl {
         }
         int minW = (int)std::lround(minWidthDip * scale());
         int maxW = (int)std::lround(maxWidthDip * scale());
-        // 频谱开启时整体加宽（频谱簇 + 与歌词的间距），不压缩歌词原有宽度；关闭即恢复
-        if (spectrumVisible_) {
-            int extra = (int)std::lround((spectrumClusterW() + kTextPadding) * scale());
+        // 仅独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
+        const float spectrumExtra = spectrumExtraW();
+        if (spectrumExtra > 0.0f) {
+            int extra = (int)std::lround(spectrumExtra * scale());
             minW += extra;
             maxW += extra;
         }
@@ -887,6 +892,25 @@ struct TaskbarHost::Impl {
         mediaPopup.setBackgroundMode(mode);
     }
 
+    void setSpectrumStyle(SpectrumStyle style) {
+        if (spectrumStyle_ == style)
+            return;
+        const bool wasBackground = spectrumStyle_ == SpectrumStyle::BackgroundWave;
+        spectrumStyle_ = style;
+        if (spectrumVisible_ && wasBackground != (spectrumStyle_ == SpectrumStyle::BackgroundWave))
+            adjustPosition();
+        render();
+    }
+
+    void setSpectrumOpacity(int percent) {
+        const int next = std::clamp(percent, 0, 100);
+        if (spectrumOpacityPct_ == next)
+            return;
+        spectrumOpacityPct_ = next;
+        if (spectrumStyle_ == SpectrumStyle::BackgroundWave)
+            render();
+    }
+
     void setSpectrumVisible(bool on) {
         if (spectrumVisible_ == on)
             return;
@@ -1063,25 +1087,186 @@ struct TaskbarHost::Impl {
 
     // 频谱开启时窗口整体加宽的宽度：频谱簇 + 与歌词区间的间距
     float spectrumExtraW() const {
-        return spectrumVisible_ ? spectrumClusterW() + kTextPadding : 0.0f;
+        return spectrumVisible_ && spectrumStyle_ != SpectrumStyle::BackgroundWave
+                   ? spectrumClusterW() + kTextPadding
+                   : 0.0f;
     }
 
-    // 频谱柱：x 起的一簇圆角柱，垂直方向以中线对称伸缩（位于歌词右侧，与左侧封面/歌曲信息对称）
-    void drawSpectrum(float x, float h) {
+    float spectrumLevel(int index) const {
+        return std::clamp(spectrumBands_[index], 0.0f, 1.0f);
+    }
+
+    void drawDefaultSpectrum(float x, float h) {
         auto* rt = renderer.renderTarget();
         if (!rt || !brushSpectrum_)
             return;
         constexpr int n = TaskbarHost::kSpectrumBands;
-        float cy = h * 0.5f;
-        float maxH = h * 0.74f;
-        float minH = 4.0f; // 静音时也保留小圆角柱，不消失
+        const float cy = h * 0.5f;
+        const float maxH = h * 0.74f;
+        constexpr float minH = 4.0f; // 静音时也保留小柱，不消失
         for (int i = 0; i < n; ++i) {
-            float bh = minH + spectrumBands_[i] * (maxH - minH);
+            const float bh = minH + spectrumLevel(i) * (maxH - minH);
             D2D1_ROUNDED_RECT rr{
                 D2D1::RectF(x, cy - bh * 0.5f, x + kSpectrumBarW, cy + bh * 0.5f),
                 kSpectrumBarW * 0.5f, kSpectrumBarW * 0.5f};
             rt->FillRoundedRectangle(rr, brushSpectrum_);
             x += kSpectrumBarW + kSpectrumGap;
+        }
+    }
+
+    // 新增样式：普通柱状图，柱底贴近歌词窗口下边缘，电平只向上增长。
+    void drawBarSpectrum(float x, float h) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !brushSpectrum_)
+            return;
+        constexpr int n = TaskbarHost::kSpectrumBands;
+        const float baseY = h - kSpectrumBottomPadding;
+        const float maxH = h * 0.82f;
+        constexpr float minH = 3.0f;
+        for (int i = 0; i < n; ++i) {
+            const float bh = minH + spectrumLevel(i) * (maxH - minH);
+            const D2D1_ROUNDED_RECT bar{
+                D2D1::RectF(x, baseY - bh, x + kSpectrumBarW, baseY),
+                kSpectrumBarRadius, kSpectrumBarRadius};
+            rt->FillRoundedRectangle(bar, brushSpectrum_);
+            x += kSpectrumBarW + kSpectrumGap;
+        }
+    }
+
+    // 填充波浪：以 baseY 为底边，width 可覆盖独立频谱区或歌曲内容背景区。
+    void drawWaveSpectrum(float x, float h, float width, float opacityScale) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !brushSpectrum_)
+            return;
+
+        constexpr int n = TaskbarHost::kSpectrumBands;
+        constexpr int samplesPerBand = 6;
+        constexpr int sampleCount = (n - 1) * samplesPerBand + 1;
+        constexpr float twoPi = 6.28318530718f;
+        const float baseY = h - kSpectrumBottomPadding;
+        const float minH = 2.0f;
+        const float maxH = std::max(minH + 1.0f, h * 0.76f);
+        const float phase = clientAnimations_
+                                ? static_cast<float>(frameNowMs_ % 60000ULL) / 1000.0f
+                                : 0.0f;
+
+        std::array<D2D1_POINT_2F, sampleCount> backWave{};
+        std::array<D2D1_POINT_2F, sampleCount> middleWave{};
+        std::array<D2D1_POINT_2F, sampleCount> frontWave{};
+        for (int i = 0; i < sampleCount; ++i) {
+            const float normalized = static_cast<float>(i) / (sampleCount - 1);
+            const float bandPosition = normalized * static_cast<float>(n - 1);
+            const int leftBand = std::min(n - 2, static_cast<int>(bandPosition));
+            const float local = bandPosition - static_cast<float>(leftBand);
+            const float smoothLocal = local * local * (3.0f - 2.0f * local);
+            const float leftLevel = spectrumLevel(leftBand);
+            const float rightLevel = spectrumLevel(leftBand + 1);
+            const float level = leftLevel + (rightLevel - leftLevel) * smoothLocal;
+
+            // 频段电平控制浪高，低频正弦只负责制造宽阔的海浪峰谷；每层使用
+            // 不同波长和相位，避免三层变成同一条线的缩放副本。
+            const float audio = std::clamp(level, 0.0f, 1.0f);
+            const float backTide = std::clamp(
+                0.5f + 0.5f * std::sin(twoPi * normalized * 0.92f + phase * 0.30f + 1.15f) +
+                    0.12f * std::sin(twoPi * normalized * 0.44f + phase * 0.16f - 0.4f),
+                0.0f, 1.0f);
+            const float middleTide = std::clamp(
+                0.5f + 0.5f * std::sin(twoPi * normalized * 1.08f + phase * 0.38f + 0.35f) +
+                    0.10f * std::sin(twoPi * normalized * 0.52f + phase * 0.20f + 1.0f),
+                0.0f, 1.0f);
+            const float frontTide = std::clamp(
+                0.5f + 0.5f * std::sin(twoPi * normalized * 1.24f + phase * 0.46f - 0.55f) +
+                    0.08f * std::sin(twoPi * normalized * 0.60f + phase * 0.24f + 0.7f),
+                0.0f, 1.0f);
+            const float backProfile = std::clamp(0.16f + audio * 0.34f + backTide * 0.50f,
+                                                 0.0f, 1.0f);
+            const float middleProfile =
+                std::clamp(0.10f + audio * 0.46f + middleTide * 0.42f, 0.0f, 1.0f);
+            const float frontProfile =
+                std::clamp(0.06f + audio * 0.62f + frontTide * 0.34f, 0.0f, 1.0f);
+            const float backAmplitude = minH + backProfile * (maxH * 0.88f - minH);
+            const float middleAmplitude = minH + middleProfile * (maxH * 0.76f - minH);
+            const float frontAmplitude = minH + frontProfile * (maxH - minH);
+            const float pointX = x + width * normalized;
+            backWave[i] = D2D1::Point2F(pointX, baseY - 1.6f - backAmplitude);
+            middleWave[i] = D2D1::Point2F(pointX, baseY - 0.8f - middleAmplitude);
+            frontWave[i] = D2D1::Point2F(pointX, baseY - frontAmplitude);
+        }
+
+        const float originalOpacity = brushSpectrum_->GetOpacity();
+        auto drawFilledWave = [&](const auto& points, float opacity) {
+            auto* d2d = renderer.d2d();
+            if (!d2d)
+                return;
+
+            ID2D1PathGeometry* geometry = nullptr;
+            if (FAILED(d2d->CreatePathGeometry(&geometry)) || !geometry)
+                return;
+            ID2D1GeometrySink* sink = nullptr;
+            if (FAILED(geometry->Open(&sink)) || !sink) {
+                geometry->Release();
+                return;
+            }
+
+            sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
+            for (int i = 1; i < sampleCount; ++i)
+                sink->AddLine(points[i]);
+            sink->AddLine(D2D1::Point2F(points[sampleCount - 1].x, baseY));
+            sink->AddLine(D2D1::Point2F(points[0].x, baseY));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            const HRESULT closeHr = sink->Close();
+            sink->Release();
+            if (SUCCEEDED(closeHr)) {
+                brushSpectrum_->SetOpacity(originalOpacity * opacityScale * opacity);
+                rt->FillGeometry(geometry, brushSpectrum_);
+            }
+            geometry->Release();
+        };
+        auto drawCurve = [&](const auto& points, float opacity, float strokeWidth) {
+            brushSpectrum_->SetOpacity(originalOpacity * opacityScale * opacity);
+            for (int i = 1; i < sampleCount; ++i)
+                rt->DrawLine(points[i - 1], points[i], brushSpectrum_, strokeWidth);
+        };
+
+        // 先铺后景到前景的连续波面，避免波峰下方出现大片空白。
+        drawFilledWave(backWave, 0.32f);
+        drawFilledWave(middleWave, 0.46f);
+        drawFilledWave(frontWave, 0.76f);
+
+        // 这条线与柱状图的柱底严格共用 baseY，切换样式时视觉基准不跳动。
+        brushSpectrum_->SetOpacity(originalOpacity * opacityScale * 0.16f);
+        rt->DrawLine(D2D1::Point2F(x, baseY), D2D1::Point2F(x + width, baseY),
+                     brushSpectrum_, 0.8f);
+        drawCurve(frontWave, 0.07f, 3.8f);
+        drawCurve(frontWave, 0.90f, 1.35f);
+        brushSpectrum_->SetOpacity(originalOpacity);
+    }
+
+    void drawDreamyWaveSpectrum(float x, float h) {
+        drawWaveSpectrum(x, h, spectrumClusterW(), 1.0f);
+    }
+
+    void drawBackgroundWaveSpectrum(float x, float h, float width) {
+        drawWaveSpectrum(x, h, width,
+                         static_cast<float>(spectrumOpacityPct_) / 100.0f);
+    }
+
+    // 默认保留原有的中线对称频谱效果；柱状图样式从窗口下边缘向上增长。
+    void drawSpectrum(float x, float h) {
+        switch (spectrumStyle_) {
+        case SpectrumStyle::Bars:
+            drawBarSpectrum(x, h);
+            break;
+        case SpectrumStyle::DreamyWave:
+            drawDreamyWaveSpectrum(x, h);
+            break;
+        case SpectrumStyle::BackgroundWave:
+            drawBackgroundWaveSpectrum(x, h, spectrumClusterW());
+            break;
+        case SpectrumStyle::Default:
+        default:
+            drawDefaultSpectrum(x, h);
+            break;
         }
     }
 
@@ -2660,8 +2845,10 @@ struct TaskbarHost::Impl {
         // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
         bool showControls = mouseOver_ && controlsOnHover_ &&
                             hoverControlStyle_ == HoverControlStyle::Inline;
-        // 频谱独占歌词区右端（窗口整体加宽，歌词宽度不变，见 adjustPosition）
-        bool showSpectrum = spectrumVisible_ && !showControls;
+        const bool backgroundSpectrum = spectrumVisible_ &&
+                                         spectrumStyle_ == SpectrumStyle::BackgroundWave;
+        // 独立频谱占用歌词区右端；背景波浪不改变窗口宽度和歌词布局。
+        bool showSpectrum = spectrumVisible_ && !showControls && !backgroundSpectrum;
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
         rt->BeginDraw();
@@ -2671,6 +2858,12 @@ struct TaskbarHost::Impl {
         // 背景：alpha 极低，视觉上透明但保证整个窗口可命中
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), kCornerRadius, kCornerRadius};
         rt->FillRoundedRectangle(bg, brushBg_);
+
+        if (backgroundSpectrum) {
+            const float waveX = infoStartX();
+            const float waveW = std::max(1.0f, w - waveX - kTextPadding);
+            drawBackgroundWaveSpectrum(waveX, h, waveW);
+        }
 
         // 左侧封面
         float s = coverSize();
@@ -3396,6 +3589,14 @@ void TaskbarHost::setRenderMode(int mode) {
 
 void TaskbarHost::setSpectrumVisible(bool on) {
     impl_->setSpectrumVisible(on);
+}
+
+void TaskbarHost::setSpectrumStyle(SpectrumStyle style) {
+    impl_->setSpectrumStyle(style);
+}
+
+void TaskbarHost::setSpectrumOpacity(int percent) {
+    impl_->setSpectrumOpacity(percent);
 }
 
 void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {

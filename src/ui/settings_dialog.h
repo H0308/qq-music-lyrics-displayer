@@ -13,6 +13,8 @@ struct SettingsState {
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
     bool spectrumOn = false;
+    int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪 3 背景波浪
+    int spectrumOpacity = 40; // 背景波浪透明度（0~100）
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
@@ -36,6 +38,8 @@ struct SettingsActions {
     std::function<void(bool)> onPlatformIconVisible;
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(bool)> onSpectrum;
+    std::function<void(int)> onSpectrumStyle;
+    std::function<void(int)> onSpectrumOpacity;
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;

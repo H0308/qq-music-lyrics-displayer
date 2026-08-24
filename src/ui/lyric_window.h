@@ -43,8 +43,8 @@ enum class DisplayScene {
     Spectrum,
 };
 
-// 频谱属于高频展示数据，不进入完整展示帧；TaskbarHost 与 AudioSpectrum 共用 6 段。
-constexpr int kPresentationSpectrumBands = 6;
+// 频谱属于高频展示数据，不进入完整展示帧；TaskbarHost 与 AudioSpectrum 共用 12 段。
+constexpr int kPresentationSpectrumBands = 12;
 
 // 高频播放补丁只携带逐字高亮和行过渡所需的字段。
 // frameRevision 用于阻止旧完整帧之后产生的补丁回写当前宿主。

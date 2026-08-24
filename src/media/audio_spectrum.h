@@ -11,7 +11,7 @@
 // 频段电平为 0~1，任意线程可随时读取（逐元素原子量）。
 class AudioSpectrum {
 public:
-    static constexpr int kBandCount = 6;
+    static constexpr int kBandCount = 12;
 
     AudioSpectrum() = default;
     ~AudioSpectrum();
