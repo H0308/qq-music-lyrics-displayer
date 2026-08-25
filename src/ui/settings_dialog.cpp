@@ -60,6 +60,7 @@ constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip
 constexpr float kNavW = 176.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
+constexpr float kHeaderH = 30.0f;
 constexpr float kTitleMinHeight = 22.0f;
 constexpr float kTitleTopPadding = 12.0f;
 constexpr float kTitleHintGap = 2.0f;
@@ -120,6 +121,7 @@ struct SettingsDialog::Impl {
         Radio,
         Slider,
         Button,
+        Header, // 分组标题：无卡片背景，不参与交互与焦点
     };
 
     struct Row {
@@ -299,6 +301,12 @@ struct SettingsDialog::Impl {
         return row;
     }
 
+    Row& addHeader(int page, const wchar_t* text) {
+        Row& row = addRow(page, 0, ControlKind::Header, text, nullptr, 0.0f, kHeaderH);
+        row.enabled = false;
+        return row;
+    }
+
     D2D1_RECT_F scrollBarHitRect() const {
         if (contentMaxScroll <= 0.0f || scrollTrackRect.bottom <= scrollTrackRect.top)
             return {};
@@ -364,6 +372,7 @@ struct SettingsDialog::Impl {
     }
 
     void createControls() {
+        addHeader(0, L"主题");
         addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
@@ -372,6 +381,7 @@ struct SettingsDialog::Impl {
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
                  true, kRowTallH);
+        addHeader(0, L"任务栏歌词");
         addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
         addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
         Row& platformIcon = addToggle(0, kIdPlatformIcon, L"显示平台图标",
@@ -386,6 +396,7 @@ struct SettingsDialog::Impl {
         progressBackground.checked = state.progressBackground;
         addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
                   state.progressBackgroundOpacity, state.progressBackground);
+        addHeader(0, L"悬浮控件与媒体卡片");
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
@@ -411,6 +422,7 @@ struct SettingsDialog::Impl {
             kRowTallH);
         autoTextContrast.checked = state.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
+        addHeader(0, L"切歌弹窗");
         Row& songToast = addRow(0, kIdSongToast, ControlKind::Toggle, L"切歌时弹出歌曲信息",
                                 L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
                                 L"始终不响应鼠标操作",
@@ -428,6 +440,7 @@ struct SettingsDialog::Impl {
         songToastSkipFullscreen.enabled = state.songToastEnabled;
         addRadio(0, kIdSongToastPosition, L"切歌弹窗位置", nullptr, {L"中上", L"中下"},
                  state.songToastPosition, state.songToastEnabled, kRowH);
+        addHeader(0, L"性能");
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -504,6 +517,8 @@ struct SettingsDialog::Impl {
     void updateHintHeights(fluent::FluentDialogSurface::Painter& painter) {
         bool changed = false;
         for (auto& row : rows[activePage]) {
+            if (row.kind == ControlKind::Header)
+                continue;
             const float labelW = row.labelRect.right - row.labelRect.left;
             const float measuredTitleHeight =
                 measureTextHeight(painter, row.text, labelW, 14.0f);
@@ -579,6 +594,13 @@ struct SettingsDialog::Impl {
 
         for (auto& row : rows[activePage]) {
             const float rowH = row.height;
+            if (row.kind == ControlKind::Header) {
+                // 分组标题无卡片，文字贴内容区左缘、垂直居中
+                row.labelRect = D2D1::RectF(contentX + 4.0f, y, contentX + contentW,
+                                            y + rowH);
+                y += rowH + kRowGap;
+                continue;
+            }
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
             const float innerX = contentX + 16.0f;
             const float controlX = contentX + contentW - 16.0f - row.controlW;
@@ -829,6 +851,11 @@ struct SettingsDialog::Impl {
         painter.target()->PushAxisAlignedClip(
             contentViewportRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         for (auto& row : rows[activePage]) {
+            if (row.kind == ControlKind::Header) {
+                painter.drawText(row.text, painter.textFormat(12.0f, 600), row.labelRect,
+                                 p.textSecondary);
+                continue;
+            }
             painter.fillRoundRect(p.cardFill, row.cardRect, fluent::metrics::cardRadius);
             painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
             painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect,
