@@ -361,6 +361,7 @@ struct App {
     int taskbarPosition_ = 0;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
+    MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
     bool mediaPopupFollowAlbum_ = false;
     bool mediaPopupAutoTextContrast_ = false;
@@ -611,6 +612,13 @@ struct App {
         saveSettings();
     }
 
+    void applyMediaPopupTrigger(int mode) {
+        mediaPopupTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
+        if (taskbarHost)
+            taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
+        saveSettings();
+    }
+
     void applyMediaPopupBackground(int mode) {
         mediaPopupBackground_ = mode == 1 ? MediaPopupBackground::Frosted
                                           : MediaPopupBackground::Solid;
@@ -842,6 +850,7 @@ struct App {
         taskbarHost->setLyricAlignment(lyricAlignment_);
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setHoverControlStyle(hoverControlStyle_);
+        taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
         taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
         taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
         taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
@@ -1376,6 +1385,9 @@ void App::loadSettings() {
         hoverControlStyle_ = j.value("hoverControlStyle", 0) == 1
                                  ? HoverControlStyle::Popup
                                  : HoverControlStyle::Inline;
+        mediaPopupTrigger_ = j.value("mediaPopupTrigger", 0) == 1
+                                 ? MediaPopupTrigger::Click
+                                 : MediaPopupTrigger::Hover;
         mediaPopupBackground_ = j.value("mediaPopupBackground", std::string("solid")) ==
                                         "frosted"
                                     ? MediaPopupBackground::Frosted
@@ -1465,6 +1477,7 @@ void App::saveSettings() {
         j["renderMode"] = renderMode_;
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
+        j["mediaPopupTrigger"] = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
         j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
                                          ? "frosted"
                                          : "solid";
@@ -2288,6 +2301,7 @@ SettingsState App::currentSettingsState() const {
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
+    st.mediaPopupTrigger = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
     st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
@@ -2324,6 +2338,7 @@ SettingsActions App::buildSettingsActions() {
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
+    act.onMediaPopupTrigger = [this](int mode) { applyMediaPopupTrigger(mode); };
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
     act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
     act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };

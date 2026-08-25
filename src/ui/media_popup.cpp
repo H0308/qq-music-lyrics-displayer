@@ -182,6 +182,7 @@ struct MediaPopup::Impl {
 
     bool enabled = false;
     bool available = false;
+    bool triggerOnHover = true;
     bool anchorHover = false;
     bool popupHover = false;
     bool popupVisible = false;
@@ -1285,8 +1286,17 @@ struct MediaPopup::Impl {
         if (!hwnd)
             return;
         KillTimer(hwnd, kHideTimer);
-        if (enabled && available && !popupVisible)
+        if (enabled && available && !popupVisible && triggerOnHover)
             SetTimer(hwnd, kShowTimer, kShowDelayMs, nullptr);
+    }
+
+    void onAnchorClick() {
+        anchorHover = true;
+        if (!hwnd || !enabled || !available || popupVisible)
+            return;
+        KillTimer(hwnd, kHideTimer);
+        KillTimer(hwnd, kShowTimer);
+        showPopup();
     }
 
     void onAnchorLeave() {
@@ -1523,8 +1533,23 @@ void MediaPopup::setEnabled(bool enabled) {
         return;
     if (!enabled)
         impl_->hideImmediate();
-    else if (impl_->anchorHover && impl_->available && !impl_->popupVisible)
+    else if (impl_->triggerOnHover && impl_->anchorHover && impl_->available &&
+             !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+}
+
+void MediaPopup::setTriggerOnHover(bool on) {
+    if (impl_->triggerOnHover == on)
+        return;
+    impl_->triggerOnHover = on;
+    if (!impl_->hwnd)
+        return;
+    if (!on) {
+        KillTimer(impl_->hwnd, kShowTimer);
+    } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
+               !impl_->popupVisible) {
+        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    }
 }
 
 void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
@@ -1631,7 +1656,8 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
         else
             impl_->render();
     }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
+    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
+        impl_->triggerOnHover)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
@@ -1655,6 +1681,10 @@ void MediaPopup::onAnchorEnter() {
 
 void MediaPopup::onAnchorLeave() {
     impl_->onAnchorLeave();
+}
+
+void MediaPopup::onAnchorClick() {
+    impl_->onAnchorClick();
 }
 
 void MediaPopup::hideImmediate() {

@@ -20,6 +20,12 @@ enum class HoverControlStyle {
     Popup,
 };
 
+// 媒体卡片展开方式：悬浮停留片刻后展开，或点击歌词区域任意位置立即展开
+enum class MediaPopupTrigger {
+    Hover,
+    Click,
+};
+
 enum class SpectrumStyle {
     Default,
     Bars,
@@ -66,6 +72,8 @@ public:
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
+    // 媒体卡片展开方式：悬浮延迟展开或点击立即展开。
+    void setMediaPopupTrigger(MediaPopupTrigger trigger);
     // 媒体卡片背景：当前纯色或 Windows 系统磨砂材质。
     void setMediaPopupBackground(MediaPopupBackground mode);
     // 是否让磨砂背景跟随当前专辑主色。

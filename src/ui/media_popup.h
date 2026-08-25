@@ -23,6 +23,8 @@ public:
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setEnabled(bool enabled);
+    // 触发方式：true 悬浮停留片刻后展开（默认），false 由点击展开（onAnchorClick）
+    void setTriggerOnHover(bool on);
     void setBackgroundMode(MediaPopupBackground mode);
     void setFollowAlbumBackground(bool on);
     void setAutoTextContrast(bool on);
@@ -35,6 +37,8 @@ public:
 
     void onAnchorEnter();
     void onAnchorLeave();
+    // 点击锚点（任务栏歌词区域任意位置）：立即展开，不走悬浮延迟
+    void onAnchorClick();
     void hideImmediate();
 
 private:

@@ -280,6 +280,7 @@ struct TaskbarHost::Impl {
     bool trackingLeave_ = false;
     bool controlsOnHover_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
+    MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
     MediaPopup mediaPopup;
     bool quitting = false;
 
@@ -370,6 +371,7 @@ struct TaskbarHost::Impl {
     bool songTransitionPending_ = false;
     ULONGLONG frameNowMs_ = 0;
     ID2D1SolidColorBrush* brushBg_ = nullptr;
+    ID2D1SolidColorBrush* brushHover_ = nullptr;
     ID2D1SolidColorBrush* brushText_ = nullptr;
     ID2D1SolidColorBrush* brushDim_ = nullptr;
     ID2D1SolidColorBrush* brushBtn_ = nullptr;
@@ -713,12 +715,14 @@ struct TaskbarHost::Impl {
         // 背景使用极低的 alpha，视觉上透明但保证分层窗口命中测试覆盖整个区域
         if (lightTheme_) {
             rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.01f), &brushBg_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.09f), &brushHover_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.08f, 0.08f, 0.95f), &brushText_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.30f, 0.30f, 0.75f), &brushDim_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.90f), &brushBtn_);
             rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.30f), &brushBtnDisabled_);
         } else {
             rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.01f), &brushBg_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f), &brushHover_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.95f), &brushText_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.65f), &brushDim_);
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f), &brushBtn_);
@@ -884,6 +888,13 @@ struct TaskbarHost::Impl {
         if (popupEnabled && mouseOver_)
             mediaPopup.onAnchorEnter();
         render();
+    }
+
+    void setMediaPopupTrigger(MediaPopupTrigger trigger) {
+        if (mediaPopupTrigger_ == trigger)
+            return;
+        mediaPopupTrigger_ = trigger;
+        mediaPopup.setTriggerOnHover(trigger == MediaPopupTrigger::Hover);
     }
 
     void setMediaPopupBackground(MediaPopupBackground mode) {
@@ -1521,6 +1532,7 @@ struct TaskbarHost::Impl {
         r(outgoingLyricLayout_);
         r(outgoingSecondaryLayout_);
         r(brushBg_);
+        r(brushHover_);
         r(brushText_);
         r(brushDim_);
         r(brushBtn_);
@@ -2936,6 +2948,9 @@ struct TaskbarHost::Impl {
         // 背景：alpha 极低，视觉上透明但保证整个窗口可命中
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), kCornerRadius, kCornerRadius};
         rt->FillRoundedRectangle(bg, brushBg_);
+        // 悬浮反馈：鼠标位于歌词区域时叠加一层柔和的圆角底色
+        if (mouseOver_ && brushHover_)
+            rt->FillRoundedRectangle(bg, brushHover_);
 
         if (backgroundSpectrum) {
             const float waveX = infoStartX();
@@ -3440,6 +3455,10 @@ struct TaskbarHost::Impl {
             int btn = hitButton(mx, my);
             if (btn >= 0 && onControl)
                 onControl(static_cast<MediaControl>(btn));
+            // 点击展开模式：点击歌词区域任意位置立即展开媒体卡片
+            else if (controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Popup &&
+                     mediaPopupTrigger_ == MediaPopupTrigger::Click)
+                mediaPopup.onAnchorClick();
             return 0;
         }
         case WM_QUERYENDSESSION:
@@ -3649,6 +3668,10 @@ void TaskbarHost::setControlsOnHover(bool on) {
 
 void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
     impl_->setHoverControlStyle(style);
+}
+
+void TaskbarHost::setMediaPopupTrigger(MediaPopupTrigger trigger) {
+    impl_->setMediaPopupTrigger(trigger);
 }
 
 void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {

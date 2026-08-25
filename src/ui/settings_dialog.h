@@ -21,6 +21,7 @@ struct SettingsState {
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
+    int mediaPopupTrigger = 0; // 0 悬浮展开 1 点击展开
     int mediaPopupBackground = 0; // 0 纯色 1 磨砂玻璃
     bool mediaPopupFollowAlbum = false; // 磨砂背景跟随专辑
     bool mediaPopupAutoTextContrast = false; // 磨砂背景自动适配文字颜色
@@ -51,6 +52,7 @@ struct SettingsActions {
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;
+    std::function<void(int)> onMediaPopupTrigger;
     std::function<void(int)> onMediaPopupBackground;
     std::function<void(bool)> onMediaPopupFollowAlbum;
     std::function<void(bool)> onMediaPopupAutoTextContrast;

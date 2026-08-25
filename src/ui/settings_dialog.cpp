@@ -28,6 +28,7 @@ constexpr int kIdSpectrumBackground = 428;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
+constexpr int kIdMediaPopupTrigger = 437;
 constexpr int kIdMediaPopupBackground = 418;
 constexpr int kIdMediaPopupFollowAlbum = 426;
 constexpr int kIdMediaPopupAutoTextContrast = 427;
@@ -238,6 +239,8 @@ struct SettingsDialog::Impl {
         auto* background = findRow(kIdMediaPopupBackground);
         if (background)
             background->enabled = popupEnabled;
+        if (auto* trigger = findRow(kIdMediaPopupTrigger))
+            trigger->enabled = popupEnabled;
         if (auto* followAlbum = findRow(kIdMediaPopupFollowAlbum))
             followAlbum->enabled = popupEnabled && background && background->selected == 1;
         if (auto* autoTextContrast = findRow(kIdMediaPopupAutoTextContrast))
@@ -355,6 +358,10 @@ struct SettingsDialog::Impl {
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
                  {L"内嵌控件", L"媒体卡片"}, state.hoverControlStyle, state.hoverControls,
                  kRowTallH);
+        addRadio(0, kIdMediaPopupTrigger, L"媒体卡片展开方式",
+                 L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
+                 {L"悬浮展开", L"点击展开"}, state.mediaPopupTrigger,
+                 state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
         addRadio(0, kIdMediaPopupBackground, L"媒体卡片背景",
                  L"纯色保持当前外观；磨砂玻璃使用 Windows 系统背景材质",
                  {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
@@ -940,6 +947,10 @@ struct SettingsDialog::Impl {
                 actions.onHoverControlStyle(row->selected);
             updateMediaPopupBackgroundRowsEnabled();
             break;
+        case kIdMediaPopupTrigger:
+            if (actions.onMediaPopupTrigger)
+                actions.onMediaPopupTrigger(row->selected);
+            break;
         case kIdMediaPopupBackground:
             if (actions.onMediaPopupBackground)
                 actions.onMediaPopupBackground(row->selected);
@@ -1060,6 +1071,8 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdMediaPopupBackground)) {
             row->selected = s.mediaPopupBackground;
         }
+        if (auto* row = findRow(kIdMediaPopupTrigger))
+            row->selected = s.mediaPopupTrigger;
         if (auto* row = findRow(kIdMediaPopupFollowAlbum))
             row->checked = s.mediaPopupFollowAlbum;
         if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
