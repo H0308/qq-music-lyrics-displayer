@@ -32,6 +32,14 @@ enum class SpectrumStyle {
     DreamyWave,
 };
 
+// 任务栏歌词背景：无 / 封面模糊 / 纯色（跟随任务栏深浅色）；
+// 画在最底层，可与播放进度背景、频谱背景波浪叠加
+enum class TaskbarBackground {
+    None,
+    CoverBlur,
+    Solid,
+};
+
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
 // 外观参考 Windows 11 原生媒体控制卡片：左侧显示圆角封面+歌名+歌手，
 // 右侧显示当前行歌词（超长自动滚动），鼠标悬浮时右侧叠加显示播放控制按钮。
@@ -107,6 +115,10 @@ public:
     // 与背景波浪互斥（背景波浪生效时不绘制）
     void setProgressBackground(bool on);
     void setProgressBackgroundOpacity(int percent);
+
+    // 任务栏歌词背景：封面模糊（不透明度可调）或跟随深浅色的纯色，画在最底层
+    void setBackground(TaskbarBackground mode);
+    void setCoverBackgroundOpacity(int percent);
 
     void show() override;
     void hide() override;

@@ -20,6 +20,8 @@ struct SettingsState {
     int spectrumOpacity = 40; // 背景波浪不透明度（0~100）
     bool progressBackground = false; // 播放进度背景（与背景波浪互斥）
     int progressBackgroundOpacity = 25; // 播放进度背景不透明度（0~100）
+    int taskbarBackground = 0; // 任务栏歌词背景：0 无 1 封面模糊 2 纯色（画在最底层，可与其他背景叠加）
+    int coverBackgroundOpacity = 60; // 封面模糊背景不透明度（0~100）
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
@@ -57,6 +59,8 @@ struct SettingsActions {
     std::function<void(int)> onSpectrumOpacity;
     std::function<void(bool)> onProgressBackground;
     std::function<void(int)> onProgressBackgroundOpacity;
+    std::function<void(int)> onTaskbarBackground;
+    std::function<void(int)> onCoverBackgroundOpacity;
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;

@@ -8,6 +8,7 @@
 #include "volume_popup.h"
 
 #include <d2d1.h>
+#include <d2d1effects.h>
 #include <dwrite.h>
 #include <gdiplus.h>
 #include <objbase.h>
@@ -63,6 +64,14 @@ constexpr float kSpectrumBarRadius = 2.0f; // 轻微圆角，保持柱状感
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylHaloWidth = 2.5f;
 constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
+constexpr float kCoverBlurStdDev = 6.0f;  // 封面模糊背景的高斯模糊强度（封面按显示尺寸解码，拉伸后等效更强）
+
+// d2d1effects.h 只声明这些 GUID；当前工程的链接配置不提供其外部定义，
+// 这里保留 Direct2D 标准 Gaussian Blur / Scale CLSID 的内部定义（与 media_popup.cpp 一致）。
+constexpr CLSID kGaussianBlurClsid = {
+    0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
+constexpr CLSID kScaleClsid = {
+    0x9daf9369, 0x3846, 0x4d0e, {0xa4, 0x4e, 0x0c, 0x60, 0x79, 0x34, 0xa5, 0xd7}};
 
 ULONGLONG monotonicNowMs() {
     static const LARGE_INTEGER frequency = [] {
@@ -424,6 +433,14 @@ struct TaskbarHost::Impl {
     bool progressBackground_ = false;
     int progressBackgroundOpacityPct_ = 25;
     ID2D1SolidColorBrush* brushProgressBg_ = nullptr;
+    // 任务栏歌词背景：封面模糊（GaussianBlur → Scale 效果链 + 主题遮罩）或纯色；
+    // 画在最底层，可与进度背景、背景波浪叠加
+    TaskbarBackground background_ = TaskbarBackground::None;
+    int coverBackgroundOpacityPct_ = 60;
+    ID2D1SolidColorBrush* brushBackground_ = nullptr; // 纯色填充与模糊遮罩共用（每帧 SetColor）
+    ID2D1Effect* coverBlurFx_ = nullptr;
+    ID2D1Effect* coverScaleFx_ = nullptr;
+    ID2D1Bitmap* coverBlurInput_ = nullptr; // 模糊链当前绑定的封面（不持有引用，仅用于比较）
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
@@ -745,6 +762,8 @@ struct TaskbarHost::Impl {
         createLyricBrushes();
         // 进度背景颜色每帧经 SetColor 写入，这里只建空画刷
         rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brushProgressBg_);
+        // 纯色背景/封面模糊遮罩同样每帧 SetColor
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brushBackground_);
         rt->CreateLayer(&coverLayer_);
         recreateFormats();
     }
@@ -979,6 +998,22 @@ struct TaskbarHost::Impl {
             return;
         progressBackgroundOpacityPct_ = next;
         if (progressBackgroundActive())
+            render();
+    }
+
+    void setBackground(TaskbarBackground mode) {
+        if (background_ == mode)
+            return;
+        background_ = mode;
+        render();
+    }
+
+    void setCoverBackgroundOpacity(int percent) {
+        const int next = std::clamp(percent, 0, 100);
+        if (coverBackgroundOpacityPct_ == next)
+            return;
+        coverBackgroundOpacityPct_ = next;
+        if (background_ == TaskbarBackground::CoverBlur)
             render();
     }
 
@@ -1586,6 +1621,10 @@ struct TaskbarHost::Impl {
         r(brushVinylGroove_);
         r(brushSpectrum_);
         r(brushProgressBg_);
+        r(brushBackground_);
+        r(coverBlurFx_);
+        r(coverScaleFx_);
+        coverBlurInput_ = nullptr;
         for (auto& cache : textFxCaches_) {
             r(cache.target);
             cache = {};
@@ -1707,6 +1746,8 @@ struct TaskbarHost::Impl {
         if (coverBmp) {
             coverBmp->Release();
             coverBmp = nullptr;
+            // 旧封面可能仍被模糊链引用，强制下帧重新绑定输入
+            coverBlurInput_ = nullptr;
         }
         auto* rt = renderer.renderTarget();
         if (!rt || !media.thumbnail || media.thumbnail->empty())
@@ -1771,6 +1812,42 @@ struct TaskbarHost::Impl {
         coverBmp = decoded; // ID2D1Bitmap1 派生自 ID2D1Bitmap
         pixels->UnlockBits(&bitmapData);
         stream->Release();
+    }
+
+    // 封面模糊链：GaussianBlur → Scale 铺满全窗。效果与设备同生命周期，
+    // 封面更换或设备重建后经 coverBlurInput_ 惰性重绑；窗口尺寸每帧可能变化，
+    // Scale 参数便宜，直接按帧写入
+    ID2D1Effect* ensureCoverBlurChain(float w, float h) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !coverBmp)
+            return nullptr;
+        if (!coverBlurFx_) {
+            if (FAILED(rt->CreateEffect(kGaussianBlurClsid, &coverBlurFx_)))
+                return nullptr;
+            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                                   kCoverBlurStdDev);
+            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
+                                   D2D1_GAUSSIANBLUR_OPTIMIZATION_SPEED);
+            // SOFT（镜像）避免边缘模糊后透出黑边
+            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_SOFT);
+        }
+        if (!coverScaleFx_) {
+            if (FAILED(rt->CreateEffect(kScaleClsid, &coverScaleFx_)))
+                return nullptr;
+            coverScaleFx_->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE,
+                                    D2D1_SCALE_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            coverScaleFx_->SetInputEffect(0, coverBlurFx_);
+        }
+        if (coverBlurInput_ != coverBmp) {
+            coverBlurFx_->SetInput(0, coverBmp);
+            coverBlurInput_ = coverBmp;
+        }
+        const D2D1_SIZE_F size = coverBmp->GetSize();
+        if (size.width <= 0.0f || size.height <= 0.0f)
+            return nullptr;
+        coverScaleFx_->SetValue(D2D1_SCALE_PROP_SCALE,
+                                D2D1::Vector2F(w / size.width, h / size.height));
+        return coverScaleFx_;
     }
 
     void decodePlatformIcon() {
@@ -3047,12 +3124,46 @@ struct TaskbarHost::Impl {
         bool showSpectrum = spectrumVisible_ && !showControls && !backgroundSpectrum;
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
+        // 模糊效果链涉及资源创建（CreateEffect），与画刷一样放在 BeginDraw 之前
+        ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp
+                                          ? ensureCoverBlurChain(w, h)
+                                          : nullptr;
+
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
         // 背景：alpha 极低，视觉上透明但保证整个窗口可命中
         D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), kCornerRadius, kCornerRadius};
+
+        // 封面模糊背景：模糊后的封面按不透明度铺满全窗，叠加主题遮罩保证文字可读；
+        // 纯色背景：跟随任务栏深浅色。画在最底层，进度背景/背景波浪叠加其上
+        if (coverBlurChain && coverLayer_ && brushBackground_) {
+            ID2D1RoundedRectangleGeometry* clip = nullptr;
+            if (auto* factory = renderer.d2d())
+                factory->CreateRoundedRectangleGeometry(bg, &clip);
+            if (clip) {
+                rt->PushLayer(D2D1::LayerParameters1(
+                                  D2D1::InfiniteRect(), clip,
+                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                  D2D1::Matrix3x2F::Identity(),
+                                  coverBackgroundOpacityPct_ / 100.0f),
+                              coverLayer_);
+                rt->DrawImage(coverBlurChain, D2D1::Point2F(0.0f, 0.0f));
+                rt->PopLayer();
+                clip->Release();
+                brushBackground_->SetColor(lightTheme_
+                                               ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f)
+                                               : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f));
+                rt->FillRoundedRectangle(bg, brushBackground_);
+            }
+        } else if (background_ == TaskbarBackground::Solid && brushBackground_) {
+            brushBackground_->SetColor(lightTheme_
+                                           ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.85f)
+                                           : D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.85f));
+            rt->FillRoundedRectangle(bg, brushBackground_);
+        }
+
         rt->FillRoundedRectangle(bg, brushBg_);
         // 悬浮反馈：鼠标位于歌词区域时叠加一层柔和的圆角底色
         if (mouseOver_ && brushHover_)
@@ -3919,6 +4030,14 @@ void TaskbarHost::setProgressBackground(bool on) {
 
 void TaskbarHost::setProgressBackgroundOpacity(int percent) {
     impl_->setProgressBackgroundOpacity(percent);
+}
+
+void TaskbarHost::setBackground(TaskbarBackground mode) {
+    impl_->setBackground(mode);
+}
+
+void TaskbarHost::setCoverBackgroundOpacity(int percent) {
+    impl_->setCoverBackgroundOpacity(percent);
 }
 
 void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {

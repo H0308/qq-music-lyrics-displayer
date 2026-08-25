@@ -27,6 +27,8 @@ constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdSpectrumBackground = 428;
 constexpr int kIdProgressBackground = 438;
 constexpr int kIdProgressBackgroundOpacity = 439;
+constexpr int kIdTaskbarBackground = 444;
+constexpr int kIdCoverBackgroundOpacity = 445;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
@@ -266,6 +268,13 @@ struct SettingsDialog::Impl {
                background->checked;
     }
 
+    // 背景波浪行的可用态：频谱开 + 梦幻波浪样式
+    bool spectrumBackgroundAvailable() const {
+        const auto* spectrum = findRow(kIdSpectrum);
+        const auto* style = findRow(kIdSpectrumStyle);
+        return spectrum && spectrum->checked && style && style->selected == 2;
+    }
+
     void updateProgressBackgroundRowsEnabled() {
         const bool available = !backgroundWaveActive();
         if (auto* row = findRow(kIdProgressBackground))
@@ -396,6 +405,12 @@ struct SettingsDialog::Impl {
         progressBackground.checked = state.progressBackground;
         addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
                   state.progressBackgroundOpacity, state.progressBackground);
+        addRadio(0, kIdTaskbarBackground, L"任务栏歌词背景",
+             L"封面模糊将专辑封面高斯模糊后铺满背景；纯色跟随任务栏深浅色；画在最底层，可与播放进度背景、背景波浪叠加",
+                 {L"无", L"封面模糊", L"纯色"}, state.taskbarBackground,
+                 true, kRowTallH);
+        addSlider(0, kIdCoverBackgroundOpacity, L"封面背景不透明度",
+                  state.coverBackgroundOpacity, state.taskbarBackground == 1);
         addHeader(0, L"悬浮控件与媒体卡片");
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
@@ -975,28 +990,22 @@ struct SettingsDialog::Impl {
             if (auto* style = findRow(kIdSpectrumStyle))
                 style->enabled = row->checked;
             if (auto* background = findRow(kIdSpectrumBackground))
-                background->enabled = row->checked &&
-                                      findRow(kIdSpectrumStyle) &&
-                                      findRow(kIdSpectrumStyle)->selected == 2;
+                background->enabled = spectrumBackgroundAvailable();
             if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = row->checked &&
+                opacity->enabled = spectrumBackgroundAvailable() &&
                                    findRow(kIdSpectrumBackground) &&
-                                   findRow(kIdSpectrumBackground)->checked &&
-                                   findRow(kIdSpectrumStyle) &&
-                                   findRow(kIdSpectrumStyle)->selected == 2;
+                                   findRow(kIdSpectrumBackground)->checked;
             if (actions.onSpectrum)
                 actions.onSpectrum(row->checked);
             updateProgressBackgroundRowsEnabled();
             break;
         case kIdSpectrumStyle:
             if (auto* background = findRow(kIdSpectrumBackground))
-                background->enabled = row->selected == 2 &&
-                                      findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
+                background->enabled = spectrumBackgroundAvailable();
             if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = row->selected == 2 &&
+                opacity->enabled = spectrumBackgroundAvailable() &&
                                    findRow(kIdSpectrumBackground) &&
-                                   findRow(kIdSpectrumBackground)->checked &&
-                                   findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
+                                   findRow(kIdSpectrumBackground)->checked;
             if (actions.onSpectrumStyle)
                 actions.onSpectrumStyle(row->selected);
             updateProgressBackgroundRowsEnabled();
@@ -1004,10 +1013,7 @@ struct SettingsDialog::Impl {
         case kIdSpectrumBackground:
             row->checked = !row->checked;
             if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = row->checked &&
-                                   findRow(kIdSpectrumStyle) &&
-                                   findRow(kIdSpectrumStyle)->selected == 2 &&
-                                   findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
+                opacity->enabled = row->checked && spectrumBackgroundAvailable();
             if (actions.onSpectrumBackground)
                 actions.onSpectrumBackground(row->checked);
             updateProgressBackgroundRowsEnabled();
@@ -1016,10 +1022,19 @@ struct SettingsDialog::Impl {
             if (actions.onSpectrumOpacity)
                 actions.onSpectrumOpacity(row->value);
             break;
+        case kIdTaskbarBackground:
+            if (auto* opacity = findRow(kIdCoverBackgroundOpacity))
+                opacity->enabled = row->selected == 1;
+            if (actions.onTaskbarBackground)
+                actions.onTaskbarBackground(row->selected);
+            break;
+        case kIdCoverBackgroundOpacity:
+            if (actions.onCoverBackgroundOpacity)
+                actions.onCoverBackgroundOpacity(row->value);
+            break;
         case kIdProgressBackground:
             row->checked = !row->checked;
-            if (auto* opacity = findRow(kIdProgressBackgroundOpacity))
-                opacity->enabled = row->checked && !backgroundWaveActive();
+            updateProgressBackgroundRowsEnabled();
             if (actions.onProgressBackground)
                 actions.onProgressBackground(row->checked);
             break;
@@ -1178,6 +1193,12 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdSpectrumOpacity)) {
             row->value = std::clamp(s.spectrumOpacity, 0, 100);
             row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground;
+        }
+        if (auto* row = findRow(kIdTaskbarBackground))
+            row->selected = std::clamp(s.taskbarBackground, 0, 2);
+        if (auto* row = findRow(kIdCoverBackgroundOpacity)) {
+            row->value = std::clamp(s.coverBackgroundOpacity, 0, 100);
+            row->enabled = s.taskbarBackground == 1;
         }
         if (auto* row = findRow(kIdProgressBackground))
             row->checked = s.progressBackground;

@@ -407,6 +407,9 @@ struct App {
     // 播放进度背景：与背景波浪互斥，不透明度默认 25% 保证文字可读
     bool progressBackground_ = false;
     int progressBackgroundOpacity_ = 25;
+    // 任务栏歌词背景：0 无 1 封面模糊 2 纯色（画在最底层，可与进度背景/背景波浪叠加）
+    int taskbarBackground_ = 0;
+    int coverBackgroundOpacity_ = 60;
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
     bool songInfoVisible_ = true;
@@ -613,6 +616,20 @@ struct App {
         progressBackgroundOpacity_ = std::clamp(percent, 0, 100);
         if (taskbarHost)
             taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        saveSettings();
+    }
+
+    void applyTaskbarBackground(int mode) {
+        taskbarBackground_ = std::clamp(mode, 0, 2);
+        if (taskbarHost)
+            taskbarHost->setBackground(static_cast<TaskbarBackground>(taskbarBackground_));
+        saveSettings();
+    }
+
+    void applyCoverBackgroundOpacity(int percent) {
+        coverBackgroundOpacity_ = std::clamp(percent, 0, 100);
+        if (taskbarHost)
+            taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
         saveSettings();
     }
 
@@ -1002,6 +1019,8 @@ struct App {
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         taskbarHost->setProgressBackground(progressBackground_);
         taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        taskbarHost->setBackground(static_cast<TaskbarBackground>(taskbarBackground_));
+        taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
         updateTrayIcon();
@@ -1591,6 +1610,8 @@ void App::loadSettings() {
         spectrumOpacity_ = std::clamp(j.value("spectrumOpacity", 40), 0, 100);
         progressBackground_ = j.value("progressBackground", false);
         progressBackgroundOpacity_ = std::clamp(j.value("progressBackgroundOpacity", 25), 0, 100);
+        taskbarBackground_ = std::clamp(j.value("taskbarBackground", 0), 0, 2);
+        coverBackgroundOpacity_ = std::clamp(j.value("coverBackgroundOpacity", 60), 0, 100);
         autoCheckOnStartup_ = j.value("autoCheckOnStartup", true);
         useGiteeUpdateSource_ = j.value("updateSource", std::string("github")) == "gitee";
         lyricFollowAlbum_ = j.value("lyricFollowAlbum", false);
@@ -1678,6 +1699,8 @@ void App::saveSettings() {
         j["spectrumOpacity"] = spectrumOpacity_;
         j["progressBackground"] = progressBackground_;
         j["progressBackgroundOpacity"] = progressBackgroundOpacity_;
+        j["taskbarBackground"] = taskbarBackground_;
+        j["coverBackgroundOpacity"] = coverBackgroundOpacity_;
         j["autoCheckOnStartup"] = autoCheckOnStartup_;
         j["updateSource"] = useGiteeUpdateSource_ ? "gitee" : "github";
         j["lyricFollowAlbum"] = lyricFollowAlbum_;
@@ -2489,6 +2512,8 @@ SettingsState App::currentSettingsState() const {
     st.spectrumOpacity = spectrumOpacity_;
     st.progressBackground = progressBackground_;
     st.progressBackgroundOpacity = progressBackgroundOpacity_;
+    st.taskbarBackground = taskbarBackground_;
+    st.coverBackgroundOpacity = coverBackgroundOpacity_;
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
@@ -2533,6 +2558,10 @@ SettingsActions App::buildSettingsActions() {
     act.onProgressBackground = [this](bool on) { applyProgressBackground(on); };
     act.onProgressBackgroundOpacity = [this](int percent) {
         applyProgressBackgroundOpacity(percent);
+    };
+    act.onTaskbarBackground = [this](int mode) { applyTaskbarBackground(mode); };
+    act.onCoverBackgroundOpacity = [this](int percent) {
+        applyCoverBackgroundOpacity(percent);
     };
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
