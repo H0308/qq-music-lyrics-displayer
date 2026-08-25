@@ -2,7 +2,6 @@
 
 #include "lyric_window.h"
 
-#include <array>
 #include <functional>
 #include <memory>
 
@@ -32,10 +31,6 @@ public:
     void setMedia(const OverlayMediaInfo& info, bool available,
                   bool animateSongTransition = false);
     void setProgress(int64_t positionMs);
-    void setSpectrumBands(const std::array<float, kPresentationSpectrumBands>& bands);
-    void setSpectrumDemandCallback(std::function<void(bool)> cb);
-    bool needsAnimation() const;
-    void advanceAnimation(ULONGLONG nowMs);
     void setAnchor(HWND anchor);
 
     void onAnchorEnter();

@@ -281,8 +281,6 @@ struct TaskbarHost::Impl {
     bool controlsOnHover_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopup mediaPopup;
-    bool mediaPopupSpectrumDemand_ = false;
-    std::function<void(bool)> onMediaPopupSpectrumDemand;
     bool quitting = false;
 
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
@@ -536,12 +534,6 @@ struct TaskbarHost::Impl {
         hwnd = h;
         if (!mediaPopup.create(inst, hwnd))
             runtime_log::writef(L"[taskbar] media popup creation failed");
-        mediaPopup.setSpectrumDemandCallback([this](bool demand) {
-            mediaPopupSpectrumDemand_ = demand;
-            if (onMediaPopupSpectrumDemand)
-                onMediaPopupSpectrumDemand(demand);
-            refreshFrameTimer();
-        });
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         return true;
@@ -894,13 +886,6 @@ struct TaskbarHost::Impl {
         render();
     }
 
-    void setMediaPopupSpectrumDemandCallback(std::function<void(bool)> cb) {
-        onMediaPopupSpectrumDemand = std::move(cb);
-        if (onMediaPopupSpectrumDemand)
-            onMediaPopupSpectrumDemand(mediaPopupSpectrumDemand_);
-        refreshFrameTimer();
-    }
-
     void setMediaPopupBackground(MediaPopupBackground mode) {
         mediaPopup.setBackgroundMode(mode);
     }
@@ -948,17 +933,13 @@ struct TaskbarHost::Impl {
 
     void setSpectrumVisible(bool on) {
         if (spectrumVisible_ == on) {
-            if (!on) {
+            if (!on)
                 spectrumBands_.fill(0.0f);
-                mediaPopup.setSpectrumBands(spectrumBands_);
-            }
             return;
         }
         spectrumVisible_ = on;
-        if (!on) {
+        if (!on)
             spectrumBands_.fill(0.0f);
-            mediaPopup.setSpectrumBands(spectrumBands_);
-        }
         // 先改窗口宽度再渲染：若在 render 内经 layoutDirty_ 改大小，
         // render 结尾的 present 会用旧尺寸位图把窗口尺寸拽回去（与 setPositionMode 同序）
         adjustPosition();
@@ -1013,7 +994,6 @@ struct TaskbarHost::Impl {
 
     void setSpectrumBands(const std::array<float, TaskbarHost::kSpectrumBands>& bands) {
         spectrumBands_ = bands;
-        mediaPopup.setSpectrumBands(spectrumBands_);
     }
 
     void applyPlaybackPatch(const PlaybackPatch& patch) {
@@ -1048,7 +1028,6 @@ struct TaskbarHost::Impl {
             patch.requestGeneration != requestGeneration_)
             return;
         spectrumBands_ = patch.bands;
-        mediaPopup.setSpectrumBands(spectrumBands_);
     }
 
     void applyPresentationFrame(const PresentationFrame& frame) {
@@ -3287,8 +3266,6 @@ struct TaskbarHost::Impl {
         if (media.playing && clientAnimations_ && albumCoverVisible_ &&
             albumCoverEffect_ == AlbumCoverEffect::Vinyl)
             return true;
-        if (mediaPopup.needsAnimation())
-            return true;
         if (media.playing && spectrumVisible_) {
             for (float v : spectrumBands_)
                 if (v > 0.01f)
@@ -3397,8 +3374,6 @@ struct TaskbarHost::Impl {
         }
         frameNowMs_ = monotonicNowMs();
         updateVinylRotation();
-        // 媒体卡片使用独立渲染器；高频帧只推进它自己的背景，不强制任务栏歌词重绘。
-        mediaPopup.advanceAnimation(frameNowMs_);
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
@@ -3674,10 +3649,6 @@ void TaskbarHost::setControlsOnHover(bool on) {
 
 void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
     impl_->setHoverControlStyle(style);
-}
-
-void TaskbarHost::setMediaPopupSpectrumDemandCallback(std::function<void(bool)> cb) {
-    impl_->setMediaPopupSpectrumDemandCallback(std::move(cb));
 }
 
 void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {

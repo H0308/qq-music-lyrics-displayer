@@ -378,7 +378,6 @@ struct App {
     int spectrumOpacity_ = 40;
     bool spectrumSessionAlive_ = false;
     std::wstring spectrumSessionKey_;
-    bool mediaPopupSpectrumDemand_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
     bool platformIconVisible_ = false;
@@ -572,11 +571,10 @@ struct App {
         saveSettings();
     }
 
-    // 频谱实际启停 = 用户开关或媒体卡片展开需求 && 正常渲染模式 && 宿主存在；
-    // 卡片只在真正展开且播放时申请捕获，低渲染/完全停止模式仍强制暂停。
+    // 频谱实际启停 = 用户开关 && 正常渲染模式 && 宿主存在；
+    // 低渲染/完全停止模式强制暂停捕获线程。
     void syncSpectrumWithMode() {
-        const bool active = (spectrumOn_ || mediaPopupSpectrumDemand_) && renderMode_ == 0 &&
-                            taskbarHost != nullptr;
+        const bool active = spectrumOn_ && renderMode_ == 0 && taskbarHost != nullptr;
         if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
@@ -834,10 +832,6 @@ struct App {
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
         taskbarHost = std::move(host);
-        taskbarHost->setMediaPopupSpectrumDemandCallback([this](bool demand) {
-            mediaPopupSpectrumDemand_ = demand;
-            syncSpectrumWithMode();
-        });
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
@@ -867,8 +861,6 @@ struct App {
 
     void destroyTaskbar() {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
-        mediaPopupSpectrumDemand_ = false;
-        // 先移出所有权，MediaPopup 销毁时的需求回调不能再回写正在析构的宿主。
         auto host = std::move(taskbarHost);
         host.reset();
         updateTrayIcon();
@@ -1052,7 +1044,7 @@ struct App {
         const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
         if (*spectrumProcess) {
             spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
-            if ((spectrumOn_ || mediaPopupSpectrumDemand_) && renderMode_ == 0)
+            if (spectrumOn_ && renderMode_ == 0)
                 spectrum_.start();
             // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
             std::wstring spectrumKey = makeTrackKey(snap);
@@ -1244,7 +1236,7 @@ struct App {
             // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
             h->applyPlaybackPatch(playback);
         }
-        if (taskbarHost && (spectrumOn_ || mediaPopupSpectrumDemand_)) {
+        if (taskbarHost && spectrumOn_) {
             SpectrumPatch spectrumPatch;
             spectrumPatch.frameRevision = currentFrame_.frameRevision;
             spectrumPatch.requestGeneration = currentFrame_.requestGeneration;

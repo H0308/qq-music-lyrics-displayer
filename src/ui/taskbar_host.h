@@ -66,10 +66,9 @@ public:
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
-    void setMediaPopupSpectrumDemandCallback(std::function<void(bool)> cb);
     // 媒体卡片背景：当前纯色或 Windows 系统磨砂材质。
     void setMediaPopupBackground(MediaPopupBackground mode);
-    // 是否让磨砂背景跟随当前专辑主色和频谱变化。
+    // 是否让磨砂背景跟随当前专辑主色。
     void setMediaPopupFollowAlbum(bool on);
     // 是否根据磨砂卡片背后的应用明暗自动切换黑白文字。
     void setMediaPopupAutoTextContrast(bool on);
