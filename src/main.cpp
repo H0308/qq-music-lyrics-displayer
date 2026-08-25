@@ -10,6 +10,7 @@
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
 #include "ui/settings_dialog.h"
+#include "ui/song_toast.h"
 #include "ui/runtime_log_dialog.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
@@ -54,6 +55,10 @@ constexpr UINT kMsgQqLocalFolderReady = WM_APP + 4;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
+// 切歌弹窗等待封面的超时：SMTC 把封面拆在切歌事件批的后续事件里投递，
+// 短暂等待可以带封面弹出；超时则按无封面弹出，不再干等。
+constexpr UINT_PTR kTimerSongToastCover = 4;
+constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
@@ -316,6 +321,7 @@ struct App {
     PlaybackStatus lastStatus = PlaybackStatus::Stopped;
     SmtcPlayerType lastPlayer_ = SmtcPlayerType::Unknown;
     bool lyricLoading_ = false;
+    bool songToastCoverWaitArmed_ = false; // 切歌弹窗正在等待封面补齐
     bool lyricDebounceArmed_ = false; // QQ 切歌请求防抖定时器已挂起
     ULONGLONG lyricDebounceDeadline_ = 0; // 等待新时间线的截止时刻（超时则按现有快照请求）
     bool lyricRequestStale_ = false; // 当前在途/最近一次歌词请求是否发于时间线不可信期间
@@ -365,6 +371,12 @@ struct App {
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
     bool mediaPopupFollowAlbum_ = false;
     bool mediaPopupAutoTextContrast_ = false;
+    // 切歌弹窗（灵动岛）：主屏幕中下方短暂弹出歌曲信息，固定鼠标穿透
+    std::unique_ptr<SongToast> songToast_;
+    bool songToastEnabled_ = false;
+    int songToastDurationSec_ = 4;
+    bool songToastSkipFullscreen_ = true; // 前台有全屏应用时不弹出
+    bool songToastTop_ = false;           // true 中上，false 中下（默认）
     // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
     fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
@@ -658,6 +670,86 @@ struct App {
         saveSettings();
     }
 
+    void applySongToastEnabled(bool on) {
+        songToastEnabled_ = on;
+        if (songToast_)
+            songToast_->setEnabled(on);
+        saveSettings();
+    }
+
+    void applySongToastDuration(int seconds) {
+        songToastDurationSec_ = std::clamp(seconds, 1, 10);
+        if (songToast_)
+            songToast_->setDurationSec(songToastDurationSec_);
+        saveSettings();
+    }
+
+    void applySongToastSkipFullscreen(bool on) {
+        songToastSkipFullscreen_ = on;
+        saveSettings();
+    }
+
+    void applySongToastPosition(int position) {
+        songToastTop_ = position == 0;
+        if (songToast_)
+            songToast_->setPlacementTop(songToastTop_);
+        saveSettings();
+    }
+
+    // 前台窗口覆盖整块显示器（无边框全屏和独占全屏都命中）时视为全屏应用；
+    // 桌面、任务栏等外壳窗口不算。
+    bool foregroundFullscreen() {
+        HWND foreground = GetForegroundWindow();
+        if (!foreground || foreground == GetShellWindow())
+            return false;
+        wchar_t className[64]{};
+        if (!GetClassNameW(foreground, className, static_cast<int>(std::size(className))))
+            return false;
+        static const wchar_t* shellClasses[] = {
+            L"Progman", L"WorkerW", L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
+        };
+        for (const wchar_t* shell : shellClasses) {
+            if (wcscmp(className, shell) == 0)
+                return false;
+        }
+        RECT rc{};
+        if (!GetWindowRect(foreground, &rc))
+            return false;
+        HMONITOR monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!GetMonitorInfoW(monitor, &info))
+            return false;
+        const RECT& mon = info.rcMonitor;
+        return rc.left <= mon.left && rc.top <= mon.top && rc.right >= mon.right &&
+               rc.bottom >= mon.bottom;
+    }
+
+    void cancelSongToastCoverWait() {
+        if (songToastCoverWaitArmed_ && trayHwnd)
+            KillTimer(trayHwnd, kTimerSongToastCover);
+        songToastCoverWaitArmed_ = false;
+    }
+
+    // 切歌确认后弹出灵动岛；弹窗懒创建，关闭功能时不创建窗口。
+    void notifySongToast() {
+        if (!songToastEnabled_ || currentFrame_.media.title.empty())
+            return;
+        if (songToastSkipFullscreen_ && foregroundFullscreen())
+            return;
+        if (!songToast_) {
+            auto toast = std::make_unique<SongToast>();
+            if (!toast->create(GetModuleHandleW(nullptr)))
+                return;
+            toast->setEnabled(true);
+            toast->setDurationSec(songToastDurationSec_);
+            toast->setPlacementTop(songToastTop_);
+            songToast_ = std::move(toast);
+        }
+        songToast_->showSong(currentFrame_.media);
+    }
+
+
     void refreshThemeWindows() {
         auto refresh = [](HWND hwnd) {
             if (hwnd) {
@@ -841,6 +933,15 @@ struct App {
         currentFrame_.frameRevision = ++frameRevision_;
         for (auto* h : hosts())
             h->applyPresentationFrame(currentFrame_);
+        // 弹窗可见期间异步补齐封面等字段；隐藏时只缓存不渲染
+        if (songToast_)
+            songToast_->setMedia(currentFrame_.media);
+        // 切歌时封面未到会短暂等待；封面在这帧补齐则立即弹出
+        if (songToastCoverWaitArmed_ && currentFrame_.media.thumbnail &&
+            !currentFrame_.media.thumbnail->empty()) {
+            cancelSongToastCoverWait();
+            notifySongToast();
+        }
     }
 
     bool createTaskbar(HINSTANCE inst) {
@@ -1065,6 +1166,9 @@ struct App {
             releaseCurrentResources();
             hasAlbumColor_ = false;
             publishPresentationFrame(snap, false, true);
+            cancelSongToastCoverWait();
+            if (songToast_)
+                songToast_->hideImmediate();
             updateRuntimeLogState(snap);
             return;
         }
@@ -1089,6 +1193,11 @@ struct App {
 
         const std::wstring key = makeTrackKey(snap);
         const bool trackChanged = key != currentKey && !snap.title.empty();
+        // QQ 的曲目键包含时长，切歌后时间线更新会让 trackChanged 再触发一次；
+        // 切歌弹窗只认标题/艺术家身份变化，避免同一首歌弹两次。
+        const bool songIdentityChanged =
+            !snap.title.empty() &&
+            (snap.title != currentTitle || snap.artist != currentArtist);
         const bool newSmtcThumbnail = snap.thumbnail && !snap.thumbnail->empty() &&
                                       (!lastSmtcThumbnail || lastSmtcThumbnail != snap.thumbnail);
         if (snap.status != lastStatus) {
@@ -1162,6 +1271,14 @@ struct App {
             startLyricRequest(snap);
         }
         publishPresentationFrame(snap, !trackChanged, trackChanged);
+        if (trackChanged && songIdentityChanged && songToastEnabled_) {
+            cancelSongToastCoverWait();
+            if (currentFrame_.media.thumbnail && !currentFrame_.media.thumbnail->empty())
+                notifySongToast();
+            else if (trayHwnd)
+                songToastCoverWaitArmed_ =
+                    SetTimer(trayHwnd, kTimerSongToastCover, kSongToastCoverWaitMs, nullptr) != 0;
+        }
         tryExtractAlbumColor();
         updateRuntimeLogState(snap);
     }
@@ -1413,6 +1530,10 @@ void App::loadSettings() {
                                     : MediaPopupBackground::Solid;
         mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
         mediaPopupAutoTextContrast_ = j.value("mediaPopupAutoTextContrast", false);
+        songToastEnabled_ = j.value("songToast", false);
+        songToastDurationSec_ = std::clamp(j.value("songToastDuration", 4), 1, 10);
+        songToastSkipFullscreen_ = j.value("songToastSkipFullscreen", true);
+        songToastTop_ = j.value("songToastPosition", std::string("bottom")) == "top";
         taskbarThemeMode_ = themeModeFromConfig(
             j.value("taskbarTheme", std::string("system")),
             fluent::ThemeMode::FollowSystem);
@@ -1504,6 +1625,10 @@ void App::saveSettings() {
                                          : "solid";
         j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
         j["mediaPopupAutoTextContrast"] = mediaPopupAutoTextContrast_;
+        j["songToast"] = songToastEnabled_;
+        j["songToastDuration"] = songToastDurationSec_;
+        j["songToastSkipFullscreen"] = songToastSkipFullscreen_;
+        j["songToastPosition"] = songToastTop_ ? "top" : "bottom";
         j["taskbarTheme"] = themeModeConfigName(taskbarThemeMode_);
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
@@ -2330,6 +2455,10 @@ SettingsState App::currentSettingsState() const {
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
     st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
+    st.songToastEnabled = songToastEnabled_;
+    st.songToastDurationSec = songToastDurationSec_;
+    st.songToastSkipFullscreen = songToastSkipFullscreen_;
+    st.songToastPosition = songToastTop_ ? 0 : 1;
     st.taskbarThemeMode = taskbarThemeMode_;
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
@@ -2371,6 +2500,10 @@ SettingsActions App::buildSettingsActions() {
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
     act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
     act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };
+    act.onSongToastEnabled = [this](bool on) { applySongToastEnabled(on); };
+    act.onSongToastDuration = [this](int seconds) { applySongToastDuration(seconds); };
+    act.onSongToastSkipFullscreen = [this](bool on) { applySongToastSkipFullscreen(on); };
+    act.onSongToastPosition = [this](int position) { applySongToastPosition(position); };
     act.onTaskbarTheme = [this](fluent::ThemeMode mode) { applyTaskbarTheme(mode); };
     act.onWindowTheme = [this](fluent::ThemeMode mode) { applyWindowTheme(mode); };
     act.onPickFont = [this] { pickFont(); };
@@ -2500,6 +2633,13 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TIMER && wp == kTimerLyricDebounce) {
         KillTimer(h, kTimerLyricDebounce);
         app->onLyricDebounce();
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kTimerSongToastCover) {
+        KillTimer(h, kTimerSongToastCover);
+        app->songToastCoverWaitArmed_ = false;
+        // 等待封面超时：按当前媒体信息弹出（可能无封面）
+        app->notifySongToast();
         return 0;
     }
     if (msg == kMsgDialogClosed) {

@@ -27,6 +27,10 @@ struct SettingsState {
     int mediaPopupBackground = 0; // 0 纯色 1 磨砂玻璃
     bool mediaPopupFollowAlbum = false; // 磨砂背景跟随专辑
     bool mediaPopupAutoTextContrast = false; // 磨砂背景自动适配文字颜色
+    bool songToastEnabled = false;    // 切歌时在屏幕中下方弹出歌曲信息
+    int songToastDurationSec = 4;     // 切歌弹窗停留秒数（1~10）
+    bool songToastSkipFullscreen = true; // 前台有全屏应用时不弹出
+    int songToastPosition = 1;      // 0 中上 1 中下
     fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
     bool followAlbum = false;
@@ -60,6 +64,10 @@ struct SettingsActions {
     std::function<void(int)> onMediaPopupBackground;
     std::function<void(bool)> onMediaPopupFollowAlbum;
     std::function<void(bool)> onMediaPopupAutoTextContrast;
+    std::function<void(bool)> onSongToastEnabled;
+    std::function<void(int)> onSongToastDuration;
+    std::function<void(bool)> onSongToastSkipFullscreen;
+    std::function<void(int)> onSongToastPosition;
     std::function<void(fluent::ThemeMode)> onTaskbarTheme;
     std::function<void(fluent::ThemeMode)> onWindowTheme;
     std::function<void()> onPickFont;

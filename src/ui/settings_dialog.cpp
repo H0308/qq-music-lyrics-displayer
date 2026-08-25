@@ -34,6 +34,10 @@ constexpr int kIdMediaPopupTrigger = 437;
 constexpr int kIdMediaPopupBackground = 418;
 constexpr int kIdMediaPopupFollowAlbum = 426;
 constexpr int kIdMediaPopupAutoTextContrast = 427;
+constexpr int kIdSongToast = 440;
+constexpr int kIdSongToastDuration = 441;
+constexpr int kIdSongToastSkipFullscreen = 442;
+constexpr int kIdSongToastPosition = 443;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -132,6 +136,7 @@ struct SettingsDialog::Impl {
         int value = 0;
         int minValue = 0;
         int maxValue = 100;
+        std::wstring valueSuffix = L"%";
         float controlW = 0.0f;
         float minHeight = kRowH;
         float height = kRowH;
@@ -406,6 +411,23 @@ struct SettingsDialog::Impl {
             kRowTallH);
         autoTextContrast.checked = state.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
+        Row& songToast = addRow(0, kIdSongToast, ControlKind::Toggle, L"切歌时弹出歌曲信息",
+                                L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
+                                L"始终不响应鼠标操作",
+                                40.0f, kRowTallH);
+        songToast.checked = state.songToastEnabled;
+        Row& songToastDuration =
+            addSlider(0, kIdSongToastDuration, L"切歌弹窗显示时长",
+                      state.songToastDurationSec, state.songToastEnabled);
+        songToastDuration.minValue = 1;
+        songToastDuration.maxValue = 10;
+        songToastDuration.valueSuffix = L" 秒";
+        Row& songToastSkipFullscreen =
+            addToggle(0, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
+                      state.songToastSkipFullscreen);
+        songToastSkipFullscreen.enabled = state.songToastEnabled;
+        addRadio(0, kIdSongToastPosition, L"切歌弹窗位置", nullptr, {L"中上", L"中下"},
+                 state.songToastPosition, state.songToastEnabled, kRowH);
         addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
                  {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
 
@@ -726,7 +748,7 @@ struct SettingsDialog::Impl {
             painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), 7.0f, 7.0f),
                                                        br);
         }
-        painter.drawText(std::to_wstring(row.value) + L"%",
+        painter.drawText(std::to_wstring(row.value) + row.valueSuffix,
                          painter.textFormat(12.0f, 400, false, true),
                          D2D1::RectF(trackRight + 6.0f, row.controlRect.top,
                                      row.controlRect.right, row.controlRect.bottom),
@@ -1010,6 +1032,30 @@ struct SettingsDialog::Impl {
             if (actions.onMediaPopupAutoTextContrast)
                 actions.onMediaPopupAutoTextContrast(row->checked);
             break;
+        case kIdSongToast:
+            row->checked = !row->checked;
+            if (auto* duration = findRow(kIdSongToastDuration))
+                duration->enabled = row->checked;
+            if (auto* skipFullscreen = findRow(kIdSongToastSkipFullscreen))
+                skipFullscreen->enabled = row->checked;
+            if (auto* position = findRow(kIdSongToastPosition))
+                position->enabled = row->checked;
+            if (actions.onSongToastEnabled)
+                actions.onSongToastEnabled(row->checked);
+            break;
+        case kIdSongToastDuration:
+            if (actions.onSongToastDuration)
+                actions.onSongToastDuration(row->value);
+            break;
+        case kIdSongToastSkipFullscreen:
+            row->checked = !row->checked;
+            if (actions.onSongToastSkipFullscreen)
+                actions.onSongToastSkipFullscreen(row->checked);
+            break;
+        case kIdSongToastPosition:
+            if (actions.onSongToastPosition)
+                actions.onSongToastPosition(row->selected);
+            break;
         case kIdTaskbarTheme:
             if (actions.onTaskbarTheme)
                 actions.onTaskbarTheme(themeModeFromIndex(row->selected));
@@ -1127,6 +1173,20 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
             row->checked = s.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
+        if (auto* row = findRow(kIdSongToast))
+            row->checked = s.songToastEnabled;
+        if (auto* row = findRow(kIdSongToastDuration)) {
+            row->value = std::clamp(s.songToastDurationSec, 1, 10);
+            row->enabled = s.songToastEnabled;
+        }
+        if (auto* row = findRow(kIdSongToastSkipFullscreen)) {
+            row->checked = s.songToastSkipFullscreen;
+            row->enabled = s.songToastEnabled;
+        }
+        if (auto* row = findRow(kIdSongToastPosition)) {
+            row->selected = std::clamp(s.songToastPosition, 0, 1);
+            row->enabled = s.songToastEnabled;
+        }
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);
         if (auto* row = findRow(kIdWindowTheme))

@@ -34,6 +34,7 @@ add_executable(QQMusicLyric
     src/ui/lyric_renderer.cpp
     src/ui/media_control_icons.cpp
     src/ui/media_popup.cpp
+    src/ui/song_toast.cpp
     src/ui/app_icon.cpp
     src/ui/platform_icon.cpp
     src/ui/fluent_dialog_surface.cpp
