@@ -19,6 +19,7 @@
 #include "ui/platform_icon.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
+#include "media/app_volume.h"
 #include "util/dominant_color.h"
 #include "logging/runtime_logger.h"
 
@@ -52,6 +53,8 @@ constexpr UINT kMsgSmtcChanged = WM_APP + 1;
 constexpr UINT kMsgLyricReady = WM_APP + 2;
 constexpr UINT kMsgCoverReady = WM_APP + 3;
 constexpr UINT kMsgQqLocalFolderReady = WM_APP + 4;
+// 应用音频会话的音量/静音/可用性变化（AppVolumeController 从 COM 回调线程投递）
+constexpr UINT kMsgAppVolumeChanged = WM_APP + 5;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -285,6 +288,16 @@ const wchar_t* spectrumProcessName(SmtcPlayerType player) {
     }
 }
 
+// 应用音量控制目标：网易云同时包含桥接插件进程 NeteaseBridge.exe——
+// 它在音量合成器中独占一格，只调 cloudmusic.exe 会漏掉它。
+std::vector<std::wstring> volumeProcessNames(SmtcPlayerType player) {
+    switch (player) {
+    case SmtcPlayerType::QQMusic: return {L"QQMusic.exe"};
+    case SmtcPlayerType::NetEase: return {L"cloudmusic.exe", L"NeteaseBridge.exe"};
+    default: return {};
+    }
+}
+
 std::wstring makeTrackKey(const SmtcSnapshot& snap) {
     if (snap.player == SmtcPlayerType::NetEase && !snap.neteaseSongId.empty())
         return L"netease|" + snap.neteaseSongId;
@@ -307,6 +320,8 @@ struct App {
     SmtcMonitor monitor;
     LyricProvider provider;
     CoverProvider coverProvider;
+    AppVolumeController appVolume_;   // 当前音乐应用的独立音量（音量合成器中该应用的一格）
+    AppVolumeState appVolumeState_;   // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
@@ -953,6 +968,10 @@ struct App {
         }
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
+        host->setAppVolumeCallback([this](int percent) {
+            appVolume_.setVolumePercent(percent);
+            pushAppVolume();
+        });
         host->setSourceOpenCallback([](const std::wstring& source) {
             if (!platform_icon::launchSourceApp(source))
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
@@ -983,6 +1002,7 @@ struct App {
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         taskbarHost->setProgressBackground(progressBackground_);
         taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
         updateTrayIcon();
         return true;
@@ -1090,6 +1110,26 @@ struct App {
         }
     }
 
+    // 读取当前音乐应用的会话音量并推送给各宿主；状态未变时跳过
+    void pushAppVolume() {
+        AppVolumeState state;
+        state.available = appVolume_.query(state.percent, state.muted);
+        if (state.available == appVolumeState_.available &&
+            (!state.available || (state.percent == appVolumeState_.percent &&
+                                  state.muted == appVolumeState_.muted)))
+            return;
+        appVolumeState_ = state;
+        for (auto* h : hosts())
+            h->setAppVolume(state);
+    }
+
+    // SMTC 来源播放器切换时更新音量控制目标进程；无会话时清空（音量不可用）
+    void syncAppVolumeTarget(const SmtcSnapshot& snap) {
+        appVolume_.setTargetProcessNames(
+            volumeProcessNames(snap.sessionAlive ? snap.player : SmtcPlayerType::Unknown));
+        pushAppVolume();
+    }
+
     // 发起一次歌词请求：网易云逻辑保持不变（事件完整、可直接请求）；
     // QQ 由防抖定时器在切歌事件合并完成后调用。
     void startLyricRequest(const SmtcSnapshot& snap, bool forceOnline = false,
@@ -1148,6 +1188,7 @@ struct App {
     // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
     void onSmtcChanged() {
         SmtcSnapshot snap = monitor.snapshot();
+        syncAppVolumeTarget(snap);
         if (!snap.sessionAlive) {
             if (spectrumSessionAlive_)
                 spectrum_.requestReconnect();
@@ -2764,6 +2805,8 @@ int main() {
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
+    app.appVolume_.setChangedCallback(
+        [&app] { PostThreadMessageW(app.mainThread, kMsgAppVolumeChanged, 0, 0); });
 
     runtime_log::writef(L"QQMusicLyric started, waiting for QQ Music or NetEase Music...");
 
@@ -2772,6 +2815,9 @@ int main() {
         if (msg.hwnd == nullptr) {
             if (msg.message == kMsgSmtcChanged) {
                 app.onSmtcChanged();
+            }
+            else if (msg.message == kMsgAppVolumeChanged) {
+                app.pushAppVolume();
             }
             else if (msg.message == kMsgLyricReady) {
                 app.onLyricReady(std::unique_ptr<LyricPayload>(

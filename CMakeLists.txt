@@ -27,6 +27,7 @@ add_executable(QQMusicLyric
     src/media/smtc/qq_music_smtc_adapter.cpp
     src/media/smtc/netease_smtc_adapter.cpp
     src/media/audio_spectrum.cpp
+    src/media/app_volume.cpp
     src/lyric/lyric_provider.cpp
     src/lyric/qrc_decoder.cpp
     src/lyric/qrc_des.cpp
@@ -34,6 +35,7 @@ add_executable(QQMusicLyric
     src/ui/lyric_renderer.cpp
     src/ui/media_control_icons.cpp
     src/ui/media_popup.cpp
+    src/ui/volume_popup.cpp
     src/ui/song_toast.cpp
     src/ui/app_icon.cpp
     src/ui/platform_icon.cpp

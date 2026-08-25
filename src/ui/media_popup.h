@@ -22,6 +22,9 @@ public:
 
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
+    // 应用音量：图标+数值常驻显示；点击图标展开/收起卡内滑块，拖动经回调上报
+    void setAppVolume(const AppVolumeState& state);
+    void setAppVolumeCallback(std::function<void(int percent)> cb);
     void setEnabled(bool enabled);
     // 触发方式：true 悬浮停留片刻后展开（默认），false 由点击展开（onAnchorClick）
     void setTriggerOnHover(bool on);

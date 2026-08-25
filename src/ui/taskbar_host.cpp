@@ -5,6 +5,7 @@
 #include "media_control_icons.h"
 #include "media_popup.h"
 #include "platform_icon.h"
+#include "volume_popup.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -284,6 +285,12 @@ struct TaskbarHost::Impl {
     MediaPopup mediaPopup;
     bool quitting = false;
 
+    // 应用音量（内嵌控件音量图标 + 悬停滑块浮窗）
+    AppVolumeState appVolume_;
+    VolumePopup volumePopup_;
+    std::function<void(int)> onAppVolume;
+    bool volumeHover_ = false;
+
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
     // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；平滑值按当前字时长
     // 决定的时间常数指数趋近目标，消除阶跃闪烁且同步误差有界
@@ -540,6 +547,8 @@ struct TaskbarHost::Impl {
         hwnd = h;
         if (!mediaPopup.create(inst, hwnd))
             runtime_log::writef(L"[taskbar] media popup creation failed");
+        if (!volumePopup_.create(inst))
+            runtime_log::writef(L"[taskbar] volume popup creation failed");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         return true;
@@ -877,6 +886,8 @@ struct TaskbarHost::Impl {
         if (controlsOnHover_ == on)
             return;
         controlsOnHover_ = on;
+        volumeHover_ = false;
+        volumePopup_.hide();
         const bool popupEnabled = on && hoverControlStyle_ == HoverControlStyle::Popup;
         mediaPopup.setEnabled(popupEnabled);
         if (popupEnabled && mouseOver_)
@@ -888,6 +899,8 @@ struct TaskbarHost::Impl {
         if (hoverControlStyle_ == style)
             return;
         hoverControlStyle_ = style;
+        volumeHover_ = false;
+        volumePopup_.hide();
         const bool popupEnabled = controlsOnHover_ &&
                                   hoverControlStyle_ == HoverControlStyle::Popup;
         mediaPopup.setEnabled(popupEnabled);
@@ -2345,6 +2358,72 @@ struct TaskbarHost::Impl {
 
     // ---------- 渲染 ----------
 
+    // ---------- 内嵌悬浮控件布局 ----------
+
+    // 上一首/播放/下一首 + 音量按钮整体居中：centers[0..2] 为播放控制，
+    // centers[3] 为音量按钮。返回 false 表示当前不在内嵌控件展示状态。
+    bool inlineControlsLayout(float centers[4], float& cy, float& r) const {
+        if (!controlsOnHover_ || !mouseOver_ || hoverControlStyle_ != HoverControlStyle::Inline)
+            return false;
+        RECT rc{};
+        GetClientRect(hwnd, &rc);
+        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        if (layout.w <= 0.0f || layout.h <= 0.0f)
+            return false;
+        cy = layout.h * 0.5f;
+        r = layout.h * 0.26f;
+        const float spacing = r * 2.8f;
+        // 音量按钮与下一首之间多留 0.9r：音量字形比三角形宽，等间距会显得挤
+        const float volumeGap = spacing + r * 0.9f;
+        // 组跨度 [cx-spacing, cx+spacing+volumeGap]，整体居中即 cx 左移 volumeGap/2
+        const float cx = layout.leftW + layout.rightW * 0.5f - volumeGap * 0.5f;
+        for (int i = 0; i < 3; ++i)
+            centers[i] = cx + (i - 1) * spacing;
+        centers[3] = cx + spacing + volumeGap;
+        return true;
+    }
+
+    void drawVolumeButton(const D2D1_POINT_2F& c, float r) {
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        ID2D1SolidColorBrush* brush =
+            appVolume_.available ? brushBtn_ : brushBtnDisabled_;
+        const int level = !appVolume_.available || appVolume_.muted
+                              ? 0
+                              : appVolume_.percent == 0 ? 1 : appVolume_.percent < 50 ? 2 : 3;
+        media_control::drawVolume(rt, c, r * 0.8f, brush, level);
+    }
+
+    bool hitVolumeButton(float x, float y) const {
+        float centers[4]{};
+        float cy = 0.0f;
+        float r = 0.0f;
+        if (!inlineControlsLayout(centers, cy, r))
+            return false;
+        x = dip(static_cast<int>(x));
+        y = dip(static_cast<int>(y));
+        return std::hypot(x - centers[3], y - cy) <= r + 4.0f;
+    }
+
+    // 音量按钮的屏幕坐标矩形（音量滑块浮窗的锚点）
+    RECT volumeButtonScreenRect() const {
+        float centers[4]{};
+        float cy = 0.0f;
+        float r = 0.0f;
+        if (!inlineControlsLayout(centers, cy, r)) {
+            RECT rc{};
+            GetWindowRect(hwnd, &rc);
+            return rc;
+        }
+        const float s = scale();
+        POINT pt{static_cast<LONG>(std::lround(centers[3] * s)),
+                 static_cast<LONG>(std::lround(cy * s))};
+        ClientToScreen(hwnd, &pt);
+        const int half = static_cast<int>(std::lround((r + 6.0f) * s));
+        return RECT{pt.x - half, pt.y - half, pt.x + half, pt.y + half};
+    }
+
     void drawButton(int idx, const D2D1_POINT_2F& c, float r) {
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -2364,23 +2443,22 @@ struct TaskbarHost::Impl {
         // 并与 render 使用完全相同的左侧分区计算。
         LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
         float w = layout.w;
-        float h = layout.h;
         x = dip(static_cast<int>(x));
         y = dip(static_cast<int>(y));
         float leftW = layout.leftW;
         if (x < leftW || x > w)
             return -1;
 
-        float cx = leftW + layout.rightW * 0.5f;
-        float cy = h * 0.5f;
-        float r = h * 0.26f;
-        float spacing = r * 2.8f;
+        float centers[4]{};
+        float cy = 0.0f;
+        float r = 0.0f;
+        if (!inlineControlsLayout(centers, cy, r))
+            return -1;
         for (int i = 0; i < 3; ++i) {
-            float bx = cx + (i - 1) * spacing;
             bool en = i == 0 ? media.canPrev : i == 1 ? media.canPlayPause : media.canNext;
             if (!en)
                 continue;
-            if (std::hypot(x - bx, y - cy) <= r + 4.0f)
+            if (std::hypot(x - centers[i], y - cy) <= r + 4.0f)
                 return i;
         }
         return -1;
@@ -3048,12 +3126,14 @@ struct TaskbarHost::Impl {
         }
 
         if (showControls) {
-            float cx = leftW + rightW * 0.5f;
-            float cy = h * 0.5f;
-            float r = h * 0.26f;
-            float spacing = r * 2.8f;
-            for (int i = 0; i < 3; ++i)
-                drawButton(i, D2D1::Point2F(cx + (i - 1) * spacing, cy), r);
+            float centers[4]{};
+            float cy = 0.0f;
+            float r = 0.0f;
+            if (inlineControlsLayout(centers, cy, r)) {
+                for (int i = 0; i < 3; ++i)
+                    drawButton(i, D2D1::Point2F(centers[i], cy), r);
+                drawVolumeButton(D2D1::Point2F(centers[3], cy), r);
+            }
         } else {
             if (showSpectrum)
                 drawSpectrum(lyricAreaX + lyricAreaW + kTextPadding, h);
@@ -3373,6 +3453,8 @@ struct TaskbarHost::Impl {
         if (mode == 2) {
             // 完全停止：隐藏窗口、停帧定时器、释放 GPU 设备链。此后 SMTC 事件仍更新
             // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
+            volumeHover_ = false;
+            volumePopup_.hide();
             if (visible) {
                 visible = false;
                 stopFrameTimer();
@@ -3496,14 +3578,42 @@ struct TaskbarHost::Impl {
             if (!wasOver)
                 render();
             trackMouseLeave();
+            // 内嵌控件的音量按钮：悬停弹出音量滑块浮窗
+            const bool volHover =
+                hitVolumeButton(static_cast<float>(GET_X_LPARAM(lp)),
+                                static_cast<float>(GET_Y_LPARAM(lp)));
+            if (volHover != volumeHover_) {
+                volumeHover_ = volHover;
+                if (!volHover)
+                    volumePopup_.onAnchorLeave();
+            }
+            if (volHover && appVolume_.available) {
+                volumePopup_.onAnchorEnter();
+                volumePopup_.showNear(volumeButtonScreenRect());
+            }
             return 0;
         }
         case WM_MOUSELEAVE:
             mouseOver_ = false;
             trackingLeave_ = false;
+            volumeHover_ = false;
+            volumePopup_.onAnchorLeave();
             mediaPopup.onAnchorLeave();
             render();
             return 0;
+        case WM_MOUSEWHEEL: {
+            // 滚轮消息使用屏幕坐标；音量图标上滚动直接调整应用音量（每格 ±2）
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            if (appVolume_.available && onAppVolume &&
+                hitVolumeButton(static_cast<float>(pt.x), static_cast<float>(pt.y))) {
+                const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+                if (steps != 0)
+                    onAppVolume(std::clamp(appVolume_.percent + steps * 2, 0, 100));
+                return 0;
+            }
+            return 0;
+        }
         case WM_LBUTTONUP: {
             float mx = static_cast<float>(GET_X_LPARAM(lp));
             float my = static_cast<float>(GET_Y_LPARAM(lp));
@@ -3534,6 +3644,7 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", visible ? 1 : 0);
             stopFrameTimer();
             stopProbe();
+            volumePopup_.destroy();
             mediaPopup.destroy();
             releaseAll();
             hwnd = nullptr;
@@ -3606,6 +3717,25 @@ void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
     impl_->mediaPopup.setControlCallback(std::move(cb));
 }
 
+void TaskbarHost::setAppVolume(const AppVolumeState& state) {
+    const bool changed = state.available != impl_->appVolume_.available ||
+                         state.percent != impl_->appVolume_.percent ||
+                         state.muted != impl_->appVolume_.muted;
+    impl_->appVolume_ = state;
+    impl_->volumePopup_.setVolume(state.percent, state.muted, state.available);
+    impl_->mediaPopup.setAppVolume(state);
+    if (!state.available)
+        impl_->volumePopup_.hide();
+    if (changed)
+        impl_->render();
+}
+
+void TaskbarHost::setAppVolumeCallback(std::function<void(int)> cb) {
+    impl_->onAppVolume = cb;
+    impl_->volumePopup_.setCallback(cb);
+    impl_->mediaPopup.setAppVolumeCallback(std::move(cb));
+}
+
 void TaskbarHost::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
     impl_->mediaPopup.setSourceOpenCallback(std::move(cb));
 }
@@ -3629,6 +3759,8 @@ void TaskbarHost::hide() {
         impl_->stopFrameTimer();
         ShowWindow(impl_->hwnd, SW_HIDE);
     }
+    impl_->volumeHover_ = false;
+    impl_->volumePopup_.hide();
     impl_->mediaPopup.hideImmediate();
 }
 

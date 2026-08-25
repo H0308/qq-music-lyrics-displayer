@@ -28,6 +28,7 @@ constexpr UINT_PTR kHideTimer = 2;
 constexpr UINT_PTR kCloseTimer = 3;
 constexpr UINT_PTR kScrollTimer = 4;
 constexpr UINT_PTR kEnterTimer = 5;
+constexpr UINT_PTR kVolumeTimer = 6;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
@@ -37,6 +38,8 @@ constexpr float kSongTransitionTravelDip = 24.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
+// 音量滑块展开/收起过渡时长
+constexpr float kVolumeSliderMs = 140.0f;
 
 constexpr float kPopupWidthDip = 384.0f;
 constexpr float kPopupHeightDip = 208.0f;
@@ -216,6 +219,18 @@ struct MediaPopup::Impl {
     std::wstring pressedSourceAppUserModelId;
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
+
+    // 应用音量控件：图标+数值固定在右上角；点击图标从图标处向左过渡展开卡内滑块
+    AppVolumeState volume;
+    bool volumeSliderOn = false;       // 展开目标状态
+    float volumeSliderT = 0.0f;        // 当前展开进度 0-1（过渡动画）
+    bool volumeSliderOpening = false;  // 过渡方向
+    bool volumeDragging = false;
+    bool hoverVolume = false;
+    bool pressedVolume = false;
+    std::function<void(int)> onAppVolume;
+    D2D1_RECT_F volumeIconRect{};
+    D2D1_RECT_F volumeSliderRect{}; // 滑块轨道矩形（目标值；命中测试自行外扩余量）
     OverlayMediaInfo media;
     int64_t positionMs = 0;
 
@@ -335,6 +350,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kCloseTimer);
         KillTimer(hwnd, kScrollTimer);
         KillTimer(hwnd, kEnterTimer);
+        KillTimer(hwnd, kVolumeTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
@@ -1020,6 +1036,70 @@ struct MediaPopup::Impl {
                              D2D1::Point2F(cx, cy), radius, iconBrush);
     }
 
+    void drawVolumeControl(ID2D1DeviceContext* rt, float w) {
+        // 图标固定在卡片右上角（来源行右端）；悬浮底是与播放键一致的 32px 圆形
+        const float cy = cardOriginDip + 23.0f;
+        volumeIconRect = D2D1::RectF(w - 38.0f, cy - 16.0f, w - 6.0f, cy + 16.0f);
+
+        // 滑块轨道目标矩形：图标左侧 112 DIP（与内嵌控件音量浮窗宽度相当）
+        const float trackRight = w - 48.0f;
+        const float trackLeft = trackRight - 112.0f;
+        volumeSliderRect = D2D1::RectF(trackLeft, cy - 2.0f, trackRight, cy + 2.0f);
+
+        // easeOutCubic：展开从图标处向左长出，收起反向缩回
+        const float t = volumeSliderT <= 0.0f
+                            ? 0.0f
+                            : 1.0f - std::pow(1.0f - volumeSliderT, 3.0f);
+        if (t > 0.0f && volume.available) {
+            const float revealLeft = trackRight - (trackRight - trackLeft) * t;
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(revealLeft, cy - 2.0f, trackRight, cy + 2.0f),
+                                  2.0f, 2.0f),
+                brushProgressTrack);
+            const float fraction = std::clamp(volume.percent, 0, 100) / 100.0f;
+            const float fillRight = trackLeft + (trackRight - trackLeft) * fraction;
+            const float fillLeft = std::max(trackLeft, revealLeft);
+            if (fillRight > fillLeft)
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(fillLeft, cy - 2.0f, fillRight, cy + 2.0f),
+                                      2.0f, 2.0f),
+                    brushAccent);
+            if (fillRight >= revealLeft && brushTextOnAccent) {
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fillRight, cy), 7.0f, 7.0f),
+                                brushAccent);
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(fillRight, cy), 2.8f, 2.8f),
+                                brushTextOnAccent);
+            }
+            // 数值随展开淡入，位于轨道左侧（右端预留超过旋钮半径的空隙，0% 时不贴 knob）
+            const std::wstring expandedText = std::to_wstring(volume.percent) + L"%";
+            brushSecondary->SetOpacity(t);
+            drawText(rt, expandedText, fmtTimeRight,
+                     D2D1::RectF(trackLeft - 58.0f, cy - 12.0f, trackLeft - 12.0f, cy + 12.0f),
+                     brushSecondary);
+            brushSecondary->SetOpacity(1.0f);
+        } else {
+            // 收起状态：数值在图标左侧
+            const std::wstring text =
+                volume.available ? std::to_wstring(volume.percent) + L"%" : L"--";
+            drawText(rt, text, fmtTimeRight,
+                     D2D1::RectF(w - 90.0f, cy - 12.0f, w - 44.0f, cy + 12.0f),
+                     volume.available ? brushSecondary : brushDisabled);
+        }
+
+        // 图标悬浮底：与播放键一致的圆形
+        if (volume.available && (hoverVolume || pressedVolume || volumeSliderOn)) {
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(volumeIconRect, 16.0f, 16.0f),
+                pressedVolume ? brushControlPressed : brushControlHover);
+        }
+        const float iconCx = (volumeIconRect.left + volumeIconRect.right) * 0.5f;
+        const int level = !volume.available || volume.muted
+                              ? 0
+                              : volume.percent == 0 ? 1 : volume.percent < 50 ? 2 : 3;
+        media_control::drawVolume(rt, D2D1::Point2F(iconCx, cy), 8.0f,
+                                  volume.available ? brushText : brushDisabled, level);
+    }
+
     bool render() {
         if (!hwnd)
             return false;
@@ -1090,6 +1170,7 @@ struct MediaPopup::Impl {
         drawProgress(rt, w);
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i);
+        drawVolumeControl(rt, w);
 
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
@@ -1182,6 +1263,59 @@ struct MediaPopup::Impl {
         return -1;
     }
 
+    bool hitVolumeIcon(float x, float y) const {
+        return volume.available && contains(volumeIconRect, x, y);
+    }
+
+    bool hitVolumeSlider(float x, float y) const {
+        // 展开过半才允许拖动；命中区域比细轨道上下左右各扩一圈余量
+        if (!volume.available || !volumeSliderOn || volumeSliderT < 0.6f)
+            return false;
+        return x >= volumeSliderRect.left - 7.0f && x <= volumeSliderRect.right + 7.0f &&
+               y >= volumeSliderRect.top - 8.0f && y <= volumeSliderRect.bottom + 8.0f;
+    }
+
+    // 拖动/点击滑块：按 x 坐标换算百分比，本地即时反馈并上报
+    void applyVolumeAt(float x) {
+        const float trackLeft = volumeSliderRect.left;
+        const float trackRight = volumeSliderRect.right;
+        const float fraction =
+            std::clamp((x - trackLeft) / std::max(1.0f, trackRight - trackLeft), 0.0f, 1.0f);
+        const int next = static_cast<int>(std::lround(fraction * 100.0f));
+        if (next == volume.percent && !volume.muted)
+            return;
+        volume.percent = next;
+        volume.muted = false; // 调整音量即解除静音（控制器侧同样处理）
+        renderOrDefer();
+        if (onAppVolume)
+            onAppVolume(next);
+    }
+
+    // 点击音量图标切换滑块；动画关闭时直接到位
+    void toggleVolumeSlider() {
+        volumeSliderOn = !volumeSliderOn;
+        if (!clientAnimations) {
+            volumeSliderT = volumeSliderOn ? 1.0f : 0.0f;
+            renderOrDefer();
+            return;
+        }
+        volumeSliderOpening = volumeSliderOn;
+        SetTimer(hwnd, kVolumeTimer, 16, nullptr);
+    }
+
+    void advanceVolumeSlider() {
+        const float step = 16.0f / kVolumeSliderMs;
+        volumeSliderT += volumeSliderOpening ? step : -step;
+        if (volumeSliderT >= 1.0f) {
+            volumeSliderT = 1.0f;
+            KillTimer(hwnd, kVolumeTimer);
+        } else if (volumeSliderT <= 0.0f) {
+            volumeSliderT = 0.0f;
+            KillTimer(hwnd, kVolumeTimer);
+        }
+        render();
+    }
+
     bool hitSource(float x, float y) const {
         if (!available || media.sourceAppUserModelId.empty())
             return false;
@@ -1220,6 +1354,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kCloseTimer);
         KillTimer(hwnd, kScrollTimer);
         KillTimer(hwnd, kEnterTimer);
+        KillTimer(hwnd, kVolumeTimer);
         scrollTimerRunning = false;
         deferredRender = false;
         entering = true;
@@ -1253,6 +1388,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kScrollTimer);
+        KillTimer(hwnd, kVolumeTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
@@ -1308,6 +1444,11 @@ struct MediaPopup::Impl {
     void hideImmediate() {
         popupVisible = false;
         closing = false;
+        volumeSliderOn = false;
+        volumeSliderT = 0.0f;
+        volumeDragging = false;
+        hoverVolume = false;
+        pressedVolume = false;
         if (!hwnd)
             return;
         killTimers();
@@ -1332,21 +1473,43 @@ struct MediaPopup::Impl {
             return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_MOUSEMOVE: {
             onPopupEnter();
-            const int button = hitButton(dip(GET_X_LPARAM(lp)), dip(GET_Y_LPARAM(lp)));
-            if (button != hoverButton) {
+            const float mx = dip(GET_X_LPARAM(lp));
+            const float my = dip(GET_Y_LPARAM(lp));
+            if (volumeDragging) {
+                applyVolumeAt(mx);
+                return 0;
+            }
+            const int button = hitButton(mx, my);
+            const bool volHover = hitVolumeIcon(mx, my) || hitVolumeSlider(mx, my);
+            if (button != hoverButton || volHover != hoverVolume) {
                 hoverButton = button;
+                hoverVolume = volHover;
                 renderOrDefer();
             }
             return 0;
         }
         case WM_MOUSELEAVE:
             hoverButton = -1;
+            hoverVolume = false;
             onPopupLeave();
             renderOrDefer();
             return 0;
         case WM_LBUTTONDOWN: {
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
+            // 音量控件优先：图标按下待点击切换滑块；滑块按下直接进入拖动
+            if (hitVolumeSlider(x, y)) {
+                volumeDragging = true;
+                SetCapture(hwnd);
+                applyVolumeAt(x);
+                return 0;
+            }
+            if (hitVolumeIcon(x, y)) {
+                pressedVolume = true;
+                SetCapture(hwnd);
+                renderOrDefer();
+                return 0;
+            }
             pressedSource = hitSource(x, y);
             pressedSourceAppUserModelId = pressedSource ? media.sourceAppUserModelId : L"";
             const int button = pressedSource ? -1 : hitButton(x, y);
@@ -1360,6 +1523,21 @@ struct MediaPopup::Impl {
         case WM_LBUTTONUP: {
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
+            if (volumeDragging) {
+                volumeDragging = false;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                return 0;
+            }
+            if (pressedVolume) {
+                pressedVolume = false;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                if (hitVolumeIcon(x, y))
+                    toggleVolumeSlider();
+                renderOrDefer();
+                return 0;
+            }
             const bool source = hitSource(x, y);
             const int button = source ? -1 : hitButton(x, y);
             const int pressed = pressedButton;
@@ -1380,10 +1558,29 @@ struct MediaPopup::Impl {
             }
             return 0;
         }
+        case WM_MOUSEWHEEL: {
+            // 音量图标/展开的滑块上滚动：直接调整应用音量（每格 ±2）
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &point);
+            const float x = dip(point.x);
+            const float y = dip(point.y);
+            if (onAppVolume && (hitVolumeIcon(x, y) || hitVolumeSlider(x, y))) {
+                const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+                if (steps != 0) {
+                    volume.percent = std::clamp(volume.percent + steps * 2, 0, 100);
+                    volume.muted = false;
+                    renderOrDefer();
+                    onAppVolume(volume.percent);
+                }
+            }
+            return 0;
+        }
         case WM_CAPTURECHANGED:
             pressedButton = -1;
             pressedSource = false;
             pressedSourceAppUserModelId.clear();
+            pressedVolume = false;
+            volumeDragging = false;
             renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
@@ -1429,6 +1626,12 @@ struct MediaPopup::Impl {
                     return 0;
                 advanceTextScroll();
                 render();
+            } else if (wp == kVolumeTimer) {
+                if (entering || closing || !popupVisible) {
+                    KillTimer(hwnd, kVolumeTimer);
+                    return 0;
+                }
+                advanceVolumeSlider();
             }
             return 0;
         case WM_DPICHANGED:
@@ -1521,6 +1724,27 @@ void MediaPopup::destroy() {
 
 void MediaPopup::setControlCallback(std::function<void(MediaControl)> cb) {
     impl_->onControl = std::move(cb);
+}
+
+void MediaPopup::setAppVolume(const AppVolumeState& state) {
+    const bool changed = state.available != impl_->volume.available ||
+                         state.percent != impl_->volume.percent ||
+                         state.muted != impl_->volume.muted;
+    impl_->volume = state;
+    if (!state.available && impl_->volumeSliderOn) {
+        // 会话消失：直接收起滑块，不走过渡动画
+        impl_->volumeSliderOn = false;
+        impl_->volumeSliderT = 0.0f;
+        impl_->volumeDragging = false;
+        if (impl_->hwnd)
+            KillTimer(impl_->hwnd, kVolumeTimer);
+    }
+    if (changed && impl_->popupVisible)
+        impl_->renderOrDefer();
+}
+
+void MediaPopup::setAppVolumeCallback(std::function<void(int)> cb) {
+    impl_->onAppVolume = std::move(cb);
 }
 
 void MediaPopup::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
