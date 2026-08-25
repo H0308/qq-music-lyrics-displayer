@@ -413,6 +413,10 @@ struct TaskbarHost::Impl {
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
     bool spectrumBackground_ = false;
     int spectrumOpacityPct_ = 40;
+    // 播放进度背景：与背景波浪互斥，颜色取专辑主色（无封面时回退系统强调色）
+    bool progressBackground_ = false;
+    int progressBackgroundOpacityPct_ = 25;
+    ID2D1SolidColorBrush* brushProgressBg_ = nullptr;
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
@@ -730,6 +734,8 @@ struct TaskbarHost::Impl {
         }
         // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这四个）
         createLyricBrushes();
+        // 进度背景颜色每帧经 SetColor 写入，这里只建空画刷
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brushProgressBg_);
         rt->CreateLayer(&coverLayer_);
         recreateFormats();
     }
@@ -939,6 +945,27 @@ struct TaskbarHost::Impl {
             return;
         spectrumOpacityPct_ = next;
         if (backgroundWaveEnabled())
+            render();
+    }
+
+    // 进度背景实际生效条件：用户开启 && 背景波浪未占用背景 && 当前歌曲有时长
+    bool progressBackgroundActive() const {
+        return progressBackground_ && !backgroundWaveEnabled() && media.durationMs > 0;
+    }
+
+    void setProgressBackground(bool on) {
+        if (progressBackground_ == on)
+            return;
+        progressBackground_ = on;
+        render();
+    }
+
+    void setProgressBackgroundOpacity(int percent) {
+        const int next = std::clamp(percent, 0, 100);
+        if (progressBackgroundOpacityPct_ == next)
+            return;
+        progressBackgroundOpacityPct_ = next;
+        if (progressBackgroundActive())
             render();
     }
 
@@ -1545,6 +1572,7 @@ struct TaskbarHost::Impl {
         r(brushVinylBase_);
         r(brushVinylGroove_);
         r(brushSpectrum_);
+        r(brushProgressBg_);
         for (auto& cache : textFxCaches_) {
             r(cache.target);
             cache = {};
@@ -2952,6 +2980,27 @@ struct TaskbarHost::Impl {
         if (mouseOver_ && brushHover_)
             rt->FillRoundedRectangle(bg, brushHover_);
 
+        // 播放进度背景：从窗口左缘按进度填充到歌词右缘（lyricAreaW 已排除独立频谱
+        // 占宽，天然不会延伸进频谱容器）；与背景波浪互斥，画在封面/文字之下
+        if (progressBackgroundActive() && brushProgressBg_) {
+            const float progressRight = lyricAreaX + lyricAreaW;
+            const float fraction = static_cast<float>(std::clamp(
+                static_cast<double>(positionMs_) / static_cast<double>(media.durationMs), 0.0,
+                1.0));
+            const float fillRight = progressRight * fraction;
+            if (fillRight > 0.5f) {
+                const COLORREF c = media.hasDominantColor ? media.dominantColor
+                                                          : fluent::accentColor();
+                brushProgressBg_->SetColor(
+                    fluent::toD2D(c, progressBackgroundOpacityPct_ / 100.0f));
+                const float radius =
+                    std::min({kCornerRadius, fillRight * 0.5f, h * 0.5f});
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, fillRight, h), radius, radius),
+                    brushProgressBg_);
+            }
+        }
+
         if (backgroundSpectrum) {
             const float waveX = infoStartX();
             const float waveW = std::max(1.0f, w - waveX - kTextPadding);
@@ -3281,6 +3330,9 @@ struct TaskbarHost::Impl {
         if (media.playing && clientAnimations_ && albumCoverVisible_ &&
             albumCoverEffect_ == AlbumCoverEffect::Vinyl)
             return true;
+        // 播放中的进度背景每帧都在推进
+        if (media.playing && progressBackgroundActive())
+            return true;
         if (media.playing && spectrumVisible_) {
             for (float v : spectrumBands_)
                 if (v > 0.01f)
@@ -3366,6 +3418,9 @@ struct TaskbarHost::Impl {
         if (media.playing &&
             (karaokeLine() || (clientAnimations_ && albumCoverVisible_ &&
                                albumCoverEffect_ == AlbumCoverEffect::Vinyl)))
+            return true;
+        // 进度背景随播放进度持续推进
+        if (media.playing && progressBackgroundActive())
             return true;
         // 频谱柱等静音衰减到阈值以下才算静止
         if (spectrumVisible_) {
@@ -3724,6 +3779,14 @@ void TaskbarHost::setSpectrumBackground(bool on) {
 
 void TaskbarHost::setSpectrumOpacity(int percent) {
     impl_->setSpectrumOpacity(percent);
+}
+
+void TaskbarHost::setProgressBackground(bool on) {
+    impl_->setProgressBackground(on);
+}
+
+void TaskbarHost::setProgressBackgroundOpacity(int percent) {
+    impl_->setProgressBackgroundOpacity(percent);
 }
 
 void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {

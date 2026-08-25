@@ -17,7 +17,9 @@ struct SettingsState {
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
     bool spectrumBackground = false; // 将梦幻波浪作为歌曲信息和歌词背景
-    int spectrumOpacity = 40; // 背景波浪透明度（0~100）
+    int spectrumOpacity = 40; // 背景波浪不透明度（0~100）
+    bool progressBackground = false; // 播放进度背景（与背景波浪互斥）
+    int progressBackgroundOpacity = 25; // 播放进度背景不透明度（0~100）
     int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
@@ -49,6 +51,8 @@ struct SettingsActions {
     std::function<void(int)> onSpectrumStyle;
     std::function<void(bool)> onSpectrumBackground;
     std::function<void(int)> onSpectrumOpacity;
+    std::function<void(bool)> onProgressBackground;
+    std::function<void(int)> onProgressBackgroundOpacity;
     std::function<void(int)> onRenderMode;
     std::function<void(bool)> onHoverControls;
     std::function<void(int)> onHoverControlStyle;

@@ -101,6 +101,11 @@ public:
     void setSpectrumVisible(bool on);
     void setSpectrumBands(const std::array<float, kSpectrumBands>& bands);
 
+    // 播放进度背景：从窗口左缘到歌词右缘按播放进度填充专辑主题色；
+    // 与背景波浪互斥（背景波浪生效时不绘制）
+    void setProgressBackground(bool on);
+    void setProgressBackgroundOpacity(int percent);
+
     void show() override;
     void hide() override;
 

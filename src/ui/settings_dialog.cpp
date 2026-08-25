@@ -25,6 +25,8 @@ constexpr int kIdSpectrum = 414;
 constexpr int kIdSpectrumStyle = 419;
 constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdSpectrumBackground = 428;
+constexpr int kIdProgressBackground = 438;
+constexpr int kIdProgressBackgroundOpacity = 439;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
@@ -247,6 +249,25 @@ struct SettingsDialog::Impl {
             autoTextContrast->enabled = popupEnabled && background && background->selected == 1;
     }
 
+    // 播放进度背景与背景波浪共用同一层背景，二者互斥：
+    // 背景波浪生效（频谱开 + 梦幻波浪 + 背景开关开）时进度背景不可用
+    bool backgroundWaveActive() const {
+        const auto* spectrum = findRow(kIdSpectrum);
+        const auto* style = findRow(kIdSpectrumStyle);
+        const auto* background = findRow(kIdSpectrumBackground);
+        return spectrum && spectrum->checked && style && style->selected == 2 && background &&
+               background->checked;
+    }
+
+    void updateProgressBackgroundRowsEnabled() {
+        const bool available = !backgroundWaveActive();
+        if (auto* row = findRow(kIdProgressBackground))
+            row->enabled = available;
+        if (auto* row = findRow(kIdProgressBackgroundOpacity))
+            row->enabled = available && findRow(kIdProgressBackground) &&
+                           findRow(kIdProgressBackground)->checked;
+    }
+
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height) {
         Row& row = addRow(page, id, ControlKind::Radio, text, hint,
@@ -353,6 +374,13 @@ struct SettingsDialog::Impl {
         platformIcon.enabled = state.albumCoverVisible;
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
+        Row& progressBackground = addRow(
+            0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
+            L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
+            40.0f, kRowTallH);
+        progressBackground.checked = state.progressBackground;
+        addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
+                  state.progressBackgroundOpacity, state.progressBackground);
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
@@ -389,8 +417,10 @@ struct SettingsDialog::Impl {
         Row& spectrumBackground =
             addToggle(1, kIdSpectrumBackground, L"背景波浪", state.spectrumBackground);
         spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2;
-        addSlider(1, kIdSpectrumOpacity, L"背景透明度", state.spectrumOpacity,
+        addSlider(1, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
                   state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground);
+        // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
+        updateProgressBackgroundRowsEnabled();
 
         addButton(2, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
         addButton(2, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
@@ -907,6 +937,7 @@ struct SettingsDialog::Impl {
                                    findRow(kIdSpectrumStyle)->selected == 2;
             if (actions.onSpectrum)
                 actions.onSpectrum(row->checked);
+            updateProgressBackgroundRowsEnabled();
             break;
         case kIdSpectrumStyle:
             if (auto* background = findRow(kIdSpectrumBackground))
@@ -919,6 +950,7 @@ struct SettingsDialog::Impl {
                                    findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
             if (actions.onSpectrumStyle)
                 actions.onSpectrumStyle(row->selected);
+            updateProgressBackgroundRowsEnabled();
             break;
         case kIdSpectrumBackground:
             row->checked = !row->checked;
@@ -929,10 +961,22 @@ struct SettingsDialog::Impl {
                                    findRow(kIdSpectrum) && findRow(kIdSpectrum)->checked;
             if (actions.onSpectrumBackground)
                 actions.onSpectrumBackground(row->checked);
+            updateProgressBackgroundRowsEnabled();
             break;
         case kIdSpectrumOpacity:
             if (actions.onSpectrumOpacity)
                 actions.onSpectrumOpacity(row->value);
+            break;
+        case kIdProgressBackground:
+            row->checked = !row->checked;
+            if (auto* opacity = findRow(kIdProgressBackgroundOpacity))
+                opacity->enabled = row->checked && !backgroundWaveActive();
+            if (actions.onProgressBackground)
+                actions.onProgressBackground(row->checked);
+            break;
+        case kIdProgressBackgroundOpacity:
+            if (actions.onProgressBackgroundOpacity)
+                actions.onProgressBackgroundOpacity(row->value);
             break;
         case kIdHoverControls:
             row->checked = !row->checked;
@@ -1062,6 +1106,11 @@ struct SettingsDialog::Impl {
             row->value = std::clamp(s.spectrumOpacity, 0, 100);
             row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground;
         }
+        if (auto* row = findRow(kIdProgressBackground))
+            row->checked = s.progressBackground;
+        if (auto* row = findRow(kIdProgressBackgroundOpacity))
+            row->value = std::clamp(s.progressBackgroundOpacity, 0, 100);
+        updateProgressBackgroundRowsEnabled();
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
         if (auto* row = findRow(kIdHoverControlStyle)) {
