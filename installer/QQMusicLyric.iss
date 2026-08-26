@@ -38,7 +38,7 @@ OutputBaseFilename=QQMusicLyric-{#AppVersion}-Setup
 SetupIconFile=..\asset\logo-dark.ico
 UninstallDisplayIcon={app}\QQMusicLyric.exe
 UninstallDisplayName=QQMusicLyric
-; 不自动关闭正在运行的程序，用户必须先自行退出 QQMusicLyric 后再继续安装。
+; 默认不自动关闭正在运行的程序；软件内更新会通过 /CLOSEAPPLICATIONS 显式覆盖。
 CloseApplications=no
 Compression=lzma2
 SolidCompression=yes
@@ -95,10 +95,30 @@ begin
   end;
 end;
 
-{ 安装向导启动前拦截：进程仍在运行时提示用户先手动退出，可重试或取消安装。 }
+{ 软件内更新由 C++ 传入 Inno Setup 官方 /CLOSEAPPLICATIONS 参数。
+  外部直接运行安装包不带该参数，继续走手动退出流程。 }
+function IsInAppUpdate: Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(I), '/CLOSEAPPLICATIONS') = 0 then
+    begin
+      Result := True;
+      exit;
+    end;
+  end;
+end;
+
+{ 外部安装包启动前拦截：进程仍在运行时提示用户先手动退出，可重试或取消安装。 }
 function InitializeSetup: Boolean;
 begin
   Result := True;
+  if IsInAppUpdate then
+    exit;
+
   while IsAppRunning do
   begin
     if MsgBox('检测到 QQMusicLyric 正在运行。' + #13#10 + #13#10 +
@@ -112,10 +132,13 @@ begin
   end;
 end;
 
-{ 点击“安装”后再次确认：覆盖向导停留期间用户重新打开软件的情况。 }
+{ 外部安装包点击“安装”后再次确认：覆盖向导停留期间用户重新打开软件的情况。 }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  if IsInAppUpdate then
+    exit;
+
   while IsAppRunning do
   begin
     if MsgBox('检测到 QQMusicLyric 正在运行。' + #13#10 + #13#10 +

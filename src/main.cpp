@@ -2675,8 +2675,10 @@ void App::showAbout(bool downloadUpdate) {
 bool App::launchUpdateInstaller(const std::wstring& path) {
     if (path.empty())
         return false;
-    HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr,
-                                     SW_SHOWNORMAL);
+    // 软件内更新使用 Inno Setup 的标准参数，让安装器在安装阶段接管仍存活的旧进程；
+    // 外部直接运行安装包不带该参数，仍保持手动退出策略。
+    HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(),
+                                     L"/CLOSEAPPLICATIONS", nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32)
         return false;
     requestQuit();
