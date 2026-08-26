@@ -40,13 +40,15 @@ HICON taskbarIcon() {
 }
 
 HICON windowIcon() {
-    return iconForTheme(fluent::isDarkMode(fluent::ThemeTarget::Window));
+    // 普通顶层窗口的任务栏按钮也应与“任务栏歌词主题”保持一致。
+    return taskbarIcon();
 }
 
-void applyWindowIcon(HWND hwnd) {
+namespace {
+
+void applyIcon(HWND hwnd, HICON icon) {
     if (!hwnd || !IsWindow(hwnd))
         return;
-    HICON icon = windowIcon();
     if (!icon)
         return;
 
@@ -55,6 +57,16 @@ void applyWindowIcon(HWND hwnd) {
     SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
+}
+
+} // namespace
+
+void applyWindowIcon(HWND hwnd) {
+    applyIcon(hwnd, windowIcon());
+}
+
+void applyTaskbarIcon(HWND hwnd) {
+    applyIcon(hwnd, taskbarIcon());
 }
 
 } // namespace app_icon

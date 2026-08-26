@@ -1,5 +1,6 @@
 #include "taskbar_host.h"
 #include "logging/runtime_logger.h"
+#include "ui/app_icon.h"
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
@@ -620,6 +621,9 @@ struct TaskbarHost::Impl {
         wc.hInstance = inst;
         wc.lpszClassName = kWndClassName;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        const HICON icon = app_icon::taskbarIcon();
+        wc.hIcon = icon;
+        wc.hIconSm = icon;
         RegisterClassExW(&wc);
 
         if (!findTaskbar())
@@ -633,6 +637,7 @@ struct TaskbarHost::Impl {
             return false;
 
         hwnd = h;
+        app_icon::applyTaskbarIcon(hwnd);
         if (!attachToTaskbar(h))
             scheduleTaskbarAttachRetry();
         if (!mediaPopup.create(inst, hwnd))
@@ -1737,6 +1742,7 @@ struct TaskbarHost::Impl {
     }
 
     void refreshTheme() {
+        app_icon::applyTaskbarIcon(hwnd);
         const bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         if (light != lightTheme_) {
             lightTheme_ = light;
