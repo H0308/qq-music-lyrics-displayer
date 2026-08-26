@@ -3,7 +3,7 @@
 namespace app_info {
 
 // 发布新版本时同步修改这里，并使用相同的版本号创建 GitHub/Gitee Release 标签。
-inline constexpr wchar_t kVersion[] = L"1.9.1";
+inline constexpr wchar_t kVersion[] = L"1.10.0";
 inline constexpr wchar_t kProjectUrl[] =
     L"https://github.com/H0308/qq-music-lyrics-displayer";
 inline constexpr wchar_t kGiteeProjectUrl[] =
