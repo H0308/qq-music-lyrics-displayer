@@ -1040,6 +1040,13 @@ struct App {
         shutdownRequested_ = true;
         runtimeLogger_.write(L"[lifecycle] quit requested");
         runtimeLogger_.flushSync();
+
+        // 先销毁仍由 Explorer 承载的任务栏窗口和托盘窗口，再结束消息循环。
+        // 仅投递 WM_QUIT 会把这部分清理推迟到 main() 返回后的析构阶段，
+        // 任务栏歌词窗口或探测线程可能在此期间继续存活。
+        destroyTaskbar();
+        closeUpdatePrompt();
+        destroyTray();
         PostQuitMessage(0);
     }
 
