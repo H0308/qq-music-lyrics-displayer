@@ -30,9 +30,11 @@
 namespace {
 
 constexpr UINT_PTR kTimerId = 2;
+constexpr UINT_PTR kTaskbarAttachTimerId = 3;
 constexpr UINT kTimerMs = 16;         // 活动帧最大间隔：60Hz 基准
 constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~125Hz，避免过度唤醒
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
+constexpr UINT kTaskbarAttachRetryMs = 250;
 constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 
@@ -236,6 +238,7 @@ struct TaskbarHost::Impl {
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
+    bool taskbarEmbedded_ = false;
     HWND notify_ = nullptr;
     HWND start_ = nullptr;
     RECT rcTaskbar_{};   // 任务栏屏幕坐标（缓存）
@@ -532,6 +535,79 @@ struct TaskbarHost::Impl {
             GetWindowRect(start_, &rcStart_);
     }
 
+    void scheduleTaskbarAttachRetry() {
+        if (hwnd)
+            SetTimer(hwnd, kTaskbarAttachTimerId, kTaskbarAttachRetryMs, nullptr);
+    }
+
+    void cancelTaskbarAttachRetry() {
+        if (hwnd)
+            KillTimer(hwnd, kTaskbarAttachTimerId);
+    }
+
+    bool attachToTaskbar(HWND window) {
+        taskbarEmbedded_ = false;
+        if (!window || !taskbar_ || !IsWindow(taskbar_))
+            return false;
+
+        SetLastError(ERROR_SUCCESS);
+        const LONG_PTR originalStyle = GetWindowLongPtrW(window, GWL_STYLE);
+        if (originalStyle == 0 && GetLastError() != ERROR_SUCCESS)
+            return false;
+
+        // SetParent 不会替窗口切换 WS_POPUP/WS_CHILD；先切成真正的子窗口，
+        // 否则后续 SetWindowPos 仍可能按顶层窗口的屏幕坐标解释。
+        const LONG_PTR childStyle =
+            (originalStyle & ~static_cast<LONG_PTR>(WS_POPUP)) |
+            static_cast<LONG_PTR>(WS_CHILD);
+        SetLastError(ERROR_SUCCESS);
+        if (SetWindowLongPtrW(window, GWL_STYLE, childStyle) == 0 &&
+            GetLastError() != ERROR_SUCCESS)
+            return false;
+
+        // 初始窗口没有父窗口时，SetParent 成功也会返回 nullptr（返回的是旧父窗口），
+        // 必须结合 GetLastError 和实际父窗口判断，不能直接判断返回值。
+        SetLastError(ERROR_SUCCESS);
+        const HWND previousParent = SetParent(window, taskbar_);
+        const DWORD error = GetLastError();
+        if (!previousParent && error != ERROR_SUCCESS) {
+            SetParent(window, nullptr);
+            SetWindowLongPtrW(window, GWL_STYLE, originalStyle);
+            runtime_log::writef(L"[taskbar] SetParent failed: error=%lu hwnd=%p parent=%p",
+                                static_cast<unsigned long>(error), window, taskbar_);
+            return false;
+        }
+
+        if (GetParent(window) != taskbar_) {
+            SetParent(window, nullptr);
+            SetWindowLongPtrW(window, GWL_STYLE, originalStyle);
+            runtime_log::writef(L"[taskbar] SetParent parent mismatch: hwnd=%p parent=%p",
+                                window, taskbar_);
+            return false;
+        }
+
+        taskbarEmbedded_ = true;
+        return true;
+    }
+
+    void retryTaskbarAttach() {
+        if (!hwnd)
+            return;
+        if (!findTaskbar())
+            return;
+
+        if (!attachToTaskbar(hwnd)) {
+            // 附着失败时仍保持顶层窗口，但必须使用屏幕坐标，避免落到屏幕顶部。
+            adjustPosition();
+            return;
+        }
+
+        cancelTaskbarAttachRetry();
+        adjustPosition();
+        if (visible)
+            render();
+    }
+
     bool createWindow(HINSTANCE inst) {
         this->inst = inst;
         BOOL animations = TRUE;
@@ -556,12 +632,9 @@ struct TaskbarHost::Impl {
         if (!h)
             return false;
 
-        // 嵌入任务栏；失败则仍可作为独立分层窗口存在
-        if (!SetParent(h, taskbar_)) {
-            runtime_log::writef(L"[taskbar] SetParent failed, fallback to popup");
-        }
-
         hwnd = h;
+        if (!attachToTaskbar(h))
+            scheduleTaskbarAttachRetry();
         if (!mediaPopup.create(inst, hwnd))
             runtime_log::writef(L"[taskbar] media popup creation failed");
         if (!volumePopup_.create(inst))
@@ -677,9 +750,9 @@ struct TaskbarHost::Impl {
 
         int y = rcTaskbar_.top + marginY;
 
-        // 转成 Shell_TrayWnd 客户区坐标
         POINT pt{x, y};
-        ScreenToClient(taskbar_, &pt);
+        if (taskbarEmbedded_)
+            ScreenToClient(taskbar_, &pt);
 
         // 把窗口提到任务栏子窗口最前面，避免被其他任务栏子窗口盖住
         SetWindowPos(hwnd, HWND_TOP, pt.x, pt.y, pxW, pxH,
@@ -1512,15 +1585,22 @@ struct TaskbarHost::Impl {
                             timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
-                SetParent(hwnd, taskbar_);
+                if (!attachToTaskbar(hwnd))
+                    scheduleTaskbarAttachRetry();
+                else
+                    cancelTaskbarAttachRetry();
                 adjustPosition();
                 if (visible)
                     ShowWindow(hwnd, SW_SHOWNA);
                 render();
+            } else {
+                taskbarEmbedded_ = false;
+                scheduleTaskbarAttachRetry();
             }
             return;
         }
         hwnd = nullptr;
+        taskbarEmbedded_ = false;
         if (createWindow(inst) && visible) {
             ShowWindow(hwnd, SW_SHOWNA);
             // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
@@ -3672,6 +3752,8 @@ struct TaskbarHost::Impl {
         case WM_TIMER:
             if (wp == kTimerId)
                 onTimer();
+            else if (wp == kTaskbarAttachTimerId)
+                retryTaskbarAttach();
             return 0;
         case WM_DISPLAYCHANGE:
             updateDisplayRefresh();
@@ -3753,6 +3835,8 @@ struct TaskbarHost::Impl {
             return 0;
         case WM_DESTROY:
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", visible ? 1 : 0);
+            KillTimer(hwnd, kTaskbarAttachTimerId);
+            taskbarEmbedded_ = false;
             stopFrameTimer();
             stopProbe();
             volumePopup_.destroy();
