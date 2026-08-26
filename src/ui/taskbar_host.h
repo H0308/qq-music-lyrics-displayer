@@ -69,6 +69,7 @@ public:
     void setAppVolume(const AppVolumeState& state) override;
     void setAppVolumeCallback(std::function<void(int percent)> cb) override;
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
+    void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
 
     const std::vector<LyricLine>& lyrics() const override;
 
@@ -87,14 +88,18 @@ public:
     void setSecondaryLyricMode(bool translation, bool romanization) override;
     void setDoubleLineLyrics(bool on);
     void setLyricAlignment(LyricAlignment alignment);
+    void setIdleQuoteAlignment(LyricAlignment alignment);
     // 是否在鼠标悬浮时用播放控件替换右侧歌词，默认开启。
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
     // 媒体卡片展开方式：悬浮延迟展开或点击立即展开。
     void setMediaPopupTrigger(MediaPopupTrigger trigger);
-    // 媒体卡片背景：当前纯色或 Windows 系统磨砂材质。
+    // 播放中的音乐控件卡片背景：当前纯色或 Windows 系统磨砂材质。
     void setMediaPopupBackground(MediaPopupBackground mode);
+    // 无播放时快速启动卡片的独立背景模式和磨砂颜色。
+    void setIdleCardBackground(MediaPopupBackground mode);
+    void setIdleCardBackgroundColor(COLORREF color, bool customized);
     // 是否让磨砂背景跟随当前专辑主色。
     void setMediaPopupFollowAlbum(bool on);
     // 是否根据磨砂卡片背后的应用明暗自动切换黑白文字。

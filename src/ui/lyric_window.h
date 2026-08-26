@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/font_style.h"
+#include "idle/idle_types.h"
 #include "lyric/lyric_provider.h"
 
 #include <array>
@@ -46,6 +47,7 @@ struct OverlayMediaInfo {
 // 任务栏正式展示的语义场景。频谱柱值不放进完整帧，仍通过任务栏的高频接口更新。
 enum class DisplayScene {
     NoPlayback,
+    Idle,
     Searching,
     Lyrics,
     Message,
@@ -81,6 +83,7 @@ struct PresentationFrame {
 
     DisplayScene scene = DisplayScene::NoPlayback;
     OverlayMediaInfo media;
+    IdlePresentation idle;
     std::vector<LyricLine> lyrics;
     std::wstring statusText;
 

@@ -22,19 +22,25 @@ public:
 
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
+    void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
     // 应用音量：图标+数值常驻显示；点击图标展开/收起卡内滑块，拖动经回调上报
     void setAppVolume(const AppVolumeState& state);
     void setAppVolumeCallback(std::function<void(int percent)> cb);
     void setEnabled(bool enabled);
     // 触发方式：true 悬浮停留片刻后展开（默认），false 由点击展开（onAnchorClick）
     void setTriggerOnHover(bool on);
+    // 播放中的音乐控件卡片背景。
     void setBackgroundMode(MediaPopupBackground mode);
+    // 无播放时快速启动卡片的独立背景模式和磨砂颜色。
+    void setIdleBackgroundMode(MediaPopupBackground mode);
+    void setIdleBackgroundColor(COLORREF color, bool customized);
     void setFollowAlbumBackground(bool on);
     void setAutoTextContrast(bool on);
     void refreshTheme();
     // animateSongTransition 只由完整展示帧在确认切歌时传入；媒体字段异步补齐不触发转场。
     void setMedia(const OverlayMediaInfo& info, bool available,
                   bool animateSongTransition = false);
+    void setIdleContent(const IdlePresentation& content, bool available);
     void setProgress(int64_t positionMs);
     void setAnchor(HWND anchor);
 

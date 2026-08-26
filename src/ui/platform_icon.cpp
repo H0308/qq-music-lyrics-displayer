@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <memory>
+#include <vector>
 
 namespace {
 
@@ -92,6 +93,46 @@ DWORD findProcessId(const std::wstring& processName) {
     if (Process32FirstW(snapshot, &entry)) {
         do {
             if (_wcsicmp(entry.szExeFile, processName.c_str()) == 0) {
+                result = entry.th32ProcessID;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return result;
+}
+
+std::wstring fullPath(const std::wstring& path) {
+    if (path.empty())
+        return {};
+    wchar_t buffer[32768]{};
+    const DWORD length = GetFullPathNameW(path.c_str(), _countof(buffer), buffer, nullptr);
+    return length > 0 && length < _countof(buffer) ? std::wstring(buffer, length) : path;
+}
+
+DWORD findProcessIdByImagePath(const std::wstring& targetPath) {
+    const std::wstring target = fullPath(targetPath);
+    if (target.empty())
+        return 0;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return 0;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    DWORD result = 0;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                         entry.th32ProcessID);
+            if (!process)
+                continue;
+            wchar_t path[32768]{};
+            DWORD length = static_cast<DWORD>(_countof(path));
+            const bool queried = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+            CloseHandle(process);
+            if (queried && _wcsicmp(path, target.c_str()) == 0) {
                 result = entry.th32ProcessID;
                 break;
             }
@@ -263,13 +304,8 @@ bool readIconPixels(HICON icon, std::vector<BYTE>& pixels, UINT& width, UINT& he
     return true;
 }
 
-} // namespace
-
-namespace platform_icon {
-
-bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
-                          std::vector<BYTE>& pixels, UINT& width, UINT& height) {
-    const std::wstring path = resolveSourceIconPath(sourceAppUserModelId);
+bool readIconPixelsFromPath(const std::wstring& path, std::vector<BYTE>& pixels, UINT& width,
+                            UINT& height) {
     if (path.empty())
         return false;
 
@@ -295,6 +331,78 @@ bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
     return ok;
 }
 
+std::wstring fallbackExeName(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    const size_t start = slash == std::wstring::npos ? 0 : slash + 1;
+    std::wstring name = path.substr(start);
+    const size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos)
+        name.resize(dot);
+    return name;
+}
+
+} // namespace
+
+namespace platform_icon {
+
+bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
+                          std::vector<BYTE>& pixels, UINT& width, UINT& height) {
+    const std::wstring path = resolveSourceIconPath(sourceAppUserModelId);
+    return readIconPixelsFromPath(path, pixels, width, height);
+}
+
+bool readExeIconPixels(const std::wstring& path, std::vector<BYTE>& pixels, UINT& width,
+                       UINT& height) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return false;
+    return readIconPixelsFromPath(path, pixels, width, height);
+}
+
+bool readExeDisplayName(const std::wstring& path, std::wstring& name) {
+    name.clear();
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return false;
+
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(path.c_str(), &ignored);
+    if (size > 0) {
+        std::vector<BYTE> data(size);
+        if (GetFileVersionInfoW(path.c_str(), 0, size, data.data())) {
+            struct Translation {
+                WORD language;
+                WORD codePage;
+            };
+            Translation* translations = nullptr;
+            UINT translationBytes = 0;
+            if (VerQueryValueW(data.data(), L"\\VarFileInfo\\Translation",
+                               reinterpret_cast<void**>(&translations), &translationBytes) &&
+                translations && translationBytes >= sizeof(Translation)) {
+                const UINT count = translationBytes / sizeof(Translation);
+                for (UINT i = 0; i < count; ++i) {
+                    wchar_t key[128]{};
+                    swprintf_s(key, L"\\StringFileInfo\\%04x%04x\\FileDescription",
+                               translations[i].language, translations[i].codePage);
+                    wchar_t* description = nullptr;
+                    UINT descriptionLength = 0;
+                    if (VerQueryValueW(data.data(), key, reinterpret_cast<void**>(&description),
+                                       &descriptionLength) &&
+                        description && descriptionLength > 1) {
+                        name.assign(description, descriptionLength - 1);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    name = fallbackExeName(path);
+    return !name.empty();
+}
+
 bool launchSourceApp(const std::wstring& sourceAppUserModelId) {
     const auto candidates = sourceProcessCandidates(sourceAppUserModelId);
     for (const auto& candidate : candidates) {
@@ -315,6 +423,18 @@ bool launchSourceApp(const std::wstring& sourceAppUserModelId) {
         return true;
 
     return executePath(resolveSourceIconPath(sourceAppUserModelId));
+}
+
+bool launchConfiguredExe(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return false;
+
+    const DWORD processId = findProcessIdByImagePath(path);
+    if (processId != 0 && activateExistingWindow(processId))
+        return true;
+    return executePath(path);
 }
 
 } // namespace platform_icon

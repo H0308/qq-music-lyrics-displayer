@@ -1,6 +1,7 @@
 #include "settings_dialog.h"
 
 #include "ui/app_icon.h"
+#include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
@@ -11,12 +12,15 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cwchar>
 #include <string>
 #include <utility>
 #include <vector>
 
 namespace {
 
+constexpr int kSettingsPageCount = 5;
+constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kRenderModeMinimal = 3;
 constexpr int kIdSongInfo = 410;
@@ -54,6 +58,13 @@ constexpr int kIdSecondaryType = 433;
 constexpr int kIdQqLocalLyricsEnabled = 434;
 constexpr int kIdQqLocalLyricsPath = 435;
 constexpr int kIdQqLocalLyricsPersistOrder = 436;
+constexpr int kIdIdleEntry = 446;
+constexpr int kIdIdleQuoteSource = 447;
+constexpr int kIdIdleQuoteRefreshInterval = 448;
+constexpr int kIdIdleApps = 449;
+constexpr int kIdMediaPopupBackgroundColor = 451;
+constexpr int kIdIdleCardBackground = 452;
+constexpr int kIdIdleQuoteAlignment = 453;
 constexpr int kIdContentScrollBar = 401;
 
 constexpr float kWindowW = 760.0f;
@@ -101,6 +112,9 @@ constexpr float kScrollBarInset = 8.0f;
 constexpr float kScrollBarOutsideGap = 8.0f;
 constexpr float kScrollMinThumbHeight = 24.0f;
 constexpr float kScrollWheelDip = 72.0f;
+constexpr float kIdleAppItemH = 52.0f;
+constexpr float kIdleAppsListTop = 76.0f;
+constexpr float kIdleAppsBaseH = 128.0f;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
@@ -140,6 +154,12 @@ int themeModeIndex(fluent::ThemeMode mode) {
     }
 }
 
+std::wstring colorText(COLORREF color) {
+    wchar_t text[10]{};
+    swprintf_s(text, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
+    return text;
+}
+
 } // namespace
 
 struct SettingsDialog::Impl {
@@ -149,6 +169,7 @@ struct SettingsDialog::Impl {
         ModeGrid, // 2×2 模式选择卡片
         Slider,
         Button,
+        AppList,
         Header, // 分组标题：无卡片背景，不参与交互与焦点
     };
 
@@ -176,6 +197,8 @@ struct SettingsDialog::Impl {
         D2D1_RECT_F hintRect{};
         D2D1_RECT_F controlRect{};
         D2D1_RECT_F artworkRect{};
+        D2D1_RECT_F addAppRect{};
+        std::vector<D2D1_RECT_F> appDeleteRects;
         std::vector<D2D1_RECT_F> optionRects;
         std::vector<std::wstring> optionHints;
     };
@@ -189,12 +212,15 @@ struct SettingsDialog::Impl {
     int activePage = 0;
 
     fluent::FluentDialogSurface surface;
-    std::array<std::wstring, 4> navItems{L"显示", L"频谱", L"字体与颜色", L"歌词"};
-    std::array<std::wstring, 4> pageTitles{L"显示", L"频谱", L"字体与颜色", L"歌词"};
-    std::vector<Row> rows[4];
+    std::unique_ptr<ColorPickerDialog> colorPicker;
+    std::array<std::wstring, kSettingsPageCount> navItems{
+        L"显示", L"频谱", L"字体与歌词颜色", L"歌词", L"每日一言"};
+    std::array<std::wstring, kSettingsPageCount> pageTitles{
+        L"显示", L"频谱", L"字体与歌词颜色", L"歌词", L"每日一言"};
+    std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
-    std::array<D2D1_RECT_F, 4> navItemRects{};
-    std::array<D2D1_RECT_F, 4> pageTitleRects{};
+    std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
+    std::array<D2D1_RECT_F, kSettingsPageCount> pageTitleRects{};
     D2D1_RECT_F contentViewportRect{};
     D2D1_RECT_F scrollTrackRect{};
     D2D1_RECT_F scrollThumbRect{};
@@ -293,6 +319,16 @@ struct SettingsDialog::Impl {
             autoTextContrast->enabled = popupEnabled && background && background->selected == 1;
     }
 
+    void updateIdleBackgroundRowsEnabled() {
+        const auto* idleEntry = findRow(kIdIdleEntry);
+        const auto* background = findRow(kIdIdleCardBackground);
+        const bool enabled = idleEntry && idleEntry->checked;
+        if (auto* row = findRow(kIdIdleCardBackground))
+            row->enabled = enabled;
+        if (auto* row = findRow(kIdMediaPopupBackgroundColor))
+            row->enabled = enabled && background && background->selected == 1;
+    }
+
     // 播放进度背景与背景波浪共用同一层背景，二者互斥：
     // 背景波浪生效（频谱开 + 梦幻波浪 + 背景开关开）时进度背景不可用
     bool backgroundWaveActive() const {
@@ -355,6 +391,72 @@ struct SettingsDialog::Impl {
         Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, height);
         row.controlText = controlText ? controlText : L"";
         return row;
+    }
+
+    void updateIdleAppsRowHeight() {
+        if (auto* row = findRow(kIdIdleApps)) {
+            const size_t count = std::max<size_t>(1, state.idleApps.size());
+            row->minHeight = kIdleAppsBaseH + static_cast<float>(count) * kIdleAppItemH;
+            row->height = row->minHeight;
+        }
+    }
+
+    void updateIdleQuoteSourceRow() {
+        if (auto* row = findRow(kIdIdleQuoteSource)) {
+            const bool privacy = state.idleQuoteSource == 1;
+            row->hint = privacy
+                            ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
+                            : L"默认使用一言获取每日一言。";
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = kRowTallH;
+        }
+    }
+
+    void updateIdleRowsEnabled() {
+        const bool enabled = state.idleEntryEnabled;
+        if (auto* row = findRow(kIdIdleQuoteSource))
+            row->enabled = enabled;
+        if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
+            row->enabled = enabled;
+        if (auto* row = findRow(kIdIdleQuoteAlignment))
+            row->enabled = enabled;
+        updateIdleBackgroundRowsEnabled();
+        if (auto* row = findRow(kIdIdleApps))
+            row->enabled = enabled;
+    }
+
+    void openColorPicker(int id) {
+        if (colorPicker && colorPicker->isOpen()) {
+            SetForegroundWindow(colorPicker->hwnd());
+            return;
+        }
+
+        COLORREF initial = 0;
+        const wchar_t* title = nullptr;
+        if (id == kIdMediaPopupBackgroundColor) {
+            initial = state.idleCardBackgroundColor;
+            title = L"快速启动卡片背景颜色";
+        } else {
+            return;
+        }
+
+        colorPicker = std::make_unique<ColorPickerDialog>();
+        if (!colorPicker->create(inst, hwnd, initial, title)) {
+            colorPicker.reset();
+            return;
+        }
+        colorPicker->setApplyCallback([this, id](COLORREF color) {
+            if (id == kIdMediaPopupBackgroundColor) {
+                state.idleCardBackgroundColor = color;
+                if (actions.onIdleCardBackgroundColor)
+                    actions.onIdleCardBackgroundColor(color);
+            }
+            if (auto* row = findRow(id))
+                row->controlText = colorText(color);
+            surface.invalidate();
+        });
+        colorPicker->show();
     }
 
     Row& addHeader(int page, const wchar_t* text) {
@@ -447,6 +549,43 @@ struct SettingsDialog::Impl {
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
                  state.albumCoverVisible && !minimal, kCoverEffectRowH);
+        Row& idleEntry = addRow(
+            kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
+            L"播放器未运行时，任务栏显示一句每日一言；悬浮后可打开已配置的应用。"
+            L"关闭后，播放器未运行时隐藏任务栏入口。",
+            40.0f, kRowTallH);
+        idleEntry.checked = state.idleEntryEnabled;
+        addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
+                 state.idleQuoteSource == 1
+                     ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
+                     : L"默认使用一言获取每日一言。",
+                 {L"一言", L"今日诗词"}, state.idleQuoteSource, state.idleEntryEnabled,
+                 kRowTallH);
+        addRadio(kIdlePage, kIdIdleQuoteRefreshInterval, L"每日一言更新频率", nullptr,
+                 {L"每天", L"每 12 小时", L"每小时"}, state.idleQuoteRefreshInterval,
+                 state.idleEntryEnabled, kRowTallH);
+        addRadio(kIdlePage, kIdIdleQuoteAlignment, L"每日一言字体对齐方式",
+                 L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
+                 {L"左对齐", L"居中", L"右对齐"}, state.idleQuoteAlignment,
+                 state.idleEntryEnabled, kRowH);
+        addRadio(kIdlePage, kIdIdleCardBackground, L"快速启动卡片背景",
+                 L"纯色跟随窗口深浅色显示白色或黑色；磨砂玻璃使用 Windows 背景材质，下面的颜色仅作为磨砂颜色叠加。",
+                 {L"纯色", L"磨砂玻璃"}, state.idleCardBackground,
+                 state.idleEntryEnabled, kRowTallH);
+        Row& idleCardBackgroundColor = addButton(
+            kIdlePage, kIdMediaPopupBackgroundColor, L"快速启动卡片背景颜色",
+            L"仅在快速启动卡片的磨砂玻璃模式下生效，用作磨砂材质的颜色叠加。",
+            colorText(state.idleCardBackgroundColor).c_str(), kRowTallH);
+        idleCardBackgroundColor.enabled = state.idleEntryEnabled && state.idleCardBackground == 1;
+        Row& idleApps = addRow(
+            kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
+            L"通过文件选择器添加本地 EXE；设置页与每日一言卡片共用正常大小的软件图标。",
+            0.0f, kIdleAppsBaseH + static_cast<float>(
+                                            std::max<size_t>(1, state.idleApps.size())) *
+                                            kIdleAppItemH);
+        idleApps.height = idleApps.minHeight;
+        idleApps.enabled = state.idleEntryEnabled;
+        updateIdleRowsEnabled();
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
             L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
@@ -472,8 +611,8 @@ struct SettingsDialog::Impl {
                  L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
                  {L"悬浮展开", L"点击展开"}, state.mediaPopupTrigger,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
-        addRadio(0, kIdMediaPopupBackground, L"媒体卡片背景",
-                 L"纯色保持当前外观；磨砂玻璃使用 Windows 系统背景材质",
+        addRadio(0, kIdMediaPopupBackground, L"音乐控件卡片背景",
+                 L"保持原有音乐控件卡片的纯色或 Windows 磨砂玻璃背景",
                  {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
         Row& followAlbum = addRow(
@@ -532,9 +671,9 @@ struct SettingsDialog::Impl {
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
-        addButton(2, kIdPickFont, L"字体", state.fontDesc.c_str(), L"选择字体…");
-        addButton(2, kIdFontColor, L"字体颜色与效果", nullptr, L"打开…");
-        addToggle(2, kIdFollowAlbum, L"已播放颜色跟随专辑", state.followAlbum);
+        addButton(2, kIdPickFont, L"通用字体", state.fontDesc.c_str(), L"选择字体…");
+        addButton(2, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
+        addToggle(2, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
 
         addToggle(3, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
         addRadio(3, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
@@ -637,7 +776,7 @@ struct SettingsDialog::Impl {
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
         navRect = D2D1::RectF(12.0f, 12.0f, 12.0f + kNavW, std::max(12.0f, h - 12.0f));
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * 32.0f,
                                           navRect.right, navRect.top + (i + 1) * 32.0f);
             pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
@@ -672,6 +811,8 @@ struct SettingsDialog::Impl {
                 row.hintRect = D2D1::RectF(0, 0, 0, 0);
                 row.controlRect = D2D1::RectF(0, 0, 0, 0);
                 row.artworkRect = D2D1::RectF(0, 0, 0, 0);
+                row.addAppRect = D2D1::RectF(0, 0, 0, 0);
+                row.appDeleteRects.clear();
                 row.optionRects.clear();
             }
         }
@@ -688,6 +829,30 @@ struct SettingsDialog::Impl {
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
             const float innerX = contentX + 16.0f;
             const float innerRight = contentX + contentW - 16.0f;
+            if (row.id == kIdIdleApps) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+                const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
+                row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                                           hintTop + 30.0f);
+                const float listTop = y + kIdleAppsListTop;
+                const size_t count = state.idleApps.size();
+                row.appDeleteRects.reserve(count);
+                for (size_t i = 0; i < count; ++i) {
+                    const float itemTop = listTop + static_cast<float>(i) * kIdleAppItemH;
+                    row.appDeleteRects.push_back(
+                        D2D1::RectF(innerRight - 70.0f, itemTop + 10.0f,
+                                    innerRight - 12.0f, itemTop + 40.0f));
+                }
+                row.addAppRect = D2D1::RectF(
+                    innerX + (innerRight - innerX - 132.0f) * 0.5f,
+                    y + rowH - 44.0f,
+                    innerX + (innerRight - innerX + 132.0f) * 0.5f,
+                    y + rowH - 12.0f);
+                y += rowH + kRowGap;
+                continue;
+            }
             if (row.id == kIdCoverEffect) {
                 const float titleTop = y + kTitleTopPadding;
                 row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
@@ -811,7 +976,7 @@ struct SettingsDialog::Impl {
     }
 
     void showPage(int page) {
-        if (page < 0 || page >= 4 || page == activePage)
+        if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
         activePage = page;
         hoverId = 0;
@@ -837,7 +1002,7 @@ struct SettingsDialog::Impl {
                 1.5f, fluent::metrics::cardRadius - 1.0f);
         }
         auto* format = painter.textFormat(13.0f, 400, false, true);
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kSettingsPageCount; ++i) {
             const bool selected = i == activePage;
             const bool hovered = hoverId == kIdNav && hoverOption == i;
             if (selected)
@@ -1943,6 +2108,94 @@ struct SettingsDialog::Impl {
         }
     }
 
+    void drawIdleApps(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+        const auto& p = fluent::palette();
+        const float innerX = row.cardRect.left + 16.0f;
+        const float innerRight = row.cardRect.right - 16.0f;
+        const float listTop = row.cardRect.top + kIdleAppsListTop;
+        const size_t count = state.idleApps.size();
+        auto* nameFormat = painter.textFormat(13.0f, 600, false, true);
+        auto* pathFormat = painter.textFormat(11.0f, 400, false, true);
+        auto* deleteFormat = painter.textFormat(12.0f, 400, true, true);
+        if (!nameFormat || !pathFormat || !deleteFormat)
+            return;
+
+        for (size_t i = 0; i < count; ++i) {
+            const auto& app = state.idleApps[i];
+            const float top = listTop + static_cast<float>(i) * kIdleAppItemH;
+            const D2D1_RECT_F item =
+                D2D1::RectF(innerX, top, innerRight, top + 44.0f);
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            painter.fillRoundRect(row.enabled ? (hovered ? p.controlHover : p.controlFill)
+                                              : p.listHover,
+                                  item, 7.0f);
+            if (pressed)
+                painter.fillRoundRect(p.controlPressed, item, 7.0f);
+
+            const D2D1_RECT_F iconRect =
+                D2D1::RectF(item.left + 8.0f, item.top + 8.0f, item.left + 36.0f,
+                            item.top + 36.0f);
+            if (app.iconPixels && !app.iconPixels->empty() && app.iconWidth > 0 &&
+                app.iconHeight > 0 && painter.target()) {
+                ID2D1Bitmap* bitmap = nullptr;
+                const auto props = D2D1::BitmapProperties(
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                      D2D1_ALPHA_MODE_PREMULTIPLIED),
+                    static_cast<float>(surface.dpi()), static_cast<float>(surface.dpi()));
+                if (SUCCEEDED(painter.target()->CreateBitmap(
+                        D2D1::SizeU(app.iconWidth, app.iconHeight), app.iconPixels->data(),
+                        app.iconWidth * 4, &props, &bitmap)) &&
+                    bitmap) {
+                    painter.target()->DrawBitmap(bitmap, iconRect, row.enabled ? 1.0f : 0.45f,
+                                                 D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    bitmap->Release();
+                }
+            }
+
+            const D2D1_RECT_F nameRect =
+                D2D1::RectF(item.left + 46.0f, item.top + 3.0f,
+                            item.right - 78.0f, item.top + 23.0f);
+            const D2D1_RECT_F pathRect =
+                D2D1::RectF(item.left + 46.0f, item.top + 22.0f,
+                            item.right - 78.0f, item.bottom - 3.0f);
+            painter.drawTrimmedText(app.name.empty() ? L"未命名应用" : app.name, nameFormat,
+                                    nameRect, row.enabled && app.pathValid ? p.text : p.disabled);
+            painter.drawTrimmedText(app.pathValid ? app.path : L"路径失效，请重新选择",
+                                    pathFormat, pathRect,
+                                    row.enabled && app.pathValid ? p.textSecondary : p.disabled);
+
+            const D2D1_RECT_F deleteRect = row.appDeleteRects[i];
+            painter.fillRoundRect(row.enabled ? (hovered ? p.controlPressed : p.controlFill)
+                                              : p.listHover,
+                                  deleteRect, 6.0f);
+            painter.strokeRoundRect(row.enabled ? p.cardStroke : p.disabled, deleteRect, 1.0f,
+                                    6.0f);
+            painter.drawText(L"删除", deleteFormat,
+                             D2D1::RectF(deleteRect.left, deleteRect.top,
+                                         deleteRect.right, deleteRect.bottom),
+                             row.enabled && app.pathValid ? p.textSecondary : p.disabled);
+        }
+
+        if (count == 0)
+            painter.drawText(L"未添加应用", pathFormat,
+                             D2D1::RectF(innerX + 8.0f, listTop + 10.0f, innerRight - 8.0f,
+                                         listTop + 34.0f),
+                             row.enabled ? p.textSecondary : p.disabled);
+
+        const bool addHovered = row.enabled && hoverId == row.id && hoverOption == -1;
+        const bool addPressed = row.enabled && pressedId == row.id && pressedOption == -1;
+        painter.fillRoundRect(
+            row.enabled ? (addPressed ? p.accentPressed : addHovered ? p.accentHover : p.accent)
+                        : p.listHover,
+            row.addAppRect, 7.0f);
+        painter.strokeRoundRect(row.enabled ? p.accent : p.disabled, row.addAppRect, 1.0f, 7.0f);
+        painter.drawText(L"添加应用", painter.textFormat(13.0f, 600, true, true),
+                         row.addAppRect, row.enabled ? p.textOnAccent : p.disabled);
+    }
+
     void drawScrollBar(fluent::FluentDialogSurface::Painter& painter) {
         if (contentMaxScroll <= 0.0f || scrollThumbRect.bottom <= scrollThumbRect.top)
             return;
@@ -1975,6 +2228,10 @@ struct SettingsDialog::Impl {
             if (row.showHint)
                 painter.drawText(row.hint, painter.textFormat(12.0f, 400), row.hintRect,
                                  row.enabled ? p.textSecondary : p.disabled);
+            if (row.kind == ControlKind::AppList) {
+                drawIdleApps(painter, row);
+                continue;
+            }
             if (row.id == kIdSpectrumBackground)
                 drawSpectrumBackgroundArtwork(painter, row.artworkRect, row.enabled);
             if (row.kind == ControlKind::Toggle)
@@ -1995,7 +2252,7 @@ struct SettingsDialog::Impl {
     int hitTest(float x, float y, int* option = nullptr) const {
         if (option)
             *option = -1;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kSettingsPageCount; ++i) {
             if (contains(navItemRects[i], x, y)) {
                 if (option)
                     *option = i;
@@ -2005,6 +2262,20 @@ struct SettingsDialog::Impl {
         if (contains(scrollBarHitRect(), x, y))
             return kIdContentScrollBar;
         for (const auto& row : rows[activePage]) {
+            if (!row.enabled)
+                continue;
+            if (row.kind == ControlKind::AppList) {
+                for (size_t i = 0; i < row.appDeleteRects.size(); ++i) {
+                    if (contains(row.appDeleteRects[i], x, y)) {
+                        if (option)
+                            *option = static_cast<int>(i);
+                        return row.id;
+                    }
+                }
+                if (contains(row.addAppRect, x, y))
+                    return row.id;
+                continue;
+            }
             bool inControl = contains(row.controlRect, x, y);
             if (row.id == kIdSpectrumBackground)
                 inControl = inControl || contains(row.artworkRect, x, y);
@@ -2058,13 +2329,50 @@ struct SettingsDialog::Impl {
         surface.invalidate();
     }
 
-    void onCommand(int id) {
+    void onCommand(int id, int option = -1) {
         if (id == kIdNav)
             return;
         Row* row = findRow(id);
         if (!row || !row->enabled)
             return;
         switch (id) {
+        case kIdIdleEntry:
+            row->checked = !row->checked;
+            state.idleEntryEnabled = row->checked;
+            updateIdleRowsEnabled();
+            if (actions.onIdleEntryEnabled)
+                actions.onIdleEntryEnabled(row->checked);
+            break;
+        case kIdIdleQuoteSource:
+            state.idleQuoteSource = row->selected;
+            updateIdleQuoteSourceRow();
+            if (actions.onIdleQuoteSource)
+                actions.onIdleQuoteSource(row->selected);
+            break;
+        case kIdIdleQuoteRefreshInterval:
+            state.idleQuoteRefreshInterval = row->selected;
+            if (actions.onIdleQuoteRefreshInterval)
+                actions.onIdleQuoteRefreshInterval(row->selected);
+            break;
+        case kIdIdleQuoteAlignment:
+            state.idleQuoteAlignment = row->selected;
+            if (actions.onIdleQuoteAlignment)
+                actions.onIdleQuoteAlignment(row->selected);
+            break;
+        case kIdIdleCardBackground:
+            state.idleCardBackground = row->selected;
+            if (actions.onIdleCardBackground)
+                actions.onIdleCardBackground(row->selected);
+            updateIdleBackgroundRowsEnabled();
+            break;
+        case kIdIdleApps:
+            if (option >= 0) {
+                if (actions.onRemoveIdleApp)
+                    actions.onRemoveIdleApp(option);
+            } else if (actions.onAddIdleApp) {
+                actions.onAddIdleApp();
+            }
+            break;
         case kIdSongInfo:
             row->checked = !row->checked;
             if (actions.onSongInfoVisible)
@@ -2166,6 +2474,9 @@ struct SettingsDialog::Impl {
             if (actions.onMediaPopupBackground)
                 actions.onMediaPopupBackground(row->selected);
             updateMediaPopupBackgroundRowsEnabled();
+            break;
+        case kIdMediaPopupBackgroundColor:
+            openColorPicker(kIdMediaPopupBackgroundColor);
             break;
         case kIdMediaPopupFollowAlbum:
             row->checked = !row->checked;
@@ -2271,6 +2582,21 @@ struct SettingsDialog::Impl {
 
     void updateState(const SettingsState& s) {
         state = s;
+        if (auto* row = findRow(kIdIdleEntry))
+            row->checked = s.idleEntryEnabled;
+        if (auto* row = findRow(kIdIdleQuoteSource))
+            row->selected = std::clamp(s.idleQuoteSource, 0, 1);
+        if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
+            row->selected = std::clamp(s.idleQuoteRefreshInterval, 0, 2);
+        if (auto* row = findRow(kIdIdleQuoteAlignment))
+            row->selected = std::clamp(s.idleQuoteAlignment, 0, 2);
+        if (auto* row = findRow(kIdIdleCardBackground))
+            row->selected = std::clamp(s.idleCardBackground, 0, 1);
+        if (auto* row = findRow(kIdMediaPopupBackgroundColor))
+            row->controlText = colorText(s.idleCardBackgroundColor);
+        updateIdleQuoteSourceRow();
+        updateIdleRowsEnabled();
+        updateIdleAppsRowHeight();
         const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongInfo))
             row->checked = s.songInfoVisible;
@@ -2545,6 +2871,9 @@ struct SettingsDialog::Impl {
                             row->selected = pressedOptionValue;
                             onCommand(pressed);
                         }
+                    } else if (row->kind == ControlKind::AppList) {
+                        if (pressedOptionValue == option)
+                            onCommand(pressed, pressedOptionValue);
                     } else if (row->kind == ControlKind::Slider) {
                         onCommand(pressed);
                     } else {
@@ -2588,8 +2917,8 @@ struct SettingsDialog::Impl {
                 if (focusedId == kIdNav) {
                     int next = activePage + (wp == VK_DOWN ? 1 : -1);
                     if (next < 0)
-                        next = 2;
-                    if (next >= 4)
+                        next = kSettingsPageCount - 1;
+                    if (next >= kSettingsPageCount)
                         next = 0;
                     showPage(next);
                 } else if (Row* row = findRow(focusedId);
@@ -2667,6 +2996,10 @@ struct SettingsDialog::Impl {
             focusVisible = false;
             surface.invalidate();
             return 0;
+        case kMsgColorPickerClosed:
+            if (colorPicker && !colorPicker->isOpen())
+                colorPicker.reset();
+            return 0;
         case WM_COMMAND:
             if (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == LBN_SELCHANGE)
                 onCommand(LOWORD(wp));
@@ -2686,6 +3019,10 @@ struct SettingsDialog::Impl {
     }
 
     void destroy() {
+        if (colorPicker) {
+            colorPicker->destroy();
+            colorPicker.reset();
+        }
         if (hwnd) {
             DestroyWindow(hwnd);
             hwnd = nullptr;

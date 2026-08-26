@@ -1,5 +1,6 @@
 #include "lyric/cover_provider.h"
 #include "lyric/lyric_provider.h"
+#include "idle/idle_quote_provider.h"
 #include "app_info.h"
 #include "ui/font_style.h"
 #include "ui/lyric_window.h"
@@ -42,6 +43,7 @@
 #include <io.h>
 #include <algorithm>
 #include <cmath>
+#include <ctime>
 #include <memory>
 #include <string>
 #include <thread>
@@ -55,14 +57,19 @@ constexpr UINT kMsgCoverReady = WM_APP + 3;
 constexpr UINT kMsgQqLocalFolderReady = WM_APP + 4;
 // 应用音频会话的音量/静音/可用性变化（AppVolumeController 从 COM 回调线程投递）
 constexpr UINT kMsgAppVolumeChanged = WM_APP + 5;
+constexpr UINT kMsgIdleQuoteReady = WM_APP + 6;
+constexpr UINT kMsgIdleAppReady = WM_APP + 7;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
 // 切歌弹窗等待封面的超时：SMTC 把封面拆在切歌事件批的后续事件里投递，
 // 短暂等待可以带封面弹出；超时则按无封面弹出，不再干等。
 constexpr UINT_PTR kTimerSongToastCover = 4;
+    // 每日一言只按本地周期检查；命中同一周期时不会重复请求网络。
+constexpr UINT_PTR kTimerIdleQuote = 5;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
+constexpr UINT kIdleQuoteCheckMs = 60 * 1000;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kCmdToggleTaskbar = 101;
@@ -144,12 +151,26 @@ struct QqLocalFolderPayload {
     std::wstring path;
 };
 
+struct IdleAppPayload {
+    std::wstring path;
+};
+
+struct IdleQuotePayload {
+    uint64_t generation = 0;
+    IdleQuoteResult result;
+};
+
 std::string utf8Of(const std::wstring& w) {
     if (w.empty()) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
     std::string s(n, '\0');
     WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
     return s;
+}
+
+COLORREF defaultIdleCardBackgroundColor() {
+    return fluent::isDarkMode(fluent::ThemeTarget::Window) ? RGB(0, 0, 0)
+                                                            : RGB(255, 255, 255);
 }
 
 std::wstring wideOf(const std::string& s) {
@@ -218,6 +239,75 @@ int spectrumStyleIndex(SpectrumStyle style) {
     case SpectrumStyle::Default:
     default: return 0;
     }
+}
+
+const wchar_t* idleQuoteSourceLabel(IdleQuoteSource source) {
+    return source == IdleQuoteSource::Jinrishici ? L"今日诗词" : L"一言";
+}
+
+const char* idleQuoteSourceConfigName(IdleQuoteSource source) {
+    return source == IdleQuoteSource::Jinrishici ? "jinrishici" : "hitokoto";
+}
+
+IdleQuoteSource idleQuoteSourceFromConfig(const std::string& value) {
+    return value == "jinrishici" ? IdleQuoteSource::Jinrishici : IdleQuoteSource::Hitokoto;
+}
+
+const char* idleQuoteIntervalConfigName(IdleQuoteRefreshInterval interval) {
+    switch (interval) {
+    case IdleQuoteRefreshInterval::HalfDay:
+        return "half-day";
+    case IdleQuoteRefreshInterval::Hourly:
+        return "hourly";
+    case IdleQuoteRefreshInterval::Daily:
+    default:
+        return "daily";
+    }
+}
+
+IdleQuoteRefreshInterval idleQuoteIntervalFromConfig(const std::string& value) {
+    if (value == "half-day")
+        return IdleQuoteRefreshInterval::HalfDay;
+    if (value == "hourly")
+        return IdleQuoteRefreshInterval::Hourly;
+    return IdleQuoteRefreshInterval::Daily;
+}
+
+std::string idleQuotePeriodKey(IdleQuoteRefreshInterval interval) {
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &now);
+    char key[64]{};
+    if (interval == IdleQuoteRefreshInterval::Hourly) {
+        sprintf_s(key, "%04d-%02d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1,
+                  local.tm_mday, local.tm_hour);
+    } else if (interval == IdleQuoteRefreshInterval::HalfDay) {
+        sprintf_s(key, "%04d-%02d-%02d-%s", local.tm_year + 1900, local.tm_mon + 1,
+                  local.tm_mday, local.tm_hour < 12 ? "0-12" : "12-24");
+    } else {
+        sprintf_s(key, "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1,
+                  local.tm_mday);
+    }
+    return key;
+}
+
+bool validExePath(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return false;
+    const size_t dot = path.find_last_of(L'.');
+    return dot != std::wstring::npos && _wcsicmp(path.c_str() + dot, L".exe") == 0;
+}
+
+std::wstring fallbackExeName(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    const size_t start = slash == std::wstring::npos ? 0 : slash + 1;
+    std::wstring name = path.substr(start);
+    const size_t dot = name.find_last_of(L'.');
+    if (dot != std::wstring::npos)
+        name.resize(dot);
+    return name;
 }
 
 fluent::ThemeMode themeModeFromConfig(const std::string& value,
@@ -352,6 +442,7 @@ struct App {
     SmtcMonitor monitor;
     LyricProvider provider;
     CoverProvider coverProvider;
+    IdleQuoteProvider idleQuoteProvider_;
     AppVolumeController appVolume_;   // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;   // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
@@ -397,18 +488,38 @@ struct App {
     FontColorDialog::ThemeState darkLyricAppearance_;
     FontColorDialog::ThemeState globalLyricAppearance_;
 
-    // 已播放颜色跟随专辑封面主色调：开启时覆盖当前主题的已播放配置色。
+    // 歌词已播放颜色跟随专辑封面主色调：开启时覆盖当前主题的已播放配置色。
     bool lyricFollowAlbum_ = false;
     // 总开关与类型选择独立于当前歌曲能力；缺少所选内容时暂不显示，后续自动恢复。
     bool secondaryLyricEnabled_ = true;
     bool preferRomanization_ = false;
     bool doubleLineLyricsEnabled_ = false;
     LyricAlignment lyricAlignment_ = LyricAlignment::Left;
+    LyricAlignment idleQuoteAlignment_ = LyricAlignment::Left;
     bool currentHasTranslation_ = false;
     bool currentHasRomanization_ = false;
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
     COLORREF albumColor_ = RGB(49, 194, 124);
     std::shared_ptr<const std::vector<uint8_t>> lastCover_; // 当前曲目有效封面（SMTC 优先，API 兜底）
+
+    // 每日一言任务栏入口：句子缓存与应用图标属于播放链路之外的独立状态。
+    bool idleEntryEnabled_ = true;
+    IdleQuoteSource idleQuoteSource_ = IdleQuoteSource::Hitokoto;
+    IdleQuoteRefreshInterval idleQuoteRefreshInterval_ = IdleQuoteRefreshInterval::Daily;
+    std::vector<IdleAppInfo> idleApps_;
+    std::wstring jinrishiciToken_;
+    std::wstring idleQuoteText_;
+    std::wstring idleQuoteOrigin_;
+    std::wstring idleQuoteUuid_;
+    std::string idleQuoteCacheSource_;
+    std::string idleQuoteCachePeriod_;
+    std::wstring idleQuoteCacheText_;
+    std::wstring idleQuoteCacheOrigin_;
+    std::wstring idleQuoteCacheUuid_;
+    bool idleQuoteLoading_ = false;
+    uint64_t idleQuoteRequestGeneration_ = 0;
+    std::string idleQuoteAttemptKey_;
+    std::string idleQuoteRequestKey_;
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
@@ -416,6 +527,9 @@ struct App {
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
     MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
+    MediaPopupBackground idleCardBackground_ = MediaPopupBackground::Solid;
+    COLORREF idleCardBackgroundColor_ = RGB(255, 255, 255);
+    bool idleCardBackgroundColorCustomized_ = false;
     bool mediaPopupFollowAlbum_ = false;
     bool mediaPopupAutoTextContrast_ = false;
     // 切歌弹窗（灵动岛）：主屏幕中下方短暂弹出歌曲信息，固定鼠标穿透
@@ -477,6 +591,7 @@ struct App {
     bool qqLocalLyricsPersistOrder_ = false;
     std::wstring qqLocalLyricsPath_;
     bool qqLocalLyricsPickerOpen_ = false;
+    bool idleAppPickerOpen_ = false;
 
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
@@ -717,6 +832,9 @@ struct App {
             minimal ? HoverControlStyle::Inline : hoverControlStyle_);
         taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
         taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        taskbarHost->setIdleCardBackground(idleCardBackground_);
+        taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
+                                                idleCardBackgroundColorCustomized_);
         taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
         taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
         taskbarHost->setAlbumCoverEffect(
@@ -802,6 +920,15 @@ struct App {
         if (taskbarHost)
             taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
         logSettingInt(L"media-popup-background", mode == 1 ? 1 : 0);
+        saveSettings();
+    }
+
+    void applyIdleCardBackground(int mode) {
+        idleCardBackground_ = mode == 1 ? MediaPopupBackground::Frosted
+                                        : MediaPopupBackground::Solid;
+        if (taskbarHost)
+            taskbarHost->setIdleCardBackground(idleCardBackground_);
+        logSettingInt(L"idle-card-background", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
@@ -935,8 +1062,12 @@ struct App {
         if (taskbarHost) {
             taskbarHost->refreshTheme();
             applyFontAppearance();
+            taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
+                                                    idleCardBackgroundColorCustomized_);
         }
         refreshThemeWindows();
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
     }
 
     void applyTaskbarTheme(fluent::ThemeMode mode) {
@@ -982,6 +1113,16 @@ struct App {
         saveSettings();
     }
 
+    void applyIdleQuoteAlignment(int alignment) {
+        idleQuoteAlignment_ = alignment == 1 ? LyricAlignment::Center
+                              : alignment == 2 ? LyricAlignment::Right
+                                               : LyricAlignment::Left;
+        if (taskbarHost)
+            taskbarHost->setIdleQuoteAlignment(idleQuoteAlignment_);
+        logSettingInt(L"daily-quote-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
+        saveSettings();
+    }
+
     void applySecondaryEnabled(bool on) {
         secondaryLyricEnabled_ = on;
         applySecondaryLyricMode();
@@ -1010,9 +1151,255 @@ struct App {
         saveSettings();
     }
 
+    void prepareIdleApps() {
+        for (auto& app : idleApps_) {
+            app.pathValid = validExePath(app.path);
+            app.iconPixels.reset();
+            app.iconWidth = 0;
+            app.iconHeight = 0;
+            app.name.clear();
+            if (!app.pathValid) {
+                app.name = fallbackExeName(app.path);
+                continue;
+            }
+
+            if (!platform_icon::readExeDisplayName(app.path, app.name) || app.name.empty())
+                app.name = fallbackExeName(app.path);
+
+            std::vector<BYTE> pixels;
+            UINT width = 0;
+            UINT height = 0;
+            if (platform_icon::readExeIconPixels(app.path, pixels, width, height) &&
+                !pixels.empty() && width > 0 && height > 0) {
+                app.iconPixels =
+                    std::make_shared<const std::vector<BYTE>>(std::move(pixels));
+                app.iconWidth = width;
+                app.iconHeight = height;
+            }
+        }
+    }
+
+    IdlePresentation currentIdlePresentation() const {
+        IdlePresentation presentation;
+        presentation.loading = idleQuoteLoading_;
+        presentation.sentence = idleQuoteText_;
+        if (presentation.sentence.empty())
+            presentation.sentence = idleQuoteLoading_ ? L"正在获取每日一言…" : L"暂时无法获取每日一言";
+        presentation.source = idleQuoteSourceLabel(idleQuoteSource_);
+        if (!idleQuoteOrigin_.empty()) {
+            presentation.source += L" · ";
+            presentation.source += idleQuoteOrigin_;
+        }
+        presentation.apps = idleApps_;
+        return presentation;
+    }
+
+    void refreshIdleQuote(bool force) {
+        if (!idleEntryEnabled_ || monitor.snapshot().sessionAlive)
+            return;
+
+        const std::string period = idleQuotePeriodKey(idleQuoteRefreshInterval_);
+        const std::string key = std::string(idleQuoteSourceConfigName(idleQuoteSource_)) +
+                                "|" + idleQuoteIntervalConfigName(idleQuoteRefreshInterval_) +
+                                "|" + period;
+        const bool cacheMatches =
+            idleQuoteCacheSource_ == idleQuoteSourceConfigName(idleQuoteSource_) &&
+            idleQuoteCachePeriod_ == period && !idleQuoteCacheText_.empty();
+        if (cacheMatches && !force) {
+            idleQuoteText_ = idleQuoteCacheText_;
+            idleQuoteOrigin_ = idleQuoteCacheOrigin_;
+            idleQuoteUuid_ = idleQuoteCacheUuid_;
+            idleQuoteLoading_ = false;
+            idleQuoteAttemptKey_ = key;
+            publishPresentationFrame(monitor.snapshot(), false, true);
+            return;
+        }
+        if (!force && (idleQuoteRequestKey_ == key || idleQuoteAttemptKey_ == key))
+            return;
+
+        ++idleQuoteRequestGeneration_;
+        idleQuoteRequestKey_ = key;
+        idleQuoteAttemptKey_ = key;
+        idleQuoteText_.clear();
+        idleQuoteOrigin_.clear();
+        idleQuoteUuid_.clear();
+        idleQuoteLoading_ = true;
+        const uint64_t generation = idleQuoteRequestGeneration_;
+        const IdleQuoteSource source = idleQuoteSource_;
+        idleQuoteProvider_.requestAsync(
+            source, jinrishiciToken_,
+            [this, generation](IdleQuoteResult result) {
+                auto* payload = new IdleQuotePayload{generation, std::move(result)};
+                if (!PostThreadMessageW(mainThread, kMsgIdleQuoteReady, 0,
+                                        reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
+            });
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void onIdleQuoteReady(std::unique_ptr<IdleQuotePayload> payload) {
+        if (!idleEntryEnabled_ || !payload ||
+            payload->generation != idleQuoteRequestGeneration_ ||
+            idleQuoteRequestKey_.empty())
+            return;
+
+        if (!payload->result.token.empty()) {
+            jinrishiciToken_ = payload->result.token;
+            saveSettings();
+        }
+        idleQuoteLoading_ = false;
+        if (payload->result.ok) {
+            idleQuoteText_ = payload->result.content;
+            idleQuoteOrigin_ = payload->result.origin;
+            idleQuoteUuid_ = payload->result.uuid;
+            idleQuoteCacheSource_ = idleQuoteSourceConfigName(idleQuoteSource_);
+            idleQuoteCachePeriod_ = idleQuotePeriodKey(idleQuoteRefreshInterval_);
+            idleQuoteCacheText_ = idleQuoteText_;
+            idleQuoteCacheOrigin_ = idleQuoteOrigin_;
+            idleQuoteCacheUuid_ = idleQuoteUuid_;
+            saveSettings();
+        }
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void applyIdleEntryEnabled(bool enabled) {
+        if (idleEntryEnabled_ == enabled)
+            return;
+        idleEntryEnabled_ = enabled;
+        runtime_log::writef(L"[action][idle-entry] enabled=%s", enabled ? L"on" : L"off");
+        if (!enabled) {
+            ++idleQuoteRequestGeneration_;
+            idleQuoteRequestKey_.clear();
+            idleQuoteLoading_ = false;
+        } else {
+            refreshIdleQuote(false);
+        }
+        saveSettings();
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void applyIdleQuoteSource(int source) {
+        const IdleQuoteSource next = source == 1 ? IdleQuoteSource::Jinrishici
+                                                  : IdleQuoteSource::Hitokoto;
+        if (idleQuoteSource_ == next)
+            return;
+        idleQuoteSource_ = next;
+        ++idleQuoteRequestGeneration_;
+        idleQuoteRequestKey_.clear();
+        idleQuoteAttemptKey_.clear();
+        idleQuoteText_.clear();
+        idleQuoteOrigin_.clear();
+        idleQuoteUuid_.clear();
+        idleQuoteLoading_ = false;
+        saveSettings();
+        refreshIdleQuote(false);
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void applyIdleQuoteRefreshInterval(int interval) {
+        const IdleQuoteRefreshInterval next =
+            interval == 2   ? IdleQuoteRefreshInterval::Hourly
+            : interval == 1 ? IdleQuoteRefreshInterval::HalfDay
+                            : IdleQuoteRefreshInterval::Daily;
+        if (idleQuoteRefreshInterval_ == next)
+            return;
+        idleQuoteRefreshInterval_ = next;
+        ++idleQuoteRequestGeneration_;
+        idleQuoteRequestKey_.clear();
+        idleQuoteAttemptKey_.clear();
+        idleQuoteText_.clear();
+        idleQuoteOrigin_.clear();
+        idleQuoteUuid_.clear();
+        idleQuoteLoading_ = false;
+        saveSettings();
+        refreshIdleQuote(false);
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void addIdleApp(const std::wstring& path) {
+        if (!validExePath(path))
+            return;
+        for (const auto& app : idleApps_) {
+            if (_wcsicmp(app.path.c_str(), path.c_str()) == 0)
+                return;
+        }
+        IdleAppInfo app;
+        app.path = path;
+        idleApps_.push_back(std::move(app));
+        prepareIdleApps();
+        runtime_log::writef(L"[action][idle-entry] app-added path=%s", path.c_str());
+        saveSettings();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void removeIdleApp(int index) {
+        if (index < 0 || static_cast<size_t>(index) >= idleApps_.size())
+            return;
+        runtime_log::writef(L"[action][idle-entry] app-removed path=%s",
+                            idleApps_[static_cast<size_t>(index)].path.c_str());
+        idleApps_.erase(idleApps_.begin() + index);
+        saveSettings();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void pickIdleApp() {
+        if (idleAppPickerOpen_)
+            return;
+
+        idleAppPickerOpen_ = true;
+        runtime_log::writef(L"[action][idle-entry] choose-app start");
+        const DWORD mainThreadId = mainThread;
+
+        // 主线程由 C++/WinRT 初始化为 MTA；IFileDialog 的模态界面放到独立 STA，
+        // 避免在设置窗口的消息处理过程中同步 Show 导致整个 UI 无响应。
+        std::thread([mainThreadId] {
+            std::wstring selectedPath;
+            const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
+                                                       COINIT_DISABLE_OLE1DDE);
+            if (SUCCEEDED(init)) {
+                IFileOpenDialog* dialog = nullptr;
+                if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
+                                               CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+                    const COMDLG_FILTERSPEC filters[] = {{L"应用程序 (*.exe)", L"*.exe"}};
+                    DWORD options = 0;
+                    if (SUCCEEDED(dialog->GetOptions(&options)))
+                        dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
+                                           FOS_PATHMUSTEXIST);
+                    dialog->SetFileTypes(_countof(filters), filters);
+                    dialog->SetTitle(L"添加可打开的应用");
+                    if (SUCCEEDED(dialog->Show(nullptr))) {
+                        IShellItem* item = nullptr;
+                        if (SUCCEEDED(dialog->GetResult(&item)) && item) {
+                            PWSTR path = nullptr;
+                            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                                selectedPath = path;
+                                CoTaskMemFree(path);
+                            }
+                            item->Release();
+                        }
+                    }
+                    dialog->Release();
+                }
+                CoUninitialize();
+            }
+
+            runtime_log::writef(L"[action][idle-entry] choose-app result=%s path=%s",
+                                selectedPath.empty() ? L"cancelled" : L"selected",
+                                selectedPath.c_str());
+            auto* payload = new IdleAppPayload{std::move(selectedPath)};
+            if (!PostThreadMessageW(mainThreadId, kMsgIdleAppReady, 0,
+                                    reinterpret_cast<LPARAM>(payload)))
+                delete payload;
+        }).detach();
+    }
+
     OverlayMediaInfo makeMediaInfo(const SmtcSnapshot& snap) const {
         OverlayMediaInfo mi;
-        const bool retainPrevious = snap.title.empty() && snap.artist.empty() &&
+        const bool retainPrevious = snap.sessionAlive && snap.title.empty() && snap.artist.empty() &&
                                     currentFrame_.frameRevision != 0 &&
                                     currentFrame_.trackKey == currentKey;
         if (retainPrevious) {
@@ -1047,7 +1434,7 @@ struct App {
 
     DisplayScene displaySceneFor(const SmtcSnapshot& snap) const {
         if (!snap.sessionAlive)
-            return DisplayScene::NoPlayback;
+            return idleEntryEnabled_ ? DisplayScene::Idle : DisplayScene::NoPlayback;
         if (lyricLoading_)
             return DisplayScene::Searching;
         if (!currentLyrics_.empty())
@@ -1062,13 +1449,16 @@ struct App {
         frame.trackKey = currentKey;
         frame.scene = displaySceneFor(snap);
         frame.media = makeMediaInfo(snap);
+        frame.idle = currentIdlePresentation();
         frame.lyrics = currentLyrics_;
         frame.actualPositionMs = snap.positionMs;
         frame.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
         frame.currentLine = LyricProvider::findLine(frame.lyrics, frame.lineSelectionPositionMs);
-        frame.visible = snap.sessionAlive;
+        frame.visible = snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         frame.animateTransition = animateTransition;
-        if (!snap.sessionAlive)
+        if (frame.scene == DisplayScene::Idle)
+            frame.statusText = frame.idle.sentence;
+        else if (!snap.sessionAlive)
             frame.statusText = notRunningStatus();
         else if (lyricLoading_)
             frame.statusText = L"歌词加载中…";
@@ -1086,13 +1476,17 @@ struct App {
         currentFrame_.trackKey = currentKey;
         currentFrame_.scene = displaySceneFor(snap);
         currentFrame_.media = makeMediaInfo(snap);
+        currentFrame_.idle = currentIdlePresentation();
         currentFrame_.actualPositionMs = snap.positionMs;
         currentFrame_.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
         currentFrame_.currentLine =
             LyricProvider::findLine(currentFrame_.lyrics, currentFrame_.lineSelectionPositionMs);
-        currentFrame_.visible = snap.sessionAlive;
+        currentFrame_.visible =
+            snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         currentFrame_.animateTransition = animateTransition;
-        if (!snap.sessionAlive)
+        if (currentFrame_.scene == DisplayScene::Idle)
+            currentFrame_.statusText = currentFrame_.idle.sentence;
+        else if (!snap.sessionAlive)
             currentFrame_.statusText = notRunningStatus();
         else if (lyricLoading_)
             currentFrame_.statusText = L"歌词加载中…";
@@ -1136,6 +1530,22 @@ struct App {
             if (!ok)
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
+        host->setIdleAppOpenCallback([this](const std::wstring& path) {
+            const bool ok = platform_icon::launchConfiguredExe(path);
+            runtime_log::writef(L"[action][idle-entry] app-open path=%s result=%s", path.c_str(),
+                                ok ? L"ok" : L"failed");
+            if (!ok) {
+                for (auto& app : idleApps_) {
+                    if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
+                        app.pathValid = validExePath(app.path);
+                        break;
+                    }
+                }
+                if (settingsDialog)
+                    settingsDialog->updateState(currentSettingsState());
+                publishPresentationFrame(monitor.snapshot(), false, true);
+            }
+        });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)
@@ -1145,6 +1555,7 @@ struct App {
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setLyricAlignment(lyricAlignment_);
+        taskbarHost->setIdleQuoteAlignment(idleQuoteAlignment_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
@@ -1379,6 +1790,7 @@ struct App {
             ++requestGeneration_;
             releaseCurrentResources();
             hasAlbumColor_ = false;
+            refreshIdleQuote(false);
             publishPresentationFrame(snap, false, true);
             cancelSongToastCoverWait();
             if (songToast_)
@@ -1645,6 +2057,8 @@ struct App {
     void applyFontAppearance();
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
+    COLORREF effectiveIdleCardBackgroundColor() const;
+    void applyIdleCardBackgroundColor(COLORREF color);
     const FontColorDialog::ThemeState& currentLyricAppearance() const;
     void tryExtractAlbumColor();
     void loadSettings();
@@ -1744,6 +2158,11 @@ void App::loadSettings() {
                                         "frosted"
                                     ? MediaPopupBackground::Frosted
                                     : MediaPopupBackground::Solid;
+        const std::string idleCardBackgroundValue =
+            j.value("idleCardBackground", j.value("mediaPopupBackground", std::string("solid")));
+        idleCardBackground_ = idleCardBackgroundValue == "frosted"
+                                  ? MediaPopupBackground::Frosted
+                                  : MediaPopupBackground::Solid;
         mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
         mediaPopupAutoTextContrast_ = j.value("mediaPopupAutoTextContrast", false);
         songToastEnabled_ = j.value("songToast", false);
@@ -1757,6 +2176,12 @@ void App::loadSettings() {
             j.value("windowTheme", std::string("app")),
             fluent::ThemeMode::FollowApp);
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
+        idleCardBackgroundColorCustomized_ =
+            j.contains("idleCardBackgroundColor") || j.contains("mediaPopupBackgroundColor");
+        idleCardBackgroundColor_ = static_cast<COLORREF>(j.value(
+            "idleCardBackgroundColor",
+            j.value("mediaPopupBackgroundColor",
+                    static_cast<unsigned>(defaultIdleCardBackgroundColor()))));
         spectrumOn_ = j.value("spectrum", false);
         const std::string spectrumStyleValue =
             j.value("spectrumStyle", std::string("default"));
@@ -1790,12 +2215,41 @@ void App::loadSettings() {
             lyricAlignment_ = LyricAlignment::Right;
         else
             lyricAlignment_ = LyricAlignment::Left;
+        const std::string idleQuoteAlignment =
+            j.value("idleQuoteAlignment", std::string("left"));
+        if (idleQuoteAlignment == "center")
+            idleQuoteAlignment_ = LyricAlignment::Center;
+        else if (idleQuoteAlignment == "right")
+            idleQuoteAlignment_ = LyricAlignment::Right;
+        else
+            idleQuoteAlignment_ = LyricAlignment::Left;
         songInfoVisible_ = j.value("songInfoVisible", true);
         albumCoverVisible_ = j.value("albumCoverVisible", true);
         platformIconVisible_ = j.value("platformIconVisible", false);
         albumCoverEffect_ = j.value("albumCoverEffect", std::string("default")) == "vinyl"
                                 ? AlbumCoverEffect::Vinyl
                                 : AlbumCoverEffect::Default;
+        idleEntryEnabled_ = j.value("idleEntryEnabled", true);
+        idleQuoteSource_ = idleQuoteSourceFromConfig(
+            j.value("idleQuoteSource", std::string("hitokoto")));
+        idleQuoteRefreshInterval_ = idleQuoteIntervalFromConfig(
+            j.value("idleQuoteRefreshInterval", std::string("daily")));
+        jinrishiciToken_ = wideOf(j.value("jinrishiciToken", std::string()));
+        idleApps_.clear();
+        if (j.contains("idleApps") && j["idleApps"].is_array()) {
+            for (const auto& value : j["idleApps"]) {
+                if (value.is_string())
+                    idleApps_.push_back({wideOf(value.get<std::string>())});
+            }
+        }
+        if (j.contains("idleQuoteCache") && j["idleQuoteCache"].is_object()) {
+            const auto& cache = j["idleQuoteCache"];
+            idleQuoteCacheSource_ = cache.value("source", std::string());
+            idleQuoteCachePeriod_ = cache.value("period", std::string());
+            idleQuoteCacheText_ = wideOf(cache.value("text", std::string()));
+            idleQuoteCacheOrigin_ = wideOf(cache.value("origin", std::string()));
+            idleQuoteCacheUuid_ = wideOf(cache.value("uuid", std::string()));
+        }
         qqLocalLyricsEnabled_ = j.value("qqLocalLyricsEnabled", false);
         qqLocalLyricsPersistOrder_ = j.value("qqLocalLyricsPersistOrder", false);
         qqLocalLyricsPath_ = wideOf(j.value("qqLocalLyricsPath", std::string()));
@@ -1833,6 +2287,20 @@ void App::saveSettings() {
         saveAppearance("Dark", darkLyricAppearance_);
         if (hasGlobalLyricAppearance_)
             saveAppearance("Global", globalLyricAppearance_);
+        j["idleEntryEnabled"] = idleEntryEnabled_;
+        j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
+        j["idleQuoteRefreshInterval"] =
+            idleQuoteIntervalConfigName(idleQuoteRefreshInterval_);
+        j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
+        j["idleApps"] = nlohmann::json::array();
+        for (const auto& app : idleApps_)
+            j["idleApps"].push_back(utf8Of(app.path));
+        j["idleQuoteCache"] = {
+            {"source", idleQuoteCacheSource_},
+            {"period", idleQuoteCachePeriod_},
+            {"text", utf8Of(idleQuoteCacheText_)},
+            {"origin", utf8Of(idleQuoteCacheOrigin_)},
+            {"uuid", utf8Of(idleQuoteCacheUuid_)}};
         j["taskbarPosition"] = taskbarPosition_;
         // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
@@ -1841,6 +2309,12 @@ void App::saveSettings() {
         j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
                                          ? "frosted"
                                          : "solid";
+        j["idleCardBackground"] = idleCardBackground_ == MediaPopupBackground::Frosted
+                                       ? "frosted"
+                                       : "solid";
+        if (idleCardBackgroundColorCustomized_)
+            j["idleCardBackgroundColor"] =
+                static_cast<unsigned>(idleCardBackgroundColor_);
         j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
         j["mediaPopupAutoTextContrast"] = mediaPopupAutoTextContrast_;
         j["songToast"] = songToastEnabled_;
@@ -1866,6 +2340,9 @@ void App::saveSettings() {
         j["lyricAlignment"] = lyricAlignment_ == LyricAlignment::Center
                                    ? "center"
                                : lyricAlignment_ == LyricAlignment::Right ? "right" : "left";
+        j["idleQuoteAlignment"] = idleQuoteAlignment_ == LyricAlignment::Center
+                                       ? "center"
+                                   : idleQuoteAlignment_ == LyricAlignment::Right ? "right" : "left";
         j["songInfoVisible"] = songInfoVisible_;
         j["albumCoverVisible"] = albumCoverVisible_;
         j["platformIconVisible"] = platformIconVisible_;
@@ -2028,6 +2505,7 @@ bool App::createTrayWindow(HINSTANCE inst) {
         return false;
     taskbarCreatedMsg_ = RegisterWindowMessageW(L"TaskbarCreated");
     updateTrayIcon();
+    SetTimer(trayHwnd, kTimerIdleQuote, kIdleQuoteCheckMs, nullptr);
     return true;
 }
 
@@ -2035,6 +2513,7 @@ void App::destroyTray() {
     if (trayHwnd) {
         HWND hwnd = trayHwnd;
         trayHwnd = nullptr;
+        KillTimer(hwnd, kTimerIdleQuote);
         // 先关闭可能打开的 Fluent 菜单（其窗口由托盘窗口所有）
         fluent::FluentMenu::dismiss();
         NOTIFYICONDATAW nid{};
@@ -2601,6 +3080,22 @@ COLORREF App::effectivePlayedColor() const {
     return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : currentLyricAppearance().played;
 }
 
+COLORREF App::effectiveIdleCardBackgroundColor() const {
+    return idleCardBackgroundColorCustomized_
+               ? idleCardBackgroundColor_
+               : defaultIdleCardBackgroundColor();
+}
+
+void App::applyIdleCardBackgroundColor(COLORREF color) {
+    idleCardBackgroundColor_ = color;
+    idleCardBackgroundColorCustomized_ = true;
+    if (taskbarHost)
+        taskbarHost->setIdleCardBackgroundColor(idleCardBackgroundColor_, true);
+    runtime_log::writef(L"[action][idle-entry] background-color=#%02X%02X%02X",
+                        GetRValue(color), GetGValue(color), GetBValue(color));
+    saveSettings();
+}
+
 // 当前曲目还没提取过时，从有效封面提取主色调；它同时供歌词颜色和媒体卡片背景使用。
 void App::tryExtractAlbumColor() {
     if (hasAlbumColor_)
@@ -2687,6 +3182,13 @@ void App::setAutoCheckOnStartup(bool enabled) {
 
 SettingsState App::currentSettingsState() const {
     SettingsState st;
+    st.idleEntryEnabled = idleEntryEnabled_;
+    st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1 : 0;
+    st.idleQuoteRefreshInterval =
+        idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::Hourly
+            ? 2
+            : idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::HalfDay ? 1 : 0;
+    st.idleApps = idleApps_;
     st.songInfoVisible = songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
     st.platformIconVisible = platformIconVisible_;
@@ -2704,6 +3206,8 @@ SettingsState App::currentSettingsState() const {
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.mediaPopupTrigger = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
+    st.idleCardBackground = idleCardBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
+    st.idleCardBackgroundColor = effectiveIdleCardBackgroundColor();
     st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
     st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
     st.songToastEnabled = songToastEnabled_;
@@ -2717,6 +3221,9 @@ SettingsState App::currentSettingsState() const {
     st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
                             ? 1
                             : lyricAlignment_ == LyricAlignment::Right ? 2 : 0;
+    st.idleQuoteAlignment = idleQuoteAlignment_ == LyricAlignment::Center
+                                ? 1
+                                : idleQuoteAlignment_ == LyricAlignment::Right ? 2 : 0;
     st.secondaryEnabled = secondaryLyricEnabled_;
     st.preferRomanization = preferRomanization_;
     st.secondaryAvailability = lyricLoading_ ? 1
@@ -2732,6 +3239,12 @@ SettingsState App::currentSettingsState() const {
 
 SettingsActions App::buildSettingsActions() {
     SettingsActions act;
+    act.onIdleEntryEnabled = [this](bool on) { applyIdleEntryEnabled(on); };
+    act.onIdleQuoteSource = [this](int source) { applyIdleQuoteSource(source); };
+    act.onIdleQuoteRefreshInterval =
+        [this](int interval) { applyIdleQuoteRefreshInterval(interval); };
+    act.onAddIdleApp = [this] { pickIdleApp(); };
+    act.onRemoveIdleApp = [this](int index) { removeIdleApp(index); };
     act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
@@ -2753,6 +3266,9 @@ SettingsActions App::buildSettingsActions() {
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onMediaPopupTrigger = [this](int mode) { applyMediaPopupTrigger(mode); };
     act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
+    act.onIdleCardBackground = [this](int mode) { applyIdleCardBackground(mode); };
+    act.onIdleCardBackgroundColor =
+        [this](COLORREF color) { applyIdleCardBackgroundColor(color); };
     act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
     act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };
     act.onSongToastEnabled = [this](bool on) { applySongToastEnabled(on); };
@@ -2766,6 +3282,7 @@ SettingsActions App::buildSettingsActions() {
     act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };
     act.onDoubleLineLyrics = [this](bool on) { applyDoubleLineLyrics(on); };
     act.onLyricAlignment = [this](int a) { applyLyricAlignment(a); };
+    act.onIdleQuoteAlignment = [this](int a) { applyIdleQuoteAlignment(a); };
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
     act.onQqLocalLyricsEnabled = [this](bool on) { applyQqLocalLyricsEnabled(on); };
@@ -2910,6 +3427,10 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->notifySongToast();
         return 0;
     }
+    if (msg == WM_TIMER && wp == kTimerIdleQuote) {
+        app->refreshIdleQuote(false);
+        return 0;
+    }
     if (msg == kMsgDialogClosed) {
         app->onDialogClosed(static_cast<DialogKind>(wp));
         return 0;
@@ -2993,6 +3514,7 @@ int main() {
     HINSTANCE inst = GetModuleHandleW(nullptr);
     App app;
     app.loadSettings();
+    app.prepareIdleApps();
     app.initializeRuntimeLogger();
     // 无命令行参数时始终开启任务栏歌词（沿用原"所有宿主都关闭则强制任务栏"的行为，
     // 避免用户关闭后找不到显示入口；运行中仍可通过托盘菜单随时关闭）
@@ -3032,6 +3554,7 @@ int main() {
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
+    app.refreshIdleQuote(false);
     app.appVolume_.setChangedCallback(
         [&app] { PostThreadMessageW(app.mainThread, kMsgAppVolumeChanged, 0, 0); });
 
@@ -3060,6 +3583,17 @@ int main() {
                 app.qqLocalLyricsPickerOpen_ = false;
                 if (payload)
                     app.applyQqLocalLyricsPath(payload->path);
+            }
+            else if (msg.message == kMsgIdleAppReady) {
+                auto payload = std::unique_ptr<IdleAppPayload>(
+                    reinterpret_cast<IdleAppPayload*>(msg.lParam));
+                app.idleAppPickerOpen_ = false;
+                if (payload && !payload->path.empty())
+                    app.addIdleApp(payload->path);
+            }
+            else if (msg.message == kMsgIdleQuoteReady) {
+                app.onIdleQuoteReady(std::unique_ptr<IdleQuotePayload>(
+                    reinterpret_cast<IdleQuotePayload*>(msg.lParam)));
             }
             continue;
         }

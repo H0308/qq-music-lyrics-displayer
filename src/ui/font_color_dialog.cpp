@@ -441,7 +441,7 @@ struct FontColorDialog::Impl {
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
         const auto& p = fluent::palette();
         const ThemeState& theme = activeThemeState();
-        painter.drawText(L"字体颜色与效果", painter.textFormat(20.0f, 600), titleRect, p.text);
+        painter.drawText(L"歌词字体颜色与效果", painter.textFormat(20.0f, 600), titleRect, p.text);
         painter.drawText(L"调整歌词颜色、不透明度、光晕和描边", painter.textFormat(13.0f, 400),
                          subtitleRect, p.textSecondary);
 
@@ -1003,7 +1003,7 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     const int y = work.top + ((work.bottom - work.top) - h) / 2;
 
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontColor",
-                                  L"字体颜色与效果", kDialogStyle, x, y, w, h,
+                                  L"歌词字体颜色与效果", kDialogStyle, x, y, w, h,
                                   nullptr, nullptr, inst, impl_.get());
     if (impl_->hwnd)
         app_icon::applyWindowIcon(impl_->hwnd);

@@ -44,6 +44,7 @@ constexpr float kVolumeSliderMs = 140.0f;
 
 constexpr float kPopupWidthDip = 384.0f;
 constexpr float kPopupHeightDip = 208.0f;
+constexpr float kIdlePopupHeightDip = 296.0f;
 constexpr float kPopupGapDip = 8.0f;
 constexpr float kPopupCornerDip = 12.0f;
 constexpr float kCoverSizeDip = 80.0f;
@@ -51,6 +52,11 @@ constexpr float kPopupTextLeftDip = 112.0f;
 constexpr float kPopupTextRightPaddingDip = 16.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
 constexpr float kPopupInfoScrollSpeed = 10.0f;
+constexpr float kIdleListHeightDip = 132.0f;
+constexpr float kIdleListRowHeightDip = 40.0f;
+constexpr float kIdleListGapDip = 8.0f;
+constexpr float kIdleScrollBarWidthDip = 3.0f;
+constexpr float kIdleScrollBarHitWidthDip = 12.0f;
 // d2d1effects.h 只声明这个 GUID；当前工程的链接配置不提供其外部定义，
 // 这里保留 Direct2D 标准 Gaussian Blur CLSID 的内部定义。
 constexpr CLSID kGaussianBlurClsid = {
@@ -186,6 +192,7 @@ struct MediaPopup::Impl {
 
     bool enabled = false;
     bool available = false;
+    bool idleMode = false;
     bool triggerOnHover = true;
     bool anchorHover = false;
     bool popupHover = false;
@@ -196,6 +203,9 @@ struct MediaPopup::Impl {
     bool placedAbove = true;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
+    MediaPopupBackground idleBackgroundMode = MediaPopupBackground::Solid;
+    COLORREF idleBackgroundColor = RGB(255, 255, 255);
+    bool idleBackgroundColorCustomized = false;
     bool followAlbumBackground = false;
     bool autoTextContrast = false;
     bool materialNeedsApply = true;
@@ -220,6 +230,7 @@ struct MediaPopup::Impl {
     std::wstring pressedSourceAppUserModelId;
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
+    std::function<void(const std::wstring&)> onIdleAppOpen;
 
     // 应用音量控件：图标+数值固定在右上角；点击图标从图标处向左过渡展开卡内滑块
     AppVolumeState volume;
@@ -233,7 +244,20 @@ struct MediaPopup::Impl {
     D2D1_RECT_F volumeIconRect{};
     D2D1_RECT_F volumeSliderRect{}; // 滑块轨道矩形（目标值；命中测试自行外扩余量）
     OverlayMediaInfo media;
+    IdlePresentation idle;
     int64_t positionMs = 0;
+    float idleScrollOffset = 0.0f;
+    float idleScrollMax = 0.0f;
+    int hoverIdleApp = -1;
+    int pressedIdleApp = -1;
+    bool idleScrollDragging = false;
+    float idleScrollDragOffset = 0.0f;
+    D2D1_RECT_F idleListRect{};
+    D2D1_RECT_F idleScrollTrackRect{};
+    D2D1_RECT_F idleScrollThumbRect{};
+    bool idleTextDirty = true;
+    bool idleIconsDirty = true;
+    std::vector<ID2D1Bitmap*> idleIconBitmaps;
 
     DCompRenderer renderer;
     ID2D1SolidColorBrush* brushBackground = nullptr;
@@ -256,14 +280,22 @@ struct MediaPopup::Impl {
     IDWriteTextFormat* fmtTitle = nullptr;
     IDWriteTextFormat* fmtArtist = nullptr;
     IDWriteTextFormat* fmtIcon = nullptr;
+    IDWriteTextFormat* fmtIdleHeader = nullptr;
+    IDWriteTextFormat* fmtIdleQuote = nullptr;
+    IDWriteTextFormat* fmtIdleSource = nullptr;
+    IDWriteTextFormat* fmtIdleApp = nullptr;
     IDWriteTextLayout* titleLayout = nullptr;
     IDWriteTextLayout* artistLayout = nullptr;
+    IDWriteTextLayout* idleQuoteLayout = nullptr;
+    float idleQuoteWidth = 0.0f;
+    float idleQuoteHeight = 0.0f;
     float titleWidth = 0.0f;
     float titleHeight = 0.0f;
     float artistWidth = 0.0f;
     float artistHeight = 0.0f;
     float titleScrollOffset = 0.0f;
     float artistScrollOffset = 0.0f;
+    float idleQuoteScrollOffset = 0.0f;
     ULONGLONG scrollTickMs = 0;
     ID2D1Bitmap* coverBmp = nullptr;
     ID2D1Bitmap* sourceIconBmp = nullptr;
@@ -276,8 +308,18 @@ struct MediaPopup::Impl {
     media_control::Geometry controlGeometry;
     D2D1_RECT_F buttonRects[3]{};
 
+    MediaPopupBackground activeBackgroundMode() const {
+        return idleMode ? idleBackgroundMode : backgroundMode;
+    }
+
+    bool frostedBackgroundActive() const {
+        return activeBackgroundMode() == MediaPopupBackground::Frosted;
+    }
+
     bool dynamicBackgroundEnabled() const {
-        return followAlbumBackground && backgroundMode == MediaPopupBackground::Frosted;
+        // 专辑主色属于播放中的音乐控件卡片，不能渗透到快速启动卡片。
+        return !idleMode && followAlbumBackground &&
+               backgroundMode == MediaPopupBackground::Frosted;
     }
 
     void releaseDynamicBackgroundResources() {
@@ -297,7 +339,7 @@ struct MediaPopup::Impl {
     }
 
     void applyBackdropTextContrast(float luminance) {
-        if (!autoTextContrast) {
+        if (idleMode || !autoTextContrast) {
             resetBackdropTextColors();
             return;
         }
@@ -343,6 +385,10 @@ struct MediaPopup::Impl {
         return static_cast<float>(px) / scale();
     }
 
+    float popupHeightDip() const {
+        return idleMode ? kIdlePopupHeightDip : kPopupHeightDip;
+    }
+
     void killTimers() {
         if (!hwnd)
             return;
@@ -381,6 +427,10 @@ struct MediaPopup::Impl {
     void releaseVisualResources() {
         releaseBitmap(coverBmp);
         releaseBitmap(sourceIconBmp);
+        for (auto*& bitmap : idleIconBitmaps)
+            releaseBitmap(bitmap);
+        idleIconBitmaps.clear();
+        idleIconsDirty = true;
         releaseBitmap(backdropBmp);
         releaseCom(backdropBlur);
         sourceIconDirty = true;
@@ -403,13 +453,22 @@ struct MediaPopup::Impl {
         releaseFormat(fmtTitle);
         releaseFormat(fmtArtist);
         releaseFormat(fmtIcon);
+        releaseFormat(fmtIdleHeader);
+        releaseFormat(fmtIdleQuote);
+        releaseFormat(fmtIdleSource);
+        releaseFormat(fmtIdleApp);
         releaseCom(titleLayout);
         releaseCom(artistLayout);
+        releaseCom(idleQuoteLayout);
         titleWidth = 0.0f;
         titleHeight = 0.0f;
         artistWidth = 0.0f;
         artistHeight = 0.0f;
+        idleQuoteWidth = 0.0f;
+        idleQuoteHeight = 0.0f;
+        idleQuoteScrollOffset = 0.0f;
         textDirty = true;
+        idleTextDirty = true;
         releaseCom(coverClip);
         media_control::release(controlGeometry);
         releaseCom(coverLayer);
@@ -423,7 +482,8 @@ struct MediaPopup::Impl {
     }
 
     bool createTextFormat(float size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out,
-                          DWRITE_PARAGRAPH_ALIGNMENT paragraph = DWRITE_PARAGRAPH_ALIGNMENT_CENTER) {
+                          DWRITE_PARAGRAPH_ALIGNMENT paragraph = DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+                          bool wrap = false) {
         if (!out || !renderer.dwrite())
             return false;
         *out = nullptr;
@@ -432,7 +492,8 @@ struct MediaPopup::Impl {
             DWRITE_FONT_STRETCH_NORMAL, size, L"", out);
         if (FAILED(hr) || !*out)
             return false;
-        (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        (*out)->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_WRAP
+                                     : DWRITE_WORD_WRAPPING_NO_WRAP);
         (*out)->SetParagraphAlignment(paragraph);
         DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
         (*out)->SetTrimming(&trimming, nullptr);
@@ -449,11 +510,23 @@ struct MediaPopup::Impl {
             return false;
 
         const auto& p = fluent::palette(fluent::ThemeTarget::Window);
+        const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
         D2D1_COLOR_F cardFill = p.cardFillSolid;
-        if (backgroundMode == MediaPopupBackground::Frosted) {
-            // 截图模糊已经是卡片底图，前景只保留一层很薄的 tint，避免再次变成灰蒙蒙。
+        if (idleMode) {
+            // 快速启动卡片的纯色模式只跟随窗口深浅色，颜色设置只参与磨砂 tint。
+            cardFill = dark ? D2D1::ColorF(D2D1::ColorF::Black)
+                            : D2D1::ColorF(D2D1::ColorF::White);
+            if (frostedBackgroundActive()) {
+                const float tintAlpha = dark ? 0.10f : 0.16f;
+                cardFill = idleBackgroundColorCustomized
+                               ? fluent::toD2D(idleBackgroundColor, tintAlpha)
+                               : p.cardFill;
+            }
+        } else if (frostedBackgroundActive()) {
+            // 保持播放中的音乐控件卡片原有磨砂逻辑；快速启动卡片的自定义颜色
+            // 不参与这里的绘制。
             cardFill = p.cardFill;
-            cardFill.a = fluent::isDarkMode(fluent::ThemeTarget::Window) ? 0.10f : 0.16f;
+            cardFill.a = dark ? 0.10f : 0.16f;
         }
         if (FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
@@ -471,11 +544,17 @@ struct MediaPopup::Impl {
             !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtTimeRight) ||
             !createTextFormat(16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtTitle) ||
             !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtArtist) ||
-            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIcon)) {
+            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIcon) ||
+            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIdleHeader) ||
+            !createTextFormat(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleQuote,
+                               DWRITE_PARAGRAPH_ALIGNMENT_NEAR) ||
+            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleSource) ||
+            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleApp)) {
             releaseDrawingResources();
             return false;
         }
-        if (FAILED(fmtTimeRight->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING))) {
+        if (FAILED(fmtTimeRight->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)) ||
+            FAILED(fmtIdleQuote->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING))) {
             releaseDrawingResources();
             return false;
         }
@@ -488,7 +567,7 @@ struct MediaPopup::Impl {
                                  &coverClip)) ||
             FAILED(rt->CreateLayer(&coverLayer)) ||
             FAILED(factory->CreateRoundedRectangleGeometry(
-                D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, kPopupWidthDip, kPopupHeightDip),
+                D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, kPopupWidthDip, popupHeightDip()),
                                   kPopupCornerDip, kPopupCornerDip),
                 &backdropClip)) ||
             FAILED(rt->CreateLayer(&backdropLayer)) ||
@@ -527,12 +606,14 @@ struct MediaPopup::Impl {
         }
 
         const auto linear = D2D1::LinearGradientBrushProperties(
-            D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(kPopupWidthDip, kPopupHeightDip));
+            D2D1::Point2F(0.0f, 0.0f),
+            D2D1::Point2F(kPopupWidthDip, popupHeightDip()));
         HRESULT hr = rt->CreateLinearGradientBrush(linear, collection, &brushDynamicGradient);
         if (SUCCEEDED(hr)) {
             const auto radial = D2D1::RadialGradientBrushProperties(
-                D2D1::Point2F(kPopupWidthDip * 0.74f, kPopupHeightDip * 0.28f),
-                D2D1::Point2F(0.0f, 0.0f), kPopupWidthDip * 0.72f, kPopupHeightDip * 0.92f);
+                D2D1::Point2F(kPopupWidthDip * 0.74f, popupHeightDip() * 0.28f),
+                D2D1::Point2F(0.0f, 0.0f), kPopupWidthDip * 0.72f,
+                popupHeightDip() * 0.92f);
             hr = rt->CreateRadialGradientBrush(radial, collection, &brushDynamicGlow);
         }
         collection->Release();
@@ -552,7 +633,7 @@ struct MediaPopup::Impl {
         releaseCom(backdropBlur);
         releaseBitmap(backdropBmp);
         resetBackdropTextColors();
-        if (backgroundMode != MediaPopupBackground::Frosted || !hwnd)
+        if (!frostedBackgroundActive() || !hwnd)
             return true;
 
         const int width = cardWidthPx;
@@ -675,6 +756,7 @@ struct MediaPopup::Impl {
         if (!clientAnimations) {
             titleScrollOffset = 0.0f;
             artistScrollOffset = 0.0f;
+            idleQuoteScrollOffset = 0.0f;
             scrollTickMs = 0;
         }
     }
@@ -715,14 +797,105 @@ struct MediaPopup::Impl {
         build(media.artist, fmtArtist, &artistLayout, artistWidth, artistHeight);
     }
 
+    void buildIdleTextLayout() {
+        if (!idleTextDirty)
+            return;
+        idleTextDirty = false;
+        releaseCom(idleQuoteLayout);
+        idleQuoteWidth = 0.0f;
+        idleQuoteHeight = 0.0f;
+        if (!renderer.dwrite() || !fmtIdleQuote || idle.sentence.empty())
+            return;
+
+        if (FAILED(renderer.dwrite()->CreateTextLayout(
+                idle.sentence.c_str(), static_cast<UINT32>(idle.sentence.size()), fmtIdleQuote,
+                100000.0f, 42.0f, &idleQuoteLayout)) ||
+            !idleQuoteLayout)
+            return;
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(idleQuoteLayout->GetMetrics(&metrics))) {
+            idleQuoteWidth = metrics.width;
+            idleQuoteHeight = std::min(42.0f, metrics.height);
+        }
+    }
+
+    void decodeIdleIcons() {
+        if (!idleIconsDirty)
+            return;
+        idleIconsDirty = false;
+        for (auto*& bitmap : idleIconBitmaps)
+            releaseBitmap(bitmap);
+        idleIconBitmaps.clear();
+
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+        const auto props = D2D1::BitmapProperties(
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                              D2D1_ALPHA_MODE_PREMULTIPLIED),
+            static_cast<float>(dpi), static_cast<float>(dpi));
+        idleIconBitmaps.reserve(idle.apps.size());
+        for (const auto& app : idle.apps) {
+            ID2D1Bitmap* bitmap = nullptr;
+            if (app.iconPixels && !app.iconPixels->empty() && app.iconWidth > 0 &&
+                app.iconHeight > 0 &&
+                SUCCEEDED(rt->CreateBitmap(
+                    D2D1::SizeU(app.iconWidth, app.iconHeight), app.iconPixels->data(),
+                    app.iconWidth * 4, &props, &bitmap))) {
+                idleIconBitmaps.push_back(bitmap);
+            } else {
+                idleIconBitmaps.push_back(nullptr);
+            }
+        }
+    }
+
+    void layoutIdleList(float w, float top) {
+        idleListRect = D2D1::RectF(16.0f, top,
+                                   w - 16.0f - (idleScrollMax > 0.0f
+                                                    ? kIdleScrollBarHitWidthDip
+                                                    : 0.0f),
+                                   top + kIdleListHeightDip);
+        const float contentHeight =
+            idle.apps.empty() ? 0.0f : idle.apps.size() * kIdleListRowHeightDip;
+        idleScrollMax = std::max(0.0f, contentHeight - kIdleListHeightDip);
+        if (idleScrollOffset > idleScrollMax)
+            idleScrollOffset = idleScrollMax;
+
+        idleListRect.right = w - 16.0f -
+                             (idleScrollMax > 0.0f ? kIdleScrollBarHitWidthDip : 0.0f);
+        idleScrollTrackRect = {};
+        idleScrollThumbRect = {};
+        if (idleScrollMax <= 0.0f)
+            return;
+
+        const float trackTop = idleListRect.top;
+        const float trackBottom = idleListRect.bottom;
+        const float trackHeight = trackBottom - trackTop;
+        const float thumbHeight = std::max(
+            24.0f, trackHeight * kIdleListHeightDip /
+                        std::max(kIdleListHeightDip, contentHeight));
+        const float usable = std::max(0.0f, trackHeight - thumbHeight);
+        const float thumbTop = trackTop + idleScrollOffset / idleScrollMax * usable;
+        const float trackLeft = w - 12.0f;
+        idleScrollTrackRect =
+            D2D1::RectF(trackLeft, trackTop, trackLeft + kIdleScrollBarWidthDip, trackBottom);
+        idleScrollThumbRect =
+            D2D1::RectF(trackLeft, thumbTop, trackLeft + kIdleScrollBarWidthDip,
+                        thumbTop + thumbHeight);
+    }
+
     float textAreaWidth(float popupWidth) const {
         return std::max(1.0f, popupWidth - kPopupTextLeftDip - kPopupTextRightPaddingDip);
     }
 
     void updateScrollTimer(float areaWidth) {
-        const bool overflow = titleWidth > areaWidth || artistWidth > areaWidth;
-        const bool shouldRun = popupVisible && !entering && !closing && enabled && available &&
-                               clientAnimations && media.playing && overflow;
+        const float idleAreaWidth = std::max(1.0f, kPopupWidthDip - 32.0f);
+        const bool idleOverflow = idleQuoteWidth > idleAreaWidth;
+        const bool mediaOverflow = titleWidth > areaWidth || artistWidth > areaWidth;
+        const bool shouldRun = popupVisible && !entering && !closing && enabled &&
+                               clientAnimations &&
+                               ((idleMode && idleOverflow) ||
+                                (!idleMode && available && media.playing && mediaOverflow));
         if (shouldRun) {
             if (!scrollTimerRunning) {
                 scrollTickMs = GetTickCount64();
@@ -735,7 +908,9 @@ struct MediaPopup::Impl {
             KillTimer(hwnd, kScrollTimer);
             scrollTimerRunning = false;
         }
-        if (!overflow || !clientAnimations) {
+        if (!idleMode || !idleOverflow || !clientAnimations)
+            idleQuoteScrollOffset = 0.0f;
+        if (idleMode || !mediaOverflow || !clientAnimations || !media.playing) {
             titleScrollOffset = 0.0f;
             artistScrollOffset = 0.0f;
         }
@@ -749,11 +924,13 @@ struct MediaPopup::Impl {
         }
         const float dt = static_cast<float>(now - scrollTickMs) / 1000.0f;
         scrollTickMs = now;
-        if (!clientAnimations || !media.playing)
+        const bool scrollingIdleQuote = idleMode;
+        if (!clientAnimations || (!scrollingIdleQuote && !media.playing))
             return;
 
-        const float areaWidth = textAreaWidth(kPopupWidthDip);
-        auto marquee = [&](float textWidth, float& offset) {
+        const float mediaAreaWidth = textAreaWidth(kPopupWidthDip);
+        const float idleAreaWidth = std::max(1.0f, kPopupWidthDip - 32.0f);
+        auto marquee = [&](float textWidth, float areaWidth, float& offset) {
             if (textWidth <= areaWidth) {
                 offset = 0.0f;
                 return;
@@ -764,8 +941,12 @@ struct MediaPopup::Impl {
             if (offset < 0.0f)
                 offset += loopWidth;
         };
-        marquee(titleWidth, titleScrollOffset);
-        marquee(artistWidth, artistScrollOffset);
+        if (scrollingIdleQuote) {
+            marquee(idleQuoteWidth, idleAreaWidth, idleQuoteScrollOffset);
+        } else {
+            marquee(titleWidth, mediaAreaWidth, titleScrollOffset);
+            marquee(artistWidth, mediaAreaWidth, artistScrollOffset);
+        }
     }
 
     void decodeCover() {
@@ -892,9 +1073,85 @@ struct MediaPopup::Impl {
         rt->PopAxisAlignedClip();
     }
 
+    void drawIdle(ID2D1DeviceContext* rt, float w) {
+        if (!rt)
+            return;
+        const float quoteTop = 40.0f;
+        // 每日一言按实际行数占用高度，避免单行句子沿用多行文本的空白区域。
+        const float quoteHeight = idleQuoteLayout ? std::max(18.0f, idleQuoteHeight) : 18.0f;
+        const float sourceTop = quoteTop + quoteHeight + 8.0f;
+        const float separatorY = sourceTop + 26.0f;
+        const float quickHeaderTop = separatorY + 4.0f;
+        const float quickHeaderBottom = quickHeaderTop + 16.0f;
+        const float listTop = quickHeaderBottom + kIdleListGapDip;
+        drawText(rt, L"每日一言", fmtIdleHeader,
+                 D2D1::RectF(16.0f, 14.0f, w - 16.0f, 36.0f), brushText);
+        const D2D1_RECT_F quoteRect =
+            D2D1::RectF(16.0f, quoteTop, w - 16.0f, quoteTop + quoteHeight);
+        if (idleQuoteLayout) {
+            drawScrollingText(rt, idleQuoteLayout, idleQuoteWidth, idleQuoteHeight, quoteRect,
+                              idleQuoteScrollOffset, brushText);
+        } else {
+            const std::wstring loading = idle.loading ? L"正在获取每日一言…" : L"暂时无法获取每日一言";
+            drawText(rt, loading, fmtIdleQuote,
+                     D2D1::RectF(16.0f, quoteTop, w - 16.0f, quoteTop + quoteHeight),
+                     idle.loading ? brushSecondary : brushDisabled);
+        }
+        if (!idle.source.empty())
+            drawText(rt, idle.source, fmtIdleSource,
+                     D2D1::RectF(16.0f, sourceTop, w - 16.0f, sourceTop + 18.0f),
+                     brushSecondary);
+        if (brushProgressTrack)
+            rt->FillRectangle(D2D1::RectF(16.0f, separatorY, w - 16.0f, separatorY + 1.0f),
+                              brushProgressTrack);
+        drawText(rt, L"快速打开", fmtIdleHeader,
+                 D2D1::RectF(16.0f, quickHeaderTop, w - 16.0f, quickHeaderBottom),
+                 brushSecondary);
+
+        layoutIdleList(w, listTop);
+        rt->PushAxisAlignedClip(idleListRect, D2D1_ANTIALIAS_MODE_ALIASED);
+        if (idle.apps.empty()) {
+            drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
+        } else {
+            for (size_t i = 0; i < idle.apps.size(); ++i) {
+                const float top = idleListRect.top +
+                                  static_cast<float>(i) * kIdleListRowHeightDip -
+                                  idleScrollOffset;
+                const D2D1_RECT_F row = D2D1::RectF(
+                    idleListRect.left, top, idleListRect.right, top + 36.0f);
+                if (row.bottom < idleListRect.top || row.top > idleListRect.bottom)
+                    continue;
+                if (static_cast<int>(i) == hoverIdleApp)
+                    rt->FillRoundedRectangle(
+                        D2D1::RoundedRect(row, 7.0f, 7.0f), brushControlHover);
+
+                const D2D1_RECT_F iconRect =
+                    D2D1::RectF(row.left + 8.0f, row.top + 6.0f, row.left + 32.0f,
+                                row.top + 30.0f);
+                if (i < idleIconBitmaps.size() && idleIconBitmaps[i])
+                    rt->DrawBitmap(idleIconBitmaps[i], iconRect, 1.0f,
+                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                const D2D1_RECT_F textRect =
+                    D2D1::RectF(row.left + 42.0f, row.top, row.right - 20.0f, row.bottom);
+                drawText(rt, idle.apps[i].name.empty() ? L"未命名应用" : idle.apps[i].name,
+                         fmtIdleApp, textRect,
+                         idle.apps[i].pathValid ? brushText : brushDisabled);
+                drawText(rt, L"›", fmtIdleHeader,
+                         D2D1::RectF(row.right - 18.0f, row.top, row.right - 4.0f, row.bottom),
+                         idle.apps[i].pathValid ? brushSecondary : brushDisabled);
+            }
+        }
+        rt->PopAxisAlignedClip();
+        if (idleScrollMax > 0.0f) {
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f), brushProgressTrack);
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(idleScrollThumbRect, 1.5f, 1.5f), brushSecondary);
+        }
+    }
+
     void drawBackdrop(ID2D1DeviceContext* rt, float w, float h) {
-        if (backgroundMode != MediaPopupBackground::Frosted ||
-            (!backdropBlur && !backdropBmp))
+        if (!frostedBackgroundActive() || (!backdropBlur && !backdropBmp))
             return;
 
         const bool clipped = backdropClip && backdropLayer;
@@ -1123,19 +1380,23 @@ struct MediaPopup::Impl {
             return false;
         if (dynamicBackgroundEnabled())
             createDynamicBackgroundResources();
-        if (backgroundMode == MediaPopupBackground::Frosted)
+        if (frostedBackgroundActive())
             captureBackdrop();
         buildTextLayouts();
         if (coverDirty)
             decodeCover();
         if (sourceIconDirty)
             decodeSourceIcon();
+        if (idleMode) {
+            buildIdleTextLayout();
+            decodeIdleIcons();
+        }
 
         auto* rt = renderer.renderTarget();
         if (!rt)
             return false;
         const float w = dip(pxW);
-        const float cardH = kPopupHeightDip;
+        const float cardH = popupHeightDip();
         const float infoW = textAreaWidth(w);
         updateScrollTimer(infoW);
         buttonRects[0] = D2D1::RectF(w * 0.5f - 102.0f, cardOriginDip + 164.0f,
@@ -1158,20 +1419,24 @@ struct MediaPopup::Impl {
         rt->DrawRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
                                  brushStroke, 1.0f);
 
-        drawSource(rt);
-        drawCover(rt);
-        drawScrollingText(rt, titleLayout, titleWidth, titleHeight,
-                          D2D1::RectF(kPopupTextLeftDip, 48.0f, w - kPopupTextRightPaddingDip,
-                                      76.0f),
-                          titleScrollOffset, brushText);
-        drawScrollingText(rt, artistLayout, artistWidth, artistHeight,
-                          D2D1::RectF(kPopupTextLeftDip, 78.0f, w - kPopupTextRightPaddingDip,
-                                      102.0f),
-                          artistScrollOffset, brushSecondary);
-        drawProgress(rt, w);
-        for (int i = 0; i < 3; ++i)
-            drawButton(rt, i);
-        drawVolumeControl(rt, w);
+        if (idleMode) {
+            drawIdle(rt, w);
+        } else {
+            drawSource(rt);
+            drawCover(rt);
+            drawScrollingText(rt, titleLayout, titleWidth, titleHeight,
+                              D2D1::RectF(kPopupTextLeftDip, 48.0f,
+                                          w - kPopupTextRightPaddingDip, 76.0f),
+                              titleScrollOffset, brushText);
+            drawScrollingText(rt, artistLayout, artistWidth, artistHeight,
+                              D2D1::RectF(kPopupTextLeftDip, 78.0f,
+                                          w - kPopupTextRightPaddingDip, 102.0f),
+                              artistScrollOffset, brushSecondary);
+            drawProgress(rt, w);
+            for (int i = 0; i < 3; ++i)
+                drawButton(rt, i);
+            drawVolumeControl(rt, w);
+        }
 
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
@@ -1209,7 +1474,7 @@ struct MediaPopup::Impl {
             dpi = GetDpiForSystem();
         const float s = scale();
         const int popupW = static_cast<int>(std::lround(kPopupWidthDip * s));
-        const int popupH = static_cast<int>(std::lround(kPopupHeightDip * s));
+        const int popupH = static_cast<int>(std::lround(popupHeightDip() * s));
         const int gap = static_cast<int>(std::lround(kPopupGapDip * s));
 
         HMONITOR monitor = MonitorFromRect(&anchorRect, MONITOR_DEFAULTTONEAREST);
@@ -1274,6 +1539,63 @@ struct MediaPopup::Impl {
             return false;
         return x >= volumeSliderRect.left - 7.0f && x <= volumeSliderRect.right + 7.0f &&
                y >= volumeSliderRect.top - 8.0f && y <= volumeSliderRect.bottom + 8.0f;
+    }
+
+    int hitIdleApp(float x, float y) const {
+        y -= cardOriginDip;
+        if (!idleMode || idle.apps.empty() || !contains(idleListRect, x, y))
+            return -1;
+        const float contentY = y - idleListRect.top + idleScrollOffset;
+        const int index = static_cast<int>(contentY / kIdleListRowHeightDip);
+        if (index < 0 || static_cast<size_t>(index) >= idle.apps.size())
+            return -1;
+        if (!idle.apps[static_cast<size_t>(index)].pathValid)
+            return -1;
+        const float rowOffset = std::fmod(contentY, kIdleListRowHeightDip);
+        return rowOffset <= 36.0f ? index : -1;
+    }
+
+    bool hitIdleScrollBar(float x, float y) const {
+        y -= cardOriginDip;
+        if (!idleMode || idleScrollMax <= 0.0f)
+            return false;
+        const D2D1_RECT_F hit = D2D1::RectF(
+            idleScrollTrackRect.left - (kIdleScrollBarHitWidthDip -
+                                        kIdleScrollBarWidthDip) * 0.5f,
+            idleScrollTrackRect.top - 4.0f,
+            idleScrollTrackRect.right + (kIdleScrollBarHitWidthDip -
+                                         kIdleScrollBarWidthDip) * 0.5f,
+            idleScrollTrackRect.bottom + 4.0f);
+        return contains(hit, x, y);
+    }
+
+    bool hitIdleScrollThumb(float x, float y) const {
+        if (!hitIdleScrollBar(x, y))
+            return false;
+        return contains(idleScrollThumbRect, x, y);
+    }
+
+    void setIdleScrollFromPointer(float y) {
+        y -= cardOriginDip;
+        if (idleScrollMax <= 0.0f)
+            return;
+        const float trackHeight = idleScrollTrackRect.bottom - idleScrollTrackRect.top;
+        const float thumbHeight = idleScrollThumbRect.bottom - idleScrollThumbRect.top;
+        const float usable = std::max(0.0f, trackHeight - thumbHeight);
+        if (usable <= 0.0f)
+            return;
+        const float thumbTop = std::clamp(
+            y - idleScrollDragOffset, idleScrollTrackRect.top,
+            idleScrollTrackRect.bottom - thumbHeight);
+        idleScrollOffset = (thumbTop - idleScrollTrackRect.top) / usable * idleScrollMax;
+        renderOrDefer();
+    }
+
+    void scrollIdleBy(float delta) {
+        if (!idleMode || idleScrollMax <= 0.0f)
+            return;
+        idleScrollOffset = std::clamp(idleScrollOffset + delta, 0.0f, idleScrollMax);
+        renderOrDefer();
     }
 
     // 拖动/点击滑块：按 x 坐标换算百分比，本地即时反馈并上报
@@ -1361,7 +1683,7 @@ struct MediaPopup::Impl {
         entering = true;
         closing = false;
         reposition();
-        if (backgroundMode == MediaPopupBackground::Frosted)
+        if (frostedBackgroundActive())
             backdropDirty = true;
         if (!render()) {
             entering = false;
@@ -1426,7 +1748,7 @@ struct MediaPopup::Impl {
         if (!hwnd)
             return;
         KillTimer(hwnd, kHideTimer);
-        if (enabled && available && !popupVisible && triggerOnHover)
+        if (enabled && available && !popupVisible && (idleMode || triggerOnHover))
             SetTimer(hwnd, kShowTimer, kShowDelayMs, nullptr);
     }
 
@@ -1453,6 +1775,9 @@ struct MediaPopup::Impl {
         volumeDragging = false;
         hoverVolume = false;
         pressedVolume = false;
+        hoverIdleApp = -1;
+        pressedIdleApp = -1;
+        idleScrollDragging = false;
         if (!hwnd)
             return;
         killTimers();
@@ -1469,7 +1794,8 @@ struct MediaPopup::Impl {
             if (LOWORD(lp) == HTCLIENT) {
                 POINT point{};
                 if (GetCursorPos(&point) && ScreenToClient(hwnd, &point) &&
-                    hitSource(dip(point.x), dip(point.y))) {
+                    (hitSource(dip(point.x), dip(point.y)) ||
+                     hitIdleApp(dip(point.x), dip(point.y)) >= 0)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
@@ -1479,6 +1805,18 @@ struct MediaPopup::Impl {
             onPopupEnter();
             const float mx = dip(GET_X_LPARAM(lp));
             const float my = dip(GET_Y_LPARAM(lp));
+            if (idleMode) {
+                if (idleScrollDragging) {
+                    setIdleScrollFromPointer(my);
+                    return 0;
+                }
+                const int idleApp = hitIdleApp(mx, my);
+                if (idleApp != hoverIdleApp) {
+                    hoverIdleApp = idleApp;
+                    renderOrDefer();
+                }
+                return 0;
+            }
             if (volumeDragging) {
                 applyVolumeAt(mx);
                 return 0;
@@ -1495,12 +1833,34 @@ struct MediaPopup::Impl {
         case WM_MOUSELEAVE:
             hoverButton = -1;
             hoverVolume = false;
+            hoverIdleApp = -1;
             onPopupLeave();
             renderOrDefer();
             return 0;
         case WM_LBUTTONDOWN: {
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
+            if (idleMode) {
+                if (hitIdleScrollThumb(x, y)) {
+                    idleScrollDragging = true;
+                    idleScrollDragOffset = y - cardOriginDip -
+                                           idleScrollThumbRect.top;
+                    SetCapture(hwnd);
+                    return 0;
+                }
+                if (hitIdleScrollBar(x, y)) {
+                    const float localY = y - cardOriginDip;
+                    const float page = kIdleListHeightDip;
+                    scrollIdleBy(localY < idleScrollThumbRect.top ? -page : page);
+                    return 0;
+                }
+                pressedIdleApp = hitIdleApp(x, y);
+                if (pressedIdleApp >= 0) {
+                    SetCapture(hwnd);
+                    renderOrDefer();
+                }
+                return 0;
+            }
             // 音量控件优先：图标按下待点击切换滑块；滑块按下直接进入拖动
             if (hitVolumeSlider(x, y)) {
                 volumeDragging = true;
@@ -1527,6 +1887,29 @@ struct MediaPopup::Impl {
         case WM_LBUTTONUP: {
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
+            if (idleMode) {
+                if (idleScrollDragging) {
+                    idleScrollDragging = false;
+                    if (GetCapture() == hwnd)
+                        ReleaseCapture();
+                    return 0;
+                }
+                const int pressed = pressedIdleApp;
+                const int hit = hitIdleApp(x, y);
+                pressedIdleApp = -1;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                renderOrDefer();
+                if (pressed >= 0 && pressed == hit &&
+                    static_cast<size_t>(pressed) < idle.apps.size() &&
+                    onIdleAppOpen) {
+                    const std::wstring path = idle.apps[static_cast<size_t>(pressed)].path;
+                    hideImmediate();
+                    anchorHover = false;
+                    onIdleAppOpen(path);
+                }
+                return 0;
+            }
             if (volumeDragging) {
                 volumeDragging = false;
                 if (GetCapture() == hwnd)
@@ -1568,6 +1951,15 @@ struct MediaPopup::Impl {
             ScreenToClient(hwnd, &point);
             const float x = dip(point.x);
             const float y = dip(point.y);
+            if (idleMode) {
+                const float localY = y - cardOriginDip;
+                if (contains(idleListRect, x, localY) || hitIdleScrollBar(x, y)) {
+                    const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+                    if (steps != 0)
+                        scrollIdleBy(-static_cast<float>(steps) * 32.0f);
+                }
+                return 0;
+            }
             if (onAppVolume && (hitVolumeIcon(x, y) || hitVolumeSlider(x, y))) {
                 const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
                 if (steps != 0) {
@@ -1585,6 +1977,8 @@ struct MediaPopup::Impl {
             pressedSourceAppUserModelId.clear();
             pressedVolume = false;
             volumeDragging = false;
+            pressedIdleApp = -1;
+            idleScrollDragging = false;
             renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
@@ -1596,7 +1990,7 @@ struct MediaPopup::Impl {
             const float x = dip(point.x);
             const float y = dip(point.y);
             if (x < 0.0f || x > kPopupWidthDip || y < cardOriginDip ||
-                y > cardOriginDip + kPopupHeightDip)
+                y > cardOriginDip + popupHeightDip())
                 return HTTRANSPARENT;
             return HTCLIENT;
         }
@@ -1755,6 +2149,10 @@ void MediaPopup::setSourceOpenCallback(std::function<void(const std::wstring&)> 
     impl_->onSourceOpen = std::move(cb);
 }
 
+void MediaPopup::setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb) {
+    impl_->onIdleAppOpen = std::move(cb);
+}
+
 void MediaPopup::setEnabled(bool enabled) {
     impl_->enabled = enabled;
     if (!enabled) {
@@ -1766,7 +2164,8 @@ void MediaPopup::setEnabled(bool enabled) {
     }
     if (!impl_->hwnd)
         return;
-    if (impl_->triggerOnHover && impl_->anchorHover && impl_->available &&
+    if ((impl_->idleMode || impl_->triggerOnHover) && impl_->anchorHover &&
+        impl_->available &&
              !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
@@ -1777,7 +2176,7 @@ void MediaPopup::setTriggerOnHover(bool on) {
     impl_->triggerOnHover = on;
     if (!impl_->hwnd)
         return;
-    if (!on) {
+    if (!on && !impl_->idleMode) {
         KillTimer(impl_->hwnd, kShowTimer);
     } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
                !impl_->popupVisible) {
@@ -1791,15 +2190,47 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     impl_->backgroundMode = mode;
     if (mode != MediaPopupBackground::Frosted)
         impl_->releaseDynamicBackgroundResources();
-    if (!impl_->hwnd)
+    if (!impl_->hwnd || impl_->idleMode)
         return;
     impl_->releaseDrawingResources();
-    if (impl_->popupVisible) {
-        if (impl_->entering || impl_->closing)
-            impl_->deferredRender = true;
-        else
-            impl_->render();
-    }
+    if (!impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
+}
+
+void MediaPopup::setIdleBackgroundMode(MediaPopupBackground mode) {
+    if (impl_->idleBackgroundMode == mode)
+        return;
+    impl_->idleBackgroundMode = mode;
+    if (!impl_->hwnd || !impl_->idleMode)
+        return;
+    impl_->releaseDrawingResources();
+    if (!impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
+}
+
+void MediaPopup::setIdleBackgroundColor(COLORREF color, bool customized) {
+    if (impl_->idleBackgroundColor == color &&
+        impl_->idleBackgroundColorCustomized == customized)
+        return;
+    impl_->idleBackgroundColor = color;
+    impl_->idleBackgroundColorCustomized = customized;
+    if (!impl_->hwnd || !impl_->idleMode)
+        return;
+    impl_->releaseDrawingResources();
+    if (!impl_->popupVisible)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
 }
 
 void MediaPopup::setFollowAlbumBackground(bool on) {
@@ -1810,7 +2241,7 @@ void MediaPopup::setFollowAlbumBackground(bool on) {
         impl_->releaseDynamicBackgroundResources();
     else
         impl_->dynamicBackgroundDirty = true;
-    if (!impl_->hwnd || !impl_->popupVisible)
+    if (!impl_->hwnd || !impl_->popupVisible || impl_->idleMode)
         return;
     if (impl_->entering || impl_->closing)
         impl_->deferredRender = true;
@@ -1826,7 +2257,7 @@ void MediaPopup::setAutoTextContrast(bool on) {
         impl_->backdropDirty = true;
     else
         impl_->resetBackdropTextColors();
-    if (!impl_->hwnd || !impl_->popupVisible)
+    if (!impl_->hwnd || !impl_->popupVisible || impl_->idleMode)
         return;
     if (impl_->entering || impl_->closing)
         impl_->deferredRender = true;
@@ -1846,6 +2277,13 @@ void MediaPopup::refreshTheme() {
 
 void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
                           bool animateSongTransition) {
+    if (impl_->idleMode) {
+        impl_->idleMode = false;
+        impl_->idleScrollOffset = 0.0f;
+        impl_->idleQuoteScrollOffset = 0.0f;
+        impl_->releaseDrawingResources();
+        impl_->reposition();
+    }
     const bool coverChanged = info.thumbnail != impl_->media.thumbnail;
     const bool sourceChanged = info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
     const bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
@@ -1891,6 +2329,59 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
     }
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
         impl_->triggerOnHover)
+        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+}
+
+void MediaPopup::setIdleContent(const IdlePresentation& content, bool available) {
+    const bool modeChanged = !impl_->idleMode;
+    const bool quoteChanged = content.sentence != impl_->idle.sentence ||
+                              content.loading != impl_->idle.loading;
+    bool changed = modeChanged || quoteChanged || content.source != impl_->idle.source ||
+                   content.apps.size() != impl_->idle.apps.size();
+    if (!changed) {
+        for (size_t i = 0; i < content.apps.size(); ++i) {
+            const auto& oldApp = impl_->idle.apps[i];
+            const auto& newApp = content.apps[i];
+            if (oldApp.path != newApp.path || oldApp.name != newApp.name ||
+                oldApp.iconPixels != newApp.iconPixels ||
+                oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
+                oldApp.pathValid != newApp.pathValid) {
+                changed = true;
+                break;
+            }
+        }
+    }
+
+    impl_->idleMode = true;
+    impl_->idle = content;
+    impl_->available = available;
+    if (modeChanged) {
+        impl_->idleScrollOffset = 0.0f;
+        impl_->idleQuoteScrollOffset = 0.0f;
+        impl_->scrollTickMs = 0;
+        impl_->releaseDrawingResources();
+        impl_->reposition();
+    } else if (changed) {
+        if (quoteChanged) {
+            impl_->idleQuoteScrollOffset = 0.0f;
+            impl_->scrollTickMs = 0;
+        }
+        impl_->idleTextDirty = true;
+        impl_->idleIconsDirty = true;
+        if (impl_->popupVisible)
+            impl_->reposition();
+    }
+    if (!available) {
+        impl_->hideImmediate();
+        return;
+    }
+    if (changed && impl_->popupVisible) {
+        if (impl_->entering || impl_->closing)
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    }
+    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
