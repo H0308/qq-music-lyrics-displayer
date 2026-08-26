@@ -427,7 +427,8 @@ struct App {
     // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
     fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
-    // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止（仅驻留内存）
+    // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止；
+    // 3 极简（不降低歌词刷新率，只关闭附加视觉与弹窗）
     int renderMode_ = 0;
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
@@ -615,7 +616,8 @@ struct App {
     void applyCoverEffect(bool vinyl) {
         albumCoverEffect_ = vinyl ? AlbumCoverEffect::Vinyl : AlbumCoverEffect::Default;
         if (taskbarHost)
-            taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
+            taskbarHost->setAlbumCoverEffect(
+                isMinimalRenderMode() ? AlbumCoverEffect::Default : albumCoverEffect_);
         logSettingBool(L"album-cover-vinyl", vinyl);
         saveSettings();
     }
@@ -642,7 +644,7 @@ struct App {
     void applySpectrumBackground(bool on) {
         spectrumBackground_ = on;
         if (taskbarHost)
-            taskbarHost->setSpectrumBackground(on);
+            taskbarHost->setSpectrumBackground(isMinimalRenderMode() ? false : on);
         logSettingBool(L"spectrum-background", on);
         saveSettings();
     }
@@ -658,7 +660,7 @@ struct App {
     void applyProgressBackground(bool on) {
         progressBackground_ = on;
         if (taskbarHost)
-            taskbarHost->setProgressBackground(on);
+            taskbarHost->setProgressBackground(isMinimalRenderMode() ? false : on);
         logSettingBool(L"progress-background", on);
         saveSettings();
     }
@@ -674,7 +676,9 @@ struct App {
     void applyTaskbarBackground(int mode) {
         taskbarBackground_ = std::clamp(mode, 0, 2);
         if (taskbarHost)
-            taskbarHost->setBackground(static_cast<TaskbarBackground>(taskbarBackground_));
+            taskbarHost->setBackground(
+                isMinimalRenderMode() ? TaskbarBackground::None
+                                       : static_cast<TaskbarBackground>(taskbarBackground_));
         logSettingInt(L"taskbar-background", taskbarBackground_);
         saveSettings();
     }
@@ -687,10 +691,48 @@ struct App {
         saveSettings();
     }
 
+    bool isRenderMode(RenderMode mode) const {
+        return renderMode_ == static_cast<int>(mode);
+    }
+
+    bool isMinimalRenderMode() const {
+        return isRenderMode(RenderMode::Minimal);
+    }
+
+    bool isNormalRenderMode() const {
+        return isRenderMode(RenderMode::Normal);
+    }
+
+    // 各设置字段保存用户的常规配置；极简模式只在推送到宿主时临时覆盖有效值，
+    // 退出后重新推送原配置，避免用户切换性能模式时丢失显示偏好。
+    void applyEffectiveTaskbarSettings() {
+        if (!taskbarHost)
+            return;
+        const bool minimal = isMinimalRenderMode();
+        taskbarHost->setControlsOnHover(hoverPlaybackControls_);
+        taskbarHost->setHoverControlStyle(
+            minimal ? HoverControlStyle::Inline : hoverControlStyle_);
+        taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
+        taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
+        taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
+        taskbarHost->setAlbumCoverEffect(
+            minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
+        taskbarHost->setSpectrumStyle(spectrumStyle_);
+        taskbarHost->setSpectrumBackground(minimal ? false : spectrumBackground_);
+        taskbarHost->setSpectrumOpacity(spectrumOpacity_);
+        taskbarHost->setProgressBackground(minimal ? false : progressBackground_);
+        taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        taskbarHost->setBackground(
+            minimal ? TaskbarBackground::None
+                    : static_cast<TaskbarBackground>(taskbarBackground_));
+        taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+    }
+
     // 频谱实际启停 = 用户开关 && 正常渲染模式 && 宿主存在；
-    // 低渲染/完全停止模式强制暂停捕获线程。
+    // 低渲染/完全停止/极简模式都强制暂停捕获线程。
     void syncSpectrumWithMode() {
-        const bool active = spectrumOn_ && renderMode_ == 0 && taskbarHost != nullptr;
+        const bool active = spectrumOn_ && isNormalRenderMode() && taskbarHost != nullptr;
         if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
@@ -706,10 +748,22 @@ struct App {
     }
 
     void applyRenderMode(int mode) {
-        renderMode_ = std::clamp(mode, 0, 2);
-        if (taskbarHost)
+        renderMode_ = std::clamp(mode, 0, 3);
+        if (taskbarHost) {
             taskbarHost->setRenderMode(renderMode_);
+            applyEffectiveTaskbarSettings();
+        }
         syncSpectrumWithMode();
+        if (isMinimalRenderMode()) {
+            cancelSongToastCoverWait();
+            // 切歌弹窗是懒创建的；极简模式下直接销毁已创建的窗口和渲染资源，
+            // 退出极简后下一次真正切歌时再按原配置懒创建。
+            songToast_.reset();
+        } else if (songToast_) {
+            songToast_->setEnabled(songToastEnabled_);
+        }
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
         logSettingInt(L"render-mode", renderMode_);
         saveSettings();
     }
@@ -725,7 +779,8 @@ struct App {
     void applyHoverControlStyle(int style) {
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
         if (taskbarHost)
-            taskbarHost->setHoverControlStyle(hoverControlStyle_);
+            taskbarHost->setHoverControlStyle(
+                isMinimalRenderMode() ? HoverControlStyle::Inline : hoverControlStyle_);
         logSettingInt(L"hover-control-style", style == 1 ? 1 : 0);
         saveSettings();
     }
@@ -765,8 +820,12 @@ struct App {
 
     void applySongToastEnabled(bool on) {
         songToastEnabled_ = on;
-        if (songToast_)
+        if (isMinimalRenderMode()) {
+            cancelSongToastCoverWait();
+            songToast_.reset();
+        } else if (songToast_) {
             songToast_->setEnabled(on);
+        }
         logSettingBool(L"song-toast", on);
         saveSettings();
     }
@@ -830,7 +889,7 @@ struct App {
 
     // 切歌确认后弹出灵动岛；弹窗懒创建，关闭功能时不创建窗口。
     void notifySongToast() {
-        if (!songToastEnabled_ || currentFrame_.media.title.empty())
+        if (isMinimalRenderMode() || !songToastEnabled_ || currentFrame_.media.title.empty())
             return;
         if (songToastSkipFullscreen_ && foregroundFullscreen())
             return;
@@ -1083,25 +1142,12 @@ struct App {
                                            secondaryLyricEnabled_ && preferRomanization_);
         taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
         taskbarHost->setLyricAlignment(lyricAlignment_);
-        taskbarHost->setControlsOnHover(hoverPlaybackControls_);
-        taskbarHost->setHoverControlStyle(hoverControlStyle_);
-        taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
-        taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
-        taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
-        taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
         taskbarHost->setSongInfoVisible(songInfoVisible_);
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
-        taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setRenderMode(renderMode_);
-        taskbarHost->setSpectrumStyle(spectrumStyle_);
-        taskbarHost->setSpectrumBackground(spectrumBackground_);
-        taskbarHost->setSpectrumOpacity(spectrumOpacity_);
-        taskbarHost->setProgressBackground(progressBackground_);
-        taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
-        taskbarHost->setBackground(static_cast<TaskbarBackground>(taskbarBackground_));
-        taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+        applyEffectiveTaskbarSettings();
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
         updateTrayIcon();
@@ -1341,7 +1387,7 @@ struct App {
         const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
         if (*spectrumProcess) {
             spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
-            if (spectrumOn_ && renderMode_ == 0)
+            if (spectrumOn_ && isNormalRenderMode())
                 spectrum_.start();
             // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
             std::wstring spectrumKey = makeTrackKey(snap);
@@ -1436,7 +1482,8 @@ struct App {
             startLyricRequest(snap);
         }
         publishPresentationFrame(snap, !trackChanged, trackChanged);
-        if (trackChanged && songIdentityChanged && songToastEnabled_) {
+        if (trackChanged && songIdentityChanged && songToastEnabled_ &&
+            !isMinimalRenderMode()) {
             cancelSongToastCoverWait();
             if (currentFrame_.media.thumbnail && !currentFrame_.media.thumbnail->empty())
                 notifySongToast();
@@ -1681,7 +1728,8 @@ void App::loadSettings() {
             hasGlobalLyricAppearance_ = true;
         }
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
-        renderMode_ = std::clamp(j.value("renderMode", 0), 0, 2);
+        // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
+        renderMode_ = static_cast<int>(RenderMode::Normal);
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
         hoverControlStyle_ = j.value("hoverControlStyle", 0) == 1
                                  ? HoverControlStyle::Popup
@@ -1783,7 +1831,7 @@ void App::saveSettings() {
         if (hasGlobalLyricAppearance_)
             saveAppearance("Global", globalLyricAppearance_);
         j["taskbarPosition"] = taskbarPosition_;
-        j["renderMode"] = renderMode_;
+        // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
         j["mediaPopupTrigger"] = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;

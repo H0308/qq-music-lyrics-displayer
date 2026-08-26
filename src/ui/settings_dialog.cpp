@@ -17,6 +17,7 @@
 namespace {
 
 constexpr int kIdNav = 400;
+constexpr int kRenderModeMinimal = 3;
 constexpr int kIdSongInfo = 410;
 constexpr int kIdAlbumCover = 411;
 constexpr int kIdPlatformIcon = 412;
@@ -70,6 +71,11 @@ constexpr float kHintBottomPadding = 8.0f;
 constexpr float kHintTextSize = 12.0f;
 constexpr float kHintMeasureHeight = 10000.0f;
 constexpr float kRowGap = 8.0f;
+constexpr float kModeGridGap = 8.0f;
+constexpr float kModeGridCardH = 56.0f;
+constexpr float kModeGridTopGap = 10.0f;
+constexpr float kModeGridNoteGap = 8.0f;
+constexpr float kModeGridMinH = 196.0f;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
@@ -121,6 +127,7 @@ struct SettingsDialog::Impl {
     enum class ControlKind {
         Toggle,
         Radio,
+        ModeGrid, // 2×2 模式选择卡片
         Slider,
         Button,
         Header, // 分组标题：无卡片背景，不参与交互与焦点
@@ -150,6 +157,7 @@ struct SettingsDialog::Impl {
         D2D1_RECT_F hintRect{};
         D2D1_RECT_F controlRect{};
         std::vector<D2D1_RECT_F> optionRects;
+        std::vector<std::wstring> optionHints;
     };
 
     HINSTANCE inst = nullptr;
@@ -221,6 +229,13 @@ struct SettingsDialog::Impl {
         return nullptr;
     }
 
+    bool minimalModeActive() const {
+        if (state.renderMode == kRenderModeMinimal)
+            return true;
+        const auto* mode = findRow(kIdRenderMode);
+        return mode && mode->selected == kRenderModeMinimal;
+    }
+
     Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
                 float controlW, float height) {
         Row row;
@@ -245,7 +260,7 @@ struct SettingsDialog::Impl {
     void updateMediaPopupBackgroundRowsEnabled() {
         const auto* controls = findRow(kIdHoverControls);
         const auto* style = findRow(kIdHoverControlStyle);
-        const bool popupEnabled = controls && controls->checked && style &&
+        const bool popupEnabled = !minimalModeActive() && controls && controls->checked && style &&
                                   style->selected == 1;
         auto* background = findRow(kIdMediaPopupBackground);
         if (background)
@@ -276,7 +291,7 @@ struct SettingsDialog::Impl {
     }
 
     void updateProgressBackgroundRowsEnabled() {
-        const bool available = !backgroundWaveActive();
+        const bool available = !minimalModeActive() && !backgroundWaveActive();
         if (auto* row = findRow(kIdProgressBackground))
             row->enabled = available;
         if (auto* row = findRow(kIdProgressBackgroundOpacity))
@@ -289,6 +304,18 @@ struct SettingsDialog::Impl {
         Row& row = addRow(page, id, ControlKind::Radio, text, hint,
                           estimateRadioWidth(options), height);
         row.options = std::move(options);
+        row.selected = selected;
+        row.enabled = enabled;
+        return row;
+    }
+
+    Row& addModeGrid(int page, int id, const wchar_t* text, const wchar_t* hint,
+                     std::vector<std::wstring> options,
+                     std::vector<std::wstring> optionHints, int selected, bool enabled,
+                     float height) {
+        Row& row = addRow(page, id, ControlKind::ModeGrid, text, hint, 0.0f, height);
+        row.options = std::move(options);
+        row.optionHints = std::move(optionHints);
         row.selected = selected;
         row.enabled = enabled;
         return row;
@@ -381,6 +408,7 @@ struct SettingsDialog::Impl {
     }
 
     void createControls() {
+        const bool minimal = state.renderMode == kRenderModeMinimal;
         addHeader(0, L"主题");
         addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
@@ -397,25 +425,28 @@ struct SettingsDialog::Impl {
                                        state.platformIconVisible);
         platformIcon.enabled = state.albumCoverVisible;
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
-                 state.coverEffectVinyl ? 1 : 0, state.albumCoverVisible, kRowH);
+                 minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
+                 state.albumCoverVisible && !minimal, kRowH);
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
             L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
             40.0f, kRowTallH);
-        progressBackground.checked = state.progressBackground;
+        progressBackground.checked = minimal ? false : state.progressBackground;
         addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
-                  state.progressBackgroundOpacity, state.progressBackground);
+                  state.progressBackgroundOpacity, !minimal && state.progressBackground);
         addRadio(0, kIdTaskbarBackground, L"任务栏歌词背景",
              L"封面模糊将专辑封面高斯模糊后铺满背景；纯色跟随任务栏深浅色；画在最底层，可与播放进度背景、背景波浪叠加",
-                 {L"无", L"封面模糊", L"纯色"}, state.taskbarBackground,
-                 true, kRowTallH);
+                 {L"无", L"封面模糊", L"纯色"}, minimal ? 0 : state.taskbarBackground,
+                 !minimal, kRowTallH);
         addSlider(0, kIdCoverBackgroundOpacity, L"封面背景不透明度",
-                  state.coverBackgroundOpacity, state.taskbarBackground == 1);
+                  state.coverBackgroundOpacity,
+                  !minimal && state.taskbarBackground == 1);
         addHeader(0, L"悬浮控件与媒体卡片");
         addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
         addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
-                 {L"内嵌控件", L"媒体卡片"}, state.hoverControlStyle, state.hoverControls,
+                 {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
+                 state.hoverControls && !minimal,
                  kRowTallH);
         addRadio(0, kIdMediaPopupTrigger, L"媒体卡片展开方式",
                  L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
@@ -442,33 +473,41 @@ struct SettingsDialog::Impl {
                                 L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
                                 L"始终不响应鼠标操作",
                                 40.0f, kRowTallH);
-        songToast.checked = state.songToastEnabled;
+        songToast.checked = minimal ? false : state.songToastEnabled;
+        songToast.enabled = !minimal;
         Row& songToastDuration =
             addSlider(0, kIdSongToastDuration, L"切歌弹窗显示时长",
-                      state.songToastDurationSec, state.songToastEnabled);
+                      state.songToastDurationSec, !minimal && state.songToastEnabled);
         songToastDuration.minValue = 1;
         songToastDuration.maxValue = 10;
         songToastDuration.valueSuffix = L" 秒";
         Row& songToastSkipFullscreen =
             addToggle(0, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
                       state.songToastSkipFullscreen);
-        songToastSkipFullscreen.enabled = state.songToastEnabled;
+        songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
         addRadio(0, kIdSongToastPosition, L"切歌弹窗位置", nullptr, {L"中上", L"中下"},
-                 state.songToastPosition, state.songToastEnabled, kRowH);
+                 state.songToastPosition, !minimal && state.songToastEnabled, kRowH);
         addHeader(0, L"性能");
-        addRadio(0, kIdRenderMode, L"性能模式", L"低渲染降帧省 GPU，完全停止仅驻留内存",
-                 {L"正常", L"低渲染", L"完全停止"}, state.renderMode, true, kRowTallH);
+        addModeGrid(0, kIdRenderMode, L"性能模式",
+                    L"模式仅本次运行有效，重启软件后恢复正常模式",
+                    {L"正常", L"低渲染", L"完全停止", L"极简"},
+                    {L"完整视觉效果", L"降低帧率，节省 GPU", L"停止渲染，保留监听",
+                     L"横向歌词，关闭逐字与转场"},
+                    std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
 
-        addToggle(1, kIdSpectrum, L"频谱", state.spectrumOn);
+        Row& spectrum = addToggle(1, kIdSpectrum, L"频谱", minimal ? false : state.spectrumOn);
+        spectrum.enabled = !minimal;
         addRadio(1, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
-                 state.spectrumOn,
+                 state.spectrumOn && !minimal,
                  kRowH);
         Row& spectrumBackground =
-            addToggle(1, kIdSpectrumBackground, L"背景波浪", state.spectrumBackground);
-        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2;
+            addToggle(1, kIdSpectrumBackground, L"背景波浪",
+                      minimal ? false : state.spectrumBackground);
+        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 && !minimal;
         addSlider(1, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
-                  state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground);
+                  state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground &&
+                      !minimal);
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
@@ -618,8 +657,31 @@ struct SettingsDialog::Impl {
             }
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
             const float innerX = contentX + 16.0f;
-            const float controlX = contentX + contentW - 16.0f - row.controlW;
+            const float innerRight = contentX + contentW - 16.0f;
+            if (row.kind == ControlKind::ModeGrid) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                const float gridH = kModeGridCardH * 2.0f + kModeGridGap;
+                const float gridBottom = gridTop + gridH;
+                row.controlRect = D2D1::RectF(innerX, gridTop, innerRight, gridBottom);
+
+                if (row.showHint) {
+                    const float hintTop = gridBottom + kModeGridNoteGap;
+                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                                              y + rowH - kHintBottomPadding);
+                }
+                y += rowH + kRowGap;
+                continue;
+            }
+
+            const float controlX = innerRight - row.controlW;
             const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
+            const float controlH = row.kind == ControlKind::Button
+                                       ? fluent::metrics::controlHeight
+                                       : 24.0f;
             if (row.showHint) {
                 const float titleTop = y + kTitleTopPadding;
                 row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
@@ -627,18 +689,16 @@ struct SettingsDialog::Impl {
                 // 提示区域从标题实际高度之后开始，避免窄窗口下标题换行后侵入提示文字。
                 const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
                 row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
-                                           y + rowH - 8.0f);
+                                           y + rowH - kHintBottomPadding);
             } else {
                 const float titleTop = y + (rowH - row.titleHeight) / 2.0f;
                 row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
                                             titleTop + row.titleHeight);
             }
-            const float controlH = row.kind == ControlKind::Button
-                                       ? fluent::metrics::controlHeight
-                                       : 24.0f;
-            row.controlRect = D2D1::RectF(controlX, y + (rowH - controlH) / 2.0f,
+            const float controlY = y + (rowH - controlH) / 2.0f;
+            row.controlRect = D2D1::RectF(controlX, controlY,
                                           controlX + row.controlW,
-                                          y + (rowH - controlH) / 2.0f + controlH);
+                                          controlY + controlH);
             y += rowH + kRowGap;
         }
     }
@@ -846,6 +906,71 @@ struct SettingsDialog::Impl {
         }
     }
 
+    void drawModeGrid(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(13.0f, 600, false, true);
+        auto* hintFormat = painter.textFormat(11.0f, 400);
+        if (!titleFormat || !hintFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        const float cardW = (gridW - kModeGridGap) * 0.5f;
+        row.optionRects.clear();
+        const size_t count = std::min<size_t>(row.options.size(), 4);
+        for (size_t i = 0; i < count; ++i) {
+            const int column = static_cast<int>(i % 2);
+            const int line = static_cast<int>(i / 2);
+            const float left = row.controlRect.left + column * (cardW + kModeGridGap);
+            const float top = row.controlRect.top + line * (kModeGridCardH + kModeGridGap);
+            const D2D1_RECT_F card =
+                D2D1::RectF(left, top, left + cardW, top + kModeGridCardH);
+            row.optionRects.push_back(card);
+
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            if (selected) {
+                painter.strokeRoundRect(hovered ? p.accentHover : p.accent, card,
+                                        focusedId == row.id && focusVisible ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+                if (auto* br = painter.brush(row.enabled ? p.accent : p.disabled)) {
+                    painter.target()->FillEllipse(
+                        D2D1::Ellipse(D2D1::Point2F(card.right - 14.0f, card.top + 14.0f),
+                                      3.0f, 3.0f),
+                        br);
+                }
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const D2D1_COLOR_F titleColor = row.enabled ? p.text : p.disabled;
+            painter.drawText(row.options[i], titleFormat,
+                             D2D1::RectF(card.left + 12.0f, card.top + 8.0f,
+                                         card.right - 12.0f, card.top + 28.0f),
+                             titleColor);
+            if (i < row.optionHints.size() && !row.optionHints[i].empty()) {
+                painter.drawText(row.optionHints[i], hintFormat,
+                                 D2D1::RectF(card.left + 12.0f, card.top + 29.0f,
+                                             card.right - 12.0f, card.bottom - 8.0f),
+                                 row.enabled ? p.textSecondary : p.disabled);
+            }
+        }
+    }
+
     void drawScrollBar(fluent::FluentDialogSurface::Painter& painter) {
         if (contentMaxScroll <= 0.0f || scrollThumbRect.bottom <= scrollThumbRect.top)
             return;
@@ -882,6 +1007,8 @@ struct SettingsDialog::Impl {
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
                 drawRadio(painter, row);
+            else if (row.kind == ControlKind::ModeGrid)
+                drawModeGrid(painter, row);
             else if (row.kind == ControlKind::Slider)
                 drawSlider(painter, row);
             else
@@ -906,7 +1033,7 @@ struct SettingsDialog::Impl {
         for (const auto& row : rows[activePage]) {
             if (!contains(row.controlRect, x, y))
                 continue;
-            if (option && row.kind == ControlKind::Radio) {
+            if (option && (row.kind == ControlKind::Radio || row.kind == ControlKind::ModeGrid)) {
                 for (size_t i = 0; i < row.optionRects.size(); ++i) {
                     if (contains(row.optionRects[i], x, y)) {
                         *option = static_cast<int>(i);
@@ -972,7 +1099,7 @@ struct SettingsDialog::Impl {
             if (actions.onAlbumCoverVisible)
                 actions.onAlbumCoverVisible(row->checked);
             if (auto* effect = findRow(kIdCoverEffect))
-                effect->enabled = row->checked;
+                effect->enabled = row->checked && !minimalModeActive();
             if (auto* platformIcon = findRow(kIdPlatformIcon))
                 platformIcon->enabled = row->checked;
             break;
@@ -1047,7 +1174,7 @@ struct SettingsDialog::Impl {
             if (actions.onHoverControls)
                 actions.onHoverControls(row->checked);
             if (auto* style = findRow(kIdHoverControlStyle))
-                style->enabled = row->checked;
+                style->enabled = row->checked && !minimalModeActive();
             updateMediaPopupBackgroundRowsEnabled();
             break;
         case kIdHoverControlStyle:
@@ -1168,6 +1295,7 @@ struct SettingsDialog::Impl {
 
     void updateState(const SettingsState& s) {
         state = s;
+        const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongInfo))
             row->checked = s.songInfoVisible;
         if (auto* row = findRow(kIdAlbumCover))
@@ -1177,39 +1305,44 @@ struct SettingsDialog::Impl {
             row->enabled = s.albumCoverVisible;
         }
         if (auto* row = findRow(kIdCoverEffect)) {
-            row->selected = s.coverEffectVinyl ? 1 : 0;
-            row->enabled = s.albumCoverVisible;
+            row->selected = minimal ? 0 : (s.coverEffectVinyl ? 1 : 0);
+            row->enabled = s.albumCoverVisible && !minimal;
         }
-        if (auto* row = findRow(kIdSpectrum))
-            row->checked = s.spectrumOn;
+        if (auto* row = findRow(kIdSpectrum)) {
+            row->checked = minimal ? false : s.spectrumOn;
+            row->enabled = !minimal;
+        }
         if (auto* row = findRow(kIdSpectrumStyle)) {
             row->selected = std::clamp(s.spectrumStyle, 0, 2);
-            row->enabled = s.spectrumOn;
+            row->enabled = s.spectrumOn && !minimal;
         }
         if (auto* row = findRow(kIdSpectrumBackground)) {
-            row->checked = s.spectrumBackground;
-            row->enabled = s.spectrumOn && s.spectrumStyle == 2;
+            row->checked = minimal ? false : s.spectrumBackground;
+            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && !minimal;
         }
         if (auto* row = findRow(kIdSpectrumOpacity)) {
             row->value = std::clamp(s.spectrumOpacity, 0, 100);
-            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground;
+            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground &&
+                           !minimal;
         }
-        if (auto* row = findRow(kIdTaskbarBackground))
-            row->selected = std::clamp(s.taskbarBackground, 0, 2);
+        if (auto* row = findRow(kIdTaskbarBackground)) {
+            row->selected = minimal ? 0 : std::clamp(s.taskbarBackground, 0, 2);
+            row->enabled = !minimal;
+        }
         if (auto* row = findRow(kIdCoverBackgroundOpacity)) {
             row->value = std::clamp(s.coverBackgroundOpacity, 0, 100);
-            row->enabled = s.taskbarBackground == 1;
+            row->enabled = !minimal && s.taskbarBackground == 1;
         }
         if (auto* row = findRow(kIdProgressBackground))
-            row->checked = s.progressBackground;
+            row->checked = minimal ? false : s.progressBackground;
         if (auto* row = findRow(kIdProgressBackgroundOpacity))
             row->value = std::clamp(s.progressBackgroundOpacity, 0, 100);
         updateProgressBackgroundRowsEnabled();
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
         if (auto* row = findRow(kIdHoverControlStyle)) {
-            row->selected = s.hoverControlStyle;
-            row->enabled = s.hoverControls;
+            row->selected = minimal ? 0 : s.hoverControlStyle;
+            row->enabled = s.hoverControls && !minimal;
         }
         if (auto* row = findRow(kIdMediaPopupBackground)) {
             row->selected = s.mediaPopupBackground;
@@ -1221,26 +1354,28 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
             row->checked = s.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
-        if (auto* row = findRow(kIdSongToast))
-            row->checked = s.songToastEnabled;
+        if (auto* row = findRow(kIdSongToast)) {
+            row->checked = minimal ? false : s.songToastEnabled;
+            row->enabled = !minimal;
+        }
         if (auto* row = findRow(kIdSongToastDuration)) {
             row->value = std::clamp(s.songToastDurationSec, 1, 10);
-            row->enabled = s.songToastEnabled;
+            row->enabled = !minimal && s.songToastEnabled;
         }
         if (auto* row = findRow(kIdSongToastSkipFullscreen)) {
             row->checked = s.songToastSkipFullscreen;
-            row->enabled = s.songToastEnabled;
+            row->enabled = !minimal && s.songToastEnabled;
         }
         if (auto* row = findRow(kIdSongToastPosition)) {
             row->selected = std::clamp(s.songToastPosition, 0, 1);
-            row->enabled = s.songToastEnabled;
+            row->enabled = !minimal && s.songToastEnabled;
         }
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);
         if (auto* row = findRow(kIdWindowTheme))
             row->selected = themeModeIndex(s.windowThemeMode);
         if (auto* row = findRow(kIdRenderMode))
-            row->selected = s.renderMode;
+            row->selected = std::clamp(s.renderMode, 0, kRenderModeMinimal);
         if (auto* row = findRow(kIdPickFont)) {
             row->hint = s.fontDesc;
             row->showHint = !row->hint.empty();
@@ -1428,7 +1563,7 @@ struct SettingsDialog::Impl {
             else if (pressed != 0 && pressed == hit) {
                 Row* row = findRow(pressed);
                 if (row && row->enabled) {
-                    if (row->kind == ControlKind::Radio) {
+                    if (row->kind == ControlKind::Radio || row->kind == ControlKind::ModeGrid) {
                         if (pressedOptionValue >= 0 && pressedOptionValue == option &&
                             pressedOptionValue != row->selected) {
                             row->selected = pressedOptionValue;
@@ -1481,6 +1616,18 @@ struct SettingsDialog::Impl {
                     if (next >= 4)
                         next = 0;
                     showPage(next);
+                } else if (Row* row = findRow(focusedId);
+                           row && row->kind == ControlKind::ModeGrid && row->enabled &&
+                               row->options.size() >= 4) {
+                    int next = row->selected;
+                    if (wp == VK_UP && row->selected >= 2)
+                        next -= 2;
+                    else if (wp == VK_DOWN && row->selected < 2)
+                        next += 2;
+                    if (next != row->selected && next >= 0 && next < 4) {
+                        row->selected = next;
+                        onCommand(row->id);
+                    }
                 }
                 return 0;
             }
@@ -1504,13 +1651,26 @@ struct SettingsDialog::Impl {
                     row->value = std::clamp(row->value + direction, row->minValue,
                                             row->maxValue);
                     onCommand(row->id);
-                } else if (row && row->kind == ControlKind::Radio && row->enabled &&
-                           !row->options.empty()) {
+                } else if (row && (row->kind == ControlKind::Radio ||
+                                   row->kind == ControlKind::ModeGrid) &&
+                           row->enabled && !row->options.empty()) {
                     int direction = wp == VK_LEFT ? -1 : 1;
-                    row->selected = (row->selected + direction +
-                                     static_cast<int>(row->options.size())) %
-                                    static_cast<int>(row->options.size());
-                    onCommand(row->id);
+                    int next = row->selected;
+                    if (row->kind == ControlKind::ModeGrid && row->options.size() >= 4) {
+                        const int column = row->selected % 2;
+                        if (direction < 0 && column > 0)
+                            --next;
+                        else if (direction > 0 && column == 0)
+                            ++next;
+                    } else {
+                        next = (row->selected + direction +
+                                static_cast<int>(row->options.size())) %
+                               static_cast<int>(row->options.size());
+                    }
+                    if (next != row->selected) {
+                        row->selected = next;
+                        onCommand(row->id);
+                    }
                 }
                 return 0;
             }

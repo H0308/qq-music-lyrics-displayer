@@ -22,7 +22,7 @@ struct SettingsState {
     int progressBackgroundOpacity = 25; // 播放进度背景不透明度（0~100）
     int taskbarBackground = 0; // 任务栏歌词背景：0 无 1 封面模糊 2 纯色（画在最底层，可与其他背景叠加）
     int coverBackgroundOpacity = 60; // 封面模糊背景不透明度（0~100）
-    int renderMode = 0; // 0 正常 1 低渲染 2 完全停止
+    int renderMode = 0; // 0 正常 1 低渲染 2 完全停止 3 极简
     bool hoverControls = true;
     int hoverControlStyle = 0; // 0 内嵌控件 1 媒体卡片
     int mediaPopupTrigger = 0; // 0 悬浮展开 1 点击展开

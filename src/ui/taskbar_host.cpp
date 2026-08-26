@@ -421,7 +421,8 @@ struct TaskbarHost::Impl {
     AlbumCoverEffect albumCoverEffect_ = AlbumCoverEffect::Default;
     bool clientAnimations_ = true;
     // 渲染模式：0 正常；1 低渲染（播放中也固定 ~30fps）；2 完全停止（窗口隐藏、
-    // 帧定时器停止、GPU 设备释放，数据状态保留在内存）
+    // 帧定时器停止、GPU 设备释放，数据状态保留在内存）；3 极简（保留歌词刷新率，
+    // 仅关闭附加视觉、媒体卡片和切歌弹窗）
     int renderMode_ = 0;
     // 最近一帧的会话可见性：完全停止模式下窗口被强制隐藏且 visible 被清，
     // 恢复时据此判断是否需要立即重新显示
@@ -870,6 +871,19 @@ struct TaskbarHost::Impl {
         rt->CreateSolidColorBrush(rgb(lyricColor_, 0.22f), &brushVinylGroove_);
     }
 
+    void releaseAlbumCoverEffectResources() {
+        auto release = [](auto*& p) {
+            if (p) {
+                p->Release();
+                p = nullptr;
+            }
+        };
+        release(brushCoverHalo_);
+        release(brushVinylBase_);
+        release(brushVinylGroove_);
+        release(vinylCoverClip_);
+    }
+
     // 歌词与黑胶画刷：随用户颜色重建，与主题画刷解耦
     void createLyricBrushes() {
         auto* rt = renderer.renderTarget();
@@ -907,7 +921,10 @@ struct TaskbarHost::Impl {
         rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
         // 频谱柱：跟随已播放色，略降透明度与歌词文字区分层次
         rt->CreateSolidColorBrush(rgb(lyricColor_, 0.60f), &brushSpectrum_);
-        createAlbumCoverBrushes();
+        if (albumCoverEffect_ == AlbumCoverEffect::Vinyl)
+            createAlbumCoverBrushes();
+        else
+            releaseAlbumCoverEffectResources();
     }
 
     void setFontGlowColors(COLORREF glow, COLORREF outline) {
@@ -979,13 +996,35 @@ struct TaskbarHost::Impl {
         render();
     }
 
+    bool isMinimalMode() const {
+        return renderMode_ == static_cast<int>(RenderMode::Minimal);
+    }
+
+    bool mediaPopupAvailable(bool sessionVisible) const {
+        return sessionVisible && renderMode_ != static_cast<int>(RenderMode::Stopped) &&
+               !isMinimalMode();
+    }
+
+    void releaseCoverBackgroundResources() {
+        if (coverBlurFx_) {
+            coverBlurFx_->Release();
+            coverBlurFx_ = nullptr;
+        }
+        if (coverScaleFx_) {
+            coverScaleFx_->Release();
+            coverScaleFx_ = nullptr;
+        }
+        coverBlurInput_ = nullptr;
+    }
+
     void setControlsOnHover(bool on) {
         if (controlsOnHover_ == on)
             return;
         controlsOnHover_ = on;
         volumeHover_ = false;
         volumePopup_.hide();
-        const bool popupEnabled = on && hoverControlStyle_ == HoverControlStyle::Popup;
+        const bool popupEnabled = on && !isMinimalMode() &&
+                                  hoverControlStyle_ == HoverControlStyle::Popup;
         mediaPopup.setEnabled(popupEnabled);
         if (popupEnabled && mouseOver_)
             mediaPopup.onAnchorEnter();
@@ -998,7 +1037,7 @@ struct TaskbarHost::Impl {
         hoverControlStyle_ = style;
         volumeHover_ = false;
         volumePopup_.hide();
-        const bool popupEnabled = controlsOnHover_ &&
+        const bool popupEnabled = controlsOnHover_ && !isMinimalMode() &&
                                   hoverControlStyle_ == HoverControlStyle::Popup;
         mediaPopup.setEnabled(popupEnabled);
         if (popupEnabled && mouseOver_)
@@ -1083,6 +1122,8 @@ struct TaskbarHost::Impl {
         if (background_ == mode)
             return;
         background_ = mode;
+        if (mode != TaskbarBackground::CoverBlur)
+            releaseCoverBackgroundResources();
         render();
     }
 
@@ -1153,6 +1194,11 @@ struct TaskbarHost::Impl {
         albumCoverEffect_ = effect;
         vinylAngleDeg_ = 0.0f;
         vinylTickMs_ = monotonicNowMs();
+        geomDirty_ = true;
+        if (effect == AlbumCoverEffect::Vinyl)
+            createAlbumCoverBrushes();
+        else
+            releaseAlbumCoverEffectResources();
         render();
     }
 
@@ -1175,7 +1221,7 @@ struct TaskbarHost::Impl {
         if (media.playing != patch.playing) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
-            mediaPopup.setMedia(media, sessionVisible_ && renderMode_ != 2);
+            mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
             render();
         }
@@ -1217,7 +1263,7 @@ struct TaskbarHost::Impl {
         const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
                                  (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
-        mediaPopup.setMedia(frame.media, frame.visible && renderMode_ != 2, songChanged);
+        mediaPopup.setMedia(frame.media, mediaPopupAvailable(frame.visible), songChanged);
         mediaPopup.setProgress(frame.actualPositionMs);
 
         frameRevision_ = frame.frameRevision;
@@ -1230,7 +1276,8 @@ struct TaskbarHost::Impl {
         statusText = frame.statusText;
 
         // 只对已有曲目之间的切换做入场动画；首次显示、同曲刷新和会话关闭保持即时提交。
-        songTransitionPending_ = songChanged && frame.visible && renderMode_ != 2 &&
+        songTransitionPending_ = songChanged && frame.visible && !isMinimalMode() &&
+                                 renderMode_ != static_cast<int>(RenderMode::Stopped) &&
                                  clientAnimations_;
 
         if (trackChanged || lyricsChanged) {
@@ -1256,7 +1303,7 @@ struct TaskbarHost::Impl {
             textDirty_ = true;
 
         sessionVisible_ = frame.visible;
-        if (frame.visible && renderMode_ != 2) {
+        if (frame.visible && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
             if (!visible) {
                 visible = true;
                 if (hwnd)
@@ -2294,7 +2341,15 @@ struct TaskbarHost::Impl {
                 nextLyricHeight_ = m.height;
             }
         }
-        buildKaraokeGeometry(displayLine);
+        if (isMinimalMode()) {
+            // 极简只改变显示策略；歌词行和逐字时间轴仍由上游完整读取，
+            // 这里只不创建供逐字绘制使用的几何缓存。
+            karaokeSpans_.clear();
+            karaokeGeometryLine_ = -1;
+            karaokeGeometryLayout_ = nullptr;
+        } else {
+            buildKaraokeGeometry(displayLine);
+        }
         if (preparedTransition) {
             if (lyricLayout_) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
@@ -2371,8 +2426,10 @@ struct TaskbarHost::Impl {
         return m;
     }
 
-    // 当前行有逐字时间轴且歌词布局对应该行时返回该行，否则 nullptr
+    // 当前行有逐字时间轴且歌词布局对应该行时返回该行；极简模式强制使用普通横向滚动。
     const LyricLine* karaokeLine() const {
+        if (isMinimalMode())
+            return nullptr;
         if (currentLine < 0 || (size_t)currentLine >= lines.size())
             return nullptr;
         const LyricLine* line = &lines[(size_t)currentLine];
@@ -2511,9 +2568,11 @@ struct TaskbarHost::Impl {
         float s = coverSize();
         D2D1_ROUNDED_RECT rr{D2D1::RectF(0, 0, s, s), 4.0f, 4.0f};
         d2d->CreateRoundedRectangleGeometry(rr, &coverClip_);
-        D2D1_ELLIPSE coverEllipse{
-            D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s), vinylInnerRadius(s)};
-        d2d->CreateEllipseGeometry(coverEllipse, &vinylCoverClip_);
+        if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
+            D2D1_ELLIPSE coverEllipse{
+                D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s), vinylInnerRadius(s)};
+            d2d->CreateEllipseGeometry(coverEllipse, &vinylCoverClip_);
+        }
 
         if (!media_control::create(d2d, controlGeometry))
             geomDirty_ = true;
@@ -3419,10 +3478,12 @@ struct TaskbarHost::Impl {
             if (songTransitionPending_) {
                 songTransitionPending_ = false;
                 renderer.resetRoot();
-                const float travel = kSongTransitionTravelDip * scale();
-                if (!renderer.animateRoot(travel, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
-                                          kSongTransitionMs / 1000.0f))
-                    renderer.resetRoot();
+                if (!isMinimalMode()) {
+                    const float travel = kSongTransitionTravelDip * scale();
+                    if (!renderer.animateRoot(travel, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                                              kSongTransitionMs / 1000.0f))
+                        renderer.resetRoot();
+                }
             }
             // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
             if (!renderer.present())
@@ -3590,8 +3651,8 @@ struct TaskbarHost::Impl {
     }
 
     UINT activeFrameMs() const {
-        // 低渲染模式：播放中也固定 ~30fps，逐字渐变/黑胶旋转的 GPU 提交随之减半以上
-        if (renderMode_ == 1)
+        // 只有低渲染模式固定 ~30fps；极简模式仍使用正常刷新率，歌词帧率不变。
+        if (renderMode_ == static_cast<int>(RenderMode::Low))
             return kTimerPausedMs;
         const UINT hz = displayRefreshHz_ ? displayRefreshHz_ : 60;
         return std::clamp(1000 / hz, kTimerMinMs, kTimerMs);
@@ -3645,9 +3706,33 @@ struct TaskbarHost::Impl {
     void setRenderMode(int mode) {
         if (mode == renderMode_)
             return;
+        const bool wasMinimal = isMinimalMode();
         renderMode_ = mode;
-        mediaPopup.setMedia(media, mode != 2 && sessionVisible_);
-        if (mode == 2) {
+        if (wasMinimal != isMinimalMode()) {
+            // 极简关闭逐字绘制后，清掉当前帧的逐字状态；退出时由重新排版恢复几何缓存。
+            textDirty_ = true;
+            karaokeSpans_.clear();
+            karaokeGeometryLine_ = -1;
+            karaokeGeometryLayout_ = nullptr;
+            karaokeProgX_ = 0.0f;
+            karaokeSmoothX_ = 0.0f;
+            karaokeSmoothLine_ = -1;
+            karaokeEnteringLine_ = false;
+            karaokeSettled_ = true;
+            karaokeTick_ = 0;
+        }
+        mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
+        if (isMinimalMode()) {
+            // 极简仍保留歌词和方形封面，因此不释放主任务栏渲染器；只清掉附加背景链和媒体卡片。
+            volumeHover_ = false;
+            volumePopup_.hide();
+            mediaPopup.setEnabled(false);
+            releaseCoverBackgroundResources();
+            // 切歌转场只改变合成器根视觉；进入极简时立即恢复到静止位置。
+            songTransitionPending_ = false;
+            renderer.resetRoot();
+        }
+        if (mode == static_cast<int>(RenderMode::Stopped)) {
             // 完全停止：隐藏窗口、停帧定时器、释放 GPU 设备链。此后 SMTC 事件仍更新
             // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
             volumeHover_ = false;
@@ -3661,7 +3746,7 @@ struct TaskbarHost::Impl {
             releaseAll();
             return;
         }
-        // 帧定时器运行中则立即按新档位调整间隔（正常=跟随刷新率，低渲染=~30fps）
+        // 帧定时器运行中则立即按新档位调整间隔（正常/极简=跟随刷新率，低渲染=~30fps）
         if (timerRunning_) {
             const UINT wantMs = desiredFrameMs();
             if (wantMs != timerMs_) {
@@ -3772,7 +3857,8 @@ struct TaskbarHost::Impl {
         case WM_MOUSEMOVE: {
             bool wasOver = mouseOver_;
             mouseOver_ = true;
-            if (controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Popup)
+            if (controlsOnHover_ && !isMinimalMode() &&
+                hoverControlStyle_ == HoverControlStyle::Popup)
                 mediaPopup.onAnchorEnter();
             if (!wasOver)
                 render();
@@ -3820,7 +3906,8 @@ struct TaskbarHost::Impl {
             if (btn >= 0 && onControl)
                 onControl(static_cast<MediaControl>(btn));
             // 点击展开模式：点击歌词区域任意位置立即展开媒体卡片
-            else if (controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Popup &&
+            else if (controlsOnHover_ && !isMinimalMode() &&
+                     hoverControlStyle_ == HoverControlStyle::Popup &&
                      mediaPopupTrigger_ == MediaPopupTrigger::Click)
                 mediaPopup.onAnchorClick();
             return 0;
@@ -3907,7 +3994,7 @@ void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
-    impl_->mediaPopup.setMedia(info, impl_->sessionVisible_ && impl_->renderMode_ != 2);
+    impl_->mediaPopup.setMedia(info, impl_->mediaPopupAvailable(impl_->sessionVisible_));
     impl_->mediaPopup.setProgress(impl_->positionMs_);
     if (impl_->updateMediaInfo(info))
         impl_->render();

@@ -40,6 +40,15 @@ enum class TaskbarBackground {
     Solid,
 };
 
+// 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
+// 数值保持与 settings.json 中已有的 0/1/2 语义一致，Minimal 追加为 3。
+enum class RenderMode {
+    Normal = 0,
+    Low = 1,
+    Stopped = 2,
+    Minimal = 3,
+};
+
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
 // 外观参考 Windows 11 原生媒体控制卡片：左侧显示圆角封面+歌名+歌手，
 // 右侧显示当前行歌词（超长自动滚动），鼠标悬浮时右侧叠加显示播放控制按钮。
@@ -98,8 +107,8 @@ public:
     void setAlbumCoverEffect(AlbumCoverEffect effect);
 
     // 渲染模式：0 正常（播放时跟随屏幕刷新率）；1 低渲染（固定 ~30fps，降低 GPU/CPU
-    // 占用）；2 完全停止（隐藏窗口、停帧定时器并释放 GPU 设备，仅内存中保留数据状态，
-    // 切回时按最近会话状态立即还原）
+    // 占用）；2 完全停止（隐藏窗口、停帧定时器并释放 GPU 设备，仅内存中保留数据状态）；
+    // 3 极简（保留正常歌词刷新策略，只关闭附加视觉与弹窗）。
     void setRenderMode(int mode);
 
     // 音频频谱（任务栏独有）：on 控制显隐，bands 为兼容入口；正式播放链路使用 SpectrumPatch。

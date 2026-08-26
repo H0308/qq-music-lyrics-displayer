@@ -1757,11 +1757,16 @@ void MediaPopup::setSourceOpenCallback(std::function<void(const std::wstring&)> 
 
 void MediaPopup::setEnabled(bool enabled) {
     impl_->enabled = enabled;
+    if (!enabled) {
+        impl_->hideImmediate();
+        // 媒体卡片是极简模式明确关闭的附加窗口；禁用时连同 DComp/D2D 资源一起释放，
+        // 下次重新启用时由现有 bind/render 路径惰性重建。
+        impl_->releaseAll();
+        return;
+    }
     if (!impl_->hwnd)
         return;
-    if (!enabled)
-        impl_->hideImmediate();
-    else if (impl_->triggerOnHover && impl_->anchorHover && impl_->available &&
+    if (impl_->triggerOnHover && impl_->anchorHover && impl_->available &&
              !impl_->popupVisible)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
