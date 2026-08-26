@@ -5,6 +5,9 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 
+#include <objbase.h>
+#include <objidl.h>
+#include <gdiplus.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -13,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <thread>
 #include <utility>
@@ -31,14 +35,115 @@ constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip
 constexpr float kPagePadding = 24.0f;
 constexpr float kCardGap = 12.0f;
 constexpr float kCardRadius = 8.0f;
+constexpr float kCoverImageSizeDip = 40.0f;
+constexpr float kCoverToggleWidthDip = 36.0f;
+constexpr float kCoverToggleHeightDip = 20.0f;
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 constexpr int kHitChooseDirectory = 1;
 constexpr int kHitOpenDirectory = 2;
 constexpr int kHitRetention = 3;
+constexpr int kHitCoverToggle = 4;
 
 const std::array<int, 4> kRetentionDays{0, 7, 30, 90};
+
+class GdiplusInit {
+public:
+    GdiplusInit() {
+        Gdiplus::GdiplusStartupInput input;
+        Gdiplus::GdiplusStartupOutput output;
+        ULONG_PTR token = 0;
+        Gdiplus::GdiplusStartup(&token, &input, &output);
+        token_ = token;
+    }
+
+    ~GdiplusInit() {
+        if (token_)
+            Gdiplus::GdiplusShutdown(token_);
+    }
+
+private:
+    ULONG_PTR token_ = 0;
+};
+
+GdiplusInit g_gdiplusInit;
+
+ID2D1Bitmap* decodeCoverBitmap(
+    ID2D1RenderTarget* target, const std::shared_ptr<const std::vector<uint8_t>>& image,
+    UINT dpi, UINT targetPx) {
+    if (!target || !image || image->empty() || targetPx == 0)
+        return nullptr;
+
+    HGLOBAL hglobal = GlobalAlloc(GHND, image->size());
+    if (!hglobal)
+        return nullptr;
+    void* buffer = GlobalLock(hglobal);
+    if (!buffer) {
+        GlobalFree(hglobal);
+        return nullptr;
+    }
+    std::memcpy(buffer, image->data(), image->size());
+    GlobalUnlock(hglobal);
+
+    IStream* stream = nullptr;
+    HRESULT hr = CreateStreamOnHGlobal(hglobal, TRUE, &stream);
+    if (FAILED(hr) || !stream) {
+        GlobalFree(hglobal);
+        return nullptr;
+    }
+
+    Gdiplus::Bitmap bitmap(stream);
+    if (bitmap.GetLastStatus() != Gdiplus::Ok) {
+        stream->Release();
+        return nullptr;
+    }
+
+    UINT width = bitmap.GetWidth();
+    UINT height = bitmap.GetHeight();
+    if (width == 0 || height == 0) {
+        stream->Release();
+        return nullptr;
+    }
+
+    Gdiplus::Bitmap scaled(static_cast<INT>(targetPx), static_cast<INT>(targetPx),
+                           PixelFormat32bppPARGB);
+    Gdiplus::Bitmap* pixels = &bitmap;
+    if ((width > targetPx || height > targetPx) && scaled.GetLastStatus() == Gdiplus::Ok) {
+        Gdiplus::Graphics graphics(&scaled);
+        graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+        if (graphics.DrawImage(&bitmap,
+                               Gdiplus::Rect(0, 0, static_cast<INT>(targetPx),
+                                             static_cast<INT>(targetPx)),
+                               0, 0, static_cast<INT>(width), static_cast<INT>(height),
+                               Gdiplus::UnitPixel) == Gdiplus::Ok) {
+            pixels = &scaled;
+            width = targetPx;
+            height = targetPx;
+        }
+    }
+
+    Gdiplus::BitmapData data{};
+    Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
+    if (pixels->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB, &data) !=
+        Gdiplus::Ok) {
+        stream->Release();
+        return nullptr;
+    }
+
+    const auto props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        static_cast<float>(dpi), static_cast<float>(dpi));
+    ID2D1Bitmap* decoded = nullptr;
+    hr = target->CreateBitmap(D2D1::SizeU(width, height), data.Scan0, data.Stride, &props,
+                               &decoded);
+    pixels->UnlockBits(&data);
+    stream->Release();
+    if (FAILED(hr))
+        return nullptr;
+    return decoded;
+}
 
 struct DirectoryPayload {
     uint64_t generation = 0;
@@ -97,11 +202,13 @@ struct RuntimeLogDialog::Impl {
     int pressedId = 0;
     int focusedId = kHitChooseDirectory;
     bool focusVisible = false;
+    bool showCover = false;
     uint64_t pickerGeneration = kInitialPickerGeneration;
     bool pickerOpen = false;
     D2D1_RECT_F chooseRect{};
     D2D1_RECT_F openRect{};
     D2D1_RECT_F retentionRect{};
+    D2D1_RECT_F coverToggleRect{};
 
     static LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_NCCREATE) {
@@ -121,6 +228,8 @@ struct RuntimeLogDialog::Impl {
     }
 
     int hitTest(float x, float y) const {
+        if (contains(coverToggleRect, x, y))
+            return kHitCoverToggle;
         if (contains(chooseRect, x, y))
             return kHitChooseDirectory;
         if (contains(openRect, x, y))
@@ -138,6 +247,18 @@ struct RuntimeLogDialog::Impl {
         const float s = surface.dipScale();
         const float width = static_cast<float>(client.right - client.left) / s;
         const float height = static_cast<float>(client.bottom - client.top) / s;
+
+        const float statusTop = 82.0f;
+        const float songH = 68.0f;
+        const float gridTop = statusTop + songH + kCardGap;
+        const float contentWidth = std::max(1.0f, width - kPagePadding * 2.0f);
+        const float gridW = (contentWidth - kCardGap * 2.0f) / 3.0f;
+        const float coverCardRight =
+            kPagePadding + 2.0f * (gridW + kCardGap) + gridW;
+        coverToggleRect = D2D1::RectF(
+            coverCardRight - 14.0f - kCoverToggleWidthDip, gridTop + 9.0f,
+            coverCardRight - 14.0f,
+            gridTop + 9.0f + kCoverToggleHeightDip);
 
         const float settingsTop = std::max(0.0f, height - 188.0f);
         const float buttonTop = settingsTop + 118.0f;
@@ -197,6 +318,91 @@ struct RuntimeLogDialog::Impl {
                                 p.text);
     }
 
+    void drawCoverToggle(fluent::FluentDialogSurface::Painter& painter, bool checked) {
+        const auto& p = fluent::palette();
+        const bool hovered = hoverId == kHitCoverToggle;
+        const bool pressed = pressedId == kHitCoverToggle;
+        const bool focused = focusedId == kHitCoverToggle && focusVisible;
+        const float trackH = std::min(kCoverToggleHeightDip,
+                                      coverToggleRect.bottom - coverToggleRect.top);
+        const float centerY = (coverToggleRect.top + coverToggleRect.bottom) * 0.5f;
+        const D2D1_RECT_F track = D2D1::RectF(
+            coverToggleRect.left + 0.5f, centerY - trackH * 0.5f,
+            coverToggleRect.right - 0.5f, centerY + trackH * 0.5f);
+        const float radius = trackH * 0.5f;
+        const float knobR = std::max(1.0f, trackH * 0.5f - 3.5f);
+        const float knobX = checked ? track.right - trackH * 0.5f
+                                    : track.left + trackH * 0.5f;
+        if (checked) {
+            painter.fillRoundRect(pressed ? p.accentPressed
+                                          : hovered ? p.accentHover : p.accent,
+                                  track, radius);
+            if (auto* br = painter.brush(p.textOnAccent))
+                painter.target()->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
+        } else {
+            painter.fillRoundRect(pressed ? p.controlPressed
+                                          : hovered ? p.controlHover : p.controlFill,
+                                  track, radius);
+            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            if (auto* br = painter.brush(p.textSecondary))
+                painter.target()->FillEllipse(
+                    D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
+        }
+        if (focused)
+            painter.strokeRoundRect(
+                p.accent,
+                D2D1::RectF(track.left + 1.5f, track.top + 1.5f,
+                            track.right - 1.5f, track.bottom - 1.5f),
+                1.5f, std::max(1.0f, radius - 1.5f));
+    }
+
+    void drawCoverCard(fluent::FluentDialogSurface::Painter& painter,
+                       const D2D1_RECT_F& rect,
+                       bool coverLoaded,
+                       const std::shared_ptr<const std::vector<uint8_t>>& image) {
+        const auto& p = fluent::palette();
+        painter.fillRoundRect(p.cardFill, rect, kCardRadius);
+        painter.strokeRoundRect(p.cardStroke, rect, 1.0f, kCardRadius);
+        painter.drawText(L"封面加载", painter.textFormat(12.0f, 500, false, true),
+                         D2D1::RectF(rect.left + 14.0f, rect.top + 10.0f,
+                                     coverToggleRect.left - 8.0f,
+                                     rect.top + 28.0f),
+                         p.textSecondary);
+        drawCoverToggle(painter, showCover);
+
+        if (!showCover) {
+            painter.drawText(coverLoaded ? L"加载成功" : L"加载失败",
+                             painter.textFormat(15.0f, 500, true, true),
+                             D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f,
+                                         rect.right - 14.0f, rect.bottom - 10.0f),
+                             p.text);
+            return;
+        }
+
+        const float imageSize = std::min(
+            kCoverImageSizeDip,
+            std::min(rect.right - rect.left - 28.0f, rect.bottom - rect.top - 36.0f));
+        const float imageLeft = rect.left + (rect.right - rect.left - imageSize) * 0.5f;
+        const float imageTop = rect.bottom - imageSize - 6.0f;
+        const UINT targetPx = std::max(
+            1u, static_cast<UINT>(std::ceil(imageSize * surface.dipScale())));
+        ID2D1Bitmap* bitmap = decodeCoverBitmap(painter.target(), image, surface.dpi(), targetPx);
+        if (bitmap) {
+            painter.target()->DrawBitmap(
+                bitmap, D2D1::RectF(imageLeft, imageTop, imageLeft + imageSize,
+                                    imageTop + imageSize),
+                1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            bitmap->Release();
+            return;
+        }
+
+        painter.drawText(L"加载失败", painter.textFormat(15.0f, 500, true, true),
+                         D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f, rect.right - 14.0f,
+                                     rect.bottom - 10.0f),
+                         p.text);
+    }
+
     void paint(fluent::FluentDialogSurface::Painter& painter, float width, float height) {
         if (!logger)
             return;
@@ -236,7 +442,7 @@ struct RuntimeLogDialog::Impl {
         drawCard(painter, card(0, 0), L"歌曲总时长", durationText(snapshot.durationMs));
         drawCard(painter, card(1, 0), L"歌词来源", snapshot.playbackActive ? snapshot.lyricSource
                                                                          : L"未加载");
-        drawCard(painter, card(2, 0), L"封面加载", snapshot.coverLoaded ? L"已加载" : L"未加载");
+        drawCoverCard(painter, card(2, 0), snapshot.coverLoaded, snapshot.coverImage);
         drawCard(painter, card(0, 1), L"CPU", percentText(snapshot.cpuPercent));
         drawCard(painter, card(1, 1), L"GPU", percentText(snapshot.gpuPercent));
         drawCard(painter, card(2, 1), L"专用内存", memoryText(snapshot.memoryBytes));
@@ -323,7 +529,11 @@ struct RuntimeLogDialog::Impl {
     }
 
     void onCommand(int id) {
-        if (id == kHitChooseDirectory) {
+        if (id == kHitCoverToggle) {
+            showCover = !showCover;
+            runtime_log::writef(L"[action][runtime-log] cover-display=%s",
+                                showCover ? L"on" : L"off");
+        } else if (id == kHitChooseDirectory) {
             pickDirectory();
         } else if (id == kHitOpenDirectory) {
             if (logger)
@@ -342,7 +552,8 @@ struct RuntimeLogDialog::Impl {
     }
 
     void focusStep(int direction) {
-        constexpr std::array<int, 3> ids{kHitChooseDirectory, kHitOpenDirectory, kHitRetention};
+        constexpr std::array<int, 4> ids{kHitChooseDirectory, kHitOpenDirectory,
+                                         kHitRetention, kHitCoverToggle};
         auto it = std::find(ids.begin(), ids.end(), focusedId);
         int index = it == ids.end() ? 0 : static_cast<int>(it - ids.begin());
         index = (index + direction + static_cast<int>(ids.size())) % static_cast<int>(ids.size());
@@ -522,6 +733,7 @@ bool RuntimeLogDialog::create(HINSTANCE inst, HWND parent, runtime_log::RuntimeL
                               RetentionCallback onRetentionChanged) {
     if (!impl_ || impl_->hwnd)
         return impl_ && impl_->hwnd != nullptr;
+    impl_->showCover = false;
     impl_->inst = inst;
     impl_->notifyHwnd = parent;
     impl_->logger = logger;

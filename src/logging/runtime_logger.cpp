@@ -680,6 +680,7 @@ void RuntimeLogger::setPlayback(const std::wstring& title, const std::wstring& a
     if (!active) {
         impl_->snapshot.lyricSource = L"未加载";
         impl_->snapshot.coverLoaded = false;
+        impl_->snapshot.coverImage.reset();
     }
 }
 
@@ -690,11 +691,22 @@ void RuntimeLogger::setLyricSource(const std::wstring& source) {
     impl_->snapshot.lyricSource = source;
 }
 
+void RuntimeLogger::setCoverImage(
+    const std::shared_ptr<const std::vector<uint8_t>>& cover) {
+    if (!impl_)
+        return;
+    std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+    impl_->snapshot.coverImage = cover;
+    impl_->snapshot.coverLoaded = cover && !cover->empty();
+}
+
 void RuntimeLogger::setCoverLoaded(bool loaded) {
     if (!impl_)
         return;
     std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
     impl_->snapshot.coverLoaded = loaded;
+    if (!loaded)
+        impl_->snapshot.coverImage.reset();
 }
 
 RuntimeLogSnapshot RuntimeLogger::snapshot() const {

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace runtime_log {
 
@@ -15,6 +16,7 @@ struct RuntimeLogSnapshot {
     int64_t durationMs = 0;
     std::wstring lyricSource = L"未加载";
     bool coverLoaded = false;
+    std::shared_ptr<const std::vector<uint8_t>> coverImage;
 
     // -1 表示当前系统没有提供对应的采样值。
     double cpuPercent = -1.0;
@@ -52,6 +54,7 @@ public:
     void setPlayback(const std::wstring& title, const std::wstring& artist,
                      int64_t durationMs, bool active);
     void setLyricSource(const std::wstring& source);
+    void setCoverImage(const std::shared_ptr<const std::vector<uint8_t>>& cover);
     void setCoverLoaded(bool loaded);
     RuntimeLogSnapshot snapshot() const;
 

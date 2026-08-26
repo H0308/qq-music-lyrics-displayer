@@ -492,7 +492,7 @@ struct App {
         if (!snap.sessionAlive) {
             runtimeLogger_.setPlayback({}, {}, 0, false);
             runtimeLogger_.setLyricSource(L"未加载");
-            runtimeLogger_.setCoverLoaded(false);
+            runtimeLogger_.setCoverImage(nullptr);
             return;
         }
 
@@ -513,9 +513,12 @@ struct App {
             runtimeLogger_.setLyricSource(L"在线歌词");
         else
             runtimeLogger_.setLyricSource(L"暂无歌词");
-        runtimeLogger_.setCoverLoaded(
-            (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) ||
-            (lastCover_ && !lastCover_->empty()));
+        std::shared_ptr<const std::vector<uint8_t>> cover;
+        if (lastSmtcThumbnail && !lastSmtcThumbnail->empty())
+            cover = lastSmtcThumbnail;
+        else if (lastCover_ && !lastCover_->empty())
+            cover = lastCover_;
+        runtimeLogger_.setCoverImage(cover);
     }
 
     void logLyricsCreated(const wchar_t* source) {
