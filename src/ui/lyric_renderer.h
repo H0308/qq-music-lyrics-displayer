@@ -8,6 +8,10 @@
 #include <dcomp.h>
 #include <dwrite.h>
 
+#include <memory>
+
+struct DCompSharedDevice;
+
 // TaskbarHost 使用的 D2D/DWrite 基础设施：
 // 工厂创建、DIB/MemoryDC 管理、DCRenderTarget 绑定、UpdateLayeredWindow 提交。
 class LyricRenderer {
@@ -121,6 +125,8 @@ private:
     IDWriteFactory* dwrite_ = nullptr;
     ID3D11Device* d3d_ = nullptr;
     IDXGIDevice* dxgiDevice_ = nullptr;
+    // sharedDevice_ 持有 D3D11/DXGI 设备；窗口级 D2D 和合成资源仍由本实例独立管理。
+    std::shared_ptr<DCompSharedDevice> sharedDevice_;
     ID2D1Device* d2dDevice_ = nullptr;
     ID2D1DeviceContext* dc_ = nullptr;
     IDXGISwapChain1* swapchain_ = nullptr;

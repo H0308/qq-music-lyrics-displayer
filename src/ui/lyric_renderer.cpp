@@ -4,6 +4,55 @@
 
 #include <cstdio>
 #include <iterator>
+#include <memory>
+#include <mutex>
+
+struct DCompSharedDevice {
+    ID3D11Device* d3d = nullptr;
+    IDXGIDevice* dxgi = nullptr;
+    bool invalid = false;
+
+    ~DCompSharedDevice() {
+        if (dxgi)
+            dxgi->Release();
+        if (d3d)
+            d3d->Release();
+    }
+};
+
+namespace {
+
+std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
+    static std::weak_ptr<DCompSharedDevice> weak;
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+
+    if (auto shared = weak.lock(); shared && !shared->invalid)
+        return shared;
+
+    auto shared = std::make_shared<DCompSharedDevice>();
+    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+                                        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
+                                   static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION,
+                                   &shared->d3d, nullptr, nullptr);
+    if (SUCCEEDED(hr))
+        hr = shared->d3d->QueryInterface(&shared->dxgi);
+    if (FAILED(hr))
+        return nullptr;
+
+    weak = shared;
+    runtime_log::writef(L"[dcomp] shared device created");
+    return shared;
+}
+
+bool isDeviceLost(HRESULT hr) {
+    return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
+           hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
+} // namespace
 
 #pragma comment(lib, "msimg32.lib") // AlphaBlend（compositeTo）
 
@@ -241,28 +290,30 @@ bool DCompRenderer::createFactories() {
 }
 
 bool DCompRenderer::createDevice() {
-    if (dc_)
+    if (dc_ && sharedDevice_ && !sharedDevice_->invalid)
         return true;
+    if (dc_)
+        discard();
     if (!d2d1_)
         return false;
 
-    const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
-                                        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
-    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
-                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels,
-                                   static_cast<UINT>(std::size(levels)), D3D11_SDK_VERSION,
-                                   &d3d_, nullptr, nullptr);
-    if (SUCCEEDED(hr))
-        hr = d3d_->QueryInterface(&dxgiDevice_);
-    if (SUCCEEDED(hr))
-        hr = d2d1_->CreateDevice(dxgiDevice_, &d2dDevice_);
+    sharedDevice_ = acquireSharedDevice();
+    if (!sharedDevice_)
+        return false;
+
+    // 共享设备只由 sharedDevice_ 持有；以下两个指针仅供现有绘制代码访问。
+    d3d_ = sharedDevice_->d3d;
+    dxgiDevice_ = sharedDevice_->dxgi;
+
+    // D2D 设备与上下文保持窗口级隔离，避免不同弹窗的绘制状态互相影响。
+    HRESULT hr = d2d1_->CreateDevice(dxgiDevice_, &d2dDevice_);
     if (SUCCEEDED(hr))
         hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
-    if (SUCCEEDED(hr)) {
+    if (SUCCEEDED(hr))
         dc_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    if (SUCCEEDED(hr))
         hr = DCompositionCreateDevice2(d2dDevice_, __uuidof(IDCompositionDevice),
                                        reinterpret_cast<void**>(&dcomp_));
-    }
     if (FAILED(hr)) {
         discard();
         return false;
@@ -393,6 +444,8 @@ bool DCompRenderer::present() {
     HRESULT hr = swapchain_->Present(0, 0);
     if (FAILED(hr)) {
         runtime_log::writef(L"[dcomp] Present failed: 0x%08X", static_cast<unsigned>(hr));
+        if (sharedDevice_ && isDeviceLost(hr))
+            sharedDevice_->invalid = true;
         return false;
     }
     if (dcomp_)
@@ -634,8 +687,9 @@ void DCompRenderer::discard() {
     release(dcomp_);
     release(dc_);
     release(d2dDevice_);
-    release(dxgiDevice_);
-    release(d3d_);
+    dxgiDevice_ = nullptr;
+    d3d_ = nullptr;
+    sharedDevice_.reset();
     hwnd_ = nullptr;
     width_ = 0;
     height_ = 0;
