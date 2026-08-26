@@ -15,7 +15,7 @@ void release(Geometry& geometry);
 bool create(ID2D1Factory* factory, Geometry& geometry);
 
 // index: 0=上一首，1=播放/暂停，2=下一首。
-void draw(ID2D1DeviceContext* target, const Geometry& geometry, int index, bool playing,
+void draw(ID2D1RenderTarget* target, const Geometry& geometry, int index, bool playing,
           const D2D1_POINT_2F& center, float radius, ID2D1Brush* brush);
 
 // 音量图标（不依赖 Geometry，按 level 现画；接受 ID2D1RenderTarget，

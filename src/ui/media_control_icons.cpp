@@ -78,7 +78,7 @@ bool create(ID2D1Factory* factory, Geometry& geometry) {
     return true;
 }
 
-void draw(ID2D1DeviceContext* target, const Geometry& geometry, int index, bool playing,
+void draw(ID2D1RenderTarget* target, const Geometry& geometry, int index, bool playing,
           const D2D1_POINT_2F& center, float radius, ID2D1Brush* brush) {
     if (!target || !brush || radius <= 0.0f || index < 0 || index > 2)
         return;

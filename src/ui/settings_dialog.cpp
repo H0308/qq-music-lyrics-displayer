@@ -4,6 +4,7 @@
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
+#include "ui/media_control_icons.h"
 
 #include <windowsx.h>
 
@@ -76,6 +77,24 @@ constexpr float kModeGridCardH = 56.0f;
 constexpr float kModeGridTopGap = 10.0f;
 constexpr float kModeGridNoteGap = 8.0f;
 constexpr float kModeGridMinH = 196.0f;
+constexpr float kSpectrumStyleCardH = 96.0f;
+constexpr float kSpectrumStyleCardGap = 8.0f;
+constexpr float kSpectrumStyleRowH = 148.0f;
+constexpr float kSpectrumBackgroundArtworkMaxW = 144.0f;
+constexpr float kSpectrumBackgroundArtworkMinW = 96.0f;
+constexpr float kSpectrumBackgroundArtworkH = 34.0f;
+constexpr float kSpectrumBackgroundArtworkGap = 12.0f;
+constexpr float kCoverEffectCardH = 72.0f;
+constexpr float kCoverEffectCardGap = 8.0f;
+constexpr float kCoverEffectRowH = 124.0f;
+constexpr float kSongToastPositionCardW = 156.0f;
+constexpr float kSongToastPositionCardH = 92.0f;
+constexpr float kSongToastPositionCardGap = 8.0f;
+constexpr float kSongToastPositionRowH = 144.0f;
+constexpr float kHoverControlStyleCardH = 156.0f;
+constexpr float kHoverControlStyleRowH = 292.0f;
+constexpr float kSliderValueW = 44.0f;
+constexpr float kSliderValueGap = 10.0f;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
@@ -156,6 +175,7 @@ struct SettingsDialog::Impl {
         D2D1_RECT_F labelRect{};
         D2D1_RECT_F hintRect{};
         D2D1_RECT_F controlRect{};
+        D2D1_RECT_F artworkRect{};
         std::vector<D2D1_RECT_F> optionRects;
         std::vector<std::wstring> optionHints;
     };
@@ -426,7 +446,7 @@ struct SettingsDialog::Impl {
         platformIcon.enabled = state.albumCoverVisible;
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
-                 state.albumCoverVisible && !minimal, kRowH);
+                 state.albumCoverVisible && !minimal, kCoverEffectRowH);
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
             L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
@@ -447,7 +467,7 @@ struct SettingsDialog::Impl {
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
-                 kRowTallH);
+                 kHoverControlStyleRowH);
         addRadio(0, kIdMediaPopupTrigger, L"媒体卡片展开方式",
                  L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
                  {L"悬浮展开", L"点击展开"}, state.mediaPopupTrigger,
@@ -486,7 +506,8 @@ struct SettingsDialog::Impl {
                       state.songToastSkipFullscreen);
         songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
         addRadio(0, kIdSongToastPosition, L"切歌弹窗位置", nullptr, {L"中上", L"中下"},
-                 state.songToastPosition, !minimal && state.songToastEnabled, kRowH);
+                 state.songToastPosition, !minimal && state.songToastEnabled,
+                 kSongToastPositionRowH);
         addHeader(0, L"性能");
         addModeGrid(0, kIdRenderMode, L"性能模式",
                     L"模式仅本次运行有效，重启软件后恢复正常模式",
@@ -500,7 +521,7 @@ struct SettingsDialog::Impl {
         addRadio(1, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
                  state.spectrumOn && !minimal,
-                 kRowH);
+                 kSpectrumStyleRowH);
         Row& spectrumBackground =
             addToggle(1, kIdSpectrumBackground, L"背景波浪",
                       minimal ? false : state.spectrumBackground);
@@ -581,10 +602,18 @@ struct SettingsDialog::Impl {
             float requiredHeight = row.minHeight;
             if (row.showHint && !row.hint.empty()) {
                 const float hintHeight = measureHintHeight(painter, row);
-                if (hintHeight > 0.0f)
-                    requiredHeight = std::max(
-                        requiredHeight, kTitleTopPadding + titleHeight + kTitleHintGap +
-                                            hintHeight + kHintBottomPadding);
+                if (hintHeight > 0.0f) {
+                    if (row.id == kIdHoverControlStyle) {
+                        requiredHeight = std::max(
+                            requiredHeight, kTitleTopPadding + titleHeight + kModeGridTopGap +
+                                                kHoverControlStyleCardH + kModeGridNoteGap +
+                                                hintHeight + kHintBottomPadding);
+                    } else {
+                        requiredHeight = std::max(
+                            requiredHeight, kTitleTopPadding + titleHeight + kTitleHintGap +
+                                                hintHeight + kHintBottomPadding);
+                    }
+                }
             } else if (measuredTitleHeight > 0.0f) {
                 requiredHeight = std::max(requiredHeight, kTitleTopPadding + titleHeight +
                                                            kHintBottomPadding);
@@ -642,6 +671,7 @@ struct SettingsDialog::Impl {
                 row.labelRect = D2D1::RectF(0, 0, 0, 0);
                 row.hintRect = D2D1::RectF(0, 0, 0, 0);
                 row.controlRect = D2D1::RectF(0, 0, 0, 0);
+                row.artworkRect = D2D1::RectF(0, 0, 0, 0);
                 row.optionRects.clear();
             }
         }
@@ -658,6 +688,83 @@ struct SettingsDialog::Impl {
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
             const float innerX = contentX + 16.0f;
             const float innerRight = contentX + contentW - 16.0f;
+            if (row.id == kIdCoverEffect) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                row.controlRect = D2D1::RectF(
+                    innerX, gridTop, innerRight, gridTop + kCoverEffectCardH);
+                if (row.showHint) {
+                    const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
+                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                                              y + rowH - kHintBottomPadding);
+                }
+                y += rowH + kRowGap;
+                continue;
+            }
+            if (row.id == kIdHoverControlStyle) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                row.controlRect = D2D1::RectF(
+                    innerX, gridTop, innerRight, gridTop + kHoverControlStyleCardH);
+                if (row.showHint) {
+                    const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
+                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                                              y + rowH - kHintBottomPadding);
+                }
+                y += rowH + kRowGap;
+                continue;
+            }
+            if (row.id == kIdSongToastPosition) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                row.controlRect = D2D1::RectF(
+                    innerX, gridTop, innerRight, gridTop + kSongToastPositionCardH);
+                y += rowH + kRowGap;
+                continue;
+            }
+            if (row.id == kIdSpectrumStyle) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                row.controlRect = D2D1::RectF(
+                    innerX, gridTop, innerRight, gridTop + kSpectrumStyleCardH);
+                y += rowH + kRowGap;
+                continue;
+            }
+            if (row.id == kIdSpectrumBackground) {
+                const float controlX = innerRight - row.controlW;
+                const float controlH = 24.0f;
+                const float availableW = std::max(0.0f, controlX - innerX);
+                const float artworkW = std::min(
+                    kSpectrumBackgroundArtworkMaxW,
+                    std::max(kSpectrumBackgroundArtworkMinW, availableW * 0.42f));
+                const float artworkRight = controlX - kSpectrumBackgroundArtworkGap;
+                const float artworkLeft = std::max(innerX, artworkRight - artworkW);
+                const float labelRight = std::max(innerX + 20.0f,
+                                                  artworkLeft - kSpectrumBackgroundArtworkGap);
+                const float titleTop = y + (rowH - row.titleHeight) * 0.5f;
+                row.labelRect = D2D1::RectF(innerX, titleTop, labelRight,
+                                            titleTop + row.titleHeight);
+                const float artworkTop = y + (rowH - kSpectrumBackgroundArtworkH) * 0.5f;
+                row.artworkRect = D2D1::RectF(artworkLeft, artworkTop, artworkRight,
+                                              artworkTop + kSpectrumBackgroundArtworkH);
+                const float controlY = y + (rowH - controlH) * 0.5f;
+                row.controlRect = D2D1::RectF(controlX, controlY,
+                                              controlX + row.controlW, controlY + controlH);
+                y += rowH + kRowGap;
+                continue;
+            }
             if (row.kind == ControlKind::ModeGrid) {
                 const float titleTop = y + kTitleTopPadding;
                 row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
@@ -823,10 +930,9 @@ struct SettingsDialog::Impl {
     void drawSlider(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
         const auto& p = fluent::palette();
         const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
-        constexpr float valueW = 38.0f;
         constexpr float trackH = 4.0f;
         const float trackLeft = row.controlRect.left;
-        const float trackRight = row.controlRect.right - valueW;
+        const float trackRight = row.controlRect.right - kSliderValueW;
         const float range = static_cast<float>(std::max(1, row.maxValue - row.minValue));
         const float t = std::clamp(
             (static_cast<float>(row.value - row.minValue) / range), 0.0f, 1.0f);
@@ -847,7 +953,7 @@ struct SettingsDialog::Impl {
         }
         painter.drawText(std::to_wstring(row.value) + row.valueSuffix,
                          painter.textFormat(12.0f, 400, false, true),
-                         D2D1::RectF(trackRight + 6.0f, row.controlRect.top,
+                         D2D1::RectF(trackRight + kSliderValueGap, row.controlRect.top,
                                      row.controlRect.right, row.controlRect.bottom),
                          row.enabled ? p.textSecondary : p.disabled);
         if (focusedId == row.id && focusVisible && row.enabled)
@@ -857,7 +963,873 @@ struct SettingsDialog::Impl {
                                     1.0f, 5.0f);
     }
 
+    void drawSpectrumStyleArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                  const D2D1_RECT_F& bounds, int style, bool enabled) {
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto withOpacity = [](D2D1_COLOR_F color, float opacity) {
+            color.a *= opacity;
+            return color;
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from,
+                                  D2D1_POINT_2F to, float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawLine(from, to, brush, stroke);
+        };
+
+        const D2D1_RECT_F panel = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                             bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), panel, 7.0f);
+        painter.strokeRoundRect(tone(p.cardStroke), panel, 1.0f, 7.0f);
+
+        const float left = panel.left + 8.0f;
+        const float right = panel.right - 8.0f;
+        const float top = panel.top + 8.0f;
+        const float bottom = panel.bottom - 8.0f;
+        const float width = std::max(0.0f, right - left);
+        const float height = std::max(0.0f, bottom - top);
+        if (width <= 0.0f || height <= 0.0f)
+            return;
+
+        if (style == 2) {
+            // 梦幻波浪：三层半透明波面向同一底线收束，避免画成几条装饰线。
+            if (!painter.target())
+                return;
+            ID2D1Factory* factory = nullptr;
+            painter.target()->GetFactory(&factory);
+            if (!factory)
+                return;
+
+            const float baseY = bottom - 2.0f;
+            constexpr int kSamples = 24;
+            constexpr float kTwoPi = 6.28318530718f;
+            const auto waveY = [&](float x, float amplitude, float offset, float phase) {
+                const float t = (x - left) / width;
+                const float profile = 0.18f +
+                                      0.82f *
+                                          (0.5f + 0.5f *
+                                                       std::sin(kTwoPi * (t * 1.12f) + phase));
+                return baseY - offset - amplitude * profile;
+            };
+            const auto drawFilledWave = [&](float amplitude, float offset, float phase,
+                                            float opacity) {
+                ID2D1PathGeometry* geometry = nullptr;
+                if (FAILED(factory->CreatePathGeometry(&geometry)) || !geometry)
+                    return;
+                ID2D1GeometrySink* sink = nullptr;
+                if (FAILED(geometry->Open(&sink)) || !sink) {
+                    geometry->Release();
+                    return;
+                }
+
+                sink->BeginFigure(D2D1::Point2F(left, waveY(left, amplitude, offset, phase)),
+                                  D2D1_FIGURE_BEGIN_FILLED);
+                for (int i = 1; i <= kSamples; ++i) {
+                    const float t = static_cast<float>(i) / kSamples;
+                    const float x = left + width * t;
+                    sink->AddLine(D2D1::Point2F(x, waveY(x, amplitude, offset, phase)));
+                }
+                sink->AddLine(D2D1::Point2F(right, baseY));
+                sink->AddLine(D2D1::Point2F(left, baseY));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                const HRESULT closeHr = sink->Close();
+                sink->Release();
+                if (SUCCEEDED(closeHr)) {
+                    if (auto* brush = painter.brush(tone(withOpacity(p.accent, opacity))))
+                        painter.target()->FillGeometry(geometry, brush);
+                }
+                geometry->Release();
+            };
+
+            drawFilledWave(height * 0.25f, height * 0.08f, 1.05f, 0.24f);
+            drawFilledWave(height * 0.34f, height * 0.04f, 0.35f, 0.36f);
+            drawFilledWave(height * 0.44f, 0.0f, -0.35f, 0.58f);
+            drawLine(p.separator, D2D1::Point2F(left, baseY),
+                     D2D1::Point2F(right, baseY), 0.8f);
+
+            D2D1_POINT_2F previous =
+                D2D1::Point2F(left, waveY(left, height * 0.44f, 0.0f, -0.35f));
+            for (int i = 1; i <= kSamples; ++i) {
+                const float t = static_cast<float>(i) / kSamples;
+                const float x = left + width * t;
+                const D2D1_POINT_2F current =
+                    D2D1::Point2F(x, waveY(x, height * 0.44f, 0.0f, -0.35f));
+                drawLine(withOpacity(p.accent, 0.62f), previous, current, 1.0f);
+                previous = current;
+            }
+            factory->Release();
+            return;
+        }
+
+        // 预览按实际频谱的 12 个频段绘制，并保持任务栏中 5:3 的柱宽/间隙比例。
+        // 这样缩小到设置卡片后仍是窄柱，不会因为用少量柱体铺满宽度而显得粗重。
+        constexpr int kBars = 12;
+        constexpr float kLevels[kBars] = {
+            0.26f, 0.42f, 0.60f, 0.82f, 0.44f, 0.70f,
+            0.52f, 0.90f, 0.66f, 0.86f, 0.48f, 0.30f};
+        constexpr float kBarUnitDenominator =
+            kBars * 5.0f + (kBars - 1) * 3.0f;
+        const float barUnit = width / kBarUnitDenominator;
+        const float barW = barUnit * 5.0f;
+        const float gap = barUnit * 3.0f;
+        if (barW <= 0.0f)
+            return;
+
+        if (style == 1) {
+            // 柱状图：柱底统一贴近底线，电平只向上增长。
+            const float baseY = bottom - 2.0f;
+            drawLine(p.separator, D2D1::Point2F(left, baseY),
+                     D2D1::Point2F(right, baseY), 0.8f);
+            for (int i = 0; i < kBars; ++i) {
+                const float barH = std::max(3.0f, height * (0.16f + kLevels[i] * 0.72f));
+                const float x = left + i * (barW + gap);
+                painter.fillRoundRect(
+                    tone(p.accent), D2D1::RectF(x, baseY - barH, x + barW, baseY),
+                    barW * 0.5f);
+            }
+            return;
+        }
+
+        // 默认：柱体以中线为基准上下对称，保留原样式的视觉特征。
+        const float centerY = (top + bottom) * 0.5f;
+        for (int i = 0; i < kBars; ++i) {
+            const float barH = std::max(3.0f, height * (0.16f + kLevels[i] * 0.68f));
+            const float x = left + i * (barW + gap);
+            painter.fillRoundRect(
+                tone(p.accent), D2D1::RectF(x, centerY - barH * 0.5f, x + barW,
+                                             centerY + barH * 0.5f),
+                barW * 0.5f);
+        }
+    }
+
+    void drawSpectrumBackgroundArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                       const D2D1_RECT_F& bounds, bool enabled) {
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto withOpacity = [](D2D1_COLOR_F color, float opacity) {
+            color.a *= opacity;
+            return color;
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from,
+                                  D2D1_POINT_2F to, float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawLine(from, to, brush, stroke);
+        };
+
+        const D2D1_RECT_F panel = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                             bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), panel, 7.0f);
+        painter.strokeRoundRect(tone(p.cardStroke), panel, 1.0f, 7.0f);
+
+        const float left = panel.left + 7.0f;
+        const float right = panel.right - 7.0f;
+        const float top = panel.top + 5.0f;
+        const float bottom = panel.bottom - 5.0f;
+        const float width = std::max(0.0f, right - left);
+        const float height = std::max(0.0f, bottom - top);
+        if (width <= 0.0f || height <= 0.0f || !painter.target())
+            return;
+
+        // 背景波浪：波面先铺在歌词横线下面，明确表达“歌词在波浪前景之上”。
+        ID2D1Factory* factory = nullptr;
+        painter.target()->GetFactory(&factory);
+        if (!factory)
+            return;
+
+        const float baseY = bottom;
+        constexpr int kSamples = 24;
+        constexpr float kTwoPi = 6.28318530718f;
+        const auto waveY = [&](float x, float amplitude, float offset, float phase) {
+            const float t = (x - left) / width;
+            const float profile = 0.18f +
+                                  0.82f *
+                                      (0.5f + 0.5f *
+                                                   std::sin(kTwoPi * (t * 1.05f) + phase));
+            return baseY - offset - amplitude * profile;
+        };
+        const auto drawFilledWave = [&](float amplitude, float offset, float phase,
+                                        float opacity) {
+            ID2D1PathGeometry* geometry = nullptr;
+            if (FAILED(factory->CreatePathGeometry(&geometry)) || !geometry)
+                return;
+            ID2D1GeometrySink* sink = nullptr;
+            if (FAILED(geometry->Open(&sink)) || !sink) {
+                geometry->Release();
+                return;
+            }
+
+            sink->BeginFigure(D2D1::Point2F(left, waveY(left, amplitude, offset, phase)),
+                              D2D1_FIGURE_BEGIN_FILLED);
+            for (int i = 1; i <= kSamples; ++i) {
+                const float t = static_cast<float>(i) / kSamples;
+                const float x = left + width * t;
+                sink->AddLine(D2D1::Point2F(x, waveY(x, amplitude, offset, phase)));
+            }
+            sink->AddLine(D2D1::Point2F(right, baseY));
+            sink->AddLine(D2D1::Point2F(left, baseY));
+            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+            const HRESULT closeHr = sink->Close();
+            sink->Release();
+            if (SUCCEEDED(closeHr)) {
+                if (auto* brush = painter.brush(tone(withOpacity(p.accent, opacity))))
+                    painter.target()->FillGeometry(geometry, brush);
+            }
+            geometry->Release();
+        };
+
+        drawFilledWave(height * 0.54f, 0.0f, -0.35f, 0.24f);
+        drawFilledWave(height * 0.38f, height * 0.10f, 0.55f, 0.16f);
+
+        // 前景歌词：横线覆盖在波面上，和“梦幻波浪”独立展示波形的预览区分开。
+        drawLine(withOpacity(p.text, 0.78f),
+                 D2D1::Point2F(left + 12.0f, top + height * 0.36f),
+                 D2D1::Point2F(right - 12.0f, top + height * 0.36f), 1.4f);
+        drawLine(withOpacity(p.textSecondary, 0.72f),
+                 D2D1::Point2F(left + 12.0f, top + height * 0.66f),
+                 D2D1::Point2F(left + width * 0.62f, top + height * 0.66f), 1.1f);
+        factory->Release();
+    }
+
+    void drawSpectrumStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(13.0f, 500, true, true);
+        if (!titleFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        row.optionRects.clear();
+        const size_t count = std::min<size_t>(row.options.size(), 3);
+        if (count == 0)
+            return;
+        const float cardW = (gridW - kSpectrumStyleCardGap * static_cast<float>(count - 1)) /
+                            static_cast<float>(count);
+        for (size_t i = 0; i < count; ++i) {
+            const float left = row.controlRect.left + static_cast<float>(i) *
+                               (cardW + kSpectrumStyleCardGap);
+            const D2D1_RECT_F card = D2D1::RectF(left, row.controlRect.top, left + cardW,
+                                                 row.controlRect.bottom);
+            row.optionRects.push_back(card);
+
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            const bool focused = focusedId == row.id && focusVisible && row.enabled;
+            if (selected) {
+                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                     : p.disabled,
+                                        card, focused ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const D2D1_RECT_F artwork =
+                D2D1::RectF(card.left + 8.0f, card.top + 8.0f, card.right - 24.0f,
+                            card.top + 60.0f);
+            drawSpectrumStyleArtwork(painter, artwork, static_cast<int>(i), row.enabled);
+
+            painter.drawText(row.options[i], titleFormat,
+                             D2D1::RectF(card.left + 6.0f, card.bottom - 25.0f,
+                                         card.right - 6.0f, card.bottom - 6.0f),
+                             row.enabled ? p.text : p.disabled);
+
+            // 示意图和文字先画，单选框最后画，避免缩放时被内容盖住。
+            const D2D1_POINT_2F radioCenter =
+                D2D1::Point2F(card.right - 14.0f, card.top + 14.0f);
+            if (!row.enabled) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush, 1.0f);
+                if (selected) {
+                    if (auto* brush = painter.brush(p.disabled))
+                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                      brush);
+                }
+            } else if (selected) {
+                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush);
+                if (auto* brush = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              pressed ? 1.5f : 1.0f);
+            }
+        }
+    }
+
+    void drawCoverEffectArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                const D2D1_RECT_F& bounds, bool vinyl, bool enabled) {
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto fillEllipse = [&](D2D1_COLOR_F color, D2D1_POINT_2F center, float radius) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->FillEllipse(D2D1::Ellipse(center, radius, radius), brush);
+        };
+        const auto drawEllipse = [&](D2D1_COLOR_F color, D2D1_POINT_2F center, float radius,
+                                     float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawEllipse(D2D1::Ellipse(center, radius, radius), brush,
+                                              stroke);
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from, D2D1_POINT_2F to,
+                                  float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawLine(from, to, brush, stroke);
+        };
+
+        const float left = bounds.left;
+        const float top = bounds.top;
+        const float right = bounds.right;
+        const float bottom = bounds.bottom;
+        const D2D1_COLOR_F clay = D2D1::ColorF(0.73f, 0.39f, 0.31f);
+        const D2D1_COLOR_F paper = D2D1::ColorF(0.95f, 0.84f, 0.68f);
+        const D2D1_COLOR_F ink = D2D1::ColorF(0.13f, 0.14f, 0.16f);
+        const D2D1_COLOR_F vinylColor = D2D1::ColorF(0.10f, 0.11f, 0.13f);
+        const D2D1_COLOR_F vinylEdge = D2D1::ColorF(0.25f, 0.26f, 0.28f);
+
+        if (!vinyl) {
+            // 默认模式：歌曲封面会占满这块圆角方形，不再画成“封面套封面”。
+            const D2D1_RECT_F cover = D2D1::RectF(left + 2.0f, top + 2.0f, right - 2.0f,
+                                                  bottom - 2.0f);
+            const D2D1_RECT_F artwork = D2D1::RectF(left + 5.0f, top + 5.0f, right - 5.0f,
+                                                   bottom - 5.0f);
+            painter.fillRoundRect(tone(clay), cover, 6.0f);
+            painter.fillRoundRect(tone(paper), artwork, 4.0f);
+            drawLine(ink, D2D1::Point2F(artwork.left + 3.0f, artwork.top + 8.0f),
+                     D2D1::Point2F(artwork.right - 4.0f, artwork.top + 8.0f), 1.5f);
+            drawLine(ink, D2D1::Point2F(artwork.left + 3.0f, artwork.top + 12.0f),
+                     D2D1::Point2F(artwork.left + 14.0f, artwork.top + 12.0f), 1.5f);
+            drawLine(clay, D2D1::Point2F(artwork.left + 4.0f, artwork.bottom - 6.0f),
+                     D2D1::Point2F(artwork.right - 4.0f, artwork.top + 16.0f), 1.8f);
+            return;
+        }
+
+        // 黑胶模式：唱片为外层，歌曲封面实际位于中央圆形裁剪区。
+        const float cx = left + (right - left) * 0.54f;
+        const float cy = top + (bottom - top) * 0.52f;
+        const float radius = std::min(right - left, bottom - top) * 0.42f;
+        const D2D1_POINT_2F center = D2D1::Point2F(cx, cy);
+        fillEllipse(vinylColor, center, radius);
+        drawEllipse(vinylEdge, center, radius - 3.0f, 1.0f);
+        drawEllipse(vinylEdge, center, radius * 0.68f, 0.8f);
+        drawLine(paper, D2D1::Point2F(cx - radius * 0.14f, cy - radius * 0.82f),
+                 D2D1::Point2F(cx + radius * 0.36f, cy - radius * 0.66f), 1.0f);
+
+        // 真实渲染中的圆形封面半径约为封面槽边长的 30%，这里用同样比例表现封面落点。
+        const float coverRadius = std::min(right - left, bottom - top) * 0.30f;
+        const D2D1_POINT_2F coverCenter = D2D1::Point2F(cx, cy);
+        fillEllipse(paper, coverCenter, coverRadius);
+        fillEllipse(clay,
+                    D2D1::Point2F(cx - coverRadius * 0.18f, cy + coverRadius * 0.16f),
+                    coverRadius * 0.44f);
+        drawLine(ink, D2D1::Point2F(cx - coverRadius * 0.55f, cy - coverRadius * 0.12f),
+                 D2D1::Point2F(cx + coverRadius * 0.50f, cy - coverRadius * 0.12f), 1.1f);
+        drawLine(clay, D2D1::Point2F(cx - coverRadius * 0.52f, cy + coverRadius * 0.48f),
+                 D2D1::Point2F(cx + coverRadius * 0.48f, cy - coverRadius * 0.34f), 1.4f);
+        drawEllipse(vinylEdge, coverCenter, coverRadius, 0.9f);
+        fillEllipse(ink, center, 1.7f);
+    }
+
+    void drawCoverEffectRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(13.0f, 500, false, true);
+        if (!titleFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        const float cardW = (gridW - kCoverEffectCardGap) * 0.5f;
+        row.optionRects.clear();
+        const size_t count = std::min<size_t>(row.options.size(), 2);
+        for (size_t i = 0; i < count; ++i) {
+            const float left = row.controlRect.left + static_cast<float>(i) *
+                               (cardW + kCoverEffectCardGap);
+            const D2D1_RECT_F card = D2D1::RectF(left, row.controlRect.top, left + cardW,
+                                                 row.controlRect.bottom);
+            row.optionRects.push_back(card);
+
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            const bool focused = focusedId == row.id && focusVisible && row.enabled;
+            if (selected) {
+                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                     : p.disabled,
+                                        card, focused ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const D2D1_POINT_2F radioCenter =
+                D2D1::Point2F(card.right - 16.0f, card.top + 16.0f);
+            if (!row.enabled) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush, 1.0f);
+                if (selected) {
+                    if (auto* brush = painter.brush(p.disabled))
+                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                      brush);
+                }
+            } else if (selected) {
+                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush);
+                if (auto* brush = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              pressed ? 1.5f : 1.0f);
+            }
+
+            const D2D1_RECT_F artwork =
+                D2D1::RectF(card.left + 12.0f, card.top + 14.0f, card.left + 56.0f,
+                            card.top + 58.0f);
+            drawCoverEffectArtwork(painter, artwork, i == 1, row.enabled);
+            painter.drawText(row.options[i], titleFormat,
+                             D2D1::RectF(card.left + 68.0f, card.top + 20.0f,
+                                         card.right - 28.0f, card.bottom - 14.0f),
+                             row.enabled ? p.text : p.disabled);
+        }
+    }
+
+    void drawSongToastPositionArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                      const D2D1_RECT_F& bounds, bool top, bool enabled) {
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from,
+                                  D2D1_POINT_2F to, float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawLine(from, to, brush, stroke);
+        };
+
+        // 用一个简化的屏幕框表示位置参照，弹窗本身保留封面和文字两块信息。
+        const D2D1_RECT_F screen = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                               bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), screen, 7.0f);
+        painter.strokeRoundRect(tone(p.cardStroke), screen, 1.0f, 7.0f);
+
+        const float centerY = (screen.top + screen.bottom) * 0.5f;
+        drawLine(p.separator, D2D1::Point2F(screen.left + 12.0f, centerY),
+                 D2D1::Point2F(screen.right - 12.0f, centerY), 1.0f);
+
+        const float toastW = std::min(62.0f, screen.right - screen.left - 18.0f);
+        const float toastH = 16.0f;
+        const float toastLeft = (screen.left + screen.right - toastW) * 0.5f;
+        const float toastTop = top ? screen.top + 7.0f : screen.bottom - toastH - 7.0f;
+        const D2D1_RECT_F toast =
+            D2D1::RectF(toastLeft, toastTop, toastLeft + toastW, toastTop + toastH);
+        const float toastRadius = toastH * 0.5f;
+        painter.fillRoundRect(tone(p.listSelected), toast, toastRadius);
+        painter.strokeRoundRect(tone(p.accent), toast, 1.0f, toastRadius);
+
+        const float coverSize = toastH - 6.0f;
+        const D2D1_RECT_F cover = D2D1::RectF(
+            toast.left + 3.0f, toast.top + 3.0f, toast.left + 3.0f + coverSize,
+            toast.bottom - 3.0f);
+        const D2D1_POINT_2F coverCenter =
+            D2D1::Point2F((cover.left + cover.right) * 0.5f,
+                          (cover.top + cover.bottom) * 0.5f);
+        if (auto* brush = painter.brush(tone(p.accent)))
+            painter.target()->FillEllipse(
+                D2D1::Ellipse(coverCenter, coverSize * 0.5f, coverSize * 0.5f), brush);
+        drawLine(p.textOnAccent, D2D1::Point2F(cover.left + 2.0f, cover.top + 4.0f),
+                 D2D1::Point2F(cover.right - 2.0f, cover.top + 4.0f), 0.8f);
+        drawLine(p.text, D2D1::Point2F(cover.right + 4.0f, toast.top + 5.0f),
+                 D2D1::Point2F(toast.right - 5.0f, toast.top + 5.0f), 1.2f);
+        drawLine(p.textSecondary, D2D1::Point2F(cover.right + 4.0f, toast.top + 11.0f),
+                 D2D1::Point2F(toast.right - 17.0f, toast.top + 11.0f), 1.0f);
+    }
+
+    void drawSongToastPositionRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(13.0f, 500, true, true);
+        if (!titleFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        row.optionRects.clear();
+        const size_t count = std::min<size_t>(row.options.size(), 2);
+        if (count == 0)
+            return;
+        const float cardW = std::min(
+            kSongToastPositionCardW,
+            (gridW - kSongToastPositionCardGap * static_cast<float>(count - 1)) /
+                static_cast<float>(count));
+        const float cardsW = cardW * static_cast<float>(count) +
+                             kSongToastPositionCardGap * static_cast<float>(count - 1);
+        const float cardsLeft = row.controlRect.left + (gridW - cardsW) * 0.5f;
+        for (size_t i = 0; i < count; ++i) {
+            const float left = cardsLeft + static_cast<float>(i) *
+                               (cardW + kSongToastPositionCardGap);
+            const D2D1_RECT_F card = D2D1::RectF(left, row.controlRect.top, left + cardW,
+                                                 row.controlRect.bottom);
+            row.optionRects.push_back(card);
+
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            const bool focused = focusedId == row.id && focusVisible && row.enabled;
+            if (selected) {
+                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                     : p.disabled,
+                                        card, focused ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const float artworkW = std::min(100.0f, cardW - 20.0f);
+            const D2D1_RECT_F artwork = D2D1::RectF(
+                card.left + (cardW - artworkW) * 0.5f, card.top + 8.0f,
+                card.left + (cardW + artworkW) * 0.5f, card.top + 58.0f);
+            drawSongToastPositionArtwork(painter, artwork, i == 0, row.enabled);
+
+            // 示意图先画，单选框最后画，避免位置指示被单选框遮住。
+            const D2D1_POINT_2F radioCenter =
+                D2D1::Point2F(card.right - 16.0f, card.top + 16.0f);
+            if (!row.enabled) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush, 1.0f);
+                if (selected) {
+                    if (auto* brush = painter.brush(p.disabled))
+                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                      brush);
+                }
+            } else if (selected) {
+                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush);
+                if (auto* brush = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              pressed ? 1.5f : 1.0f);
+            }
+
+            painter.drawText(row.options[i], titleFormat,
+                             D2D1::RectF(card.left + 10.0f, card.top + 65.0f,
+                                         card.right - 10.0f, card.bottom - 8.0f),
+                             row.enabled ? p.text : p.disabled);
+        }
+    }
+
+    void drawHoverControlStyleArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                       const D2D1_RECT_F& bounds, bool mediaCard,
+                                       bool enabled) {
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from, D2D1_POINT_2F to,
+                                  float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                painter.target()->DrawLine(from, to, brush, stroke);
+        };
+
+        const D2D1_RECT_F panel = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                             bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), panel, 9.0f);
+        painter.strokeRoundRect(tone(p.cardStroke), panel, 1.0f, 9.0f);
+
+        // 设置页直接复用任务栏和媒体卡片使用的播放控件几何，避免预览和真实图标各画一套。
+        media_control::Geometry controls;
+        ID2D1Factory* factory = nullptr;
+        bool hasControls = false;
+        if (painter.target()) {
+            painter.target()->GetFactory(&factory);
+            if (factory) {
+                hasControls = media_control::create(factory, controls);
+                factory->Release();
+            }
+        }
+        const auto drawControl = [&](int index, bool playing, D2D1_POINT_2F center,
+                                     float radius, D2D1_COLOR_F color) {
+            if (!hasControls)
+                return;
+            if (auto* brush = painter.brush(tone(color)))
+                media_control::draw(painter.target(), controls, index, playing, center, radius,
+                                    brush);
+        };
+        const auto fillButton = [&](D2D1_COLOR_F color, D2D1_POINT_2F center, float size) {
+            painter.fillRoundRect(tone(color),
+                                  D2D1::RectF(center.x - size * 0.5f, center.y - size * 0.5f,
+                                              center.x + size * 0.5f, center.y + size * 0.5f),
+                                  size * 0.5f);
+        };
+
+        if (!mediaCard) {
+            // 内嵌控件：保留两条等长歌词基线，四个控件统一使用任务栏里的普通单色字形。
+            const float panelH = panel.bottom - panel.top;
+            const float cx = (panel.left + panel.right) * 0.5f;
+            const float cy = (panel.top + panel.bottom) * 0.5f;
+            const float lineLeft = panel.left + 18.0f;
+            const float lineRight = panel.right - 18.0f;
+            drawLine(p.separator, D2D1::Point2F(lineLeft, panel.top + 20.0f),
+                     D2D1::Point2F(lineRight, panel.top + 20.0f), 1.2f);
+            drawLine(p.separator, D2D1::Point2F(lineLeft, panel.bottom - 20.0f),
+                     D2D1::Point2F(lineRight, panel.bottom - 20.0f), 1.2f);
+
+            const float preferredControlSize = std::clamp(panelH * 0.30f, 28.0f, 34.0f);
+            constexpr float kControlGap = 10.0f;
+            constexpr float kVolumeGap = 14.0f;
+            const float preferredGroupW = preferredControlSize * 4.0f +
+                                          kControlGap * 2.0f + kVolumeGap;
+            // 卡片变窄时按同一比例缩放控件组，保留 4 DIP 安全边距，避免图标越界。
+            const float availableW = std::max(0.0f, panel.right - panel.left - 8.0f);
+            const float groupScale = preferredGroupW > 0.0f
+                                         ? std::clamp(availableW / preferredGroupW, 0.0f, 1.0f)
+                                         : 1.0f;
+            const float controlSize = preferredControlSize * groupScale;
+            const float controlGap = kControlGap * groupScale;
+            const float volumeGap = kVolumeGap * groupScale;
+            const float groupW = controlSize * 4.0f + controlGap * 2.0f + volumeGap;
+            const float groupLeft = cx - groupW * 0.5f;
+            const float previousX = groupLeft + controlSize * 0.5f;
+            const float playX = previousX + controlSize + controlGap;
+            const float nextX = playX + controlSize + controlGap;
+            const float volumeX = nextX + controlSize + volumeGap;
+            const D2D1_POINT_2F previous = D2D1::Point2F(previousX, cy);
+            const D2D1_POINT_2F play = D2D1::Point2F(playX, cy);
+            const D2D1_POINT_2F next = D2D1::Point2F(nextX, cy);
+            const D2D1_POINT_2F volume = D2D1::Point2F(volumeX, cy);
+            const float iconRadius = controlSize * 0.25f;
+            const D2D1_COLOR_F iconColor = enabled ? p.text : p.disabled;
+            drawControl(0, false, previous, iconRadius, iconColor);
+            drawControl(1, false, play, iconRadius, iconColor);
+            drawControl(2, false, next, iconRadius, iconColor);
+            if (auto* brush = painter.brush(tone(iconColor)))
+                media_control::drawVolume(painter.target(), volume, iconRadius * 0.8f, brush,
+                                          enabled ? 3 : 0);
+            media_control::release(controls);
+            return;
+        }
+
+        // 媒体卡片按实际弹窗 384x208 DIP 等比缩放，结构顺序也与真实弹窗一致。
+        const float panelW = panel.right - panel.left;
+        const float panelH = panel.bottom - panel.top;
+        const float popupScale = std::min(panelW / 384.0f, panelH / 208.0f);
+        const float popupW = 384.0f * popupScale;
+        const float popupH = 208.0f * popupScale;
+        const float originX = panel.left + (panelW - popupW) * 0.5f;
+        const float originY = panel.top + (panelH - popupH) * 0.5f;
+        const auto popupPoint = [=](float x, float y) {
+            return D2D1::Point2F(originX + x * popupScale, originY + y * popupScale);
+        };
+        const auto popupRect = [=](float left, float top, float right, float bottom) {
+            return D2D1::RectF(originX + left * popupScale, originY + top * popupScale,
+                               originX + right * popupScale, originY + bottom * popupScale);
+        };
+
+        const D2D1_COLOR_F primary = enabled ? p.text : p.disabled;
+        const D2D1_COLOR_F secondary = enabled ? p.textSecondary : p.disabled;
+
+        // 来源行：左侧是应用图标，右侧留出真实媒体卡片的音量入口。
+        const D2D1_RECT_F sourceIcon = popupRect(16.0f, 14.0f, 34.0f, 32.0f);
+        painter.fillRoundRect(tone(p.accent), sourceIcon, 4.0f);
+        drawLine(p.textOnAccent, popupPoint(21.0f, 20.0f), popupPoint(29.0f, 20.0f), 1.3f);
+        drawLine(p.textOnAccent, popupPoint(21.0f, 24.0f), popupPoint(27.0f, 24.0f), 1.3f);
+        drawLine(primary, popupPoint(42.0f, 23.0f), popupPoint(126.0f, 23.0f), 1.5f);
+        const D2D1_RECT_F volumeButton = popupRect(344.0f, 8.0f, 376.0f, 40.0f);
+        painter.fillRoundRect(tone(p.controlHover), volumeButton, 16.0f);
+        if (auto* brush = painter.brush(tone(secondary)))
+            media_control::drawVolume(painter.target(), popupPoint(360.0f, 24.0f),
+                                      7.0f * popupScale, brush, 3);
+
+        // 封面与歌曲信息：封面比例保持 80x80，右侧用不同长度的线表现标题/歌手。
+        drawCoverEffectArtwork(painter, popupRect(16.0f, 44.0f, 96.0f, 124.0f), false,
+                               enabled);
+        drawLine(primary, popupPoint(112.0f, 57.0f), popupPoint(286.0f, 57.0f), 2.0f);
+        drawLine(secondary, popupPoint(112.0f, 86.0f), popupPoint(236.0f, 86.0f), 1.6f);
+        drawLine(secondary, popupPoint(112.0f, 97.0f), popupPoint(198.0f, 97.0f), 1.2f);
+
+        // 进度：上方两段短时间标记，下面是实际弹窗的 4 DIP 进度轨道。
+        drawLine(secondary, popupPoint(16.0f, 136.0f), popupPoint(42.0f, 136.0f), 1.4f);
+        drawLine(secondary, popupPoint(342.0f, 136.0f), popupPoint(368.0f, 136.0f), 1.4f);
+        const D2D1_RECT_F progressTrack = popupRect(16.0f, 148.0f, 368.0f, 152.0f);
+        painter.fillRoundRect(tone(p.separator), progressTrack, 2.0f);
+        painter.fillRoundRect(tone(p.accent), popupRect(16.0f, 148.0f, 178.0f, 152.0f), 2.0f);
+
+        // 底部三键使用真实控件尺寸关系：两侧 36 DIP，中间 40 DIP。
+        const float controlY = originY + 182.0f * popupScale;
+        const float centerX = originX + 192.0f * popupScale;
+        const float sideSize = 36.0f * popupScale;
+        const float playSize = 40.0f * popupScale;
+        const D2D1_POINT_2F previous =
+            D2D1::Point2F(centerX - 84.0f * popupScale, controlY);
+        const D2D1_POINT_2F play = D2D1::Point2F(centerX, controlY);
+        const D2D1_POINT_2F next = D2D1::Point2F(centerX + 84.0f * popupScale, controlY);
+        fillButton(p.controlHover, previous, sideSize);
+        fillButton(p.accent, play, playSize);
+        fillButton(p.controlHover, next, sideSize);
+        drawControl(0, false, previous, 9.0f * popupScale, primary);
+        drawControl(1, false, play, 11.0f * popupScale, p.textOnAccent);
+        drawControl(2, false, next, 9.0f * popupScale, primary);
+        media_control::release(controls);
+    }
+
+    void drawHoverControlStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(12.5f, 500, true, true);
+        if (!titleFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        const float cardW = (gridW - kCoverEffectCardGap) * 0.5f;
+        row.optionRects.clear();
+        const size_t count = std::min<size_t>(row.options.size(), 2);
+        for (size_t i = 0; i < count; ++i) {
+            const float left = row.controlRect.left + static_cast<float>(i) *
+                               (cardW + kCoverEffectCardGap);
+            const D2D1_RECT_F card = D2D1::RectF(left, row.controlRect.top, left + cardW,
+                                                 row.controlRect.bottom);
+            row.optionRects.push_back(card);
+
+            const bool selected = static_cast<int>(i) == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == static_cast<int>(i);
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            const bool focused = focusedId == row.id && focusVisible && row.enabled;
+            if (selected) {
+                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                     : p.disabled,
+                                        card, focused ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const D2D1_RECT_F artwork =
+                D2D1::RectF(card.left + 10.0f, card.top + 10.0f, card.right - 30.0f,
+                            card.bottom - 27.0f);
+            drawHoverControlStyleArtwork(painter, artwork, i == 1, row.enabled);
+
+            // 示意图先画，单选框最后画，确保它始终位于卡片内容之上。
+            const D2D1_POINT_2F radioCenter =
+                D2D1::Point2F(card.right - 16.0f, card.top + 14.0f);
+            if (!row.enabled) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush, 1.0f);
+                if (selected) {
+                    if (auto* brush = painter.brush(p.disabled))
+                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                      brush);
+                }
+            } else if (selected) {
+                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush);
+                if (auto* brush = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              pressed ? 1.5f : 1.0f);
+            }
+
+            painter.drawText(row.options[i], titleFormat,
+                             D2D1::RectF(card.left + 10.0f, card.bottom - 24.0f,
+                                         card.right - 10.0f, card.bottom - 5.0f),
+                             row.enabled ? p.text : p.disabled);
+        }
+    }
+
     void drawRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        if (row.id == kIdSpectrumStyle) {
+            drawSpectrumStyleRadio(painter, row);
+            return;
+        }
+        if (row.id == kIdCoverEffect) {
+            drawCoverEffectRadio(painter, row);
+            return;
+        }
+        if (row.id == kIdHoverControlStyle) {
+            drawHoverControlStyleRadio(painter, row);
+            return;
+        }
+        if (row.id == kIdSongToastPosition) {
+            drawSongToastPositionRadio(painter, row);
+            return;
+        }
+
         const auto& p = fluent::palette();
         auto* format = painter.textFormat(13.0f, 400, false, true);
         if (!format)
@@ -1003,6 +1975,8 @@ struct SettingsDialog::Impl {
             if (row.showHint)
                 painter.drawText(row.hint, painter.textFormat(12.0f, 400), row.hintRect,
                                  row.enabled ? p.textSecondary : p.disabled);
+            if (row.id == kIdSpectrumBackground)
+                drawSpectrumBackgroundArtwork(painter, row.artworkRect, row.enabled);
             if (row.kind == ControlKind::Toggle)
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
@@ -1031,7 +2005,10 @@ struct SettingsDialog::Impl {
         if (contains(scrollBarHitRect(), x, y))
             return kIdContentScrollBar;
         for (const auto& row : rows[activePage]) {
-            if (!contains(row.controlRect, x, y))
+            bool inControl = contains(row.controlRect, x, y);
+            if (row.id == kIdSpectrumBackground)
+                inControl = inControl || contains(row.artworkRect, x, y);
+            if (!inControl)
                 continue;
             if (option && (row.kind == ControlKind::Radio || row.kind == ControlKind::ModeGrid)) {
                 for (size_t i = 0; i < row.optionRects.size(); ++i) {
@@ -1069,9 +2046,8 @@ struct SettingsDialog::Impl {
     }
 
     void updateSliderFromPointer(Row& row, float x) {
-        constexpr float valueW = 38.0f;
         const float left = row.controlRect.left;
-        const float right = row.controlRect.right - valueW;
+        const float right = row.controlRect.right - kSliderValueW;
         const float ratio = std::clamp((x - left) / std::max(1.0f, right - left), 0.0f, 1.0f);
         const int value = row.minValue + static_cast<int>(std::lround(
                                                    ratio * (row.maxValue - row.minValue)));
