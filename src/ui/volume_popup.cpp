@@ -3,6 +3,7 @@
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
+#include "logging/runtime_logger.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -247,6 +248,8 @@ struct VolumePopup::Impl {
             render();
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             visible = true;
+            runtime_log::writef(L"[action][volume-popup] shown percent=%d available=%d",
+                                percent, available ? 1 : 0);
         }
     }
 
@@ -259,6 +262,7 @@ struct VolumePopup::Impl {
         if (visible) {
             visible = false;
             ShowWindow(hwnd, SW_HIDE);
+            runtime_log::writef(L"[action][volume-popup] hidden");
         }
     }
 

@@ -4,6 +4,7 @@
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
+#include "logging/runtime_logger.h"
 
 #include <windowsx.h>
 
@@ -1253,10 +1254,16 @@ struct ManualSearchDialog::Impl {
 
     void selectCandidateRow(int row) {
         if (row < 0 || row >= static_cast<int>(candidateItems.size()) ||
-            candidateItems[row].header || candidateItems[row].candidateIndex < 0)
+            candidateItems[row].header || candidateItems[row].candidateIndex < 0 ||
+            candidateItems[row].candidateIndex >= static_cast<int>(candidates.size()))
             return;
         selectedItemRow = row;
         selectedIdx = candidateItems[row].candidateIndex;
+        const auto& candidate = candidates[selectedIdx];
+        runtime_log::writef(L"[action][manual-search] candidate-selected index=%d name=\"%ls\" "
+                            L"artist=\"%ls\" source=%d",
+                            selectedIdx, candidate.name.c_str(), candidate.singer.c_str(),
+                            static_cast<int>(candidate.source));
         ensureCandidateVisible(row);
         onSelectionChanged();
     }
@@ -1267,25 +1274,33 @@ struct ManualSearchDialog::Impl {
             doSearch();
             break;
         case kIdAdvanceButton:
+            runtime_log::writef(L"[action][manual-search] preview-offset delta=-500ms");
             shiftPreviewTimes(-500);
             break;
         case kIdDelayButton:
+            runtime_log::writef(L"[action][manual-search] preview-offset delta=+500ms");
             shiftPreviewTimes(500);
             break;
         case kIdPreviewRomanization:
             previewShowRomanization = !previewShowRomanization;
+            runtime_log::writef(L"[action][manual-search] preview-romanization=%s",
+                                previewShowRomanization ? L"on" : L"off");
             syncPreviewToCurrentLine();
             surface.invalidate();
             break;
         case kIdPreviewTranslation:
             previewShowTranslation = !previewShowTranslation;
+            runtime_log::writef(L"[action][manual-search] preview-translation=%s",
+                                previewShowTranslation ? L"on" : L"off");
             syncPreviewToCurrentLine();
             surface.invalidate();
             break;
         case kIdApplyButton:
+            runtime_log::writef(L"[action][manual-search] apply-click");
             applySelection();
             break;
         case kIdCancelButton:
+            runtime_log::writef(L"[action][manual-search] cancel-click");
             destroy();
             break;
         default:

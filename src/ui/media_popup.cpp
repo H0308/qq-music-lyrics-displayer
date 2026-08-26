@@ -4,6 +4,7 @@
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
 #include "platform_icon.h"
+#include "logging/runtime_logger.h"
 
 #include <d2d1.h>
 #include <d2d1effects.h>
@@ -1379,6 +1380,8 @@ struct MediaPopup::Impl {
         renderer.commit();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         popupVisible = true;
+        runtime_log::writef(L"[action][media-popup] shown trigger=%s",
+                            triggerOnHover ? L"hover" : L"click");
         SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
     }
 
@@ -1393,6 +1396,7 @@ struct MediaPopup::Impl {
         entering = false;
         deferredRender = false;
         closing = true;
+        runtime_log::writef(L"[action][media-popup] hide");
         const float toY = placedAbove ? animationTravelPx : -animationTravelPx;
         if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, toY,
                                   1.0f, 1.0f,

@@ -5,6 +5,7 @@
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
+#include "logging/runtime_logger.h"
 
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
@@ -66,6 +67,16 @@ enum class UpdateState {
     NoRelease,
     Failed,
 };
+
+const wchar_t* updateStateName(UpdateState state) {
+    switch (state) {
+    case UpdateState::Current: return L"current";
+    case UpdateState::Available: return L"available";
+    case UpdateState::NoRelease: return L"no-release";
+    case UpdateState::Failed: return L"failed";
+    default: return L"unknown";
+    }
+}
 
 enum class UpdateSource {
     GitHub,
@@ -499,6 +510,7 @@ std::wstring displayReleaseDate(const std::wstring& value) {
 }
 
 void openUrl(const wchar_t* url) {
+    runtime_log::writef(L"[action][about] open-url url=%s", url ? url : L"");
     ShellExecuteW(nullptr, L"open", url, nullptr, nullptr, SW_SHOWNORMAL);
 }
 
@@ -1513,6 +1525,7 @@ struct AboutDialog::Impl {
         if (source == updateSource || !canChangeUpdateSource())
             return;
         updateSource = source;
+        runtime_log::writef(L"[action][update] source=%s", updateSourceName(updateSource));
         if (onUpdateSourceChanged)
             onUpdateSourceChanged(updateSource == UpdateSource::Gitee);
         checking = false;
@@ -1520,6 +1533,7 @@ struct AboutDialog::Impl {
     }
 
     void onCommand(int id) {
+        runtime_log::writef(L"[action][about] command=%d", id);
         switch (id) {
         case kIdProjectButton:
             openUrl(app_info::kProjectUrl);
@@ -1535,13 +1549,19 @@ struct AboutDialog::Impl {
             break;
         case kIdAutoCheckSwitch:
             autoCheckOnStartup = !autoCheckOnStartup;
+            runtime_log::writef(L"[action][update] auto-check-on-startup=%s",
+                                autoCheckOnStartup ? L"on" : L"off");
             if (onAutoCheckChanged)
                 onAutoCheckChanged(autoCheckOnStartup);
             break;
         case kIdCheckButton:
+            runtime_log::writef(L"[action][update] check-request source=%s",
+                                updateSourceName(updateSource));
             startCheck();
             break;
         case kIdReleaseButton:
+            runtime_log::writef(L"[action][update] release-action=%s",
+                                downloadedInstallerPath.empty() ? L"download" : L"install");
             if (!downloadedInstallerPath.empty())
                 startInstall();
             else
@@ -1708,6 +1728,9 @@ struct AboutDialog::Impl {
             std::unique_ptr<UpdatePayload> result(reinterpret_cast<UpdatePayload*>(lp));
             if (!result || result->requestId != activeRequest)
                 return 0;
+            runtime_log::writef(L"[action][update] check-result state=%s version=%s source=%s",
+                                updateStateName(result->state), result->version.c_str(),
+                                updateSourceName(updateSource));
             const bool shouldNotifyStartupUpdate =
                 notifyStartupUpdate && result->state == UpdateState::Available;
             const bool shouldDownloadAfterCheck = downloadAfterCheck;
@@ -1774,16 +1797,22 @@ struct AboutDialog::Impl {
             downloading = false;
             downloadCancel.reset();
             if (result->success) {
+                runtime_log::writef(L"[action][update] download-result=success path=%s",
+                                    result->path.c_str());
                 downloadedInstallerPath = std::move(result->path);
                 releaseButtonText = L"安装更新";
                 releaseButtonEnabled = true;
                 releaseButtonAccent = true;
                 statusText = L"安装器下载完成，点击“安装更新”";
             } else if (!result->cancelled) {
+                runtime_log::writef(L"[action][update] download-result=failed detail=%s",
+                                    result->detail.c_str());
                 releaseButtonText = L"重试下载";
                 releaseButtonEnabled = latestRelease && !latestRelease->installerUrl.empty();
                 releaseButtonAccent = releaseButtonEnabled;
                 statusText = result->detail.empty() ? L"更新安装器下载失败" : result->detail;
+            } else {
+                runtime_log::writef(L"[action][update] download-result=cancelled");
             }
             surface.invalidate();
             return 0;
@@ -1906,6 +1935,7 @@ struct AboutDialog::Impl {
         clearDownloadedInstaller();
         const std::wstring outputPath = makeTempInstallerPath(latestRelease->installerName);
         if (outputPath.empty()) {
+            runtime_log::writef(L"[action][update] download-start result=failed reason=temp-path");
             statusText = L"无法创建下载临时文件";
             surface.invalidate();
             return;
@@ -1918,6 +1948,12 @@ struct AboutDialog::Impl {
         statusText = L"正在准备下载更新安装器…";
         activeRequest = nextRequestId();
         downloadCancel = std::make_shared<std::atomic_bool>(false);
+        runtime_log::writef(L"[action][update] download-start source=%s version=%s url=%s "
+                            L"size=%llu output=%s",
+                            updateSourceName(updateSource), latestRelease->version.c_str(),
+                            latestRelease->installerUrl.c_str(),
+                            static_cast<unsigned long long>(latestRelease->installerSize),
+                            outputPath.c_str());
         downloadInstaller(hwnd, activeRequest, latestRelease->installerUrl, outputPath,
                           latestRelease->installerSize, updateSourceName(updateSource),
                           downloadCancel);
@@ -1930,7 +1966,9 @@ struct AboutDialog::Impl {
 
         const std::wstring installerPath = downloadedInstallerPath;
         installingUpdate = true;
+        runtime_log::writef(L"[action][update] install-start path=%s", installerPath.c_str());
         if (!onInstallUpdate(installerPath)) {
+            runtime_log::writef(L"[action][update] install-start result=failed");
             installingUpdate = false;
             statusText = L"无法启动更新安装器";
             surface.invalidate();
@@ -1956,6 +1994,9 @@ struct AboutDialog::Impl {
         // 打开瞬间只保留一处即时反馈；旧结果（更新日志/版本标签/按钮高亮）
         // 留到 kMsgUpdateReady 统一刷新。
         statusText = L"正在检查" + std::wstring(updateSourceName(updateSource)) + L"更新…";
+        runtime_log::writef(L"[action][update] check-start source=%s request=%llu",
+                            updateSourceName(updateSource),
+                            static_cast<unsigned long long>(activeRequest));
         requestLatestRelease(hwnd, activeRequest, updateSource);
     }
 

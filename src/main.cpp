@@ -96,6 +96,38 @@ constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
 constexpr int kUpdatePromptAbout = 3;
 
+const wchar_t* trayCommandName(int command) {
+    switch (command) {
+    case kCmdToggleTaskbar: return L"toggle-taskbar";
+    case kCmdTaskbarPosNotify: return L"taskbar-position-notify";
+    case kCmdTaskbarPosLeft: return L"taskbar-position-left";
+    case kCmdSpectrum: return L"spectrum";
+    case kCmdAutoStart: return L"autostart";
+    case kCmdFollowAlbum: return L"follow-album";
+    case kCmdSecondaryLyric: return L"secondary-lyric";
+    case kCmdSwitchSecondaryLyric: return L"switch-secondary-lyric";
+    case kCmdSongInfo: return L"song-info";
+    case kCmdAlbumCover: return L"album-cover";
+    case kCmdAlbumCoverEffectDefault: return L"album-cover-effect-default";
+    case kCmdAlbumCoverEffectVinyl: return L"album-cover-effect-vinyl";
+    case kCmdDoubleLineLyrics: return L"double-line-lyrics";
+    case kCmdPlatformIcon: return L"platform-icon";
+    case kCmdAbout: return L"about";
+    case kCmdLyricAlignLeft: return L"lyric-align-left";
+    case kCmdLyricAlignCenter: return L"lyric-align-center";
+    case kCmdLyricAlignRight: return L"lyric-align-right";
+    case kCmdHoverPlaybackControls: return L"hover-playback-controls";
+    case kCmdSettings: return L"settings";
+    case kCmdSwitchLyricSource: return L"switch-lyric-source";
+    case kCmdRuntimeLog: return L"runtime-log";
+    case kCmdPickFont: return L"pick-font";
+    case kCmdFontColorEffect: return L"font-color-effect";
+    case kCmdManualSearch: return L"manual-search";
+    case kCmdExit: return L"exit";
+    default: return L"unknown";
+    }
+}
+
 struct CoverPayload {
     std::wstring key;
     uint64_t requestGeneration = 0;
@@ -547,11 +579,20 @@ struct App {
             h->setSecondaryLyricMode(showTranslation, showRomanization);
     }
 
+    void logSettingBool(const wchar_t* name, bool value) {
+        runtime_log::writef(L"[action][setting] %s=%s", name, value ? L"on" : L"off");
+    }
+
+    void logSettingInt(const wchar_t* name, int value) {
+        runtime_log::writef(L"[action][setting] %s=%d", name, value);
+    }
+
     // 设置项统一直接生效入口：右键菜单与设置页共用同一套应用逻辑
     void applySongInfoVisible(bool on) {
         songInfoVisible_ = on;
         if (taskbarHost)
             taskbarHost->setSongInfoVisible(on);
+        logSettingBool(L"song-info-visible", on);
         saveSettings();
     }
 
@@ -559,6 +600,7 @@ struct App {
         albumCoverVisible_ = on;
         if (taskbarHost)
             taskbarHost->setAlbumCoverVisible(on);
+        logSettingBool(L"album-cover-visible", on);
         saveSettings();
     }
 
@@ -566,6 +608,7 @@ struct App {
         platformIconVisible_ = on;
         if (taskbarHost)
             taskbarHost->setPlatformIconVisible(on);
+        logSettingBool(L"platform-icon-visible", on);
         saveSettings();
     }
 
@@ -573,12 +616,14 @@ struct App {
         albumCoverEffect_ = vinyl ? AlbumCoverEffect::Vinyl : AlbumCoverEffect::Default;
         if (taskbarHost)
             taskbarHost->setAlbumCoverEffect(albumCoverEffect_);
+        logSettingBool(L"album-cover-vinyl", vinyl);
         saveSettings();
     }
 
     void applySpectrumOn(bool on) {
         spectrumOn_ = on;
         syncSpectrumWithMode();
+        logSettingBool(L"spectrum", on);
         saveSettings();
     }
 
@@ -588,6 +633,9 @@ struct App {
                                                    : SpectrumStyle::Default;
         if (taskbarHost)
             taskbarHost->setSpectrumStyle(spectrumStyle_);
+        logSettingInt(L"spectrum-style", spectrumStyle_ == SpectrumStyle::Bars
+                                            ? 1
+                                            : spectrumStyle_ == SpectrumStyle::DreamyWave ? 2 : 0);
         saveSettings();
     }
 
@@ -595,6 +643,7 @@ struct App {
         spectrumBackground_ = on;
         if (taskbarHost)
             taskbarHost->setSpectrumBackground(on);
+        logSettingBool(L"spectrum-background", on);
         saveSettings();
     }
 
@@ -602,6 +651,7 @@ struct App {
         spectrumOpacity_ = std::clamp(percent, 0, 100);
         if (taskbarHost)
             taskbarHost->setSpectrumOpacity(spectrumOpacity_);
+        logSettingInt(L"spectrum-opacity", spectrumOpacity_);
         saveSettings();
     }
 
@@ -609,6 +659,7 @@ struct App {
         progressBackground_ = on;
         if (taskbarHost)
             taskbarHost->setProgressBackground(on);
+        logSettingBool(L"progress-background", on);
         saveSettings();
     }
 
@@ -616,6 +667,7 @@ struct App {
         progressBackgroundOpacity_ = std::clamp(percent, 0, 100);
         if (taskbarHost)
             taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        logSettingInt(L"progress-background-opacity", progressBackgroundOpacity_);
         saveSettings();
     }
 
@@ -623,6 +675,7 @@ struct App {
         taskbarBackground_ = std::clamp(mode, 0, 2);
         if (taskbarHost)
             taskbarHost->setBackground(static_cast<TaskbarBackground>(taskbarBackground_));
+        logSettingInt(L"taskbar-background", taskbarBackground_);
         saveSettings();
     }
 
@@ -630,6 +683,7 @@ struct App {
         coverBackgroundOpacity_ = std::clamp(percent, 0, 100);
         if (taskbarHost)
             taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+        logSettingInt(L"cover-background-opacity", coverBackgroundOpacity_);
         saveSettings();
     }
 
@@ -656,6 +710,7 @@ struct App {
         if (taskbarHost)
             taskbarHost->setRenderMode(renderMode_);
         syncSpectrumWithMode();
+        logSettingInt(L"render-mode", renderMode_);
         saveSettings();
     }
 
@@ -663,6 +718,7 @@ struct App {
         hoverPlaybackControls_ = on;
         if (taskbarHost)
             taskbarHost->setControlsOnHover(on);
+        logSettingBool(L"hover-playback-controls", on);
         saveSettings();
     }
 
@@ -670,6 +726,7 @@ struct App {
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
         if (taskbarHost)
             taskbarHost->setHoverControlStyle(hoverControlStyle_);
+        logSettingInt(L"hover-control-style", style == 1 ? 1 : 0);
         saveSettings();
     }
 
@@ -677,6 +734,7 @@ struct App {
         mediaPopupTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
         if (taskbarHost)
             taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
+        logSettingInt(L"media-popup-trigger", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
@@ -685,6 +743,7 @@ struct App {
                                           : MediaPopupBackground::Solid;
         if (taskbarHost)
             taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
+        logSettingInt(L"media-popup-background", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
@@ -692,6 +751,7 @@ struct App {
         mediaPopupFollowAlbum_ = on;
         if (taskbarHost)
             taskbarHost->setMediaPopupFollowAlbum(on);
+        logSettingBool(L"media-popup-follow-album", on);
         saveSettings();
     }
 
@@ -699,6 +759,7 @@ struct App {
         mediaPopupAutoTextContrast_ = on;
         if (taskbarHost)
             taskbarHost->setMediaPopupAutoTextContrast(on);
+        logSettingBool(L"media-popup-auto-text-contrast", on);
         saveSettings();
     }
 
@@ -706,6 +767,7 @@ struct App {
         songToastEnabled_ = on;
         if (songToast_)
             songToast_->setEnabled(on);
+        logSettingBool(L"song-toast", on);
         saveSettings();
     }
 
@@ -713,11 +775,13 @@ struct App {
         songToastDurationSec_ = std::clamp(seconds, 1, 10);
         if (songToast_)
             songToast_->setDurationSec(songToastDurationSec_);
+        logSettingInt(L"song-toast-duration", songToastDurationSec_);
         saveSettings();
     }
 
     void applySongToastSkipFullscreen(bool on) {
         songToastSkipFullscreen_ = on;
+        logSettingBool(L"song-toast-skip-fullscreen", on);
         saveSettings();
     }
 
@@ -725,6 +789,7 @@ struct App {
         songToastTop_ = position == 0;
         if (songToast_)
             songToast_->setPlacementTop(songToastTop_);
+        logSettingInt(L"song-toast-position", songToastTop_ ? 0 : 1);
         saveSettings();
     }
 
@@ -779,6 +844,8 @@ struct App {
             songToast_ = std::move(toast);
         }
         songToast_->showSong(currentFrame_.media);
+        runtime_log::writef(L"[action][song-toast] shown title=%s artist=%s",
+                            currentFrame_.media.title.c_str(), currentFrame_.media.artist.c_str());
     }
 
 
@@ -813,12 +880,14 @@ struct App {
     void applyTaskbarTheme(fluent::ThemeMode mode) {
         taskbarThemeMode_ = mode;
         refreshTheme();
+        logSettingInt(L"taskbar-theme", static_cast<int>(mode));
         saveSettings();
     }
 
     void applyWindowTheme(fluent::ThemeMode mode) {
         windowThemeMode_ = mode;
         refreshTheme();
+        logSettingInt(L"window-theme", static_cast<int>(mode));
         saveSettings();
     }
 
@@ -829,6 +898,7 @@ struct App {
         } else {
             applyFontColors();      // 恢复配置色
         }
+        logSettingBool(L"follow-album-color", on);
         saveSettings();
     }
 
@@ -836,6 +906,7 @@ struct App {
         doubleLineLyricsEnabled_ = on;
         if (taskbarHost)
             taskbarHost->setDoubleLineLyrics(on);
+        logSettingBool(L"double-line-lyrics", on);
         saveSettings();
     }
 
@@ -845,30 +916,35 @@ struct App {
                                            : LyricAlignment::Left;
         if (taskbarHost)
             taskbarHost->setLyricAlignment(lyricAlignment_);
+        logSettingInt(L"lyric-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
         saveSettings();
     }
 
     void applySecondaryEnabled(bool on) {
         secondaryLyricEnabled_ = on;
         applySecondaryLyricMode();
+        logSettingBool(L"secondary-lyrics", on);
         saveSettings();
     }
 
     void applyPreferRomanization(bool on) {
         preferRomanization_ = on;
         applySecondaryLyricMode();
+        logSettingBool(L"prefer-romanization", on);
         saveSettings();
     }
 
     void applyQqLocalLyricsEnabled(bool on) {
         qqLocalLyricsEnabled_ = on;
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
+        logSettingBool(L"qq-local-lyrics", on);
         saveSettings();
         reloadCurrentQqLyrics();
     }
 
     void applyQqLocalLyricsPersistOrder(bool on) {
         qqLocalLyricsPersistOrder_ = on;
+        logSettingBool(L"qq-local-lyrics-persist-order", on);
         saveSettings();
     }
 
@@ -986,11 +1062,16 @@ struct App {
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setAppVolumeCallback([this](int percent) {
-            appVolume_.setVolumePercent(percent);
+            const bool ok = appVolume_.setVolumePercent(percent);
+            runtime_log::writef(L"[action][volume] set percent=%d result=%s", percent,
+                                ok ? L"ok" : L"unavailable");
             pushAppVolume();
         });
         host->setSourceOpenCallback([](const std::wstring& source) {
-            if (!platform_icon::launchSourceApp(source))
+            const bool ok = platform_icon::launchSourceApp(source);
+            runtime_log::writef(L"[action][player] open-source source=%s result=%s", source.c_str(),
+                                ok ? L"ok" : L"failed");
+            if (!ok)
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
         taskbarHost = std::move(host);
@@ -1051,14 +1132,20 @@ struct App {
     }
 
     void toggleTaskbar() {
+        runtime_log::writef(L"[action][taskbar] toggle current=%s",
+                            taskbarHost ? L"enabled" : L"disabled");
         if (taskbarHost) {
             destroyTaskbar();
         } else {
             createTaskbar(GetModuleHandleW(nullptr));
         }
+        runtime_log::writef(L"[action][taskbar] toggle result=%s",
+                            taskbarHost ? L"enabled" : L"disabled");
     }
 
     void showManualSearch(HINSTANCE inst) {
+        runtime_log::writef(L"[action][dialog] open=manual-search title=%s artist=%s",
+                            currentTitle.c_str(), currentArtist.c_str());
         if (manualSearchDialog && !manualSearchDialog->isOpen()) {
             manualSearchDialog.reset();
         }
@@ -1129,11 +1216,22 @@ struct App {
     }
 
     void onControl(MediaControl c) {
+        const wchar_t* name = L"unknown";
         switch (c) {
-        case MediaControl::Prev: monitor.skipPrevious(); break;
-        case MediaControl::PlayPause: monitor.playPause(); break;
-        case MediaControl::Next: monitor.skipNext(); break;
+        case MediaControl::Prev:
+            name = L"previous";
+            monitor.skipPrevious();
+            break;
+        case MediaControl::PlayPause:
+            name = L"play-pause";
+            monitor.playPause();
+            break;
+        case MediaControl::Next:
+            name = L"next";
+            monitor.skipNext();
+            break;
         }
+        runtime_log::writef(L"[action][media-control] command=%s", name);
     }
 
     // 读取当前音乐应用的会话音量并推送给各宿主；状态未变时跳过
@@ -1756,6 +1854,7 @@ void App::setLogRetentionDays(int days) {
 }
 
 void App::showRuntimeLog() {
+    runtime_log::writef(L"[action][dialog] open=runtime-log");
     if (runtimeLogDialog && !runtimeLogDialog->isOpen())
         runtimeLogDialog.reset();
     if (!runtimeLogDialog) {
@@ -1775,6 +1874,8 @@ void App::pickQqLocalLyricsPath() {
     if (qqLocalLyricsPickerOpen_)
         return;
 
+    runtime_log::writef(L"[action][qq-local-lyrics] choose-directory start current=%s",
+                        qqLocalLyricsPath_.c_str());
     qqLocalLyricsPickerOpen_ = true;
     const DWORD mainThreadId = mainThread;
     const std::wstring initialPath = qqLocalLyricsPath_;
@@ -1818,6 +1919,9 @@ void App::pickQqLocalLyricsPath() {
             CoUninitialize();
         }
 
+        runtime_log::writef(L"[action][qq-local-lyrics] choose-directory result=%s path=%s",
+                            selectedPath.empty() ? L"cancelled" : L"selected",
+                            selectedPath.c_str());
         auto* payload = new QqLocalFolderPayload{std::move(selectedPath)};
         if (!PostThreadMessageW(mainThreadId, kMsgQqLocalFolderReady, 0,
                                 reinterpret_cast<LPARAM>(payload)))
@@ -1828,6 +1932,8 @@ void App::pickQqLocalLyricsPath() {
 void App::applyQqLocalLyricsPath(const std::wstring& selectedPath) {
     if (selectedPath.empty() || selectedPath == qqLocalLyricsPath_)
         return;
+    runtime_log::writef(L"[action][qq-local-lyrics] directory-changed path=%s",
+                        selectedPath.c_str());
     qqLocalLyricsPath_ = selectedPath;
     saveSettings();
     if (settingsDialog)
@@ -1846,6 +1952,8 @@ void App::reloadCurrentQqLyrics(bool forceOnline, bool forceLocal, bool persistO
         (forceLocal && (currentLyricsFromLocal_ || currentLyricsFromManual_)))
         return;
 
+    runtime_log::writef(L"[action][lyrics] reload force-online=%d force-local=%d persist-order=%d",
+                        forceOnline ? 1 : 0, forceLocal ? 1 : 0, persistOrder ? 1 : 0);
     cancelLyricDebounce();
     releaseCurrentLyrics();
     lyricLoading_ = true;
@@ -1906,6 +2014,8 @@ void App::updateTrayIcon() {
 void App::showUpdatePrompt(const std::wstring& latestVersion) {
     if (latestVersion.empty())
         return;
+    runtime_log::writef(L"[action][update] prompt version=%s source=%s", latestVersion.c_str(),
+                        useGiteeUpdateSource_ ? L"gitee" : L"github");
     if (updatePromptHwnd_) {
         SetForegroundWindow(updatePromptHwnd_);
         return;
@@ -2093,6 +2203,10 @@ void App::onUpdatePromptCommand(int command) {
         command != kUpdatePromptAbout)
         return;
 
+    const wchar_t* action = command == kUpdatePromptReleasePage
+                                ? L"open-release-page"
+                                : command == kUpdatePromptDownload ? L"download" : L"open-about";
+    runtime_log::writef(L"[action][update-prompt] command=%s", action);
     const bool useGiteeSource = updatePromptUseGiteeSource_;
     closeUpdatePrompt();
     if (command == kUpdatePromptReleasePage) {
@@ -2303,6 +2417,7 @@ void App::showTrayMenu() {
 }
 
 void App::onMenuCommand(int cmd) {
+    runtime_log::writef(L"[action][tray] command=%s id=%d", trayCommandName(cmd), cmd);
     switch (cmd) {
     case kCmdToggleTaskbar:
         toggleTaskbar();
@@ -2311,6 +2426,7 @@ void App::onMenuCommand(int cmd) {
     case kCmdTaskbarPosNotify:
     case kCmdTaskbarPosLeft:
         taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
+        logSettingInt(L"taskbar-position", taskbarPosition_);
         if (taskbarHost)
             taskbarHost->setPositionMode(taskbarPosition_);
         saveSettings();
@@ -2390,6 +2506,9 @@ void App::onMenuCommand(int cmd) {
 }
 
 void App::pickFont() {
+    runtime_log::writef(L"[action][dialog] open=font-picker current-family=%s size=%.1f style=%s",
+                        fontFamily_.c_str(), static_cast<double>(fontSize_),
+                        fontStyleLabel(fontStyle_));
     if (!taskbarHost)
         return;
     if (fontPickerDialog && fontPickerDialog->isOpen()) {
@@ -2408,6 +2527,9 @@ void App::pickFont() {
             fontSize_ = std::clamp(size, 4.0f, 96.0f);
             fontStyle_ = style;
             hasUserFont_ = true;
+            runtime_log::writef(L"[action][font] applied family=%s size=%.1f style=%s",
+                                fontFamily_.c_str(), static_cast<double>(fontSize_),
+                                fontStyleLabel(fontStyle_));
             if (taskbarHost)
                 taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
             saveSettings();
@@ -2466,6 +2588,7 @@ void App::applyFontAppearance() {
 }
 
 void App::showFontColorDialog() {
+    runtime_log::writef(L"[action][dialog] open=font-color");
     if (!taskbarHost)
         return;
     if (fontColorDialog && fontColorDialog->isOpen()) {
@@ -2494,6 +2617,8 @@ void App::showFontColorDialog() {
         lightLyricAppearance_ = r.light;
         darkLyricAppearance_ = r.dark;
         globalLyricAppearance_ = r.globalTheme;
+        runtime_log::writef(L"[action][font-color] applied global=%d has-global=%d",
+                            r.global ? 1 : 0, r.hasGlobalTheme ? 1 : 0);
         applyFontAppearance();
         saveSettings();
     });
@@ -2504,6 +2629,8 @@ void App::setAutoCheckOnStartup(bool enabled) {
     if (autoCheckOnStartup_ == enabled)
         return;
     autoCheckOnStartup_ = enabled;
+    runtime_log::writef(L"[action][update] auto-check-on-startup=%s",
+                        enabled ? L"on" : L"off");
     saveSettings();
 }
 
@@ -2597,6 +2724,7 @@ SettingsActions App::buildSettingsActions() {
 }
 
 void App::showSettings() {
+    runtime_log::writef(L"[action][dialog] open=settings");
     if (settingsDialog && !settingsDialog->isOpen())
         settingsDialog.reset();
 
@@ -2622,6 +2750,7 @@ void App::showSettings() {
 }
 
 void App::onDialogClosed(DialogKind kind) {
+    runtime_log::writef(L"[action][dialog] closed kind=%d", static_cast<int>(kind));
     auto resetIfClosed = [](auto& dialog) {
         if (dialog && !dialog->isOpen())
             dialog.reset();
@@ -2650,6 +2779,8 @@ void App::onDialogClosed(DialogKind kind) {
 }
 
 void App::showAbout(bool downloadUpdate) {
+    runtime_log::writef(L"[action][dialog] open=about download-update=%d",
+                        downloadUpdate ? 1 : 0);
     if (aboutDialog && aboutDialog->isOpen()) {
         aboutDialog->show(downloadUpdate);
         return;
@@ -2662,6 +2793,8 @@ void App::showAbout(bool downloadUpdate) {
                 if (useGiteeUpdateSource_ == useGitee)
                     return;
                 useGiteeUpdateSource_ = useGitee;
+                runtime_log::writef(L"[action][update] source=%s",
+                                    useGitee ? L"gitee" : L"github");
                 saveSettings();
             },
             [this](const std::wstring& path) { return launchUpdateInstaller(path); },
@@ -2675,12 +2808,17 @@ void App::showAbout(bool downloadUpdate) {
 bool App::launchUpdateInstaller(const std::wstring& path) {
     if (path.empty())
         return false;
+    runtime_log::writef(L"[action][update] installer-start path=%s", path.c_str());
     // 软件内更新使用 Inno Setup 的标准参数，让安装器在安装阶段接管仍存活的旧进程；
     // 外部直接运行安装包不带该参数，仍保持手动退出策略。
     HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(),
                                      L"/CLOSEAPPLICATIONS", nullptr, SW_SHOWNORMAL);
     if (reinterpret_cast<INT_PTR>(result) <= 32)
+    {
+        runtime_log::writef(L"[action][update] installer-start result=failed");
         return false;
+    }
+    runtime_log::writef(L"[action][update] installer-start result=ok");
     requestQuit();
     return true;
 }

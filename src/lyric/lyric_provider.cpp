@@ -2576,7 +2576,12 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
                                        const std::wstring& title,
                                        const std::wstring& artist,
                                        int64_t durationMs, ReadyCallback cb) {
+    runtime_log::writef(L"[lyric][request][Netease] songid=\"%ls\" title=\"%ls\" "
+                        L"artist=\"%ls\" duration=%lldms",
+                        songId.c_str(), title.c_str(), artist.c_str(),
+                        static_cast<long long>(durationMs));
     if (songId.empty()) {
+        runtime_log::writef(L"[lyric][request][Netease] result=failed reason=empty-songid");
         if (cb)
             cb(false);
         return;
@@ -2595,6 +2600,8 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
             impl_->lastLoadWasManual = true;
             impl_->current = std::move(manual.lines);
             impl_->currentSongInfo = std::move(manual.info);
+            runtime_log::writef(L"[lyric][source=manual][Netease] songid=\"%ls\"",
+                                songId.c_str());
             if (cb)
                 cb(true);
             return;
@@ -2603,6 +2610,8 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
         if (impl_->cacheGet(key, cached)) {
             impl_->current = std::move(cached.lines);
             impl_->currentSongInfo = std::move(cached.info);
+            runtime_log::writef(L"[lyric][source=online-cache][Netease] songid=\"%ls\"",
+                                songId.c_str());
             if (cb)
                 cb(true);
             return;
@@ -2617,6 +2626,9 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
         std::vector<LyricLine> result;
         SongInfo info;
         bool ok = impl->fetchNetease(songId, result, info);
+        runtime_log::writef(L"[lyric][source=online][Netease] result=%s songid=\"%ls\" "
+                            L"lines=%zu",
+                            ok ? L"success" : L"failed", songId.c_str(), result.size());
         if (ok) {
             std::lock_guard<std::mutex> lk(impl->mtx);
             if (impl->generation == gen) {
@@ -2677,6 +2689,8 @@ int LyricProvider::findLine(const std::vector<LyricLine>& lines, int64_t positio
 
 void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                           SearchCallback cb) {
+    runtime_log::writef(L"[action][manual-search] request title=\"%ls\" artist=\"%ls\"",
+                        title.c_str(), artist.c_str());
     Impl* impl = impl_.get();
     Impl::Worker worker;
     auto done = worker.done;
@@ -2728,6 +2742,9 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
             }
             curl_easy_cleanup(curl);
         }
+        runtime_log::writef(L"[action][manual-search] candidates title=\"%ls\" artist=\"%ls\" "
+                            L"count=%zu",
+                            title.c_str(), artist.c_str(), result.size());
         if (cb)
             cb(std::move(result));
     });
@@ -2737,6 +2754,9 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
 }
 
 void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback cb) {
+    runtime_log::writef(L"[action][manual-search] preview name=\"%ls\" artist=\"%ls\" "
+                        L"source=%d",
+                        cand.name.c_str(), cand.singer.c_str(), static_cast<int>(cand.source));
     Impl* impl = impl_.get();
     Impl::Worker worker;
     auto done = worker.done;
@@ -2758,6 +2778,10 @@ void LyricProvider::fetchLyricAsync(const SearchCandidate& cand, FetchCallback c
                 attachQqSecondary(curl, toUtf8(cand.songmid), lines);
             curl_easy_cleanup(curl);
         }
+        runtime_log::writef(L"[action][manual-search] preview-result name=\"%ls\" "
+                            L"source=%d result=%s lines=%zu",
+                            cand.name.c_str(), static_cast<int>(cand.source),
+                            ok ? L"success" : L"failed", lines.size());
         SongInfo info{cand.songmid, cand.albummid, cand.neteaseSongId};
         if (cb)
             cb(ok, std::move(lines), info);
@@ -2785,6 +2809,10 @@ void LyricProvider::setManualOverride(const std::wstring& title, const std::wstr
     std::wstring path = impl_->overrideFilePath(key, title, artist, netease, false);
     if (!path.empty())
         impl_->saveOverrideFile(path, title, artist, durationMs, stored);
+    runtime_log::writef(L"[action][manual-search] applied title=\"%ls\" artist=\"%ls\" "
+                        L"duration=%lldms lines=%zu source=%s path=\"%ls\"",
+                        title.c_str(), artist.c_str(), static_cast<long long>(durationMs),
+                        stored.lines.size(), netease ? L"Netease" : L"QQ", path.c_str());
 }
 
 void LyricProvider::setManualOverrideDir(const std::wstring& dir) {

@@ -5,6 +5,7 @@
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
+#include "logging/runtime_logger.h"
 
 #include <windowsx.h>
 
@@ -142,6 +143,7 @@ struct FontColorDialog::Impl {
         if (enabled && (focusedId == kIdTabDark || focusedId == kIdTabLight))
             focusedId = kIdToggleGlobal;
         state.global = enabled;
+        runtime_log::writef(L"[action][font-color] global=%s", enabled ? L"on" : L"off");
         layout();
         surface.invalidate();
     }
@@ -562,6 +564,7 @@ struct FontColorDialog::Impl {
     }
 
     void openPicker(int swatchId) {
+        runtime_log::writef(L"[action][font-color] color-picker-open swatch=%d", swatchId);
         closePicker();
         picker = std::make_unique<ColorPickerDialog>();
         if (!picker->create(inst, hwnd, colorRefOf(swatchId), titleOf(swatchId))) {
@@ -570,6 +573,8 @@ struct FontColorDialog::Impl {
         }
         picker->setApplyCallback([this, swatchId](COLORREF color) {
             colorRefOf(swatchId) = color;
+            runtime_log::writef(L"[action][font-color] color-applied swatch=%d rgb=#%02X%02X%02X",
+                                swatchId, GetRValue(color), GetGValue(color), GetBValue(color));
             surface.invalidate();
         });
         picker->show();
@@ -580,6 +585,7 @@ struct FontColorDialog::Impl {
             return;
         closePicker();
         activeTab = tab;
+        runtime_log::writef(L"[action][font-color] tab=%s", tab == 0 ? L"dark" : L"light");
         draggingSlider = false;
         pressedId = 0;
         surface.invalidate();
@@ -594,6 +600,7 @@ struct FontColorDialog::Impl {
     }
 
     void onCommand(int id) {
+        runtime_log::writef(L"[action][font-color] command=%d", id);
         switch (id) {
         case kIdTabDark:
             selectTab(0);
