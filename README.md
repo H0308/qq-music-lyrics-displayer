@@ -112,7 +112,6 @@
 
 ## 软件测试版本
 
-- QQMusicLyric：1.9.0
 - QQ音乐：22.5.2
 - 网易云音乐：3.1.38 (64 位)(Build: 205386) Patch:5ca9ba0，额外需要安装 BetterNCM + InfLink-rs；适配版本以 InfLink-rs 项目的测试范围为准
 - Windows 11版本：Windows 11 25H2 OS build：26200.9168
