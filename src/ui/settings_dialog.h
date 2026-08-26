@@ -53,7 +53,7 @@ struct SettingsState {
     bool qqLocalLyricsEnabled = false;
     bool qqLocalLyricsPersistOrder = false;
     std::wstring qqLocalLyricsPath;
-    std::wstring fontDesc;         // 字体页提示文字（如 "Microsoft YaHei UI, 16px, 常规"）
+    std::wstring fontDesc;         // 字体设置提示文字（如 "Microsoft YaHei UI, 16px, 常规"）
 };
 
 // 设置变更回调：用户操作即时生效（与右键菜单语义一致）

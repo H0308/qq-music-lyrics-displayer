@@ -19,7 +19,10 @@
 
 namespace {
 
-constexpr int kSettingsPageCount = 5;
+constexpr int kSettingsPageCount = 7;
+constexpr int kPerformancePage = 1;
+constexpr int kMediaPopupPage = 2;
+constexpr int kSongToastPage = 5;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kRenderModeMinimal = 3;
@@ -160,6 +163,9 @@ std::wstring colorText(COLORREF color) {
     return text;
 }
 
+constexpr const wchar_t* kFontSettingNotice =
+    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息";
+
 } // namespace
 
 struct SettingsDialog::Impl {
@@ -178,6 +184,7 @@ struct SettingsDialog::Impl {
         ControlKind kind = ControlKind::Toggle;
         std::wstring text;
         std::wstring hint;
+        std::wstring valueText;
         std::wstring controlText;
         std::vector<std::wstring> options;
         bool showHint = false;
@@ -192,8 +199,10 @@ struct SettingsDialog::Impl {
         float minHeight = kRowH;
         float height = kRowH;
         float titleHeight = kTitleMinHeight;
+        float valueHeight = 0.0f;
         D2D1_RECT_F cardRect{};
         D2D1_RECT_F labelRect{};
+        D2D1_RECT_F valueRect{};
         D2D1_RECT_F hintRect{};
         D2D1_RECT_F controlRect{};
         D2D1_RECT_F artworkRect{};
@@ -214,9 +223,11 @@ struct SettingsDialog::Impl {
     fluent::FluentDialogSurface surface;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
-        L"显示", L"频谱", L"字体与歌词颜色", L"歌词", L"每日一言"};
+        L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
+        L"每日一言"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
-        L"显示", L"频谱", L"字体与歌词颜色", L"歌词", L"每日一言"};
+        L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
+        L"每日一言"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
@@ -540,6 +551,10 @@ struct SettingsDialog::Impl {
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
                  true, kRowTallH);
+        addHeader(0, L"字体");
+        Row& font = addButton(0, kIdPickFont, L"通用字体", kFontSettingNotice,
+                              L"选择字体…", kRowTallH);
+        font.valueText = state.fontDesc;
         addHeader(0, L"任务栏歌词");
         addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
         addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
@@ -600,97 +615,96 @@ struct SettingsDialog::Impl {
         addSlider(0, kIdCoverBackgroundOpacity, L"封面背景不透明度",
                   state.coverBackgroundOpacity,
                   !minimal && state.taskbarBackground == 1);
-        addHeader(0, L"悬浮控件与媒体卡片");
-        addToggle(0, kIdHoverControls, L"悬浮时显示播放控件", state.hoverControls);
-        addRadio(0, kIdHoverControlStyle, L"悬浮控件样式",
+        addToggle(kMediaPopupPage, kIdHoverControls, L"悬浮时显示播放控件",
+                  state.hoverControls);
+        addRadio(kMediaPopupPage, kIdHoverControlStyle, L"悬浮控件样式",
                  L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
                  kHoverControlStyleRowH);
-        addRadio(0, kIdMediaPopupTrigger, L"媒体卡片展开方式",
+        addRadio(kMediaPopupPage, kIdMediaPopupTrigger, L"媒体卡片展开方式",
                  L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
                  {L"悬浮展开", L"点击展开"}, state.mediaPopupTrigger,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
-        addRadio(0, kIdMediaPopupBackground, L"音乐控件卡片背景",
+        addRadio(kMediaPopupPage, kIdMediaPopupBackground, L"音乐控件卡片背景",
                  L"保持原有音乐控件卡片的纯色或 Windows 磨砂玻璃背景",
                  {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
                  state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
         Row& followAlbum = addRow(
-            0, kIdMediaPopupFollowAlbum, ControlKind::Toggle, L"磨砂背景跟随专辑",
+            kMediaPopupPage, kIdMediaPopupFollowAlbum, ControlKind::Toggle,
+            L"磨砂背景跟随专辑",
             L"根据专辑主题颜色实时改变磨砂玻璃颜色", 40.0f,
             kRowTallH);
         followAlbum.checked = state.mediaPopupFollowAlbum;
         Row& autoTextContrast = addRow(
-            0, kIdMediaPopupAutoTextContrast, ControlKind::Toggle,
+            kMediaPopupPage, kIdMediaPopupAutoTextContrast, ControlKind::Toggle,
             L"磨砂媒体卡片字体颜色动态变化",
             L"根据卡片背后应用的明暗，自动切换黑色或白色文字以提高可读性", 40.0f,
             kRowTallH);
         autoTextContrast.checked = state.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
-        addHeader(0, L"切歌弹窗");
-        Row& songToast = addRow(0, kIdSongToast, ControlKind::Toggle, L"切歌时弹出歌曲信息",
+        Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
+                                L"切歌时弹出歌曲信息",
                                 L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
                                 L"始终不响应鼠标操作",
                                 40.0f, kRowTallH);
         songToast.checked = minimal ? false : state.songToastEnabled;
         songToast.enabled = !minimal;
         Row& songToastDuration =
-            addSlider(0, kIdSongToastDuration, L"切歌弹窗显示时长",
+            addSlider(kSongToastPage, kIdSongToastDuration, L"切歌弹窗显示时长",
                       state.songToastDurationSec, !minimal && state.songToastEnabled);
         songToastDuration.minValue = 1;
         songToastDuration.maxValue = 10;
         songToastDuration.valueSuffix = L" 秒";
         Row& songToastSkipFullscreen =
-            addToggle(0, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
+            addToggle(kSongToastPage, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
                       state.songToastSkipFullscreen);
         songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
-        addRadio(0, kIdSongToastPosition, L"切歌弹窗位置", nullptr, {L"中上", L"中下"},
+        addRadio(kSongToastPage, kIdSongToastPosition, L"切歌弹窗位置", nullptr,
+                 {L"中上", L"中下"},
                  state.songToastPosition, !minimal && state.songToastEnabled,
                  kSongToastPositionRowH);
-        addHeader(0, L"性能");
-        addModeGrid(0, kIdRenderMode, L"性能模式",
+        addModeGrid(kPerformancePage, kIdRenderMode, L"性能模式",
                     L"模式仅本次运行有效，重启软件后恢复正常模式",
                     {L"正常", L"低渲染", L"完全停止", L"极简"},
                     {L"完整视觉效果", L"降低帧率，节省 GPU", L"停止渲染，保留监听",
                      L"横向歌词，关闭逐字与转场"},
                     std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
 
-        Row& spectrum = addToggle(1, kIdSpectrum, L"频谱", minimal ? false : state.spectrumOn);
+        Row& spectrum = addToggle(3, kIdSpectrum, L"频谱", minimal ? false : state.spectrumOn);
         spectrum.enabled = !minimal;
-        addRadio(1, kIdSpectrumStyle, L"频谱样式", nullptr,
+        addRadio(3, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
                  state.spectrumOn && !minimal,
                  kSpectrumStyleRowH);
         Row& spectrumBackground =
-            addToggle(1, kIdSpectrumBackground, L"背景波浪",
+            addToggle(3, kIdSpectrumBackground, L"背景波浪",
                       minimal ? false : state.spectrumBackground);
         spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 && !minimal;
-        addSlider(1, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
+        addSlider(3, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
                   state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground &&
                       !minimal);
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
-        addButton(2, kIdPickFont, L"通用字体", state.fontDesc.c_str(), L"选择字体…");
-        addButton(2, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
-        addToggle(2, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
-
-        addToggle(3, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
-        addRadio(3, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
+        addToggle(4, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
+        addRadio(4, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
                  state.lyricAlignment, true, kRowH);
-        addToggle(3, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
+        addButton(4, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
+        addToggle(4, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
+        addToggle(4, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
                                             ? L"正在检查翻译和罗马音…"
                                             : state.secondaryAvailability == 2
                                                   ? L"当前歌曲无翻译或罗马音"
                                                   : L"";
-        addRadio(3, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
+        addRadio(4, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
                  {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
                  state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
-        addToggle(3, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
+        addToggle(4, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
-        Row& persistOrder = addRow(3, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
+        Row& persistOrder = addRow(4, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
                                    L"切换版本持久化",
                                    L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
                                    40.0f, kRowTallH);
@@ -699,7 +713,7 @@ struct SettingsDialog::Impl {
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
-        Row& localPath = addButton(3, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
+        Row& localPath = addButton(4, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
     }
@@ -738,8 +752,28 @@ struct SettingsDialog::Impl {
                 measureTextHeight(painter, row.text, labelW, 14.0f);
             const float titleHeight =
                 std::max(kTitleMinHeight, measuredTitleHeight);
+            const float measuredValueHeight =
+                row.id == kIdPickFont
+                    ? measureTextHeight(painter, row.valueText, labelW, 13.0f)
+                    : 0.0f;
+            const float valueHeight =
+                row.id == kIdPickFont && !row.valueText.empty()
+                    ? std::max(kTitleMinHeight, measuredValueHeight)
+                    : 0.0f;
             float requiredHeight = row.minHeight;
-            if (row.showHint && !row.hint.empty()) {
+            if (row.id == kIdPickFont) {
+                const float hintHeight =
+                    measureTextHeight(painter, row.hint, labelW, kHintTextSize);
+                if (hintHeight > 0.0f) {
+                    const float valueBlockHeight =
+                        valueHeight > 0.0f
+                            ? kTitleHintGap + valueHeight + kTitleHintGap
+                            : 0.0f;
+                    requiredHeight = std::max(
+                        requiredHeight, kTitleTopPadding + titleHeight + valueBlockHeight +
+                                            hintHeight + kHintBottomPadding);
+                }
+            } else if (row.showHint && !row.hint.empty()) {
                 const float hintHeight = measureHintHeight(painter, row);
                 if (hintHeight > 0.0f) {
                     if (row.id == kIdHoverControlStyle) {
@@ -758,8 +792,10 @@ struct SettingsDialog::Impl {
                                                            kHintBottomPadding);
             }
             if (std::fabs(row.titleHeight - titleHeight) > 0.5f ||
+                std::fabs(row.valueHeight - valueHeight) > 0.5f ||
                 std::fabs(row.height - requiredHeight) > 0.5f) {
                 row.titleHeight = titleHeight;
+                row.valueHeight = valueHeight;
                 row.height = requiredHeight;
                 changed = true;
             }
@@ -808,6 +844,7 @@ struct SettingsDialog::Impl {
             for (auto& row : page) {
                 row.cardRect = D2D1::RectF(0, 0, 0, 0);
                 row.labelRect = D2D1::RectF(0, 0, 0, 0);
+                row.valueRect = D2D1::RectF(0, 0, 0, 0);
                 row.hintRect = D2D1::RectF(0, 0, 0, 0);
                 row.controlRect = D2D1::RectF(0, 0, 0, 0);
                 row.artworkRect = D2D1::RectF(0, 0, 0, 0);
@@ -954,7 +991,18 @@ struct SettingsDialog::Impl {
             const float controlH = row.kind == ControlKind::Button
                                        ? fluent::metrics::controlHeight
                                        : 24.0f;
-            if (row.showHint) {
+            if (row.id == kIdPickFont) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                                            titleTop + row.titleHeight);
+                const float valueTop = titleTop + row.titleHeight + kTitleHintGap;
+                row.valueRect = D2D1::RectF(innerX, valueTop, innerX + labelW,
+                                            valueTop + row.valueHeight);
+                const float hintTop = valueTop + row.valueHeight +
+                                      (row.valueHeight > 0.0f ? kTitleHintGap : 0.0f);
+                row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
+                                           y + rowH - kHintBottomPadding);
+            } else if (row.showHint) {
                 const float titleTop = y + kTitleTopPadding;
                 row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
                                             titleTop + row.titleHeight);
@@ -2225,6 +2273,9 @@ struct SettingsDialog::Impl {
             painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
             painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect,
                              row.enabled ? p.text : p.disabled);
+            if (row.id == kIdPickFont && !row.valueText.empty())
+                painter.drawText(row.valueText, painter.textFormat(13.0f, 600),
+                                 row.valueRect, row.enabled ? p.accent : p.disabled);
             if (row.showHint)
                 painter.drawText(row.hint, painter.textFormat(12.0f, 400), row.hintRect,
                                  row.enabled ? p.textSecondary : p.disabled);
@@ -2679,9 +2730,10 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdRenderMode))
             row->selected = std::clamp(s.renderMode, 0, kRenderModeMinimal);
         if (auto* row = findRow(kIdPickFont)) {
-            row->hint = s.fontDesc;
-            row->showHint = !row->hint.empty();
-            row->minHeight = kRowH;
+            row->valueText = s.fontDesc;
+            row->hint = kFontSettingNotice;
+            row->showHint = true;
+            row->minHeight = kRowTallH;
             row->height = row->minHeight;
         }
         if (auto* row = findRow(kIdFollowAlbum))
@@ -2723,9 +2775,10 @@ struct SettingsDialog::Impl {
     void updateFontDescription(const std::wstring& description) {
         state.fontDesc = description;
         if (auto* row = findRow(kIdPickFont)) {
-            row->hint = description;
-            row->showHint = !description.empty();
-            row->minHeight = kRowH;
+            row->valueText = description;
+            row->hint = kFontSettingNotice;
+            row->showHint = true;
+            row->minHeight = kRowTallH;
             row->height = row->minHeight;
             layout();
             surface.invalidate();
