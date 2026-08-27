@@ -1500,6 +1500,8 @@ struct App {
     }
 
     void addIdleApp(const std::wstring& path) {
+        if (idleApps_.size() >= kMaxIdleApps)
+            return;
         if (!validExePath(path))
             return;
         for (const auto& app : idleApps_) {

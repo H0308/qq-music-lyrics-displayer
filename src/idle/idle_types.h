@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -55,6 +56,8 @@ struct IdleAppInfo {
     UINT iconHeight = 0;
     bool pathValid = true;
 };
+
+constexpr std::size_t kMaxIdleApps = 5;
 
 struct IdlePresentation {
     std::wstring sentence;

@@ -228,10 +228,10 @@ struct SettingsDialog::Impl {
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
         L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言"};
+        L"每日一言与应用速启"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
         L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言"};
+        L"每日一言与应用速启"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
@@ -629,7 +629,7 @@ struct SettingsDialog::Impl {
                  state.idleEntryEnabled && !state.idleCardTriggerSync, kRowTallH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
-            L"通过文件选择器添加本地 EXE；设置页与每日一言卡片共用正常大小的软件图标。",
+            L"通过文件选择器添加本地 EXE，最多添加 5 个应用。",
             0.0f, kIdleAppsBaseH + static_cast<float>(
                                             std::max<size_t>(1, state.idleApps.size())) *
                                             kIdleAppItemH);
@@ -2268,15 +2268,16 @@ struct SettingsDialog::Impl {
                                          listTop + 34.0f),
                              row.enabled ? p.textSecondary : p.disabled);
 
-        const bool addHovered = row.enabled && hoverId == row.id && hoverOption == -1;
-        const bool addPressed = row.enabled && pressedId == row.id && pressedOption == -1;
+        const bool canAdd = row.enabled && count < kMaxIdleApps;
+        const bool addHovered = canAdd && hoverId == row.id && hoverOption == -1;
+        const bool addPressed = canAdd && pressedId == row.id && pressedOption == -1;
         painter.fillRoundRect(
-            row.enabled ? (addPressed ? p.accentPressed : addHovered ? p.accentHover : p.accent)
-                        : p.listHover,
+            canAdd ? (addPressed ? p.accentPressed : addHovered ? p.accentHover : p.accent)
+                   : p.listHover,
             row.addAppRect, 7.0f);
-        painter.strokeRoundRect(row.enabled ? p.accent : p.disabled, row.addAppRect, 1.0f, 7.0f);
+        painter.strokeRoundRect(canAdd ? p.accent : p.disabled, row.addAppRect, 1.0f, 7.0f);
         painter.drawText(L"添加应用", painter.textFormat(13.0f, 600, true, true),
-                         row.addAppRect, row.enabled ? p.textOnAccent : p.disabled);
+                         row.addAppRect, canAdd ? p.textOnAccent : p.disabled);
     }
 
     void drawScrollBar(fluent::FluentDialogSurface::Painter& painter) {
@@ -2358,7 +2359,7 @@ struct SettingsDialog::Impl {
                         return row.id;
                     }
                 }
-                if (contains(row.addAppRect, x, y))
+                if (state.idleApps.size() < kMaxIdleApps && contains(row.addAppRect, x, y))
                     return row.id;
                 continue;
             }
@@ -2480,7 +2481,7 @@ struct SettingsDialog::Impl {
             if (option >= 0) {
                 if (actions.onRemoveIdleApp)
                     actions.onRemoveIdleApp(option);
-            } else if (actions.onAddIdleApp) {
+            } else if (state.idleApps.size() < kMaxIdleApps && actions.onAddIdleApp) {
                 actions.onAddIdleApp();
             }
             break;
