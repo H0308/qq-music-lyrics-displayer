@@ -59,6 +59,7 @@ constexpr UINT kMsgQqLocalFolderReady = WM_APP + 4;
 constexpr UINT kMsgAppVolumeChanged = WM_APP + 5;
 constexpr UINT kMsgIdleQuoteReady = WM_APP + 6;
 constexpr UINT kMsgIdleAppReady = WM_APP + 7;
+constexpr UINT kMsgHolidayReady = WM_APP + 8;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -70,6 +71,7 @@ constexpr UINT_PTR kTimerIdleQuote = 5;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kIdleQuoteCheckMs = 60 * 1000;
+constexpr int64_t kHolidayCacheMaxAgeSec = 7 * 24 * 60 * 60;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kCmdToggleTaskbar = 101;
@@ -158,6 +160,11 @@ struct IdleAppPayload {
 struct IdleQuotePayload {
     uint64_t generation = 0;
     IdleQuoteResult result;
+};
+
+struct HolidayPayload {
+    uint64_t generation = 0;
+    HolidayCalendarResult result;
 };
 
 std::string utf8Of(const std::wstring& w) {
@@ -288,6 +295,20 @@ std::string idleQuotePeriodKey(IdleQuoteRefreshInterval interval) {
         sprintf_s(key, "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1,
                   local.tm_mday);
     }
+    return key;
+}
+
+std::tm localNow() {
+    std::time_t now = std::time(nullptr);
+    std::tm local{};
+    localtime_s(&local, &now);
+    return local;
+}
+
+std::string localDateKey(const std::tm& local) {
+    char key[32]{};
+    sprintf_s(key, "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1,
+              local.tm_mday);
     return key;
 }
 
@@ -504,6 +525,7 @@ struct App {
 
     // 每日一言任务栏入口：句子缓存与应用图标属于播放链路之外的独立状态。
     bool idleEntryEnabled_ = true;
+    bool idleQuoteEnabled_ = true;
     IdleQuoteSource idleQuoteSource_ = IdleQuoteSource::Hitokoto;
     IdleQuoteRefreshInterval idleQuoteRefreshInterval_ = IdleQuoteRefreshInterval::Daily;
     std::vector<IdleAppInfo> idleApps_;
@@ -520,6 +542,15 @@ struct App {
     uint64_t idleQuoteRequestGeneration_ = 0;
     std::string idleQuoteAttemptKey_;
     std::string idleQuoteRequestKey_;
+
+    // 当前年份节假日类型缓存：只在启动或缓存过期时请求全年数据，日常判断不访问网络。
+    int holidayCalendarYear_ = 0;
+    int64_t holidayCalendarUpdatedAt_ = 0;
+    std::vector<HolidayDayInfo> holidayCalendar_;
+    uint64_t holidayRequestGeneration_ = 0;
+    bool holidayRequestInFlight_ = false;
+    int holidayRequestYear_ = 0;
+    int64_t holidayRequestAttemptAt_ = 0;
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
@@ -1179,23 +1210,130 @@ struct App {
         }
     }
 
+    bool holidayCalendarFresh(int year) const {
+        if (holidayCalendarYear_ != year || holidayCalendarUpdatedAt_ <= 0)
+            return false;
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        return now < holidayCalendarUpdatedAt_ ||
+               now - holidayCalendarUpdatedAt_ <= kHolidayCacheMaxAgeSec;
+    }
+
+    void refreshHolidayCalendar(bool force) {
+        const std::tm local = localNow();
+        const int year = local.tm_year + 1900;
+        if (!force && holidayCalendarFresh(year))
+            return;
+        if (!force && holidayRequestInFlight_)
+            return;
+        const int64_t now = static_cast<int64_t>(std::time(nullptr));
+        if (!force && holidayRequestYear_ == year && holidayRequestAttemptAt_ > 0 &&
+            (now < holidayRequestAttemptAt_ ||
+             now - holidayRequestAttemptAt_ < kHolidayCacheMaxAgeSec))
+            return;
+
+        ++holidayRequestGeneration_;
+        holidayRequestInFlight_ = true;
+        holidayRequestYear_ = year;
+        holidayRequestAttemptAt_ = now;
+        const uint64_t generation = holidayRequestGeneration_;
+        idleQuoteProvider_.requestHolidayYearAsync(
+            year, [this, generation](HolidayCalendarResult result) {
+                auto* payload = new HolidayPayload{generation, std::move(result)};
+                if (!PostThreadMessageW(mainThread, kMsgHolidayReady, 0,
+                                        reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
+            });
+    }
+
+    IdleDayType todayDayType() const {
+        const std::tm local = localNow();
+        const std::string today = localDateKey(local);
+        if (holidayCalendarYear_ == local.tm_year + 1900) {
+            for (const auto& day : holidayCalendar_) {
+                if (day.date == today && day.type >= 0 && day.type <= 3)
+                    return static_cast<IdleDayType>(day.type);
+            }
+        }
+        // 年度数据尚未返回或接口没有覆盖该日时，先使用自然星期生成首屏文案；
+        // 缓存到达后只刷新内容，不影响网络请求和入口状态。
+        return local.tm_wday == 0 || local.tm_wday == 6 ? IdleDayType::Weekend
+                                                         : IdleDayType::Workday;
+    }
+
+    std::wstring defaultIdleWelcome() const {
+        const std::tm local = localNow();
+        const wchar_t* greeting = local.tm_hour >= 5 && local.tm_hour < 12
+                                       ? L"早上好"
+                                       : local.tm_hour >= 12 && local.tm_hour < 18
+                                             ? L"中午好"
+                                             : L"晚上好";
+        switch (todayDayType()) {
+        case IdleDayType::MakeupWorkday:
+            return L"放假最开心，调休伤身体，用一首歌的时间平衡一下吧~";
+        case IdleDayType::Weekend:
+        case IdleDayType::Holiday:
+            return std::wstring(greeting) + L"，牛马快乐日用一首歌开启周末美好时光～";
+        case IdleDayType::Workday:
+        default:
+            return std::wstring(greeting) + L"，致敬奋斗者，闲暇时光用一首歌的时候放松一下心情吧～";
+        }
+    }
+
     IdlePresentation currentIdlePresentation() const {
         IdlePresentation presentation;
-        presentation.loading = idleQuoteLoading_;
-        presentation.sentence = idleQuoteText_;
-        if (presentation.sentence.empty())
-            presentation.sentence = idleQuoteLoading_ ? L"正在获取每日一言…" : L"暂时无法获取每日一言";
-        presentation.source = idleQuoteSourceLabel(idleQuoteSource_);
-        if (!idleQuoteOrigin_.empty()) {
-            presentation.source += L" · ";
-            presentation.source += idleQuoteOrigin_;
+        presentation.showQuote = idleQuoteEnabled_;
+        presentation.quickStartEnabled = idleEntryEnabled_;
+        if (idleQuoteEnabled_) {
+            presentation.loading = idleQuoteLoading_;
+            presentation.sentence = idleQuoteText_;
+            if (presentation.sentence.empty())
+                presentation.sentence = idleQuoteLoading_ ? L"正在获取每日一言…" : L"暂时无法获取每日一言";
+            presentation.source = idleQuoteSourceLabel(idleQuoteSource_);
+            presentation.copyEnabled = !idleQuoteLoading_ && !idleQuoteText_.empty();
+            if (!idleQuoteOrigin_.empty()) {
+                presentation.source += L" · ";
+                presentation.source += idleQuoteOrigin_;
+            }
+        } else {
+            presentation.sentence = defaultIdleWelcome();
         }
         presentation.apps = idleApps_;
         return presentation;
     }
 
+    void refreshIdleWelcome() {
+        const SmtcSnapshot snap = monitor.snapshot();
+        if (!idleEntryEnabled_ || idleQuoteEnabled_ || snap.sessionAlive)
+            return;
+        if (currentFrame_.idle.sentence == defaultIdleWelcome())
+            return;
+        publishPresentationFrame(snap, false, true);
+    }
+
+    void onHolidayReady(std::unique_ptr<HolidayPayload> payload) {
+        if (!payload || payload->generation != holidayRequestGeneration_)
+            return;
+        holidayRequestInFlight_ = false;
+        const std::tm local = localNow();
+        const int currentYear = local.tm_year + 1900;
+        if (!payload->result.ok || payload->result.year != currentYear) {
+            if (payload->result.year != currentYear)
+                refreshHolidayCalendar(false);
+            return;
+        }
+
+        holidayCalendarYear_ = payload->result.year;
+        holidayCalendarUpdatedAt_ = static_cast<int64_t>(std::time(nullptr));
+        holidayCalendar_ = std::move(payload->result.days);
+        saveSettings();
+        if (idleEntryEnabled_ && !idleQuoteEnabled_ && !monitor.snapshot().sessionAlive)
+            publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
     void refreshIdleQuote(bool force) {
-        if (!idleEntryEnabled_ || monitor.snapshot().sessionAlive)
+        // 每日一言属于空闲面板的独立内容状态；即使启动时已经存在播放器，
+        // 也要先把内容准备好，用户切到“每日一言 + 快速打开”面板时才能直接显示。
+        if (!idleEntryEnabled_ || !idleQuoteEnabled_)
             return;
 
         const std::string period = idleQuotePeriodKey(idleQuoteRefreshInterval_);
@@ -1238,7 +1376,7 @@ struct App {
     }
 
     void onIdleQuoteReady(std::unique_ptr<IdleQuotePayload> payload) {
-        if (!idleEntryEnabled_ || !payload ||
+        if (!idleEntryEnabled_ || !idleQuoteEnabled_ || !payload ||
             payload->generation != idleQuoteRequestGeneration_ ||
             idleQuoteRequestKey_.empty())
             return;
@@ -1262,6 +1400,22 @@ struct App {
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
+    void applyIdleQuoteEnabled(bool enabled) {
+        if (idleQuoteEnabled_ == enabled)
+            return;
+        idleQuoteEnabled_ = enabled;
+        runtime_log::writef(L"[action][idle-quote] enabled=%s", enabled ? L"on" : L"off");
+        if (!enabled) {
+            ++idleQuoteRequestGeneration_;
+            idleQuoteRequestKey_.clear();
+            idleQuoteLoading_ = false;
+        } else {
+            refreshIdleQuote(false);
+        }
+        saveSettings();
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
     void applyIdleEntryEnabled(bool enabled) {
         if (idleEntryEnabled_ == enabled)
             return;
@@ -1271,7 +1425,7 @@ struct App {
             ++idleQuoteRequestGeneration_;
             idleQuoteRequestKey_.clear();
             idleQuoteLoading_ = false;
-        } else {
+        } else if (idleQuoteEnabled_) {
             refreshIdleQuote(false);
         }
         saveSettings();
@@ -2230,6 +2384,7 @@ void App::loadSettings() {
                                 ? AlbumCoverEffect::Vinyl
                                 : AlbumCoverEffect::Default;
         idleEntryEnabled_ = j.value("idleEntryEnabled", true);
+        idleQuoteEnabled_ = j.value("idleQuoteEnabled", true);
         idleQuoteSource_ = idleQuoteSourceFromConfig(
             j.value("idleQuoteSource", std::string("hitokoto")));
         idleQuoteRefreshInterval_ = idleQuoteIntervalFromConfig(
@@ -2249,6 +2404,26 @@ void App::loadSettings() {
             idleQuoteCacheText_ = wideOf(cache.value("text", std::string()));
             idleQuoteCacheOrigin_ = wideOf(cache.value("origin", std::string()));
             idleQuoteCacheUuid_ = wideOf(cache.value("uuid", std::string()));
+        }
+        holidayCalendarYear_ = 0;
+        holidayCalendarUpdatedAt_ = 0;
+        holidayCalendar_.clear();
+        if (j.contains("holidayCalendar") && j["holidayCalendar"].is_object()) {
+            const auto& cache = j["holidayCalendar"];
+            holidayCalendarYear_ = cache.value("year", 0);
+            holidayCalendarUpdatedAt_ = cache.value("updatedAt", int64_t{0});
+            if (cache.contains("days") && cache["days"].is_array()) {
+                for (const auto& value : cache["days"]) {
+                    if (!value.is_object())
+                        continue;
+                    HolidayDayInfo day;
+                    day.date = value.value("date", std::string());
+                    day.type = value.value("type", -1);
+                    day.name = wideOf(value.value("name", std::string()));
+                    if (!day.date.empty() && day.type >= 0 && day.type <= 3)
+                        holidayCalendar_.push_back(std::move(day));
+                }
+            }
         }
         qqLocalLyricsEnabled_ = j.value("qqLocalLyricsEnabled", false);
         qqLocalLyricsPersistOrder_ = j.value("qqLocalLyricsPersistOrder", false);
@@ -2288,6 +2463,7 @@ void App::saveSettings() {
         if (hasGlobalLyricAppearance_)
             saveAppearance("Global", globalLyricAppearance_);
         j["idleEntryEnabled"] = idleEntryEnabled_;
+        j["idleQuoteEnabled"] = idleQuoteEnabled_;
         j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
         j["idleQuoteRefreshInterval"] =
             idleQuoteIntervalConfigName(idleQuoteRefreshInterval_);
@@ -2301,6 +2477,13 @@ void App::saveSettings() {
             {"text", utf8Of(idleQuoteCacheText_)},
             {"origin", utf8Of(idleQuoteCacheOrigin_)},
             {"uuid", utf8Of(idleQuoteCacheUuid_)}};
+        j["holidayCalendar"] = nlohmann::json{
+            {"year", holidayCalendarYear_},
+            {"updatedAt", holidayCalendarUpdatedAt_},
+            {"days", nlohmann::json::array()}};
+        for (const auto& day : holidayCalendar_)
+            j["holidayCalendar"]["days"].push_back({
+                {"date", day.date}, {"type", day.type}, {"name", utf8Of(day.name)}});
         j["taskbarPosition"] = taskbarPosition_;
         // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
@@ -3183,6 +3366,7 @@ void App::setAutoCheckOnStartup(bool enabled) {
 SettingsState App::currentSettingsState() const {
     SettingsState st;
     st.idleEntryEnabled = idleEntryEnabled_;
+    st.idleQuoteEnabled = idleQuoteEnabled_;
     st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1 : 0;
     st.idleQuoteRefreshInterval =
         idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::Hourly
@@ -3240,6 +3424,7 @@ SettingsState App::currentSettingsState() const {
 SettingsActions App::buildSettingsActions() {
     SettingsActions act;
     act.onIdleEntryEnabled = [this](bool on) { applyIdleEntryEnabled(on); };
+    act.onIdleQuoteEnabled = [this](bool on) { applyIdleQuoteEnabled(on); };
     act.onIdleQuoteSource = [this](int source) { applyIdleQuoteSource(source); };
     act.onIdleQuoteRefreshInterval =
         [this](int interval) { applyIdleQuoteRefreshInterval(interval); };
@@ -3428,7 +3613,9 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_TIMER && wp == kTimerIdleQuote) {
+        app->refreshHolidayCalendar(false);
         app->refreshIdleQuote(false);
+        app->refreshIdleWelcome();
         return 0;
     }
     if (msg == kMsgDialogClosed) {
@@ -3554,7 +3741,9 @@ int main() {
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
+    app.refreshHolidayCalendar(false);
     app.refreshIdleQuote(false);
+    app.refreshIdleWelcome();
     app.appVolume_.setChangedCallback(
         [&app] { PostThreadMessageW(app.mainThread, kMsgAppVolumeChanged, 0, 0); });
 
@@ -3594,6 +3783,10 @@ int main() {
             else if (msg.message == kMsgIdleQuoteReady) {
                 app.onIdleQuoteReady(std::unique_ptr<IdleQuotePayload>(
                     reinterpret_cast<IdleQuotePayload*>(msg.lParam)));
+            }
+            else if (msg.message == kMsgHolidayReady) {
+                app.onHolidayReady(std::unique_ptr<HolidayPayload>(
+                    reinterpret_cast<HolidayPayload*>(msg.lParam)));
             }
             continue;
         }

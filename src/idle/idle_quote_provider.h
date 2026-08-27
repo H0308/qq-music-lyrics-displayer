@@ -9,6 +9,7 @@
 class IdleQuoteProvider {
 public:
     using ReadyCallback = std::function<void(IdleQuoteResult)>;
+    using HolidayReadyCallback = std::function<void(HolidayCalendarResult)>;
 
     IdleQuoteProvider();
     ~IdleQuoteProvider();
@@ -17,6 +18,7 @@ public:
     IdleQuoteProvider& operator=(const IdleQuoteProvider&) = delete;
 
     void requestAsync(IdleQuoteSource source, const std::wstring& token, ReadyCallback cb);
+    void requestHolidayYearAsync(int year, HolidayReadyCallback cb);
 
 private:
     struct Impl;

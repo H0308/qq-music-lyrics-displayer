@@ -31,7 +31,7 @@ public:
     void setTriggerOnHover(bool on);
     // 播放中的音乐控件卡片背景。
     void setBackgroundMode(MediaPopupBackground mode);
-    // 无播放时快速启动卡片的独立背景模式和磨砂颜色。
+    // 无播放组合面板的独立背景模式和磨砂颜色。
     void setIdleBackgroundMode(MediaPopupBackground mode);
     void setIdleBackgroundColor(COLORREF color, bool customized);
     void setFollowAlbumBackground(bool on);
@@ -41,6 +41,9 @@ public:
     void setMedia(const OverlayMediaInfo& info, bool available,
                   bool animateSongTransition = false);
     void setIdleContent(const IdlePresentation& content, bool available);
+    // 展示类别与具体内容分开同步：scene 不为 Idle 时表示播放媒体；
+    // 播放中的弹窗允许临时切到“每日一言 + 快速启动”组合面板，关闭后回到媒体卡片。
+    void setPresentationMode(DisplayScene scene, bool available);
     void setProgress(int64_t positionMs);
     void setAnchor(HWND anchor);
 

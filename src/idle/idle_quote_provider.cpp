@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -167,6 +168,72 @@ IdleQuoteResult requestQuote(IdleQuoteSource source, const std::wstring& token,
     return result;
 }
 
+std::string fullDateForYear(int year, const std::string& value) {
+    if (value.size() >= 10 && value[4] == '-' && value[7] == '-')
+        return value.substr(0, 10);
+
+    int month = 0;
+    int day = 0;
+    if (sscanf_s(value.c_str(), "%d-%d", &month, &day) != 2 || month < 1 || month > 12 ||
+        day < 1 || day > 31)
+        return {};
+    char date[16]{};
+    sprintf_s(date, "%04d-%02d-%02d", year, month, day);
+    return date;
+}
+
+std::string shortDateOf(const std::string& fullDate) {
+    return fullDate.size() >= 10 ? fullDate.substr(5, 5) : fullDate;
+}
+
+HolidayCalendarResult requestHolidayYear(int year, std::atomic<bool>& shutdown) {
+    HolidayCalendarResult result;
+    result.year = year;
+    if (year < 2000 || year > 3000)
+        return result;
+
+    json data;
+    const std::string url = "https://timor.tech/api/holiday/year/" + std::to_string(year) +
+                            "/?type=Y&week=Y";
+    if (!getJson(url, {}, shutdown, data) || data.value("code", -1) != 0 ||
+        !data.contains("type") || !data["type"].is_object())
+        return result;
+
+    const json* holidays = nullptr;
+    if (data.contains("holiday") && data["holiday"].is_object())
+        holidays = &data["holiday"];
+
+    for (const auto& item : data["type"].items()) {
+        if (!item.value().is_object())
+            continue;
+        const std::string date = fullDateForYear(year, item.key());
+        const int type = item.value().value("type", -1);
+        if (date.empty() || type < 0 || type > 3)
+            continue;
+
+        std::wstring name = toWide(item.value().value("name", std::string()));
+        if (holidays) {
+            const std::string shortDate = shortDateOf(date);
+            auto holiday = holidays->find(item.key());
+            if (holiday == holidays->end())
+                holiday = holidays->find(shortDate);
+            if (holiday != holidays->end() && holiday->is_object()) {
+                const std::string holidayName = holiday->value("name", std::string());
+                if (!holidayName.empty())
+                    name = toWide(holidayName);
+            }
+        }
+        result.days.push_back({date, type, std::move(name)});
+    }
+
+    std::sort(result.days.begin(), result.days.end(),
+              [](const HolidayDayInfo& left, const HolidayDayInfo& right) {
+                  return left.date < right.date;
+              });
+    result.ok = !result.days.empty();
+    return result;
+}
+
 } // namespace
 
 struct IdleQuoteProvider::Impl {
@@ -218,6 +285,28 @@ void IdleQuoteProvider::requestAsync(IdleQuoteSource source, const std::wstring&
         IdleQuoteResult result = requestQuote(source, token, impl->shutdown);
         runtime_log::writef(L"[idle-quote] source=%s result=%s",
                             source == IdleQuoteSource::Hitokoto ? L"hitokoto" : L"jinrishici",
+                            result.ok ? L"success" : L"failed");
+        if (!impl->shutdown.load() && cb)
+            cb(std::move(result));
+    });
+
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
+}
+
+void IdleQuoteProvider::requestHolidayYearAsync(int year, HolidayReadyCallback cb) {
+    Impl* impl = impl_.get();
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, year, cb = std::move(cb), done]() mutable {
+        struct DoneFlag {
+            std::shared_ptr<std::atomic<bool>> value;
+            ~DoneFlag() { value->store(true); }
+        } doneFlag{done};
+
+        HolidayCalendarResult result = requestHolidayYear(year, impl->shutdown);
+        runtime_log::writef(L"[holiday] year=%d result=%s", year,
                             result.ok ? L"success" : L"failed");
         if (!impl->shutdown.load() && cb)
             cb(std::move(result));

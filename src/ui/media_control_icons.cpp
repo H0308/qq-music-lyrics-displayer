@@ -100,11 +100,14 @@ void draw(ID2D1RenderTarget* target, const Geometry& geometry, int index, bool p
                                   barRadius, barRadius),
                 brush);
         } else if (geometry.play) {
-            target->SetTransform(D2D1::Matrix3x2F::Scale(radius * 1.4f, radius * 1.4f) *
-                                  D2D1::Matrix3x2F::Translation(center.x + radius * 0.05f,
-                                                                 center.y));
+            D2D1_MATRIX_3X2_F previous{};
+            target->GetTransform(&previous);
+            target->SetTransform(
+                D2D1::Matrix3x2F::Scale(radius * 1.4f, radius * 1.4f) *
+                D2D1::Matrix3x2F::Translation(center.x + radius * 0.05f, center.y) *
+                previous);
             target->FillGeometry(geometry.play, brush);
-            target->SetTransform(D2D1::Matrix3x2F::Identity());
+            target->SetTransform(previous);
         }
         return;
     }
@@ -124,10 +127,13 @@ void draw(ID2D1RenderTarget* target, const Geometry& geometry, int index, bool p
                           barRadius, barRadius),
         brush);
     if (triangle) {
+        D2D1_MATRIX_3X2_F previous{};
+        target->GetTransform(&previous);
         target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
-                             D2D1::Matrix3x2F::Translation(center.x + centerShift, center.y));
+                             D2D1::Matrix3x2F::Translation(center.x + centerShift, center.y) *
+                             previous);
         target->FillGeometry(triangle, brush);
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->SetTransform(previous);
     }
 }
 
@@ -162,10 +168,12 @@ void fillSpeaker(ID2D1RenderTarget* target, const D2D1_POINT_2F& center, float s
     const HRESULT hr = sink->Close();
     sink->Release();
     if (SUCCEEDED(hr)) {
+        D2D1_MATRIX_3X2_F previous{};
+        target->GetTransform(&previous);
         target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
-                             D2D1::Matrix3x2F::Translation(center.x, center.y));
+                             D2D1::Matrix3x2F::Translation(center.x, center.y) * previous);
         target->FillGeometry(geometry, brush);
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->SetTransform(previous);
     }
     geometry->Release();
 }
@@ -203,10 +211,12 @@ void strokeWaveArc(ID2D1RenderTarget* target, const D2D1_POINT_2F& center, float
     const HRESULT hr = sink->Close();
     sink->Release();
     if (SUCCEEDED(hr)) {
+        D2D1_MATRIX_3X2_F previous{};
+        target->GetTransform(&previous);
         target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale) *
-                             D2D1::Matrix3x2F::Translation(center.x, center.y));
+                             D2D1::Matrix3x2F::Translation(center.x, center.y) * previous);
         target->DrawGeometry(geometry, brush, stroke / scale);
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->SetTransform(previous);
     }
     geometry->Release();
 }

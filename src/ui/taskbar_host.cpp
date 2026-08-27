@@ -297,6 +297,7 @@ struct TaskbarHost::Impl {
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
     MediaPopup mediaPopup;
+    bool mediaPopupEnabled_ = false;
     bool quitting = false;
 
     // 应用音量（内嵌控件音量图标 + 悬停滑块浮窗）
@@ -1026,7 +1027,17 @@ struct TaskbarHost::Impl {
 
     void syncMediaPopupEnabled() {
         const bool enabled = mediaPopupEnabledForScene();
+        const bool wasEnabled = mediaPopupEnabled_;
+        mediaPopupEnabled_ = enabled;
         mediaPopup.setEnabled(enabled);
+        if (enabled && !wasEnabled) {
+            // 弹窗样式可能在媒体会话已经存在时才开启；补送当前完整快照，
+            // 让弹窗的可用状态和展示类别不依赖下一次 SMTC 事件。
+            const bool available = mediaPopupAvailable(sessionVisible_);
+            mediaPopup.setIdleContent(idle, available);
+            mediaPopup.setPresentationMode(scene_, available);
+            mediaPopup.setMedia(media, available);
+        }
         mediaPopup.setTriggerOnHover(
             scene_ == DisplayScene::Idle || mediaPopupTrigger_ == MediaPopupTrigger::Hover);
         if (enabled && mouseOver_)
@@ -1250,6 +1261,7 @@ struct TaskbarHost::Impl {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
             mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
+            mediaPopup.setPresentationMode(scene_, mediaPopupAvailable(sessionVisible_));
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
             render();
         }
@@ -1283,6 +1295,9 @@ struct TaskbarHost::Impl {
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
                                  frame.idle.source != idle.source ||
                                  frame.idle.loading != idle.loading ||
+                                 frame.idle.showQuote != idle.showQuote ||
+                                 frame.idle.copyEnabled != idle.copyEnabled ||
+                                 frame.idle.quickStartEnabled != idle.quickStartEnabled ||
                                  frame.idle.apps.size() != idle.apps.size();
         const bool wasVisible = visible;
         const bool mediaIdentityChanged =
@@ -1295,10 +1310,10 @@ struct TaskbarHost::Impl {
         const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
                                  (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
-        if (frame.scene == DisplayScene::Idle)
-            mediaPopup.setIdleContent(frame.idle, mediaPopupAvailable(frame.visible));
-        else
-            mediaPopup.setMedia(frame.media, mediaPopupAvailable(frame.visible), songChanged);
+        const bool popupAvailable = mediaPopupAvailable(frame.visible);
+        mediaPopup.setIdleContent(frame.idle, popupAvailable);
+        mediaPopup.setPresentationMode(frame.scene, popupAvailable);
+        mediaPopup.setMedia(frame.media, popupAvailable, songChanged);
         mediaPopup.setProgress(frame.actualPositionMs);
 
         frameRevision_ = frame.frameRevision;
@@ -3795,15 +3810,16 @@ struct TaskbarHost::Impl {
             karaokeSettled_ = true;
             karaokeTick_ = 0;
         }
-        if (scene_ == DisplayScene::Idle)
-            mediaPopup.setIdleContent(idle, mediaPopupAvailable(sessionVisible_));
-        else
-            mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
+        const bool popupAvailable = mediaPopupAvailable(sessionVisible_);
+        mediaPopup.setIdleContent(idle, popupAvailable);
+        mediaPopup.setMedia(media, popupAvailable);
+        mediaPopup.setPresentationMode(scene_, popupAvailable);
         syncMediaPopupEnabled();
         if (isMinimalMode()) {
             // 极简仍保留歌词和方形封面，因此不释放主任务栏渲染器；只清掉附加背景链和媒体卡片。
             volumeHover_ = false;
             volumePopup_.hide();
+            mediaPopupEnabled_ = false;
             mediaPopup.setEnabled(false);
             releaseCoverBackgroundResources();
             // 切歌转场只改变合成器根视觉；进入极简时立即恢复到静止位置。
@@ -3815,6 +3831,7 @@ struct TaskbarHost::Impl {
             // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
             volumeHover_ = false;
             volumePopup_.hide();
+            mediaPopupEnabled_ = false;
             mediaPopup.setEnabled(false);
             if (visible) {
                 visible = false;
@@ -4072,11 +4089,10 @@ void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
-    if (impl_->scene_ == DisplayScene::Idle)
-        impl_->mediaPopup.setIdleContent(impl_->idle,
-                                         impl_->mediaPopupAvailable(impl_->sessionVisible_));
-    else
-        impl_->mediaPopup.setMedia(info, impl_->mediaPopupAvailable(impl_->sessionVisible_));
+    const bool popupAvailable = impl_->mediaPopupAvailable(impl_->sessionVisible_);
+    impl_->mediaPopup.setIdleContent(impl_->idle, popupAvailable);
+    impl_->mediaPopup.setMedia(info, popupAvailable);
+    impl_->mediaPopup.setPresentationMode(impl_->scene_, popupAvailable);
     impl_->mediaPopup.setProgress(impl_->positionMs_);
     if (impl_->updateMediaInfo(info))
         impl_->render();

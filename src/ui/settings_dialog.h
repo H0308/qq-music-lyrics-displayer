@@ -13,6 +13,7 @@
 // 设置窗口的初始状态快照（打开时由 App 填充）
 struct SettingsState {
     bool idleEntryEnabled = true;
+    bool idleQuoteEnabled = true;
     int idleQuoteSource = 0; // 0 一言 1 今日诗词
     int idleQuoteRefreshInterval = 0; // 0 每天 1 每 12 小时 2 每小时
     int idleQuoteAlignment = 0; // 0 左对齐 1 居中 2 右对齐
@@ -59,6 +60,7 @@ struct SettingsState {
 // 设置变更回调：用户操作即时生效（与右键菜单语义一致）
 struct SettingsActions {
     std::function<void(bool)> onIdleEntryEnabled;
+    std::function<void(bool)> onIdleQuoteEnabled;
     std::function<void(int)> onIdleQuoteSource;
     std::function<void(int)> onIdleQuoteRefreshInterval;
     std::function<void(int)> onIdleQuoteAlignment;

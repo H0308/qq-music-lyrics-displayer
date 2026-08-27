@@ -68,6 +68,7 @@ constexpr int kIdIdleApps = 449;
 constexpr int kIdMediaPopupBackgroundColor = 451;
 constexpr int kIdIdleCardBackground = 452;
 constexpr int kIdIdleQuoteAlignment = 453;
+constexpr int kIdIdleQuote = 454;
 constexpr int kIdContentScrollBar = 401;
 
 constexpr float kWindowW = 760.0f;
@@ -425,16 +426,16 @@ struct SettingsDialog::Impl {
     }
 
     void updateIdleRowsEnabled() {
-        const bool enabled = state.idleEntryEnabled;
+        const bool quoteEnabled = state.idleQuoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteSource))
-            row->enabled = enabled;
+            row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
-            row->enabled = enabled;
+            row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteAlignment))
-            row->enabled = enabled;
+            row->enabled = quoteEnabled;
         updateIdleBackgroundRowsEnabled();
         if (auto* row = findRow(kIdIdleApps))
-            row->enabled = enabled;
+            row->enabled = state.idleEntryEnabled;
     }
 
     void openColorPicker(int id) {
@@ -566,23 +567,28 @@ struct SettingsDialog::Impl {
                  state.albumCoverVisible && !minimal, kCoverEffectRowH);
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
-            L"播放器未运行时，任务栏显示一句每日一言；悬浮后可打开已配置的应用。"
+            L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
             L"关闭后，播放器未运行时隐藏任务栏入口。",
             40.0f, kRowTallH);
         idleEntry.checked = state.idleEntryEnabled;
+        Row& idleQuote = addRow(
+            kIdlePage, kIdIdleQuote, ControlKind::Toggle, L"显示每日一言",
+            L"关闭后显示按时间和日期类型生成的默认欢迎语；每日一言来源、更新频率和缓存会保留。",
+            40.0f, kRowTallH);
+        idleQuote.checked = state.idleQuoteEnabled;
         addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
                  state.idleQuoteSource == 1
                      ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
                      : L"默认使用一言获取每日一言。",
-                 {L"一言", L"今日诗词"}, state.idleQuoteSource, state.idleEntryEnabled,
+                 {L"一言", L"今日诗词"}, state.idleQuoteSource, state.idleQuoteEnabled,
                  kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteRefreshInterval, L"每日一言更新频率", nullptr,
                  {L"每天", L"每 12 小时", L"每小时"}, state.idleQuoteRefreshInterval,
-                 state.idleEntryEnabled, kRowTallH);
+                 state.idleQuoteEnabled, kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteAlignment, L"每日一言字体对齐方式",
                  L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
                  {L"左对齐", L"居中", L"右对齐"}, state.idleQuoteAlignment,
-                 state.idleEntryEnabled, kRowH);
+                 state.idleQuoteEnabled, kRowH);
         addRadio(kIdlePage, kIdIdleCardBackground, L"快速启动卡片背景",
                  L"纯色跟随窗口深浅色显示白色或黑色；磨砂玻璃使用 Windows 背景材质，下面的颜色仅作为磨砂颜色叠加。",
                  {L"纯色", L"磨砂玻璃"}, state.idleCardBackground,
@@ -2394,6 +2400,13 @@ struct SettingsDialog::Impl {
             if (actions.onIdleEntryEnabled)
                 actions.onIdleEntryEnabled(row->checked);
             break;
+        case kIdIdleQuote:
+            row->checked = !row->checked;
+            state.idleQuoteEnabled = row->checked;
+            updateIdleRowsEnabled();
+            if (actions.onIdleQuoteEnabled)
+                actions.onIdleQuoteEnabled(row->checked);
+            break;
         case kIdIdleQuoteSource:
             state.idleQuoteSource = row->selected;
             updateIdleQuoteSourceRow();
@@ -2635,6 +2648,8 @@ struct SettingsDialog::Impl {
         state = s;
         if (auto* row = findRow(kIdIdleEntry))
             row->checked = s.idleEntryEnabled;
+        if (auto* row = findRow(kIdIdleQuote))
+            row->checked = s.idleQuoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteSource))
             row->selected = std::clamp(s.idleQuoteSource, 0, 1);
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))

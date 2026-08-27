@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -15,6 +16,26 @@ enum class IdleQuoteRefreshInterval {
     Daily,
     HalfDay,
     Hourly,
+};
+
+// Timor 年度接口返回的日期类型：0 工作日、1 周末、2 节日、3 调休/补班。
+enum class IdleDayType {
+    Workday = 0,
+    Weekend = 1,
+    Holiday = 2,
+    MakeupWorkday = 3,
+};
+
+struct HolidayDayInfo {
+    std::string date; // YYYY-MM-DD
+    int type = static_cast<int>(IdleDayType::Workday);
+    std::wstring name;
+};
+
+struct HolidayCalendarResult {
+    bool ok = false;
+    int year = 0;
+    std::vector<HolidayDayInfo> days;
 };
 
 struct IdleQuoteResult {
@@ -39,5 +60,8 @@ struct IdlePresentation {
     std::wstring sentence;
     std::wstring source;
     bool loading = false;
+    bool showQuote = true;
+    bool copyEnabled = false;
+    bool quickStartEnabled = true;
     std::vector<IdleAppInfo> apps;
 };
