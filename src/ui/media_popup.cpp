@@ -234,6 +234,9 @@ struct MediaPopup::Impl {
     bool materialNeedsApply = true;
     bool backdropDirty = true;
     bool preserveBackdropOnNextResourceCreate = false;
+    // 最近一次背景采样得到的亮度（-1 表示无效）。页面切换时背景位图被保留，
+    // 画笔重建后直接用它恢复文字对比色，无需再次隐藏窗口抓屏。
+    float lastBackdropLuminance = -1.0f;
     bool coverDirty = true;
     bool sourceIconDirty = true;
     bool textDirty = true;
@@ -602,6 +605,7 @@ struct MediaPopup::Impl {
         if (!preserveBackdrop) {
             releaseBitmap(backdropBmp);
             releaseCom(backdropBlur);
+            lastBackdropLuminance = -1.0f;
         }
         sourceIconDirty = true;
         if (!preserveBackdrop)
@@ -756,6 +760,10 @@ struct MediaPopup::Impl {
             return false;
         }
 
+        // 画笔按调色板重建后，如果背景快照被保留（页面互切场景），沿用之前
+        // 采样的亮度恢复文字对比色，避免为重新采样而隐藏窗口造成可见闪烁。
+        if (backdropBmp && lastBackdropLuminance >= 0.0f)
+            applyBackdropTextContrast(lastBackdropLuminance);
         themeDirty = false;
         return true;
     }
@@ -889,6 +897,7 @@ struct MediaPopup::Impl {
         }
 
         const float sampledLuminance = backdropLuminance(pixels, width, height);
+        lastBackdropLuminance = sampledLuminance;
 
         auto* rt = renderer.renderTarget();
         if (!rt) {
