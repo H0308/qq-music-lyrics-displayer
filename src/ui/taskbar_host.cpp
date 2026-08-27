@@ -297,6 +297,8 @@ struct TaskbarHost::Impl {
     bool controlsOnHover_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
+    MediaPopupTrigger idleCardTrigger_ = MediaPopupTrigger::Hover;
+    bool idleCardTriggerSync_ = true;
     MediaPopup mediaPopup;
     bool mediaPopupEnabled_ = false;
     bool quitting = false;
@@ -1061,8 +1063,10 @@ struct TaskbarHost::Impl {
             mediaPopup.setPresentationMode(scene_, available);
             mediaPopup.setMedia(media, available);
         }
-        mediaPopup.setTriggerOnHover(
-            scene_ == DisplayScene::Idle || mediaPopupTrigger_ == MediaPopupTrigger::Hover);
+        mediaPopup.setTriggerOnHover(mediaPopupTrigger_ == MediaPopupTrigger::Hover);
+        mediaPopup.setIdleTriggerOnHover(
+            (idleCardTriggerSync_ ? mediaPopupTrigger_ : idleCardTrigger_) ==
+            MediaPopupTrigger::Hover);
         if (enabled && mouseOver_)
             mediaPopup.onAnchorEnter();
     }
@@ -1116,6 +1120,18 @@ struct TaskbarHost::Impl {
 
     void setIdleCardBackgroundColor(COLORREF color, bool customized) {
         mediaPopup.setIdleBackgroundColor(color, customized);
+    }
+
+    void setIdleCardFollowAlbum(bool on) {
+        mediaPopup.setIdleFollowAlbumBackground(on);
+    }
+
+    void setIdleCardTrigger(bool sync, MediaPopupTrigger trigger) {
+        if (idleCardTriggerSync_ == sync && idleCardTrigger_ == trigger)
+            return;
+        idleCardTriggerSync_ = sync;
+        idleCardTrigger_ = trigger;
+        syncMediaPopupEnabled();
     }
 
     void setMediaPopupFollowAlbum(bool on) {
@@ -4285,10 +4301,9 @@ struct TaskbarHost::Impl {
             int btn = hitButton(mx, my);
             if (btn >= 0 && onControl)
                 onControl(static_cast<MediaControl>(btn));
-            // 点击展开模式：点击歌词区域任意位置立即展开媒体卡片
-            else if (controlsOnHover_ && !isMinimalMode() &&
-                     hoverControlStyle_ == HoverControlStyle::Popup &&
-                     mediaPopupTrigger_ == MediaPopupTrigger::Click)
+            // 卡片的当前页面自己判断是否为点击展开；这样无播放时的每日一言卡片
+            // 可以独立于媒体控件样式使用点击展开。
+            else if (!isMinimalMode())
                 mediaPopup.onAnchorClick();
             return 0;
         }
@@ -4550,6 +4565,14 @@ void TaskbarHost::setIdleCardBackground(MediaPopupBackground mode) {
 
 void TaskbarHost::setIdleCardBackgroundColor(COLORREF color, bool customized) {
     impl_->setIdleCardBackgroundColor(color, customized);
+}
+
+void TaskbarHost::setIdleCardFollowAlbum(bool on) {
+    impl_->setIdleCardFollowAlbum(on);
+}
+
+void TaskbarHost::setIdleCardTrigger(bool sync, MediaPopupTrigger trigger) {
+    impl_->setIdleCardTrigger(sync, trigger);
 }
 
 void TaskbarHost::setMediaPopupFollowAlbum(bool on) {

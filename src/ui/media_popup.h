@@ -29,11 +29,14 @@ public:
     void setEnabled(bool enabled);
     // 触发方式：true 悬浮停留片刻后展开（默认），false 由点击展开（onAnchorClick）
     void setTriggerOnHover(bool on);
+    // 无播放组合面板的触发方式。
+    void setIdleTriggerOnHover(bool on);
     // 播放中的音乐控件卡片背景。
     void setBackgroundMode(MediaPopupBackground mode);
     // 无播放组合面板的独立背景模式和磨砂颜色。
     void setIdleBackgroundMode(MediaPopupBackground mode);
     void setIdleBackgroundColor(COLORREF color, bool customized);
+    void setIdleFollowAlbumBackground(bool on);
     void setFollowAlbumBackground(bool on);
     void setAutoTextContrast(bool on);
     void refreshTheme();

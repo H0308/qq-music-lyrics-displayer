@@ -561,6 +561,9 @@ struct App {
     MediaPopupBackground idleCardBackground_ = MediaPopupBackground::Solid;
     COLORREF idleCardBackgroundColor_ = RGB(255, 255, 255);
     bool idleCardBackgroundColorCustomized_ = false;
+    bool idleCardFollowAlbum_ = false;
+    bool idleCardTriggerSync_ = true;
+    MediaPopupTrigger idleCardTrigger_ = MediaPopupTrigger::Hover;
     bool mediaPopupFollowAlbum_ = false;
     bool mediaPopupAutoTextContrast_ = false;
     // 切歌弹窗（灵动岛）：主屏幕中下方短暂弹出歌曲信息，固定鼠标穿透
@@ -866,6 +869,8 @@ struct App {
         taskbarHost->setIdleCardBackground(idleCardBackground_);
         taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
                                                 idleCardBackgroundColorCustomized_);
+        taskbarHost->setIdleCardFollowAlbum(idleCardFollowAlbum_);
+        taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
         taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
         taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
         taskbarHost->setAlbumCoverEffect(
@@ -960,6 +965,30 @@ struct App {
         if (taskbarHost)
             taskbarHost->setIdleCardBackground(idleCardBackground_);
         logSettingInt(L"idle-card-background", mode == 1 ? 1 : 0);
+        saveSettings();
+    }
+
+    void applyIdleCardFollowAlbum(bool on) {
+        idleCardFollowAlbum_ = on;
+        if (taskbarHost)
+            taskbarHost->setIdleCardFollowAlbum(on);
+        logSettingBool(L"idle-card-follow-album", on);
+        saveSettings();
+    }
+
+    void applyIdleCardTriggerSync(bool sync) {
+        idleCardTriggerSync_ = sync;
+        if (taskbarHost)
+            taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
+        logSettingBool(L"idle-card-trigger-sync", sync);
+        saveSettings();
+    }
+
+    void applyIdleCardTrigger(int mode) {
+        idleCardTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
+        if (taskbarHost)
+            taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
+        logSettingInt(L"idle-card-trigger", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
@@ -2317,6 +2346,11 @@ void App::loadSettings() {
         idleCardBackground_ = idleCardBackgroundValue == "frosted"
                                   ? MediaPopupBackground::Frosted
                                   : MediaPopupBackground::Solid;
+        idleCardFollowAlbum_ = j.value("idleCardFollowAlbum", false);
+        idleCardTriggerSync_ = j.value("idleCardTriggerSync", true);
+        idleCardTrigger_ = j.value("idleCardTrigger", 0) == 1
+                               ? MediaPopupTrigger::Click
+                               : MediaPopupTrigger::Hover;
         mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
         mediaPopupAutoTextContrast_ = j.value("mediaPopupAutoTextContrast", false);
         songToastEnabled_ = j.value("songToast", false);
@@ -2498,6 +2532,9 @@ void App::saveSettings() {
         if (idleCardBackgroundColorCustomized_)
             j["idleCardBackgroundColor"] =
                 static_cast<unsigned>(idleCardBackgroundColor_);
+        j["idleCardFollowAlbum"] = idleCardFollowAlbum_;
+        j["idleCardTriggerSync"] = idleCardTriggerSync_;
+        j["idleCardTrigger"] = idleCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
         j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
         j["mediaPopupAutoTextContrast"] = mediaPopupAutoTextContrast_;
         j["songToast"] = songToastEnabled_;
@@ -3392,6 +3429,9 @@ SettingsState App::currentSettingsState() const {
     st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.idleCardBackground = idleCardBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
     st.idleCardBackgroundColor = effectiveIdleCardBackgroundColor();
+    st.idleCardFollowAlbum = idleCardFollowAlbum_;
+    st.idleCardTriggerSync = idleCardTriggerSync_;
+    st.idleCardTrigger = idleCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
     st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
     st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
     st.songToastEnabled = songToastEnabled_;
@@ -3454,6 +3494,9 @@ SettingsActions App::buildSettingsActions() {
     act.onIdleCardBackground = [this](int mode) { applyIdleCardBackground(mode); };
     act.onIdleCardBackgroundColor =
         [this](COLORREF color) { applyIdleCardBackgroundColor(color); };
+    act.onIdleCardFollowAlbum = [this](bool on) { applyIdleCardFollowAlbum(on); };
+    act.onIdleCardTriggerSync = [this](bool sync) { applyIdleCardTriggerSync(sync); };
+    act.onIdleCardTrigger = [this](int mode) { applyIdleCardTrigger(mode); };
     act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
     act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };
     act.onSongToastEnabled = [this](bool on) { applySongToastEnabled(on); };

@@ -69,6 +69,9 @@ constexpr int kIdMediaPopupBackgroundColor = 451;
 constexpr int kIdIdleCardBackground = 452;
 constexpr int kIdIdleQuoteAlignment = 453;
 constexpr int kIdIdleQuote = 454;
+constexpr int kIdIdleCardFollowAlbum = 455;
+constexpr int kIdIdleCardTriggerSync = 456;
+constexpr int kIdIdleCardTrigger = 457;
 constexpr int kIdContentScrollBar = 401;
 
 constexpr float kWindowW = 760.0f;
@@ -335,10 +338,18 @@ struct SettingsDialog::Impl {
         const auto* idleEntry = findRow(kIdIdleEntry);
         const auto* background = findRow(kIdIdleCardBackground);
         const bool enabled = idleEntry && idleEntry->checked;
+        const bool frosted = enabled && background && background->selected == 1;
         if (auto* row = findRow(kIdIdleCardBackground))
             row->enabled = enabled;
         if (auto* row = findRow(kIdMediaPopupBackgroundColor))
-            row->enabled = enabled && background && background->selected == 1;
+            row->enabled = frosted;
+        if (auto* row = findRow(kIdIdleCardFollowAlbum))
+            row->enabled = frosted;
+        if (auto* row = findRow(kIdIdleCardTriggerSync))
+            row->enabled = enabled;
+        const auto* triggerSync = findRow(kIdIdleCardTriggerSync);
+        if (auto* row = findRow(kIdIdleCardTrigger))
+            row->enabled = enabled && triggerSync && !triggerSync->checked;
     }
 
     // 播放进度背景与背景波浪共用同一层背景，二者互斥：
@@ -598,6 +609,21 @@ struct SettingsDialog::Impl {
             L"仅在快速启动卡片的磨砂玻璃模式下生效，用作磨砂材质的颜色叠加。",
             colorText(state.idleCardBackgroundColor).c_str(), kRowTallH);
         idleCardBackgroundColor.enabled = state.idleEntryEnabled && state.idleCardBackground == 1;
+        Row& idleCardFollowAlbum = addRow(
+            kIdlePage, kIdIdleCardFollowAlbum, ControlKind::Toggle,
+            L"磨砂玻璃颜色跟随专辑",
+            L"识别到当前音乐并提取到专辑色时，快速启动和每日一言卡片使用与悬浮媒体控件卡片相同的颜色；没有专辑色时继续使用自定义颜色。",
+            40.0f, kRowTallH);
+        idleCardFollowAlbum.checked = state.idleCardFollowAlbum;
+        Row& idleCardTriggerSync = addRow(
+            kIdlePage, kIdIdleCardTriggerSync, ControlKind::Toggle,
+            L"每日一言卡片展开方式跟随媒体卡片",
+            L"开启后使用媒体卡片的悬浮展开或点击展开设置；关闭后使用下面的独立设置。",
+            40.0f, kRowTallH);
+        idleCardTriggerSync.checked = state.idleCardTriggerSync;
+        addRadio(kIdlePage, kIdIdleCardTrigger, L"每日一言卡片展开方式", nullptr,
+                 {L"悬浮展开", L"点击展开"}, state.idleCardTrigger,
+                 state.idleEntryEnabled && !state.idleCardTriggerSync, kRowTallH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
             L"通过文件选择器添加本地 EXE；设置页与每日一言卡片共用正常大小的软件图标。",
@@ -2429,6 +2455,24 @@ struct SettingsDialog::Impl {
                 actions.onIdleCardBackground(row->selected);
             updateIdleBackgroundRowsEnabled();
             break;
+        case kIdIdleCardFollowAlbum:
+            row->checked = !row->checked;
+            state.idleCardFollowAlbum = row->checked;
+            if (actions.onIdleCardFollowAlbum)
+                actions.onIdleCardFollowAlbum(row->checked);
+            break;
+        case kIdIdleCardTriggerSync:
+            row->checked = !row->checked;
+            state.idleCardTriggerSync = row->checked;
+            updateIdleBackgroundRowsEnabled();
+            if (actions.onIdleCardTriggerSync)
+                actions.onIdleCardTriggerSync(row->checked);
+            break;
+        case kIdIdleCardTrigger:
+            state.idleCardTrigger = row->selected;
+            if (actions.onIdleCardTrigger)
+                actions.onIdleCardTrigger(row->selected);
+            break;
         case kIdIdleApps:
             if (option >= 0) {
                 if (actions.onRemoveIdleApp)
@@ -2660,6 +2704,12 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.idleCardBackground, 0, 1);
         if (auto* row = findRow(kIdMediaPopupBackgroundColor))
             row->controlText = colorText(s.idleCardBackgroundColor);
+        if (auto* row = findRow(kIdIdleCardFollowAlbum))
+            row->checked = s.idleCardFollowAlbum;
+        if (auto* row = findRow(kIdIdleCardTriggerSync))
+            row->checked = s.idleCardTriggerSync;
+        if (auto* row = findRow(kIdIdleCardTrigger))
+            row->selected = std::clamp(s.idleCardTrigger, 0, 1);
         updateIdleQuoteSourceRow();
         updateIdleRowsEnabled();
         updateIdleAppsRowHeight();

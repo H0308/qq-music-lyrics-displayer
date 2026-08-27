@@ -100,6 +100,10 @@ public:
     // 无播放时快速启动卡片的独立背景模式和磨砂颜色。
     void setIdleCardBackground(MediaPopupBackground mode);
     void setIdleCardBackgroundColor(COLORREF color, bool customized);
+    // 每日一言/快速启动卡片的磨砂背景是否跟随当前专辑主色。
+    void setIdleCardFollowAlbum(bool on);
+    // 每日一言卡片展开方式：同步媒体卡片，或使用独立的悬浮/点击设置。
+    void setIdleCardTrigger(bool sync, MediaPopupTrigger trigger);
     // 是否让磨砂背景跟随当前专辑主色。
     void setMediaPopupFollowAlbum(bool on);
     // 是否根据磨砂卡片背后的应用明暗自动切换黑白文字。

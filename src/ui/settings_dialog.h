@@ -37,6 +37,9 @@ struct SettingsState {
     int mediaPopupBackground = 0; // 音乐控件卡片：0 纯色 1 磨砂玻璃
     int idleCardBackground = 0; // 0 纯色 1 磨砂玻璃
     COLORREF idleCardBackgroundColor = RGB(255, 255, 255);
+    bool idleCardFollowAlbum = false; // 磨砂背景颜色跟随当前专辑
+    bool idleCardTriggerSync = true; // 每日一言卡片展开方式跟随媒体卡片
+    int idleCardTrigger = 0; // 0 悬浮展开 1 点击展开
     bool mediaPopupFollowAlbum = false; // 磨砂背景跟随专辑
     bool mediaPopupAutoTextContrast = false; // 磨砂背景自动适配文字颜色
     bool songToastEnabled = false;    // 切歌时在屏幕中下方弹出歌曲信息
@@ -85,6 +88,9 @@ struct SettingsActions {
     std::function<void(int)> onMediaPopupBackground;
     std::function<void(int)> onIdleCardBackground;
     std::function<void(COLORREF)> onIdleCardBackgroundColor;
+    std::function<void(bool)> onIdleCardFollowAlbum;
+    std::function<void(bool)> onIdleCardTriggerSync;
+    std::function<void(int)> onIdleCardTrigger;
     std::function<void(bool)> onMediaPopupFollowAlbum;
     std::function<void(bool)> onMediaPopupAutoTextContrast;
     std::function<void(bool)> onSongToastEnabled;

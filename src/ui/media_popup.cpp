@@ -205,6 +205,7 @@ struct MediaPopup::Impl {
     bool playbackScene = false;
     bool idlePanelManual = false;
     bool triggerOnHover = true;
+    bool idleTriggerOnHover = true;
     bool anchorHover = false;
     bool popupHover = false;
     bool popupVisible = false;
@@ -217,6 +218,7 @@ struct MediaPopup::Impl {
     MediaPopupBackground idleBackgroundMode = MediaPopupBackground::Solid;
     COLORREF idleBackgroundColor = RGB(255, 255, 255);
     bool idleBackgroundColorCustomized = false;
+    bool idleFollowAlbumBackground = false;
     bool followAlbumBackground = false;
     bool autoTextContrast = false;
     bool materialNeedsApply = true;
@@ -344,9 +346,7 @@ struct MediaPopup::Impl {
     }
 
     bool opensOnHover() const {
-        // 只有真正的无播放入口始终随悬浮打开；播放中的媒体卡片切到组合面板后，
-        // 仍然遵循媒体卡片原本的悬浮/点击触发方式。
-        return triggerOnHover || (idleMode && !playbackScene);
+        return idleMode ? idleTriggerOnHover : triggerOnHover;
     }
 
     bool idlePageAllowed() const {
@@ -403,9 +403,13 @@ struct MediaPopup::Impl {
     }
 
     bool dynamicBackgroundEnabled() const {
-        // 专辑主色属于播放中的音乐控件卡片，不能渗透到无播放组合面板。
-        return !idleMode && followAlbumBackground &&
-               backgroundMode == MediaPopupBackground::Frosted;
+        if (idleMode) {
+            // 空闲入口只有在仍有播放场景且已提取专辑色时才切换，纯无播放入口
+            // 保留用户设置的磨砂颜色。
+            return idleFollowAlbumBackground && playbackScene && media.hasDominantColor &&
+                   idleBackgroundMode == MediaPopupBackground::Frosted;
+        }
+        return followAlbumBackground && backgroundMode == MediaPopupBackground::Frosted;
     }
 
     void releaseDynamicBackgroundResources() {
@@ -624,9 +628,14 @@ struct MediaPopup::Impl {
                             : D2D1::ColorF(D2D1::ColorF::White);
             if (frostedBackgroundActive()) {
                 const float tintAlpha = dark ? 0.10f : 0.16f;
-                cardFill = idleBackgroundColorCustomized
-                               ? fluent::toD2D(idleBackgroundColor, tintAlpha)
-                               : p.cardFill;
+                if (dynamicBackgroundEnabled()) {
+                    cardFill = p.cardFill;
+                    cardFill.a = tintAlpha;
+                } else {
+                    cardFill = idleBackgroundColorCustomized
+                                   ? fluent::toD2D(idleBackgroundColor, tintAlpha)
+                                   : p.cardFill;
+                }
             }
         } else if (frostedBackgroundActive()) {
             // 保持播放中的音乐控件卡片原有磨砂逻辑；无播放组合面板的自定义颜色
@@ -2246,7 +2255,7 @@ struct MediaPopup::Impl {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         popupVisible = true;
         runtime_log::writef(L"[action][media-popup] shown trigger=%s",
-                            triggerOnHover ? L"hover" : L"click");
+                            opensOnHover() ? L"hover" : L"click");
         SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
     }
 
@@ -2301,7 +2310,7 @@ struct MediaPopup::Impl {
 
     void onAnchorClick() {
         anchorHover = true;
-        if (!hwnd || !enabled || !available || popupVisible)
+        if (!hwnd || !enabled || !available || popupVisible || opensOnHover())
             return;
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kShowTimer);
@@ -2618,7 +2627,7 @@ struct MediaPopup::Impl {
         case WM_TIMER:
             if (wp == kShowTimer) {
                 KillTimer(hwnd, kShowTimer);
-                if (anchorHover)
+                if (anchorHover && opensOnHover())
                     showPopup();
             } else if (wp == kHideTimer) {
                 KillTimer(hwnd, kHideTimer);
@@ -2822,6 +2831,20 @@ void MediaPopup::setTriggerOnHover(bool on) {
     }
 }
 
+void MediaPopup::setIdleTriggerOnHover(bool on) {
+    if (impl_->idleTriggerOnHover == on)
+        return;
+    impl_->idleTriggerOnHover = on;
+    if (!impl_->hwnd)
+        return;
+    if (!impl_->opensOnHover()) {
+        KillTimer(impl_->hwnd, kShowTimer);
+    } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
+               !impl_->popupVisible) {
+        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    }
+}
+
 void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     if (impl_->backgroundMode == mode)
         return;
@@ -2871,11 +2894,27 @@ void MediaPopup::setIdleBackgroundColor(COLORREF color, bool customized) {
         impl_->render();
 }
 
+void MediaPopup::setIdleFollowAlbumBackground(bool on) {
+    if (impl_->idleFollowAlbumBackground == on)
+        return;
+    impl_->idleFollowAlbumBackground = on;
+    if (!impl_->dynamicBackgroundEnabled())
+        impl_->releaseDynamicBackgroundResources();
+    else
+        impl_->dynamicBackgroundDirty = true;
+    if (!impl_->hwnd || !impl_->popupVisible || !impl_->idleMode)
+        return;
+    if (impl_->entering || impl_->closing)
+        impl_->deferredRender = true;
+    else
+        impl_->render();
+}
+
 void MediaPopup::setFollowAlbumBackground(bool on) {
     if (impl_->followAlbumBackground == on)
         return;
     impl_->followAlbumBackground = on;
-    if (!on)
+    if (!impl_->dynamicBackgroundEnabled())
         impl_->releaseDynamicBackgroundResources();
     else
         impl_->dynamicBackgroundDirty = true;
@@ -2953,14 +2992,15 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
                                    !impl_->entering && !impl_->closing &&
                                    impl_->clientAnimations && !impl_->idleMode &&
                                    !impl_->categoryTransitionActive;
-    if (changed && impl_->popupVisible && !impl_->idleMode) {
+    if (changed && impl_->popupVisible &&
+        (!impl_->idleMode || dominantColorChanged)) {
         if (impl_->entering || impl_->closing)
             impl_->deferredRender = true;
         else
             impl_->render();
     }
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
-        impl_->triggerOnHover)
+        impl_->opensOnHover())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
@@ -3028,7 +3068,8 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         else
             impl_->render();
     }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible)
+    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
+        impl_->opensOnHover())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
