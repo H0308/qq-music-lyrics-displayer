@@ -3968,7 +3968,9 @@ struct TaskbarHost::Impl {
             marquee(titleWidth_, infoW, kInfoScrollSpeed, titleScrollOffset_);
             marquee(artistWidth_, infoW, kInfoScrollSpeed, artistScrollOffset_);
         }
-        if (mouseOver_ && controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Inline) {
+        // 空闲场景没有内嵌播放控件，悬浮时也应继续滚动每日一言。
+        if (mouseOver_ && controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Inline &&
+            !idleMarquee) {
             scrollAnimating_ = animating;
             return;
         }

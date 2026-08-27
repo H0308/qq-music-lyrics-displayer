@@ -338,7 +338,7 @@ struct SettingsDialog::Impl {
         const auto* idleEntry = findRow(kIdIdleEntry);
         const auto* background = findRow(kIdIdleCardBackground);
         const auto* style = findRow(kIdHoverControlStyle);
-        const bool enabled = idleEntry && idleEntry->checked;
+        const bool enabled = !minimalModeActive() && idleEntry && idleEntry->checked;
         const bool frosted = enabled && background && background->selected == 1;
         const bool mediaPopupStyle = style && style->selected == 1;
         if (auto* row = findRow(kIdIdleCardBackground))
@@ -449,7 +449,7 @@ struct SettingsDialog::Impl {
             row->enabled = quoteEnabled;
         updateIdleBackgroundRowsEnabled();
         if (auto* row = findRow(kIdIdleApps))
-            row->enabled = state.idleEntryEnabled;
+            row->enabled = !minimalModeActive() && state.idleEntryEnabled;
     }
 
     void openColorPicker(int id) {
