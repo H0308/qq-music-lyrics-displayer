@@ -339,7 +339,9 @@ struct MediaPopup::Impl {
     }
 
     void applyBackdropTextContrast(float luminance) {
-        if (idleMode || !autoTextContrast) {
+        // 快速启动卡片没有单独的字体颜色开关，磨砂模式始终根据后方内容
+        // 选择黑/白文字；播放中的媒体卡片仍由设置项控制。
+        if (!idleMode && !autoTextContrast) {
             resetBackdropTextColors();
             return;
         }
@@ -2255,7 +2257,7 @@ void MediaPopup::setAutoTextContrast(bool on) {
     impl_->autoTextContrast = on;
     if (on)
         impl_->backdropDirty = true;
-    else
+    else if (!impl_->idleMode)
         impl_->resetBackdropTextColors();
     if (!impl_->hwnd || !impl_->popupVisible || impl_->idleMode)
         return;
