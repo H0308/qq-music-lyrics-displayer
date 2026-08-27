@@ -212,6 +212,7 @@ struct MediaPopup::Impl {
     bool available = false;
     bool idleMode = false;
     bool playbackScene = false;
+    bool inlineControls = false;
     bool idlePanelManual = false;
     bool triggerOnHover = true;
     bool idleTriggerOnHover = true;
@@ -2537,7 +2538,7 @@ struct MediaPopup::Impl {
     }
 
     void hideImmediate() {
-        if (playbackScene && idleMode)
+        if (playbackScene && idleMode && !inlineControls)
             idleMode = false;
         idlePanelManual = false;
         popupVisible = false;
@@ -3321,7 +3322,9 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
-void MediaPopup::setPresentationMode(DisplayScene scene, bool available) {
+void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool inlineControls) {
+    impl_->inlineControls = inlineControls;
+
     if (!available) {
         impl_->available = false;
         impl_->playbackScene = false;
@@ -3335,14 +3338,15 @@ void MediaPopup::setPresentationMode(DisplayScene scene, bool available) {
     impl_->available = true;
     const bool noPlayback = scene == DisplayScene::Idle || scene == DisplayScene::NoPlayback;
     impl_->playbackScene = !noPlayback;
-    if (noPlayback)
+    if (noPlayback || inlineControls)
         impl_->idlePanelManual = false;
-    const bool keepManualIdle = impl_->playbackScene && impl_->idlePanelManual &&
+    const bool keepManualIdle = !inlineControls && impl_->playbackScene &&
+                                impl_->idlePanelManual &&
                                 impl_->currentPage() == MediaPopup::Impl::PopupPage::Idle &&
                                 impl_->idlePageAllowed();
     const MediaPopup::Impl::PopupPage target =
-        noPlayback || keepManualIdle ? MediaPopup::Impl::PopupPage::Idle
-                                     : MediaPopup::Impl::PopupPage::Media;
+        noPlayback || keepManualIdle || inlineControls ? MediaPopup::Impl::PopupPage::Idle
+                                                        : MediaPopup::Impl::PopupPage::Media;
     impl_->setPage(target);
 }
 

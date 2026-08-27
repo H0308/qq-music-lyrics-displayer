@@ -337,8 +337,10 @@ struct SettingsDialog::Impl {
     void updateIdleBackgroundRowsEnabled() {
         const auto* idleEntry = findRow(kIdIdleEntry);
         const auto* background = findRow(kIdIdleCardBackground);
+        const auto* style = findRow(kIdHoverControlStyle);
         const bool enabled = idleEntry && idleEntry->checked;
         const bool frosted = enabled && background && background->selected == 1;
+        const bool mediaPopupStyle = style && style->selected == 1;
         if (auto* row = findRow(kIdIdleCardBackground))
             row->enabled = enabled;
         if (auto* row = findRow(kIdMediaPopupBackgroundColor))
@@ -346,10 +348,11 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleCardFollowAlbum))
             row->enabled = frosted;
         if (auto* row = findRow(kIdIdleCardTriggerSync))
-            row->enabled = enabled;
+            row->enabled = enabled && mediaPopupStyle;
         const auto* triggerSync = findRow(kIdIdleCardTriggerSync);
         if (auto* row = findRow(kIdIdleCardTrigger))
-            row->enabled = enabled && triggerSync && !triggerSync->checked;
+            row->enabled = enabled &&
+                           (!mediaPopupStyle || (triggerSync && !triggerSync->checked));
     }
 
     // 播放进度背景与背景波浪共用同一层背景，二者互斥：
@@ -2573,6 +2576,7 @@ struct SettingsDialog::Impl {
             if (actions.onHoverControlStyle)
                 actions.onHoverControlStyle(row->selected);
             updateMediaPopupBackgroundRowsEnabled();
+            updateIdleRowsEnabled();
             break;
         case kIdMediaPopupTrigger:
             if (actions.onMediaPopupTrigger)
@@ -2711,7 +2715,6 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleCardTrigger))
             row->selected = std::clamp(s.idleCardTrigger, 0, 1);
         updateIdleQuoteSourceRow();
-        updateIdleRowsEnabled();
         updateIdleAppsRowHeight();
         const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongInfo))
@@ -2772,6 +2775,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
             row->checked = s.mediaPopupAutoTextContrast;
         updateMediaPopupBackgroundRowsEnabled();
+        updateIdleRowsEnabled();
         if (auto* row = findRow(kIdSongToast)) {
             row->checked = minimal ? false : s.songToastEnabled;
             row->enabled = !minimal;

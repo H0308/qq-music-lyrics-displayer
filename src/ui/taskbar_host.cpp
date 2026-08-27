@@ -1046,8 +1046,10 @@ struct TaskbarHost::Impl {
         if (isMinimalMode() || renderMode_ == static_cast<int>(RenderMode::Stopped))
             return false;
         if (scene_ == DisplayScene::Idle)
-            return sessionVisible_;
-        return controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Popup;
+            return sessionVisible_ && idle.quickStartEnabled;
+        if (hoverControlStyle_ == HoverControlStyle::Popup)
+            return controlsOnHover_;
+        return sessionVisible_ && idle.quickStartEnabled;
     }
 
     void syncMediaPopupEnabled() {
@@ -1060,12 +1062,20 @@ struct TaskbarHost::Impl {
             // 让弹窗的可用状态和展示类别不依赖下一次 SMTC 事件。
             const bool available = mediaPopupAvailable(sessionVisible_);
             mediaPopup.setIdleContent(idle, available);
-            mediaPopup.setPresentationMode(scene_, available);
+            mediaPopup.setPresentationMode(scene_, available,
+                                            hoverControlStyle_ == HoverControlStyle::Inline);
             mediaPopup.setMedia(media, available);
+        } else if (enabled) {
+            const bool available = mediaPopupAvailable(sessionVisible_);
+            mediaPopup.setPresentationMode(scene_, available,
+                                            hoverControlStyle_ == HoverControlStyle::Inline);
         }
         mediaPopup.setTriggerOnHover(mediaPopupTrigger_ == MediaPopupTrigger::Hover);
+        // 内嵌控件没有媒体卡片可跟随，使用每日一言卡片自己的展开方式。
+        const bool idleTriggerFollowMedia =
+            idleCardTriggerSync_ && hoverControlStyle_ == HoverControlStyle::Popup;
         mediaPopup.setIdleTriggerOnHover(
-            (idleCardTriggerSync_ ? mediaPopupTrigger_ : idleCardTrigger_) ==
+            (idleTriggerFollowMedia ? mediaPopupTrigger_ : idleCardTrigger_) ==
             MediaPopupTrigger::Hover);
         if (enabled && mouseOver_)
             mediaPopup.onAnchorEnter();
@@ -1300,7 +1310,9 @@ struct TaskbarHost::Impl {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
             mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
-            mediaPopup.setPresentationMode(scene_, mediaPopupAvailable(sessionVisible_));
+            mediaPopup.setPresentationMode(
+                scene_, mediaPopupAvailable(sessionVisible_),
+                hoverControlStyle_ == HoverControlStyle::Inline);
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
             render();
         }
@@ -1369,7 +1381,8 @@ struct TaskbarHost::Impl {
         const bool mediaChanged = updateMediaInfo(frame.media);
         const bool popupAvailable = mediaPopupAvailable(frame.visible);
         mediaPopup.setIdleContent(frame.idle, popupAvailable);
-        mediaPopup.setPresentationMode(frame.scene, popupAvailable);
+        mediaPopup.setPresentationMode(frame.scene, popupAvailable,
+                                       hoverControlStyle_ == HoverControlStyle::Inline);
         mediaPopup.setMedia(frame.media, popupAvailable, songChanged);
         mediaPopup.setProgress(frame.actualPositionMs);
 
@@ -4114,7 +4127,8 @@ struct TaskbarHost::Impl {
         const bool popupAvailable = mediaPopupAvailable(sessionVisible_);
         mediaPopup.setIdleContent(idle, popupAvailable);
         mediaPopup.setMedia(media, popupAvailable);
-        mediaPopup.setPresentationMode(scene_, popupAvailable);
+        mediaPopup.setPresentationMode(scene_, popupAvailable,
+                                       hoverControlStyle_ == HoverControlStyle::Inline);
         syncMediaPopupEnabled();
         if (isMinimalMode()) {
             // 极简仍保留歌词和方形封面，因此不释放主任务栏渲染器；只清掉附加背景链和媒体卡片。
@@ -4392,7 +4406,9 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     const bool popupAvailable = impl_->mediaPopupAvailable(impl_->sessionVisible_);
     impl_->mediaPopup.setIdleContent(impl_->idle, popupAvailable);
     impl_->mediaPopup.setMedia(info, popupAvailable);
-    impl_->mediaPopup.setPresentationMode(impl_->scene_, popupAvailable);
+    impl_->mediaPopup.setPresentationMode(
+        impl_->scene_, popupAvailable,
+        impl_->hoverControlStyle_ == HoverControlStyle::Inline);
     impl_->mediaPopup.setProgress(impl_->positionMs_);
     if (impl_->updateMediaInfo(info))
         impl_->render();
