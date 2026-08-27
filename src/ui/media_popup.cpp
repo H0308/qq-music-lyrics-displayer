@@ -31,6 +31,7 @@ constexpr UINT_PTR kScrollTimer = 4;
 constexpr UINT_PTR kEnterTimer = 5;
 constexpr UINT_PTR kVolumeTimer = 6;
 constexpr UINT_PTR kIdleQuickExpandTimer = 7;
+constexpr UINT_PTR kCategoryTimer = 8;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
@@ -43,6 +44,9 @@ constexpr float kIdleQuickExpandMs = 160.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
+// 页面滑动转场只有 240ms，按 32ms 驱动只有 7-8 帧，肉眼明显卡顿；
+// 转场期间改用 16ms（60fps 级别），由 updateScrollTimer 按驱动目的切换间隔。
+constexpr UINT kTransitionFrameMs = 16;
 // 音量滑块展开/收起过渡时长
 constexpr float kVolumeSliderMs = 140.0f;
 
@@ -241,14 +245,17 @@ struct MediaPopup::Impl {
     bool sourceIconDirty = true;
     bool textDirty = true;
     bool scrollTimerRunning = false;
+    UINT scrollTimerInterval = 0; // kScrollTimer 当前实际间隔，用于按驱动目的切换帧率
     bool clientAnimations = true;
     bool songTransitionPending = false;
     bool categoryTransitionActive = false;
     PopupPage categoryTransitionFrom = PopupPage::Media;
     IdlePresentation categoryTransitionIdle;
     OverlayMediaInfo categoryTransitionMedia;
-    ULONGLONG categoryTransitionStartMs = 0;
     int categoryTransitionDirection = 1;
+    // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
+    // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
+    bool categoryLayersActive = false;
     // 卡片高度变化时，旧卡片和新卡片的屏幕位置可能不同。这个区域只用于
     // 转场后的鼠标连续性判断，不参与绘制，也不会扩大媒体卡片的可见外观。
     bool categoryHoverEnvelopeActive = false;
@@ -385,19 +392,6 @@ struct MediaPopup::Impl {
         // 复制按钮已经移到标题行，与返回按钮并排；正文可以使用完整宽度，
         // 文本滚动区域必须与实际绘制区域保持一致。
         return std::max(1.0f, kPopupWidthDip - 32.0f);
-    }
-
-    float categoryTransitionProgress() const {
-        if (!categoryTransitionActive || categoryTransitionStartMs == 0)
-            return 1.0f;
-        const ULONGLONG now = GetTickCount64();
-        const float linear = std::clamp(
-            static_cast<float>(now >= categoryTransitionStartMs
-                                   ? now - categoryTransitionStartMs
-                                   : 0) /
-                kCategoryTransitionMs,
-            0.0f, 1.0f);
-        return linear * linear * (3.0f - 2.0f * linear);
     }
 
     float idleContentTransitionProgress() const {
@@ -568,12 +562,26 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kVolumeTimer);
         KillTimer(hwnd, kIdleQuickExpandTimer);
+        KillTimer(hwnd, kCategoryTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
     }
 
+    // 结束页面互切转场：撤掉 DComp 合成层并停掉收尾定时器。
+    // 多次调用安全；随后的一次 render()/present() 会把层的移除一并提交。
+    void stopCategoryTransition() {
+        categoryTransitionActive = false;
+        if (categoryLayersActive) {
+            categoryLayersActive = false;
+            renderer.clearLyricTransitionLayers();
+        }
+        if (hwnd)
+            KillTimer(hwnd, kCategoryTimer);
+    }
+
     void releaseDrawingResources() {
+        stopCategoryTransition();
         preserveBackdropOnNextResourceCreate = false;
         releaseVisualResources();
         renderer.discard();
@@ -947,7 +955,7 @@ struct MediaPopup::Impl {
             artistScrollOffset = 0.0f;
             idleQuoteScrollOffset = 0.0f;
             scrollTickMs = 0;
-            categoryTransitionActive = false;
+            stopCategoryTransition();
             categoryHoverEnvelopeActive = false;
             categoryHoverEnvelope = {};
             idleContentTransitionActive = false;
@@ -1099,22 +1107,31 @@ struct MediaPopup::Impl {
         const float idleAreaWidth = idleQuoteAreaWidth();
         const bool idleOverflow = idleQuoteWidth > idleAreaWidth;
         const bool mediaOverflow = titleWidth > areaWidth || artistWidth > areaWidth;
+        const bool transitionDriving = idleContentTransitionActive;
         const bool shouldRun = popupVisible && !entering && !closing && enabled &&
                                clientAnimations &&
-                               (categoryTransitionActive || idleContentTransitionActive ||
+                               (transitionDriving ||
                                 (idleMode && idleOverflow) ||
                                 (!idleMode && available && media.playing && mediaOverflow));
         if (shouldRun) {
-            if (!scrollTimerRunning) {
+            // 短转场由这个定时器逐帧驱动，需要 60fps 级别才平滑；
+            // 纯文本跑马灯保持 32ms 即可。驱动目的变化时按新间隔重建定时器。
+            // （卡片 ⇄ 空闲面板的互切转场由 DComp 合成层执行，不走这里。）
+            const UINT interval = transitionDriving ? kTransitionFrameMs : kScrollTimerMs;
+            if (!scrollTimerRunning || scrollTimerInterval != interval) {
+                if (scrollTimerRunning)
+                    KillTimer(hwnd, kScrollTimer);
                 scrollTickMs = GetTickCount64();
-                SetTimer(hwnd, kScrollTimer, kScrollTimerMs, nullptr);
+                SetTimer(hwnd, kScrollTimer, interval, nullptr);
                 scrollTimerRunning = true;
+                scrollTimerInterval = interval;
             }
             return;
         }
         if (scrollTimerRunning) {
             KillTimer(hwnd, kScrollTimer);
             scrollTimerRunning = false;
+            scrollTimerInterval = 0;
         }
         if (!idleMode || !idleOverflow || !clientAnimations)
             idleQuoteScrollOffset = 0.0f;
@@ -1915,32 +1932,53 @@ struct MediaPopup::Impl {
     }
 
     void drawCategoryContent(ID2D1DeviceContext* rt, float w, float cardH) {
-        if (!categoryTransitionActive) {
-            drawPageLayer(rt, w, currentPage(), false, true);
+        // 页面互切期间，两页内容承载在两个 DComp 合成层上，横向滑动由合成器
+        // 按刷新率执行（BeginDraw 前统一启动）；交换链只保留卡片底，不重复
+        // 绘制内容，UI 线程不再逐帧重绘。
+        if (categoryTransitionActive)
             return;
+        drawPageLayer(rt, w, currentPage(), false, true);
+    }
+
+    // 把旧页快照和新页内容分别画进两个 DComp 合成层并启动横向位移动画。
+    // 必须在 createResources/文本布局/封面与图标解码之后调用，保证两页都按
+    // 最新画笔和内容绘制。失败返回 false，调用方直接呈现最终页。
+    bool startCategoryLayerTransition(float w) {
+        if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0 ||
+            !renderer.ensureLyricTransitionLayers(cardWidthPx, cardHeightPx))
+            return false;
+
+        struct LayerJob {
+            int index;
+            PopupPage page;
+            bool oldLayer;
+        };
+        const LayerJob jobs[2] = {
+            {0, categoryTransitionFrom, true},
+            {1, currentPage(), false},
+        };
+        for (const auto& job : jobs) {
+            auto* dc = renderer.beginLyricLayerDraw(job.index);
+            if (!dc)
+                return false;
+            drawPageLayer(dc, w, job.page, job.oldLayer, false);
+            if (!renderer.endLyricLayerDraw(job.index, dc))
+                return false;
         }
 
-        const float progress = categoryTransitionProgress();
-        if (progress >= 1.0f) {
-            categoryTransitionActive = false;
-            drawPageLayer(rt, w, currentPage(), false, true);
-            refreshPopupHoverAfterTransition();
-            return;
-        }
-
-        const float travel = w;
-        const float oldOffset = -static_cast<float>(categoryTransitionDirection) * travel * progress;
-        const float newOffset = static_cast<float>(categoryTransitionDirection) * travel *
-                                (1.0f - progress);
-        const D2D1_MATRIX_3X2_F base = D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip);
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, cardH),
-                                 D2D1_ANTIALIAS_MODE_ALIASED);
-        rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
-        drawPageLayer(rt, w, categoryTransitionFrom, true, false);
-        rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
-        drawPageLayer(rt, w, currentPage(), false, false);
-        rt->SetTransform(base);
-        rt->PopAxisAlignedClip();
+        const float travel = static_cast<float>(cardWidthPx);
+        const float baseY = cardOriginDip * scale();
+        const float dir = static_cast<float>(categoryTransitionDirection);
+        const float durationSec = kCategoryTransitionMs / 1000.0f;
+        if (!renderer.animateLyricLayerX(0, 0.0f, -dir * travel, baseY, durationSec) ||
+            !renderer.animateLyricLayerX(1, dir * travel, 0.0f, baseY, durationSec))
+            return false;
+        categoryLayersActive = true;
+        // 合成器动画在 kCategoryTransitionMs 后停在终点；定时器稍加余量收尾：
+        // 撤层并画一帧正常内容。余量内层已静止在终点，交接无跳变。
+        SetTimer(hwnd, kCategoryTimer, static_cast<UINT>(kCategoryTransitionMs) + 32,
+                 nullptr);
+        return true;
     }
 
     bool render() {
@@ -1990,6 +2028,14 @@ struct MediaPopup::Impl {
                                      w * 0.5f + 20.0f, cardOriginDip + 202.0f);
         buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, cardOriginDip + 164.0f,
                                      w * 0.5f + 102.0f, cardOriginDip + 200.0f);
+
+        // 页面互切：先把两页内容装入 DComp 合成层并启动横向位移动画。放在
+        // BeginDraw 之前：若装层失败，stopCategoryTransition 后本帧仍按正常
+        // 页面绘制内容，不会输出只含卡片底的空内容帧。present() 时层与卡片底
+        // 同帧提交，不会闪空帧。
+        if (categoryTransitionActive && !categoryLayersActive &&
+            !startCategoryLayerTransition(w))
+            stopCategoryTransition();
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -2175,6 +2221,9 @@ struct MediaPopup::Impl {
 
         categoryHoverEnvelopeActive = false;
         categoryHoverEnvelope = {};
+        // 打断可能仍在进行的转场：撤掉旧合成层；若本次也需要转场，接下来的
+        // render() 会在同一帧内换上新层，不会闪空帧。
+        stopCategoryTransition();
         categoryTransitionActive = popupVisible && clientAnimations && !entering && !closing;
         if (categoryTransitionActive) {
             categoryTransitionFrom = from;
@@ -2182,10 +2231,7 @@ struct MediaPopup::Impl {
                                          ? idleContentTransitionFrom
                                          : idle;
             categoryTransitionMedia = media;
-            categoryTransitionStartMs = GetTickCount64();
             categoryTransitionDirection = categoryDirection(from, target);
-        } else {
-            categoryTransitionStartMs = 0;
         }
         idleContentTransitionActive = false;
         idleScrollOffset = 0.0f;
@@ -2552,7 +2598,7 @@ struct MediaPopup::Impl {
         idlePanelManual = false;
         popupVisible = false;
         closing = false;
-        categoryTransitionActive = false;
+        stopCategoryTransition();
         categoryHoverEnvelopeActive = false;
         categoryHoverEnvelope = {};
         idleContentTransitionActive = false;
@@ -2929,6 +2975,16 @@ struct MediaPopup::Impl {
                 advanceVolumeSlider();
             } else if (wp == kIdleQuickExpandTimer) {
                 advanceIdleQuickExpand();
+            } else if (wp == kCategoryTimer) {
+                // 合成器动画已到终点并静止：撤掉合成层，画一帧正常页面完成交接。
+                KillTimer(hwnd, kCategoryTimer);
+                if (categoryTransitionActive) {
+                    stopCategoryTransition();
+                    if (popupVisible && !entering && !closing) {
+                        render();
+                        refreshPopupHoverAfterTransition();
+                    }
+                }
             }
             return 0;
         case WM_DPICHANGED:

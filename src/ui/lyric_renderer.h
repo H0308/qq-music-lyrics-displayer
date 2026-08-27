@@ -94,6 +94,10 @@ public:
     bool endLyricLayerDraw(int index, ID2D1DeviceContext* dc);
     bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
                            float toOpacity, float durationSec);
+    // 页面横向滑动转场（媒体卡片 ⇄ 空闲面板）：内容已画入层，只让合成器
+    // 按刷新率做 X 位移；层定位在 (0, baseY)，透明度保持不透明。
+    bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
+                            float durationSec);
     void clearLyricTransitionLayers();
     // 弹出式宿主的根视觉动画：只改变合成器位移和透明度，不触发布局。
     bool animateRoot(float fromX, float toX, float fromY, float toY,

@@ -613,6 +613,31 @@ void DCompRenderer::clearLyricTransitionLayers() {
     releaseLyricTransitionLayers();
 }
 
+bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float baseY,
+                                       float durationSec) {
+    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+        !lyricLayers_[index].opacity || durationSec <= 0.0f)
+        return false;
+
+    const double duration = static_cast<double>(durationSec);
+    IDCompositionAnimation* offsetAnim = nullptr;
+    HRESULT hr = dcomp_->CreateAnimation(&offsetAnim);
+    if (SUCCEEDED(hr))
+        hr = addSmoothStep(offsetAnim, 0.0, duration, fromX, toX) ? S_OK : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = offsetAnim->End(duration, toX);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].visual->SetOffsetX(offsetAnim);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].visual->SetOffsetY(baseY);
+    if (SUCCEEDED(hr))
+        hr = lyricLayers_[index].opacity->SetOpacity(1.0f);
+
+    if (offsetAnim)
+        offsetAnim->Release();
+    return SUCCEEDED(hr);
+}
+
 bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
                                 float fromOpacity, float toOpacity, float durationSec) {
     if (!dcomp_ || !visual_ || !rootOpacity_ || durationSec <= 0.0f)
