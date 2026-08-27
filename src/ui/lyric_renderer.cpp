@@ -460,12 +460,17 @@ void DCompRenderer::releaseLyricTransitionLayers() {
         if (layer.visual) {
             layer.visual->SetContent(nullptr);
             layer.visual->SetEffect(nullptr);
+            layer.visual->SetClip(nullptr);
             layer.visual->Release();
             layer.visual = nullptr;
         }
         if (layer.opacity) {
             layer.opacity->Release();
             layer.opacity = nullptr;
+        }
+        if (layer.clip) {
+            layer.clip->Release();
+            layer.clip = nullptr;
         }
         if (layer.surface) {
             layer.surface->Release();
@@ -476,25 +481,53 @@ void DCompRenderer::releaseLyricTransitionLayers() {
     }
 }
 
-bool DCompRenderer::ensureLyricTransitionLayers(int width, int height) {
-    if (!dcomp_ || !visual_ || width <= 0 || height <= 0)
+bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+                                                int height1) {
+    if (!dcomp_ || !visual_ || width0 <= 0 || height0 <= 0 || width1 <= 0 || height1 <= 0)
         return false;
+    const int widths[2] = {width0, width1};
+    const int heights[2] = {height0, height1};
     if (lyricLayers_[0].surface && lyricLayers_[1].surface &&
-        lyricLayers_[0].width == width && lyricLayers_[0].height == height)
+        lyricLayers_[0].width == width0 && lyricLayers_[0].height == height0 &&
+        lyricLayers_[1].width == width1 && lyricLayers_[1].height == height1) {
+        // 复用已有层：裁剪可能被上一次覆盖动画改过，统一重置为整层可见。
+        for (int i = 0; i < 2; ++i) {
+            auto& layer = lyricLayers_[i];
+            if (layer.clip) {
+                layer.clip->SetLeft(0.0f);
+                layer.clip->SetTop(0.0f);
+                layer.clip->SetRight(static_cast<float>(widths[i]));
+                layer.clip->SetBottom(static_cast<float>(heights[i]));
+            }
+        }
         return true;
+    }
 
     releaseLyricTransitionLayers();
     for (int i = 0; i < 2; ++i) {
         auto& layer = lyricLayers_[i];
         HRESULT hr = dcomp_->CreateVisual(&layer.visual);
         if (SUCCEEDED(hr))
-            hr = dcomp_->CreateSurface(static_cast<UINT>(width), static_cast<UINT>(height),
+            hr = dcomp_->CreateSurface(static_cast<UINT>(widths[i]),
+                                       static_cast<UINT>(heights[i]),
                                        DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED,
                                        &layer.surface);
         if (SUCCEEDED(hr))
             hr = dcomp_->CreateEffectGroup(&layer.opacity);
         if (SUCCEEDED(hr))
             hr = layer.opacity->SetOpacity(0.0f);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateRectangleClip(&layer.clip);
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetLeft(0.0f);
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetTop(0.0f);
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetRight(static_cast<float>(widths[i]));
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetBottom(static_cast<float>(heights[i]));
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetClip(layer.clip);
         if (SUCCEEDED(hr))
             hr = layer.visual->SetContent(layer.surface);
         if (SUCCEEDED(hr))
@@ -509,8 +542,8 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width, int height) {
             releaseLyricTransitionLayers();
             return false;
         }
-        layer.width = width;
-        layer.height = height;
+        layer.width = widths[i];
+        layer.height = heights[i];
     }
     return true;
 }
@@ -635,6 +668,61 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
 
     if (offsetAnim)
         offsetAnim->Release();
+    return SUCCEEDED(hr);
+}
+
+bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float fromY,
+                                               float toY, float clipFromBottom,
+                                               float clipToBottom, float durationSec) {
+    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+        !lyricLayers_[index].opacity || !lyricLayers_[index].clip || durationSec <= 0.0f)
+        return false;
+
+    auto& layer = lyricLayers_[index];
+    const double duration = static_cast<double>(durationSec);
+    HRESULT hr = layer.visual->SetOffsetX(offsetX);
+    if (fromY == toY) {
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetOffsetY(toY);
+    } else {
+        IDCompositionAnimation* offsetAnim = nullptr;
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateAnimation(&offsetAnim);
+        if (SUCCEEDED(hr))
+            hr = addSmoothStep(offsetAnim, 0.0, duration, fromY, toY) ? S_OK : E_FAIL;
+        if (SUCCEEDED(hr))
+            hr = offsetAnim->End(duration, toY);
+        if (SUCCEEDED(hr))
+            hr = layer.visual->SetOffsetY(offsetAnim);
+        if (offsetAnim)
+            offsetAnim->Release();
+    }
+    if (SUCCEEDED(hr))
+        hr = layer.clip->SetLeft(0.0f);
+    if (SUCCEEDED(hr))
+        hr = layer.clip->SetTop(0.0f);
+    if (SUCCEEDED(hr))
+        hr = layer.clip->SetRight(static_cast<float>(layer.width));
+    if (clipFromBottom == clipToBottom) {
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetBottom(clipToBottom);
+    } else {
+        IDCompositionAnimation* clipAnim = nullptr;
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateAnimation(&clipAnim);
+        if (SUCCEEDED(hr))
+            hr = addSmoothStep(clipAnim, 0.0, duration, clipFromBottom, clipToBottom)
+                     ? S_OK
+                     : E_FAIL;
+        if (SUCCEEDED(hr))
+            hr = clipAnim->End(duration, clipToBottom);
+        if (SUCCEEDED(hr))
+            hr = layer.clip->SetBottom(clipAnim);
+        if (clipAnim)
+            clipAnim->Release();
+    }
+    if (SUCCEEDED(hr))
+        hr = layer.opacity->SetOpacity(1.0f);
     return SUCCEEDED(hr);
 }
 

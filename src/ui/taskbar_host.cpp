@@ -3798,7 +3798,7 @@ struct TaskbarHost::Impl {
         if (useDoubleLineLyrics() || !lyricTransitionActive_ || !outgoingLyricLayout_ ||
             !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
-        if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_))
+        if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_, lastPxW_, lastPxH_))
             return false;
 
         if (ID2D1DeviceContext* dc = renderer.beginLyricLayerDraw(0)) {

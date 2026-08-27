@@ -88,8 +88,8 @@ public:
     void discard();
 
     // 单行歌词转场用的两个临时合成层（旧行/新行），内容只在转场开始时绘制一次，
-    // 位移和透明度由 DirectComposition 按刷新率执行。
-    bool ensureLyricTransitionLayers(int width, int height);
+    // 位移和透明度由 DirectComposition 按刷新率执行。两层可指定不同尺寸。
+    bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1);
     ID2D1DeviceContext* beginLyricLayerDraw(int index);
     bool endLyricLayerDraw(int index, ID2D1DeviceContext* dc);
     bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
@@ -98,6 +98,11 @@ public:
     // 按刷新率做 X 位移；层定位在 (0, baseY)，透明度保持不透明。
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
                             float durationSec);
+    // 区域覆盖动画（快速打开展开/收起）：层固定在 (offsetX, fromY→toY)，
+    // 同时矩形裁剪底边从 clipFromBottom 动画到 clipToBottom（像素，层内坐标）。
+    bool animateLyricLayerClipSlide(int index, float offsetX, float fromY, float toY,
+                                    float clipFromBottom, float clipToBottom,
+                                    float durationSec);
     void clearLyricTransitionLayers();
     // 弹出式宿主的根视觉动画：只改变合成器位移和透明度，不触发布局。
     bool animateRoot(float fromX, float toX, float fromY, float toY,
@@ -113,6 +118,7 @@ private:
         IDCompositionVisual* visual = nullptr;
         IDCompositionSurface* surface = nullptr;
         IDCompositionEffectGroup* opacity = nullptr;
+        IDCompositionRectangleClip* clip = nullptr;
         int width = 0;
         int height = 0;
     };

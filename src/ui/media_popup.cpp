@@ -256,6 +256,10 @@ struct MediaPopup::Impl {
     // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
     // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
     bool categoryLayersActive = false;
+    // 快速打开展开/收起是否正由 DComp 合成层呈现（一言区 + 快速打开区两层，
+    // 位移与裁剪由合成器执行）；进行中交换链不再绘制空闲页内容。
+    bool quickExpandTransitionActive = false;
+    bool quickExpandLayersBuilt = false;
     // 卡片高度变化时，旧卡片和新卡片的屏幕位置可能不同。这个区域只用于
     // 转场后的鼠标连续性判断，不参与绘制，也不会扩大媒体卡片的可见外观。
     bool categoryHoverEnvelopeActive = false;
@@ -580,8 +584,22 @@ struct MediaPopup::Impl {
             KillTimer(hwnd, kCategoryTimer);
     }
 
+    // 结束快速打开展开/收起转场：撤掉 DComp 合成层并停掉收尾定时器。
+    // 与页面互切转场共用同一对合成层，两者不会同时激活（切换按钮在
+    // 页面互切期间禁点，setPage 也会先停掉本转场）。
+    void stopQuickExpandTransition() {
+        quickExpandTransitionActive = false;
+        if (quickExpandLayersBuilt) {
+            quickExpandLayersBuilt = false;
+            renderer.clearLyricTransitionLayers();
+        }
+        if (hwnd)
+            KillTimer(hwnd, kIdleQuickExpandTimer);
+    }
+
     void releaseDrawingResources() {
         stopCategoryTransition();
+        stopQuickExpandTransition();
         preserveBackdropOnNextResourceCreate = false;
         releaseVisualResources();
         renderer.discard();
@@ -961,8 +979,7 @@ struct MediaPopup::Impl {
             idleContentTransitionActive = false;
             idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
             idleQuickExpandOpening = false;
-            if (hwnd)
-                KillTimer(hwnd, kIdleQuickExpandTimer);
+            stopQuickExpandTransition();
         }
     }
 
@@ -1937,6 +1954,12 @@ struct MediaPopup::Impl {
         // 绘制内容，UI 线程不再逐帧重绘。
         if (categoryTransitionActive)
             return;
+        // 快速打开展开/收起期间，一言区与快速打开区承载在两个 DComp 合成层上，
+        // 交换链只画卡片底与返回箭头，不重复绘制空闲页内容。
+        if (quickExpandTransitionActive && currentPage() == PopupPage::Idle) {
+            drawPageArrow(rt, w, PopupPage::Idle, false);
+            return;
+        }
         drawPageLayer(rt, w, currentPage(), false, true);
     }
 
@@ -1945,7 +1968,8 @@ struct MediaPopup::Impl {
     // 最新画笔和内容绘制。失败返回 false，调用方直接呈现最终页。
     bool startCategoryLayerTransition(float w) {
         if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0 ||
-            !renderer.ensureLyricTransitionLayers(cardWidthPx, cardHeightPx))
+            !renderer.ensureLyricTransitionLayers(cardWidthPx, cardHeightPx, cardWidthPx,
+                                                  cardHeightPx))
             return false;
 
         struct LayerJob {
@@ -1978,6 +2002,120 @@ struct MediaPopup::Impl {
         // 撤层并画一帧正常内容。余量内层已静止在终点，交接无跳变。
         SetTimer(hwnd, kCategoryTimer, static_cast<UINT>(kCategoryTransitionMs) + 32,
                  nullptr);
+        return true;
+    }
+
+    // 快速打开展开/收起：把一言区（含分隔线）和展开态的快速打开区分别画进
+    // 两个 DComp 合成层。快速打开区整体上滑/下滑（OffsetY 动画），列表视口
+    // 高度收放（层内矩形裁剪底边动画——推导后可证该底边在层内坐标系中与
+    // 位移无关，直接按两个端点值插值）；一言区原地不动，由裁剪底边扫过
+    // 模拟被覆盖/显露。几何与 drawIdle 的逐帧版本在两个端点完全一致。
+    bool startQuickExpandLayerTransition(float w) {
+        if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0)
+            return false;
+
+        const float s = scale();
+        const bool opening = idleQuickExpanded;
+        const float quoteTop = 40.0f;
+        const float sourceTop = quoteTop + idleUnitHeight(idle, true) + 8.0f;
+        const float collapsedHeaderTop = sourceTop + 30.0f;
+        const float expandedHeaderTop = kIdleQuickExpandedTopDip;
+        const float delta = std::max(0.0f, collapsedHeaderTop - expandedHeaderTop);
+        const float expandedButtonTop = idleQuickExpandButtonTop(expandedHeaderTop);
+        const float collapsedButtonTop = idleQuickExpandButtonTop(collapsedHeaderTop);
+        // 层 1（快速打开区）原点对齐展开态按钮顶；按钮与标题同体平移
+        const float quickOriginY = expandedButtonTop;
+
+        const float expandedListTop =
+            std::max(expandedHeaderTop + 16.0f + kIdleListGapDip,
+                     expandedButtonTop + 32.0f + kIdleListGapDip);
+        const float collapsedListTop =
+            std::max(collapsedHeaderTop + 16.0f + kIdleListGapDip,
+                     collapsedButtonTop + 32.0f + kIdleListGapDip);
+        auto availableHeight = [&](float listTop) {
+            return std::max(0.0f, kIdlePopupHeightDip - listTop -
+                                      kIdleListBottomPaddingDip);
+        };
+        const float expandedListHeight =
+            std::min(kIdleListExpandedHeightDip, availableHeight(expandedListTop));
+        const float collapsedListHeight =
+            std::min(kIdleListHeightDip, availableHeight(collapsedListTop));
+        // 层内坐标（原点 = 卡片 y=quickOriginY）的列表可见底边端点
+        const float clipBottomExpanded =
+            (expandedListTop - quickOriginY) + expandedListHeight;
+        const float clipBottomCollapsed =
+            (expandedListTop - quickOriginY) + collapsedListHeight;
+
+        const int layer0W = cardWidthPx;
+        const int layer0H = static_cast<int>(std::lround(collapsedButtonTop * s)) + 1;
+        const int layer1W = cardWidthPx;
+        const int layer1H = static_cast<int>(std::lround(clipBottomExpanded * s)) + 1;
+        if (!renderer.ensureLyricTransitionLayers(layer0W, layer0H, layer1W, layer1H))
+            return false;
+
+        // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
+        // 被隐藏/显露（与原逐帧版本的淡出/淡入近似，端点一致）。
+        if (auto* dc = renderer.beginLyricLayerDraw(0)) {
+            drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
+                     D2D1::RectF(16.0f, 14.0f, w - 16.0f, 36.0f), brushText);
+            drawIdleQuoteUnit(dc, w, idle, true);
+            drawIdleCopyButton(dc, w, idle, false);
+            if (brushProgressTrack) {
+                const float dividerTop = collapsedButtonTop - 4.0f;
+                dc->FillRectangle(
+                    D2D1::RectF(16.0f, dividerTop, w - 16.0f, dividerTop + 1.0f),
+                    brushProgressTrack);
+            }
+            if (!renderer.endLyricLayerDraw(0, dc))
+                return false;
+        } else {
+            return false;
+        }
+
+        // 层 1：快速打开区，按展开态完整绘制（列表布局依赖展开进度，临时固定
+        // 为展开态；收起过程的收缩由合成层裁剪动画完成）。层原点 =
+        // 卡片 y=quickOriginY，用平移变换把卡片坐标映射进层内坐标。
+        if (auto* dc = renderer.beginLyricLayerDraw(1)) {
+            const float savedT = idleQuickExpandT;
+            idleQuickExpandT = 1.0f;
+            // 保留 BeginDraw 的表面更新偏移，在其上叠加层原点平移
+            D2D1_MATRIX_3X2_F baseTransform;
+            dc->GetTransform(&baseTransform);
+            dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -quickOriginY) *
+                             baseTransform);
+            drawIdleQuickExpandButton(dc, expandedHeaderTop, idle, false);
+            const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(expandedHeaderTop);
+            const float quickHeaderRight = idle.quickStartEnabled
+                                               ? expandButton.left - 8.0f
+                                               : w - 16.0f;
+            drawText(dc, L"快速打开", fmtIdleHeader,
+                     D2D1::RectF(16.0f, expandedHeaderTop, quickHeaderRight,
+                                 expandedHeaderTop + 16.0f),
+                     brushSecondary);
+            drawIdleQuickList(dc, w, expandedListTop, idle);
+            idleQuickExpandT = savedT;
+            if (!renderer.endLyricLayerDraw(1, dc))
+                return false;
+        } else {
+            return false;
+        }
+
+        const float quoteBaseY = cardOriginDip * s;
+        const float quickBaseY = (cardOriginDip + quickOriginY) * s;
+        const float travelPx = delta * s;
+        const float durationSec = kIdleQuickExpandMs / 1000.0f;
+        if (!renderer.animateLyricLayerClipSlide(
+                0, 0.0f, quoteBaseY, quoteBaseY,
+                (opening ? collapsedButtonTop : expandedButtonTop) * s,
+                (opening ? expandedButtonTop : collapsedButtonTop) * s, durationSec))
+            return false;
+        if (!renderer.animateLyricLayerClipSlide(
+                1, 0.0f, opening ? quickBaseY + travelPx : quickBaseY,
+                opening ? quickBaseY : quickBaseY + travelPx,
+                (opening ? clipBottomCollapsed : clipBottomExpanded) * s,
+                (opening ? clipBottomExpanded : clipBottomCollapsed) * s, durationSec))
+            return false;
+        quickExpandLayersBuilt = true;
         return true;
     }
 
@@ -2036,6 +2174,10 @@ struct MediaPopup::Impl {
         if (categoryTransitionActive && !categoryLayersActive &&
             !startCategoryLayerTransition(w))
             stopCategoryTransition();
+        // 快速打开展开/收起：同理，装层失败则本帧直接呈现目标状态。
+        if (quickExpandTransitionActive && !quickExpandLayersBuilt &&
+            !startQuickExpandLayerTransition(w))
+            stopQuickExpandTransition();
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -2246,8 +2388,7 @@ struct MediaPopup::Impl {
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
         idleQuickExpandRect = {};
-        if (hwnd)
-            KillTimer(hwnd, kIdleQuickExpandTimer);
+        stopQuickExpandTransition();
         idleMode = target != PopupPage::Media;
         // 页面互切只需要按新的页面状态重建画笔、文本和内容位图；保留
         // DirectComposition 的交换链与视觉树，避免切换期间出现透明空帧闪烁。
@@ -2373,34 +2514,23 @@ struct MediaPopup::Impl {
     void toggleIdleQuickExpand() {
         if (!hwnd || !idleMode || !idle.quickStartEnabled)
             return;
+        // 上一次层动画还在进行时再次点击：合成器动画无法中途取值反向，
+        // 直接停掉（瞬时落到当前目标状态），再从新目标重新起步。
+        if (quickExpandTransitionActive)
+            stopQuickExpandTransition();
         idleQuickExpanded = !idleQuickExpanded;
-        if (!clientAnimations) {
-            idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
-            idleQuickExpandOpening = false;
+        idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
+        idleQuickExpandOpening = false;
+        if (!clientAnimations || !popupVisible || entering || closing) {
             KillTimer(hwnd, kIdleQuickExpandTimer);
             renderOrDefer();
             return;
         }
-        idleQuickExpandOpening = idleQuickExpanded;
-        SetTimer(hwnd, kIdleQuickExpandTimer, 16, nullptr);
-        renderOrDefer();
-    }
-
-    void advanceIdleQuickExpand() {
-        if (entering || closing || !popupVisible || !idleMode ||
-            !idle.quickStartEnabled) {
-            KillTimer(hwnd, kIdleQuickExpandTimer);
-            return;
-        }
-        const float step = 16.0f / kIdleQuickExpandMs;
-        idleQuickExpandT += idleQuickExpandOpening ? step : -step;
-        if (idleQuickExpandT >= 1.0f) {
-            idleQuickExpandT = 1.0f;
-            KillTimer(hwnd, kIdleQuickExpandTimer);
-        } else if (idleQuickExpandT <= 0.0f) {
-            idleQuickExpandT = 0.0f;
-            KillTimer(hwnd, kIdleQuickExpandTimer);
-        }
+        // 展开/收起由 DComp 合成层执行（render() 里装层）；定时器在合成器
+        // 动画到达终点并静止后收尾：撤层并画一帧正常内容完成交接。
+        quickExpandTransitionActive = true;
+        SetTimer(hwnd, kIdleQuickExpandTimer,
+                 static_cast<UINT>(kIdleQuickExpandMs) + 32, nullptr);
         render();
     }
 
@@ -2474,7 +2604,8 @@ struct MediaPopup::Impl {
     }
 
     void scheduleHide() {
-        if (!hwnd || !popupVisible || anchorHover || popupHover || categoryTransitionActive)
+        if (!hwnd || !popupVisible || anchorHover || popupHover ||
+            categoryTransitionActive || quickExpandTransitionActive)
             return;
         KillTimer(hwnd, kShowTimer);
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
@@ -2528,7 +2659,8 @@ struct MediaPopup::Impl {
     }
 
     void hideAnimated() {
-        if (!popupVisible || closing || categoryTransitionActive)
+        if (!popupVisible || closing || categoryTransitionActive ||
+            quickExpandTransitionActive)
             return;
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kEnterTimer);
@@ -2599,6 +2731,7 @@ struct MediaPopup::Impl {
         popupVisible = false;
         closing = false;
         stopCategoryTransition();
+        stopQuickExpandTransition();
         categoryHoverEnvelopeActive = false;
         categoryHoverEnvelope = {};
         idleContentTransitionActive = false;
@@ -2926,7 +3059,7 @@ struct MediaPopup::Impl {
                     showPopup();
             } else if (wp == kHideTimer) {
                 KillTimer(hwnd, kHideTimer);
-                if (categoryTransitionActive)
+                if (categoryTransitionActive || quickExpandTransitionActive)
                     return 0;
                 if (categoryHoverEnvelopeActive) {
                     if (cursorInsidePopupCard()) {
@@ -2974,7 +3107,16 @@ struct MediaPopup::Impl {
                 }
                 advanceVolumeSlider();
             } else if (wp == kIdleQuickExpandTimer) {
-                advanceIdleQuickExpand();
+                // 快速打开展开/收起的合成器动画已到终点并静止：
+                // 撤掉合成层，画一帧正常页面完成交接。
+                KillTimer(hwnd, kIdleQuickExpandTimer);
+                if (quickExpandTransitionActive) {
+                    stopQuickExpandTransition();
+                    if (popupVisible && !entering && !closing) {
+                        render();
+                        refreshPopupHoverAfterTransition();
+                    }
+                }
             } else if (wp == kCategoryTimer) {
                 // 合成器动画已到终点并静止：撤掉合成层，画一帧正常页面完成交接。
                 KillTimer(hwnd, kCategoryTimer);
@@ -3358,8 +3500,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         impl_->idleQuickExpanded = false;
         impl_->idleQuickExpandOpening = false;
         impl_->idleQuickExpandT = 0.0f;
-        if (impl_->hwnd)
-            KillTimer(impl_->hwnd, kIdleQuickExpandTimer);
+        impl_->stopQuickExpandTransition();
     }
     if (changed) {
         if (quoteChanged) {
