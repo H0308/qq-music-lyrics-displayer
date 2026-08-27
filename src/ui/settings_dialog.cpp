@@ -72,6 +72,8 @@ constexpr int kIdIdleQuote = 454;
 constexpr int kIdIdleCardFollowAlbum = 455;
 constexpr int kIdIdleCardTriggerSync = 456;
 constexpr int kIdIdleCardTrigger = 457;
+constexpr int kIdIdleQuoteBackground = 458;
+constexpr int kIdIdleQuoteBackgroundScope = 459;
 constexpr int kIdContentScrollBar = 401;
 
 constexpr float kWindowW = 760.0f;
@@ -122,6 +124,9 @@ constexpr float kScrollWheelDip = 72.0f;
 constexpr float kIdleAppItemH = 52.0f;
 constexpr float kIdleAppsListTop = 76.0f;
 constexpr float kIdleAppsBaseH = 128.0f;
+constexpr float kIdleQuoteBackgroundCardH = 112.0f;
+constexpr float kIdleQuoteBackgroundCardGap = 8.0f;
+constexpr float kIdleQuoteBackgroundRowH = 324.0f;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
@@ -447,6 +452,10 @@ struct SettingsDialog::Impl {
             row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteAlignment))
             row->enabled = quoteEnabled;
+        if (auto* row = findRow(kIdIdleQuoteBackground))
+            row->enabled = !minimalModeActive();
+        if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
+            row->enabled = !minimalModeActive() && state.idleQuoteBackground != 0;
         updateIdleBackgroundRowsEnabled();
         if (auto* row = findRow(kIdIdleApps))
             row->enabled = !minimalModeActive() && state.idleEntryEnabled;
@@ -650,6 +659,20 @@ struct SettingsDialog::Impl {
         addSlider(0, kIdCoverBackgroundOpacity, L"封面背景不透明度",
                   state.coverBackgroundOpacity,
                   !minimal && state.taskbarBackground == 1);
+        addRadio(0, kIdIdleQuoteBackground, L"任务栏内容动态背景",
+                 L"选择任务栏动态背景效果；作用范围在下方单独设置，独立频谱容器和悬浮卡片不使用此效果，极简模式下暂时关闭。",
+                 {L"无", L"落叶", L"闪烁星星", L"二进制", L"流光粒子"},
+                 state.idleQuoteBackground,
+                 !minimal,
+                 kIdleQuoteBackgroundRowH);
+        addModeGrid(0, kIdIdleQuoteBackgroundScope, L"动态背景作用范围",
+                    L"选择动态背景显示在每日一言、歌词或两者；独立频谱容器和悬浮卡片不使用。",
+                    {L"都不启用", L"仅每日一言启用", L"仅歌词启用", L"都启用"},
+                    {L"不显示动态背景", L"只在每日一言时显示", L"只在播放歌词时显示",
+                     L"每日一言和歌词都显示"},
+                    state.idleQuoteBackgroundScope,
+                    !minimal && state.idleQuoteBackground != 0,
+                    kModeGridMinH);
         addToggle(kMediaPopupPage, kIdHoverControls, L"悬浮时显示播放控件",
                   state.hoverControls);
         addRadio(kMediaPopupPage, kIdHoverControlStyle, L"悬浮控件样式",
@@ -811,7 +834,14 @@ struct SettingsDialog::Impl {
             } else if (row.showHint && !row.hint.empty()) {
                 const float hintHeight = measureHintHeight(painter, row);
                 if (hintHeight > 0.0f) {
-                    if (row.id == kIdHoverControlStyle) {
+                    if (row.id == kIdIdleQuoteBackground) {
+                        const float gridH = kIdleQuoteBackgroundCardH * 2.0f +
+                                            kIdleQuoteBackgroundCardGap;
+                        requiredHeight = std::max(
+                            requiredHeight, kTitleTopPadding + titleHeight + kModeGridTopGap +
+                                                gridH + kModeGridNoteGap + hintHeight +
+                                                kHintBottomPadding);
+                    } else if (row.id == kIdHoverControlStyle) {
                         requiredHeight = std::max(
                             requiredHeight, kTitleTopPadding + titleHeight + kModeGridTopGap +
                                                 kHoverControlStyleCardH + kModeGridNoteGap +
@@ -933,6 +963,23 @@ struct SettingsDialog::Impl {
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
                 row.controlRect = D2D1::RectF(
                     innerX, gridTop, innerRight, gridTop + kCoverEffectCardH);
+                if (row.showHint) {
+                    const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
+                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                                              y + rowH - kHintBottomPadding);
+                }
+                y += rowH + kRowGap;
+                continue;
+            }
+            if (row.id == kIdIdleQuoteBackground) {
+                const float titleTop = y + kTitleTopPadding;
+                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                                            titleTop + row.titleHeight);
+
+                const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
+                const float gridH = kIdleQuoteBackgroundCardH * 2.0f +
+                                    kIdleQuoteBackgroundCardGap;
+                row.controlRect = D2D1::RectF(innerX, gridTop, innerRight, gridTop + gridH);
                 if (row.showHint) {
                     const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
                     row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
@@ -2004,6 +2051,335 @@ struct SettingsDialog::Impl {
         media_control::release(controls);
     }
 
+    void drawIdleQuoteBackgroundArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                        const D2D1_RECT_F& bounds, int style, bool enabled) {
+        auto* rt = painter.target();
+        if (!rt)
+            return;
+
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color) {
+            if (!enabled)
+                color.a *= 0.42f;
+            return color;
+        };
+        const auto withOpacity = [](D2D1_COLOR_F color, float opacity) {
+            color.a *= opacity;
+            return color;
+        };
+        const auto drawLine = [&](D2D1_COLOR_F color, D2D1_POINT_2F from,
+                                  D2D1_POINT_2F to, float stroke) {
+            if (auto* brush = painter.brush(tone(color)))
+                rt->DrawLine(from, to, brush, stroke);
+        };
+
+        const D2D1_RECT_F panel = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                             bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), panel, 8.0f);
+        painter.fillRoundRect(tone(withOpacity(p.accent, 0.055f)), panel, 8.0f);
+        painter.strokeRoundRect(tone(withOpacity(p.cardStroke, 0.72f)), panel, 1.0f, 8.0f);
+
+        const float left = panel.left + 8.0f;
+        const float right = panel.right - 8.0f;
+        const float top = panel.top + 7.0f;
+        const float bottom = panel.bottom - 7.0f;
+        const float width = std::max(0.0f, right - left);
+        const float height = std::max(0.0f, bottom - top);
+        if (width <= 0.0f || height <= 0.0f)
+            return;
+
+        rt->PushAxisAlignedClip(panel, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        switch (style) {
+        case 1: { // 落叶
+            struct Leaf {
+                float x;
+                float y;
+                float size;
+                float angle;
+            };
+            static constexpr Leaf leaves[] = {
+                {0.04f, 0.30f, 5.0f, -28.0f}, {0.14f, 0.76f, 3.6f, 22.0f},
+                {0.23f, 0.16f, 4.2f, 48.0f},  {0.34f, 0.58f, 5.6f, -12.0f},
+                {0.46f, 0.86f, 3.8f, 34.0f},  {0.57f, 0.28f, 4.8f, -46.0f},
+                {0.69f, 0.70f, 4.0f, 16.0f},   {0.80f, 0.12f, 5.2f, -34.0f},
+                {0.92f, 0.48f, 4.0f, 42.0f},
+            };
+            for (size_t i = 0; i < _countof(leaves); ++i) {
+                const float x = left + leaves[i].x * width;
+                const float y = top + leaves[i].y * height;
+                const D2D1_POINT_2F center = D2D1::Point2F(x, y);
+                const D2D1_COLOR_F color = withOpacity(p.accent, i % 3 == 0 ? 0.90f : 0.68f);
+                if (auto* brush = painter.brush(tone(color))) {
+                    D2D1_MATRIX_3X2_F previous{};
+                    rt->GetTransform(&previous);
+                    rt->SetTransform(D2D1::Matrix3x2F::Rotation(leaves[i].angle, center));
+                    rt->FillEllipse(D2D1::Ellipse(center, leaves[i].size,
+                                                   leaves[i].size * 0.44f),
+                                    brush);
+                    rt->DrawLine(D2D1::Point2F(x - leaves[i].size * 0.72f, y),
+                                 D2D1::Point2F(x + leaves[i].size * 0.72f, y), brush, 0.8f);
+                    rt->SetTransform(previous);
+                }
+            }
+            drawLine(withOpacity(p.textSecondary, 0.55f), D2D1::Point2F(left, bottom - 2.0f),
+                     D2D1::Point2F(right, bottom - 2.0f), 0.8f);
+            break;
+        }
+        case 2: { // 闪烁星星
+            struct Star {
+                float x;
+                float y;
+                float radius;
+                bool cross;
+            };
+            static constexpr Star stars[] = {
+                {0.04f, 0.22f, 1.5f, true},  {0.11f, 0.72f, 1.0f, false},
+                {0.18f, 0.44f, 1.2f, false}, {0.25f, 0.14f, 1.0f, false},
+                {0.31f, 0.84f, 1.4f, true},  {0.38f, 0.36f, 0.9f, false},
+                {0.45f, 0.64f, 1.1f, false}, {0.52f, 0.16f, 1.3f, true},
+                {0.59f, 0.48f, 0.9f, false}, {0.66f, 0.78f, 1.2f, false},
+                {0.73f, 0.28f, 1.0f, true},  {0.80f, 0.58f, 1.4f, false},
+                {0.88f, 0.12f, 0.9f, false}, {0.95f, 0.82f, 1.2f, true},
+            };
+            for (size_t i = 0; i < _countof(stars); ++i) {
+                const D2D1_POINT_2F center =
+                    D2D1::Point2F(left + stars[i].x * width, top + stars[i].y * height);
+                const D2D1_COLOR_F color = withOpacity(p.accent, stars[i].cross ? 0.90f : 0.64f);
+                if (auto* brush = painter.brush(tone(color))) {
+                    rt->FillEllipse(D2D1::Ellipse(center, stars[i].radius, stars[i].radius),
+                                    brush);
+                    if (stars[i].cross) {
+                        const float ray = stars[i].radius * 2.8f;
+                        rt->DrawLine(D2D1::Point2F(center.x - ray, center.y),
+                                     D2D1::Point2F(center.x + ray, center.y), brush, 0.8f);
+                        rt->DrawLine(D2D1::Point2F(center.x, center.y - ray),
+                                     D2D1::Point2F(center.x, center.y + ray), brush, 0.8f);
+                    }
+                }
+            }
+            break;
+        }
+        case 3: { // 二进制
+            auto* format = painter.textFormat(11.0f, 600, true, true);
+            if (format) {
+                constexpr wchar_t digits[] = L"101100101011010010110101";
+                constexpr int kColumns = 8;
+                constexpr int kRows = 3;
+                const float columnW = width / static_cast<float>(kColumns);
+                const float rowH = height / static_cast<float>(kRows);
+                for (int col = 0; col < kColumns; ++col) {
+                    for (int row = 0; row < kRows; ++row) {
+                        const int index = (col * 3 + row * 5) %
+                                          (static_cast<int>(_countof(digits)) - 1);
+                        const wchar_t digit[2] = {digits[index], L'\0'};
+                        const D2D1_RECT_F rect = D2D1::RectF(
+                            left + col * columnW, top + row * rowH,
+                            left + (col + 1) * columnW, top + (row + 1) * rowH);
+                        painter.drawText(std::wstring(digit), format, rect,
+                                         tone(withOpacity(p.accent, 0.52f +
+                                                                   ((col + row) % 3) * 0.16f)),
+                                         D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    }
+                }
+            }
+            break;
+        }
+        case 4: { // 流光粒子
+            constexpr int kFlowLines = 3;
+            constexpr int kFlowSamples = 28;
+            constexpr float kTwoPi = 6.28318530718f;
+            const auto flowY = [&](float x, float lane, float phase) {
+                const float t = std::clamp((x - left) / width, 0.0f, 1.0f);
+                const float center = 0.28f + lane * 0.22f;
+                const float wave = std::sin(t * kTwoPi * 1.15f + phase) * 0.07f +
+                                   std::sin(t * kTwoPi * 2.25f + phase * 0.65f) * 0.035f;
+                return top + (center + wave) * height;
+            };
+            for (int lane = 0; lane < kFlowLines; ++lane) {
+                const float phase = 0.45f + lane * 1.12f;
+                D2D1_POINT_2F previous =
+                    D2D1::Point2F(left, flowY(left, static_cast<float>(lane), phase));
+                for (int sample = 1; sample <= kFlowSamples; ++sample) {
+                    const float t = static_cast<float>(sample) / kFlowSamples;
+                    const float x = left + width * t;
+                    const D2D1_POINT_2F current =
+                        D2D1::Point2F(x, flowY(x, static_cast<float>(lane), phase));
+                    drawLine(withOpacity(lane == 1 ? p.accent : p.textSecondary,
+                                         lane == 1 ? 0.34f : 0.20f),
+                             previous, current, lane == 1 ? 1.4f : 0.9f);
+                    previous = current;
+                }
+            }
+
+            struct Particle {
+                float x;
+                float lane;
+                float radius;
+                float phase;
+                bool accent;
+            };
+            static constexpr Particle particles[] = {
+                {0.04f, 0.0f, 1.5f, 0.3f, true},   {0.10f, 1.0f, 1.1f, 1.8f, false},
+                {0.17f, 2.0f, 1.8f, 3.4f, true},   {0.25f, 0.0f, 1.0f, 4.6f, false},
+                {0.32f, 1.0f, 2.0f, 5.5f, true},   {0.39f, 2.0f, 1.2f, 0.8f, false},
+                {0.47f, 0.0f, 1.4f, 2.6f, true},   {0.54f, 1.0f, 1.0f, 4.0f, false},
+                {0.61f, 2.0f, 1.9f, 5.1f, true},   {0.68f, 0.0f, 1.1f, 1.2f, false},
+                {0.75f, 1.0f, 1.7f, 2.2f, true},   {0.82f, 2.0f, 1.0f, 3.8f, false},
+                {0.89f, 0.0f, 1.8f, 5.0f, true},   {0.96f, 1.0f, 1.2f, 0.6f, false},
+            };
+            for (size_t i = 0; i < _countof(particles); ++i) {
+                const float x = left + particles[i].x * width;
+                const float y = flowY(x, particles[i].lane, particles[i].phase);
+                const D2D1_POINT_2F center = D2D1::Point2F(x, y);
+                const D2D1_COLOR_F base = particles[i].accent ? p.accent : p.textSecondary;
+                if (auto* brush = painter.brush(tone(withOpacity(base, 0.14f))))
+                    rt->FillEllipse(D2D1::Ellipse(center, particles[i].radius * 2.3f,
+                                                   particles[i].radius * 2.3f),
+                                    brush);
+                if (auto* brush = painter.brush(tone(withOpacity(base,
+                                                                   particles[i].accent ? 0.92f
+                                                                                       : 0.72f)))) {
+                    const float trail = 5.0f + particles[i].radius * 2.8f;
+                    rt->DrawLine(D2D1::Point2F(x - trail, y + 0.5f),
+                                 D2D1::Point2F(x - particles[i].radius, y), brush, 0.9f);
+                    rt->FillEllipse(D2D1::Ellipse(center, particles[i].radius,
+                                                   particles[i].radius),
+                                    brush);
+                    if (particles[i].accent && i % 3 == 0) {
+                        const float ray = particles[i].radius * 2.1f;
+                        rt->DrawLine(D2D1::Point2F(x - ray, y), D2D1::Point2F(x + ray, y),
+                                     brush, 0.65f);
+                        rt->DrawLine(D2D1::Point2F(x, y - ray), D2D1::Point2F(x, y + ray),
+                                     brush, 0.65f);
+                    }
+                }
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        rt->PopAxisAlignedClip();
+    }
+
+    void drawIdleQuoteBackgroundRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
+        const auto& p = fluent::palette();
+        auto* titleFormat = painter.textFormat(12.5f, 600, true, true);
+        auto* noneFormat = painter.textFormat(12.0f, 600, true, true);
+        if (!titleFormat || !noneFormat)
+            return;
+
+        const float gridW = row.controlRect.right - row.controlRect.left;
+        const float cardW = (gridW - kIdleQuoteBackgroundCardGap) * 0.5f;
+        row.optionRects.clear();
+
+        const D2D1_RECT_F noneRect =
+            D2D1::RectF(row.cardRect.right - 72.0f, row.cardRect.top + 10.0f,
+                        row.cardRect.right - 16.0f, row.cardRect.top + 36.0f);
+        row.optionRects.push_back(noneRect);
+
+        const bool noneSelected = row.selected == 0;
+        const bool noneHovered = row.enabled && hoverId == row.id && hoverOption == 0;
+        const bool nonePressed = row.enabled && pressedId == row.id && pressedOption == 0;
+        D2D1_COLOR_F noneFill = p.controlFill;
+        if (!row.enabled)
+            noneFill = p.listHover;
+        else if (nonePressed)
+            noneFill = p.controlPressed;
+        else if (noneSelected)
+            noneFill = p.listSelected;
+        else if (noneHovered)
+            noneFill = p.controlHover;
+        painter.fillRoundRect(noneFill, noneRect, 13.0f);
+        if (noneSelected) {
+            painter.strokeRoundRect(row.enabled ? (noneHovered ? p.accentHover : p.accent)
+                                                 : p.disabled,
+                                    noneRect,
+                                    focusedId == row.id && focusVisible ? 2.0f : 1.0f, 13.0f);
+        } else {
+            painter.strokeRoundRect(p.cardStroke, noneRect, 1.0f, 13.0f);
+        }
+        const std::wstring noneText = row.options.empty() ? std::wstring(L"无") : row.options[0];
+        painter.drawText(noneText, noneFormat, noneRect,
+                         row.enabled ? p.text : p.disabled);
+
+        const size_t count = row.options.size() > 1
+                                 ? std::min<size_t>(row.options.size() - 1, 4)
+                                 : 0;
+        for (size_t i = 0; i < count; ++i) {
+            const int optionIndex = static_cast<int>(i + 1);
+            const int column = static_cast<int>(i % 2);
+            const int line = static_cast<int>(i / 2);
+            const float left = row.controlRect.left +
+                               column * (cardW + kIdleQuoteBackgroundCardGap);
+            const float top = row.controlRect.top +
+                              line * (kIdleQuoteBackgroundCardH + kIdleQuoteBackgroundCardGap);
+            const D2D1_RECT_F card =
+                D2D1::RectF(left, top, left + cardW, top + kIdleQuoteBackgroundCardH);
+            row.optionRects.push_back(card);
+
+            const bool selected = optionIndex == row.selected;
+            const bool hovered = row.enabled && hoverId == row.id &&
+                                 hoverOption == optionIndex;
+            const bool pressed = row.enabled && pressedId == row.id &&
+                                 pressedOption == optionIndex;
+            D2D1_COLOR_F fill = p.controlFill;
+            if (!row.enabled)
+                fill = p.listHover;
+            else if (pressed)
+                fill = p.controlPressed;
+            else if (selected)
+                fill = p.listSelected;
+            else if (hovered)
+                fill = p.controlHover;
+            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+            const bool focused = focusedId == row.id && focusVisible && row.enabled;
+            if (selected) {
+                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                     : p.disabled,
+                                        card, focused ? 2.0f : 1.5f,
+                                        fluent::metrics::controlRadius);
+            } else {
+                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                        fluent::metrics::controlRadius);
+            }
+
+            const D2D1_RECT_F artwork =
+                D2D1::RectF(card.left + 10.0f, card.top + 10.0f, card.right - 10.0f,
+                            card.bottom - 31.0f);
+            drawIdleQuoteBackgroundArtwork(painter, artwork, optionIndex, row.enabled);
+
+            const D2D1_POINT_2F radioCenter =
+                D2D1::Point2F(card.right - 16.0f, card.top + 14.0f);
+            if (!row.enabled) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush, 1.0f);
+                if (selected) {
+                    if (auto* brush = painter.brush(p.disabled))
+                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                      brush);
+                }
+            } else if (selected) {
+                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
+                                                  brush);
+                if (auto* brush = painter.brush(p.textOnAccent))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              pressed ? 1.5f : 1.0f);
+            }
+
+            painter.drawText(row.options[optionIndex], titleFormat,
+                             D2D1::RectF(card.left + 10.0f, card.bottom - 24.0f,
+                                         card.right - 10.0f, card.bottom - 5.0f),
+                             row.enabled ? p.text : p.disabled);
+        }
+    }
+
     void drawHoverControlStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
         const auto& p = fluent::palette();
         auto* titleFormat = painter.textFormat(12.5f, 500, true, true);
@@ -2099,6 +2475,10 @@ struct SettingsDialog::Impl {
         }
         if (row.id == kIdSongToastPosition) {
             drawSongToastPositionRadio(painter, row);
+            return;
+        }
+        if (row.id == kIdIdleQuoteBackground) {
+            drawIdleQuoteBackgroundRadio(painter, row);
             return;
         }
 
@@ -2390,6 +2770,8 @@ struct SettingsDialog::Impl {
             bool inControl = contains(row.controlRect, x, y);
             if (row.id == kIdSpectrumBackground)
                 inControl = inControl || contains(row.artworkRect, x, y);
+            if (row.id == kIdIdleQuoteBackground && !row.optionRects.empty())
+                inControl = inControl || contains(row.optionRects.front(), x, y);
             if (!inControl)
                 continue;
             if (option && (row.kind == ControlKind::Radio || row.kind == ControlKind::ModeGrid)) {
@@ -2476,6 +2858,17 @@ struct SettingsDialog::Impl {
             state.idleQuoteAlignment = row->selected;
             if (actions.onIdleQuoteAlignment)
                 actions.onIdleQuoteAlignment(row->selected);
+            break;
+        case kIdIdleQuoteBackground:
+            state.idleQuoteBackground = row->selected;
+            if (actions.onIdleQuoteBackground)
+                actions.onIdleQuoteBackground(row->selected);
+            updateIdleRowsEnabled();
+            break;
+        case kIdIdleQuoteBackgroundScope:
+            state.idleQuoteBackgroundScope = row->selected;
+            if (actions.onIdleQuoteBackgroundScope)
+                actions.onIdleQuoteBackgroundScope(row->selected);
             break;
         case kIdIdleCardBackground:
             state.idleCardBackground = row->selected;
@@ -2729,6 +3122,10 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.idleQuoteRefreshInterval, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteAlignment))
             row->selected = std::clamp(s.idleQuoteAlignment, 0, 2);
+        if (auto* row = findRow(kIdIdleQuoteBackground))
+            row->selected = std::clamp(s.idleQuoteBackground, 0, 4);
+        if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
+            row->selected = std::clamp(s.idleQuoteBackgroundScope, 0, 3);
         if (auto* row = findRow(kIdIdleCardBackground))
             row->selected = std::clamp(s.idleCardBackground, 0, 1);
         if (auto* row = findRow(kIdMediaPopupBackgroundColor))
@@ -3077,6 +3474,29 @@ struct SettingsDialog::Impl {
                     else if (wp == VK_DOWN && row->selected < 2)
                         next += 2;
                     if (next != row->selected && next >= 0 && next < 4) {
+                        row->selected = next;
+                        onCommand(row->id);
+                    }
+                } else if (Row* row = findRow(focusedId);
+                           row && row->id == kIdIdleQuoteBackground && row->enabled &&
+                               row->options.size() >= 5) {
+                    int next = row->selected;
+                    if (wp == VK_DOWN) {
+                        if (next == 0)
+                            next = 1;
+                        else if (next == 1)
+                            next = 3;
+                        else if (next == 2)
+                            next = 4;
+                    } else {
+                        if (next == 3)
+                            next = 1;
+                        else if (next == 4)
+                            next = 2;
+                        else if (next == 1 || next == 2)
+                            next = 0;
+                    }
+                    if (next != row->selected) {
                         row->selected = next;
                         onCommand(row->id);
                     }

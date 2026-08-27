@@ -40,6 +40,23 @@ enum class TaskbarBackground {
     Solid,
 };
 
+// 任务栏内容动态背景；绘制在歌词等内容区域下方，不侵入独立频谱容器或悬浮卡片。
+enum class IdleQuoteBackground {
+    None,
+    FallingLeaves,
+    TwinklingStars,
+    BinaryRain,
+    FloatingParticles,
+};
+
+// 任务栏内容动态背景的作用范围：不启用 / 仅每日一言 / 仅歌词 / 两者。
+enum class IdleQuoteBackgroundScope {
+    None,
+    DailyQuote,
+    Lyrics,
+    All,
+};
+
 // 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
 // 数值保持与 settings.json 中已有的 0/1/2 语义一致，Minimal 追加为 3。
 enum class RenderMode {
@@ -89,6 +106,8 @@ public:
     void setDoubleLineLyrics(bool on);
     void setLyricAlignment(LyricAlignment alignment);
     void setIdleQuoteAlignment(LyricAlignment alignment);
+    void setIdleQuoteBackground(IdleQuoteBackground background);
+    void setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope);
     // 是否在鼠标悬浮时用播放控件替换右侧歌词，默认开启。
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。

@@ -248,6 +248,70 @@ int spectrumStyleIndex(SpectrumStyle style) {
     }
 }
 
+IdleQuoteBackground idleQuoteBackgroundFromConfig(const std::string& value) {
+    if (value == "leaves")
+        return IdleQuoteBackground::FallingLeaves;
+    if (value == "stars")
+        return IdleQuoteBackground::TwinklingStars;
+    if (value == "binary")
+        return IdleQuoteBackground::BinaryRain;
+    if (value == "particles")
+        return IdleQuoteBackground::FloatingParticles;
+    return IdleQuoteBackground::None;
+}
+
+const char* idleQuoteBackgroundConfigName(IdleQuoteBackground background) {
+    switch (background) {
+    case IdleQuoteBackground::FallingLeaves: return "leaves";
+    case IdleQuoteBackground::TwinklingStars: return "stars";
+    case IdleQuoteBackground::BinaryRain: return "binary";
+    case IdleQuoteBackground::FloatingParticles: return "particles";
+    case IdleQuoteBackground::None:
+    default: return "none";
+    }
+}
+
+int idleQuoteBackgroundIndex(IdleQuoteBackground background) {
+    switch (background) {
+    case IdleQuoteBackground::FallingLeaves: return 1;
+    case IdleQuoteBackground::TwinklingStars: return 2;
+    case IdleQuoteBackground::BinaryRain: return 3;
+    case IdleQuoteBackground::FloatingParticles: return 4;
+    case IdleQuoteBackground::None:
+    default: return 0;
+    }
+}
+
+IdleQuoteBackgroundScope idleQuoteBackgroundScopeFromConfig(const std::string& value) {
+    if (value == "none")
+        return IdleQuoteBackgroundScope::None;
+    if (value == "lyrics")
+        return IdleQuoteBackgroundScope::Lyrics;
+    if (value == "all")
+        return IdleQuoteBackgroundScope::All;
+    return IdleQuoteBackgroundScope::DailyQuote;
+}
+
+const char* idleQuoteBackgroundScopeConfigName(IdleQuoteBackgroundScope scope) {
+    switch (scope) {
+    case IdleQuoteBackgroundScope::None: return "none";
+    case IdleQuoteBackgroundScope::Lyrics: return "lyrics";
+    case IdleQuoteBackgroundScope::All: return "all";
+    case IdleQuoteBackgroundScope::DailyQuote:
+    default: return "daily-quote";
+    }
+}
+
+int idleQuoteBackgroundScopeIndex(IdleQuoteBackgroundScope scope) {
+    switch (scope) {
+    case IdleQuoteBackgroundScope::Lyrics: return 2;
+    case IdleQuoteBackgroundScope::All: return 3;
+    case IdleQuoteBackgroundScope::None: return 0;
+    case IdleQuoteBackgroundScope::DailyQuote:
+    default: return 1;
+    }
+}
+
 const wchar_t* idleQuoteSourceLabel(IdleQuoteSource source) {
     return source == IdleQuoteSource::Jinrishici ? L"今日诗词" : L"一言";
 }
@@ -517,6 +581,8 @@ struct App {
     bool doubleLineLyricsEnabled_ = false;
     LyricAlignment lyricAlignment_ = LyricAlignment::Left;
     LyricAlignment idleQuoteAlignment_ = LyricAlignment::Left;
+    IdleQuoteBackground idleQuoteBackground_ = IdleQuoteBackground::None;
+    IdleQuoteBackgroundScope idleQuoteBackgroundScope_ = IdleQuoteBackgroundScope::DailyQuote;
     bool currentHasTranslation_ = false;
     bool currentHasRomanization_ = false;
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
@@ -869,6 +935,10 @@ struct App {
         taskbarHost->setIdleCardBackground(idleCardBackground_);
         taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
                                                 idleCardBackgroundColorCustomized_);
+        taskbarHost->setIdleQuoteBackground(
+            minimal ? IdleQuoteBackground::None : idleQuoteBackground_);
+        taskbarHost->setIdleQuoteBackgroundScope(
+            minimal ? IdleQuoteBackgroundScope::None : idleQuoteBackgroundScope_);
         taskbarHost->setIdleCardFollowAlbum(idleCardFollowAlbum_);
         taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
         taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
@@ -1180,6 +1250,27 @@ struct App {
         if (taskbarHost)
             taskbarHost->setIdleQuoteAlignment(idleQuoteAlignment_);
         logSettingInt(L"daily-quote-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
+        saveSettings();
+    }
+
+    void applyIdleQuoteBackground(int background) {
+        const int normalized = std::clamp(background, 0, 4);
+        idleQuoteBackground_ = static_cast<IdleQuoteBackground>(normalized);
+        if (taskbarHost)
+            taskbarHost->setIdleQuoteBackground(
+                isMinimalRenderMode() ? IdleQuoteBackground::None : idleQuoteBackground_);
+        logSettingInt(L"daily-quote-background", normalized);
+        saveSettings();
+    }
+
+    void applyIdleQuoteBackgroundScope(int scope) {
+        const int normalized = std::clamp(scope, 0, 3);
+        idleQuoteBackgroundScope_ = static_cast<IdleQuoteBackgroundScope>(normalized);
+        if (taskbarHost)
+            taskbarHost->setIdleQuoteBackgroundScope(
+                isMinimalRenderMode() ? IdleQuoteBackgroundScope::None
+                                      : idleQuoteBackgroundScope_);
+        logSettingInt(L"taskbar-dynamic-background-scope", normalized);
         saveSettings();
     }
 
@@ -2425,6 +2516,10 @@ void App::loadSettings() {
             j.value("idleQuoteSource", std::string("hitokoto")));
         idleQuoteRefreshInterval_ = idleQuoteIntervalFromConfig(
             j.value("idleQuoteRefreshInterval", std::string("daily")));
+        idleQuoteBackground_ = idleQuoteBackgroundFromConfig(
+            j.value("idleQuoteBackground", std::string("none")));
+        idleQuoteBackgroundScope_ = idleQuoteBackgroundScopeFromConfig(
+            j.value("idleQuoteBackgroundScope", std::string("daily-quote")));
         jinrishiciToken_ = wideOf(j.value("jinrishiciToken", std::string()));
         idleApps_.clear();
         if (j.contains("idleApps") && j["idleApps"].is_array()) {
@@ -2503,6 +2598,9 @@ void App::saveSettings() {
         j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
         j["idleQuoteRefreshInterval"] =
             idleQuoteIntervalConfigName(idleQuoteRefreshInterval_);
+        j["idleQuoteBackground"] = idleQuoteBackgroundConfigName(idleQuoteBackground_);
+        j["idleQuoteBackgroundScope"] =
+            idleQuoteBackgroundScopeConfigName(idleQuoteBackgroundScope_);
         j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
         j["idleApps"] = nlohmann::json::array();
         for (const auto& app : idleApps_)
@@ -3411,6 +3509,8 @@ SettingsState App::currentSettingsState() const {
         idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::Hourly
             ? 2
             : idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::HalfDay ? 1 : 0;
+    st.idleQuoteBackground = idleQuoteBackgroundIndex(idleQuoteBackground_);
+    st.idleQuoteBackgroundScope = idleQuoteBackgroundScopeIndex(idleQuoteBackgroundScope_);
     st.idleApps = idleApps_;
     st.songInfoVisible = songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -3470,6 +3570,10 @@ SettingsActions App::buildSettingsActions() {
     act.onIdleQuoteSource = [this](int source) { applyIdleQuoteSource(source); };
     act.onIdleQuoteRefreshInterval =
         [this](int interval) { applyIdleQuoteRefreshInterval(interval); };
+    act.onIdleQuoteBackground =
+        [this](int background) { applyIdleQuoteBackground(background); };
+    act.onIdleQuoteBackgroundScope =
+        [this](int scope) { applyIdleQuoteBackgroundScope(scope); };
     act.onAddIdleApp = [this] { pickIdleApp(); };
     act.onRemoveIdleApp = [this](int index) { removeIdleApp(index); };
     act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
