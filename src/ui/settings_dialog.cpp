@@ -544,7 +544,7 @@ struct SettingsDialog::Impl {
     void createControls() {
         const bool minimal = state.renderMode == kRenderModeMinimal;
         addHeader(0, L"主题");
-        addRadio(0, kIdTaskbarTheme, L"任务栏歌词主题",
+        addRadio(0, kIdTaskbarTheme, L"任务栏内容主题",
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
                  true, kRowTallH);
@@ -614,7 +614,7 @@ struct SettingsDialog::Impl {
         progressBackground.checked = minimal ? false : state.progressBackground;
         addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
                   state.progressBackgroundOpacity, !minimal && state.progressBackground);
-        addRadio(0, kIdTaskbarBackground, L"任务栏歌词背景",
+        addRadio(0, kIdTaskbarBackground, L"任务栏内容背景",
              L"封面模糊将专辑封面高斯模糊后铺满背景；纯色跟随任务栏深浅色；画在最底层，可与播放进度背景、背景波浪叠加",
                  {L"无", L"封面模糊", L"纯色"}, minimal ? 0 : state.taskbarBackground,
                  !minimal, kRowTallH);
