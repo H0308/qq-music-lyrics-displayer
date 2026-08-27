@@ -30,6 +30,7 @@ constexpr UINT_PTR kCloseTimer = 3;
 constexpr UINT_PTR kScrollTimer = 4;
 constexpr UINT_PTR kEnterTimer = 5;
 constexpr UINT_PTR kVolumeTimer = 6;
+constexpr UINT_PTR kIdleQuickExpandTimer = 7;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
@@ -38,6 +39,7 @@ constexpr float kSongTransitionMs = 220.0f;
 constexpr float kSongTransitionTravelDip = 24.0f;
 constexpr float kCategoryTransitionMs = 240.0f;
 constexpr float kInnerContentTransitionMs = 220.0f;
+constexpr float kIdleQuickExpandMs = 160.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
@@ -56,9 +58,16 @@ constexpr float kPopupTextRightPaddingDip = 16.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
 constexpr float kPopupInfoScrollSpeed = 10.0f;
 constexpr float kIdleListHeightDip = 132.0f;
+constexpr float kIdleListExpandedHeightDip = 160.0f;
 constexpr float kIdleListRowHeightDip = 40.0f;
 constexpr float kIdleListGapDip = 8.0f;
 constexpr float kIdleListBottomPaddingDip = 8.0f;
+constexpr float kIdleQuickExpandedTopDip = 15.0f;
+constexpr float kIdleQuickTitleLeftDip = 16.0f;
+constexpr float kIdleQuickTitleWidthDip = 52.0f;
+constexpr float kIdleQuickTitleButtonGapDip = 8.0f;
+constexpr float kIdleQuickTriggerHorizontalPaddingDip = 8.0f;
+constexpr float kIdleQuickTriggerVerticalPaddingDip = 4.0f;
 constexpr float kIdleScrollBarWidthDip = 3.0f;
 constexpr float kIdleScrollBarHitWidthDip = 12.0f;
 // d2d1effects.h 只声明这个 GUID；当前工程的链接配置不提供其外部定义，
@@ -243,6 +252,9 @@ struct MediaPopup::Impl {
     bool idleContentTransitionActive = false;
     IdlePresentation idleContentTransitionFrom;
     ULONGLONG idleContentTransitionStartMs = 0;
+    bool idleQuickExpanded = false;
+    bool idleQuickExpandOpening = false;
+    float idleQuickExpandT = 0.0f;
     bool dynamicBackgroundDirty = true;
     int cardScreenX = 0;
     int cardScreenY = 0;
@@ -283,11 +295,14 @@ struct MediaPopup::Impl {
     float idleScrollMax = 0.0f;
     int hoverIdleApp = -1;
     int pressedIdleApp = -1;
+    bool hoverIdleQuickExpand = false;
+    bool pressedIdleQuickExpand = false;
     bool idleScrollDragging = false;
     float idleScrollDragOffset = 0.0f;
     D2D1_RECT_F idleListRect{};
     D2D1_RECT_F idleScrollTrackRect{};
     D2D1_RECT_F idleScrollThumbRect{};
+    D2D1_RECT_F idleQuickExpandRect{};
     bool idleTextDirty = true;
     bool idleIconsDirty = true;
     std::vector<ID2D1Bitmap*> idleIconBitmaps;
@@ -392,6 +407,54 @@ struct MediaPopup::Impl {
                 kInnerContentTransitionMs,
             0.0f, 1.0f);
         return linear * linear * (3.0f - 2.0f * linear);
+    }
+
+    float idleQuickExpandProgress(const IdlePresentation& content) const {
+        if (!content.quickStartEnabled)
+            return 0.0f;
+        const float linear = std::clamp(idleQuickExpandT, 0.0f, 1.0f);
+        return linear * linear * (3.0f - 2.0f * linear);
+    }
+
+    float idleQuickHeaderTop(float collapsedTop, const IdlePresentation& content) const {
+        const float progress = idleQuickExpandProgress(content);
+        return collapsedTop + (kIdleQuickExpandedTopDip - collapsedTop) * progress;
+    }
+
+    float idleQuickExpandButtonTop(float headerTop) const {
+        // 保持按钮与卡片顶栏一致；展开后顶边仍留出圆角内侧的安全间距。
+        return std::max(7.0f, headerTop - 8.0f);
+    }
+
+    D2D1_RECT_F idleQuickExpandLocalRect(float headerTop) const {
+        const float left = kIdleQuickTitleLeftDip + kIdleQuickTitleWidthDip +
+                           kIdleQuickTitleButtonGapDip;
+        const float top = idleQuickExpandButtonTop(headerTop);
+        return D2D1::RectF(left, top, left + 32.0f, top + 32.0f);
+    }
+
+    D2D1_RECT_F idleQuickTriggerLocalRect(float headerTop) const {
+        const D2D1_RECT_F button = idleQuickExpandLocalRect(headerTop);
+        return D2D1::RectF(
+            kIdleQuickTitleLeftDip - kIdleQuickTriggerHorizontalPaddingDip,
+            button.top - kIdleQuickTriggerVerticalPaddingDip,
+            button.right + kIdleQuickTriggerHorizontalPaddingDip,
+            button.bottom + kIdleQuickTriggerVerticalPaddingDip);
+    }
+
+    void drawIdleQuickDivider(ID2D1DeviceContext* rt, float w, float headerTop,
+                              const IdlePresentation& content) {
+        if (!rt || !brushProgressTrack)
+            return;
+        const float opacity = 1.0f - idleQuickExpandProgress(content);
+        if (opacity <= 0.0f)
+            return;
+        const float dividerTop = idleQuickExpandButtonTop(headerTop) - 4.0f;
+        brushProgressTrack->SetOpacity(opacity);
+        rt->FillRectangle(D2D1::RectF(16.0f, dividerTop, w - 16.0f,
+                                      dividerTop + 1.0f),
+                          brushProgressTrack);
+        brushProgressTrack->SetOpacity(1.0f);
     }
 
     MediaPopupBackground activeBackgroundMode() const {
@@ -500,6 +563,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kScrollTimer);
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kVolumeTimer);
+        KillTimer(hwnd, kIdleQuickExpandTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
@@ -877,6 +941,10 @@ struct MediaPopup::Impl {
             categoryHoverEnvelopeActive = false;
             categoryHoverEnvelope = {};
             idleContentTransitionActive = false;
+            idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
+            idleQuickExpandOpening = false;
+            if (hwnd)
+                KillTimer(hwnd, kIdleQuickExpandTimer);
         }
     }
 
@@ -971,10 +1039,15 @@ struct MediaPopup::Impl {
     void layoutIdleList(float w, float top, const IdlePresentation* content = nullptr) {
         // 组合卡片高度固定为媒体卡片高度；应用数量较多时只在卡片内部滚动，
         // 不允许列表绘制或命中区域越过圆角卡片底部。
+        const IdlePresentation& listContent = content ? *content : idle;
+        const float expandProgress = idleQuickExpandProgress(listContent);
+        const float maxListHeight =
+            kIdleListHeightDip +
+            (kIdleListExpandedHeightDip - kIdleListHeightDip) * expandProgress;
         const float availableHeight =
             std::max(0.0f, kIdlePopupHeightDip - top - kIdleListBottomPaddingDip);
-        const float listHeight = std::min(kIdleListHeightDip, availableHeight);
-        const auto& apps = content ? content->apps : idle.apps;
+        const float listHeight = std::min(maxListHeight, availableHeight);
+        const auto& apps = listContent.apps;
         idleListRect = D2D1::RectF(16.0f, top,
                                    w - 16.0f - (idleScrollMax > 0.0f
                                                     ? kIdleScrollBarHitWidthDip
@@ -1215,6 +1288,34 @@ struct MediaPopup::Impl {
         rt->DrawLine(middle, bottom, brush, 1.35f);
     }
 
+    void drawVerticalChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
+                             ID2D1Brush* brush, bool up) {
+        if (!rt || !brush)
+            return;
+        const float direction = up ? -1.0f : 1.0f;
+        const float halfWidth = size * 0.52f;
+        const float shoulderOffset = size * 0.18f;
+        const float tipOffset = size * 0.42f;
+        // 尖端比两侧端点伸得更远，按实际包围盒中心校正视觉位置。
+        const float iconCenterY =
+            center.y - direction * (tipOffset - shoulderOffset) * 0.5f;
+        const D2D1_POINT_2F left =
+            D2D1::Point2F(center.x - halfWidth, iconCenterY - direction * shoulderOffset);
+        const D2D1_POINT_2F middle =
+            D2D1::Point2F(center.x, iconCenterY + direction * tipOffset);
+        const D2D1_POINT_2F right =
+            D2D1::Point2F(center.x + halfWidth, iconCenterY - direction * shoulderOffset);
+        constexpr float kStrokeWidth = 1.5f;
+        rt->DrawLine(left, middle, brush, kStrokeWidth);
+        rt->DrawLine(middle, right, brush, kStrokeWidth);
+
+        // DrawLine 默认端点是平的，用圆点补齐端帽和折点，形成更柔和的 Fluent 风格。
+        const float capRadius = kStrokeWidth * 0.5f;
+        rt->FillEllipse(D2D1::Ellipse(left, capRadius, capRadius), brush);
+        rt->FillEllipse(D2D1::Ellipse(middle, capRadius, capRadius), brush);
+        rt->FillEllipse(D2D1::Ellipse(right, capRadius, capRadius), brush);
+    }
+
     void drawCopyButton(ID2D1DeviceContext* rt, const D2D1_RECT_F& rect, bool hovered,
                         bool pressed) {
         if (!rt)
@@ -1299,6 +1400,38 @@ struct MediaPopup::Impl {
                                    localCopy.right, cardOriginDip + localCopy.bottom);
     }
 
+    void drawIdleQuickExpandButton(ID2D1DeviceContext* rt, float headerTop,
+                                   const IdlePresentation& content, bool updateHitTest) {
+        if (!rt || !content.quickStartEnabled) {
+            if (updateHitTest)
+                idleQuickExpandRect = {};
+            return;
+        }
+
+        const D2D1_RECT_F local = idleQuickExpandLocalRect(headerTop);
+        const D2D1_RECT_F trigger = idleQuickTriggerLocalRect(headerTop);
+        if (updateHitTest) {
+            idleQuickExpandRect = D2D1::RectF(
+                trigger.left, cardOriginDip + trigger.top, trigger.right,
+                cardOriginDip + trigger.bottom);
+        }
+        if (updateHitTest && (hoverIdleQuickExpand || pressedIdleQuickExpand)) {
+            // 可见悬浮底与返回媒体按钮同为 32 DIP；命中区仍额外保留 4 DIP。
+            const D2D1_RECT_F hoverRect =
+                D2D1::RectF(trigger.left, local.top, trigger.right, local.bottom);
+            rt->FillRoundedRectangle(
+                D2D1::RoundedRect(hoverRect, 6.0f, 6.0f),
+                pressedIdleQuickExpand ? brushControlPressed : brushControlHover);
+        }
+
+        // 收起状态提示向上展开，展开状态提示向下收起。
+        drawVerticalChevron(
+            rt,
+            D2D1::Point2F((local.left + local.right) * 0.5f,
+                          (local.top + local.bottom) * 0.5f),
+            6.5f, brushSecondary, !idleQuickExpanded);
+    }
+
     void drawIdleQuickList(ID2D1DeviceContext* rt, float w, float top,
                            const IdlePresentation& content) {
         if (!rt)
@@ -1347,16 +1480,25 @@ struct MediaPopup::Impl {
     void drawIdle(ID2D1DeviceContext* rt, float w, bool updateHitTest) {
         if (!rt)
             return;
-        if (updateHitTest)
+        if (updateHitTest) {
             copyRect = {};
+            idleQuickExpandRect = {};
+        }
         const float quoteTop = 40.0f;
         const float quoteHeight = idleUnitHeight(idle, true);
         const float sourceTop = quoteTop + quoteHeight + 8.0f;
-        const float separatorY = sourceTop + 26.0f;
-        const float quickHeaderTop = separatorY + 4.0f;
+        const float collapsedQuickHeaderTop = sourceTop + 30.0f;
+        const float quickHeaderTop = idleQuickHeaderTop(collapsedQuickHeaderTop, idle);
         const float quickHeaderBottom = quickHeaderTop + 16.0f;
-        const float listTop = quickHeaderBottom + kIdleListGapDip;
+        const float quickExpandButtonTop = idleQuickExpandButtonTop(quickHeaderTop);
+        const float listTop = std::max(
+            quickHeaderBottom + kIdleListGapDip,
+            quickExpandButtonTop + 32.0f + kIdleListGapDip);
 
+        // 快速启动区域从底部向上覆盖每日一言；先裁掉被覆盖的旧内容，
+        // 这样在半透明卡片或动态背景下也不会残留文字。
+        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, quickExpandButtonTop),
+                                D2D1_ANTIALIAS_MODE_ALIASED);
         drawText(rt, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                  D2D1::RectF(16.0f, 14.0f, w - 16.0f, 36.0f), brushText);
 
@@ -1369,28 +1511,40 @@ struct MediaPopup::Impl {
                 const float travel = w + 24.0f;
                 const float oldOffset = -travel * progress;
                 const float newOffset = travel * (1.0f - progress);
-                const float transitionBottom = sourceTop + 18.0f;
-                rt->PushAxisAlignedClip(D2D1::RectF(8.0f, 36.0f, w - 8.0f,
-                                                     transitionBottom),
-                                         D2D1_ANTIALIAS_MODE_ALIASED);
-                rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
-                drawIdleQuoteUnit(rt, w, idleContentTransitionFrom, false);
-                rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
-                drawIdleQuoteUnit(rt, w, idle, true);
-                rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
-                rt->PopAxisAlignedClip();
+                const float transitionBottom = std::min(sourceTop + 18.0f,
+                                                        quickExpandButtonTop);
+                if (transitionBottom > 36.0f) {
+                    rt->PushAxisAlignedClip(D2D1::RectF(8.0f, 36.0f, w - 8.0f,
+                                                         transitionBottom),
+                                            D2D1_ANTIALIAS_MODE_ALIASED);
+                    rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
+                    drawIdleQuoteUnit(rt, w, idleContentTransitionFrom, false);
+                    rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
+                    drawIdleQuoteUnit(rt, w, idle, true);
+                    rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
+                    rt->PopAxisAlignedClip();
+                }
             }
         } else {
             drawIdleQuoteUnit(rt, w, idle, true);
         }
 
         drawIdleCopyButton(rt, w, idle, updateHitTest);
+        rt->PopAxisAlignedClip();
 
-        if (brushProgressTrack)
-            rt->FillRectangle(D2D1::RectF(16.0f, separatorY, w - 16.0f, separatorY + 1.0f),
-                              brushProgressTrack);
+        if (updateHitTest && copyRect.right > copyRect.left &&
+            copyRect.bottom > cardOriginDip + quickExpandButtonTop)
+            copyRect = {};
+
+        drawIdleQuickDivider(rt, w, quickHeaderTop, idle);
+        const D2D1_RECT_F expandButton =
+            idleQuickExpandLocalRect(quickHeaderTop);
+        const float quickHeaderRight = idle.quickStartEnabled
+                                           ? expandButton.left - 8.0f
+                                           : w - 16.0f;
+        drawIdleQuickExpandButton(rt, quickHeaderTop, idle, updateHitTest);
         drawText(rt, L"快速打开", fmtIdleHeader,
-                 D2D1::RectF(16.0f, quickHeaderTop, w - 16.0f, quickHeaderBottom),
+                 D2D1::RectF(16.0f, quickHeaderTop, quickHeaderRight, quickHeaderBottom),
                  brushSecondary);
         drawIdleQuickList(rt, w, listTop, idle);
     }
@@ -1698,19 +1852,31 @@ struct MediaPopup::Impl {
         const float quoteTop = 40.0f;
         const float quoteHeight = idleUnitHeight(content, false);
         const float sourceTop = quoteTop + quoteHeight + 8.0f;
-        const float separatorY = sourceTop + 26.0f;
-        const float quickHeaderTop = separatorY + 4.0f;
+        const float collapsedQuickHeaderTop = sourceTop + 30.0f;
+        const float quickHeaderTop = idleQuickHeaderTop(collapsedQuickHeaderTop, content);
         const float quickHeaderBottom = quickHeaderTop + 16.0f;
-        const float listTop = quickHeaderBottom + kIdleListGapDip;
+        const float quickExpandButtonTop = idleQuickExpandButtonTop(quickHeaderTop);
+        const float listTop = std::max(
+            quickHeaderBottom + kIdleListGapDip,
+            quickExpandButtonTop + 32.0f + kIdleListGapDip);
+
+        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, quickExpandButtonTop),
+                                D2D1_ANTIALIAS_MODE_ALIASED);
         drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                  D2D1::RectF(16.0f, 14.0f, w - 16.0f, 36.0f), brushText);
         drawIdleQuoteUnit(rt, w, content, false);
         drawIdleCopyButton(rt, w, content, false);
-        if (brushProgressTrack)
-            rt->FillRectangle(D2D1::RectF(16.0f, separatorY, w - 16.0f, separatorY + 1.0f),
-                              brushProgressTrack);
+        rt->PopAxisAlignedClip();
+
+        drawIdleQuickDivider(rt, w, quickHeaderTop, content);
+        const D2D1_RECT_F expandButton =
+            idleQuickExpandLocalRect(quickHeaderTop);
+        const float quickHeaderRight = content.quickStartEnabled
+                                           ? expandButton.left - 8.0f
+                                           : w - 16.0f;
+        drawIdleQuickExpandButton(rt, quickHeaderTop, content, false);
         drawText(rt, L"快速打开", fmtIdleHeader,
-                 D2D1::RectF(16.0f, quickHeaderTop, w - 16.0f, quickHeaderBottom),
+                 D2D1::RectF(16.0f, quickHeaderTop, quickHeaderRight, quickHeaderBottom),
                  brushSecondary);
         drawIdleQuickList(rt, w, listTop, content);
     }
@@ -2021,6 +2187,11 @@ struct MediaPopup::Impl {
         pressedPageArrow = false;
         hoverCopy = false;
         pressedCopy = false;
+        hoverIdleQuickExpand = false;
+        pressedIdleQuickExpand = false;
+        idleQuickExpandRect = {};
+        if (hwnd)
+            KillTimer(hwnd, kIdleQuickExpandTimer);
         idleMode = target != PopupPage::Media;
         // 页面互切只需要按新的页面状态重建画笔、文本和内容位图；保留
         // DirectComposition 的交换链与视觉树，避免切换期间出现透明空帧闪烁。
@@ -2049,6 +2220,12 @@ struct MediaPopup::Impl {
             setPage(PopupPage::Idle, true);
         else if (currentPage() == PopupPage::Idle && idlePanelManual)
             setPage(PopupPage::Media);
+    }
+
+    bool hitIdleQuickExpand(float x, float y) const {
+        return !categoryTransitionActive && idleMode && idle.quickStartEnabled &&
+               idleQuickExpandRect.right > idleQuickExpandRect.left &&
+               contains(idleQuickExpandRect, x, y);
     }
 
     int hitIdleApp(float x, float y) const {
@@ -2135,6 +2312,40 @@ struct MediaPopup::Impl {
         }
         volumeSliderOpening = volumeSliderOn;
         SetTimer(hwnd, kVolumeTimer, 16, nullptr);
+    }
+
+    void toggleIdleQuickExpand() {
+        if (!hwnd || !idleMode || !idle.quickStartEnabled)
+            return;
+        idleQuickExpanded = !idleQuickExpanded;
+        if (!clientAnimations) {
+            idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
+            idleQuickExpandOpening = false;
+            KillTimer(hwnd, kIdleQuickExpandTimer);
+            renderOrDefer();
+            return;
+        }
+        idleQuickExpandOpening = idleQuickExpanded;
+        SetTimer(hwnd, kIdleQuickExpandTimer, 16, nullptr);
+        renderOrDefer();
+    }
+
+    void advanceIdleQuickExpand() {
+        if (entering || closing || !popupVisible || !idleMode ||
+            !idle.quickStartEnabled) {
+            KillTimer(hwnd, kIdleQuickExpandTimer);
+            return;
+        }
+        const float step = 16.0f / kIdleQuickExpandMs;
+        idleQuickExpandT += idleQuickExpandOpening ? step : -step;
+        if (idleQuickExpandT >= 1.0f) {
+            idleQuickExpandT = 1.0f;
+            KillTimer(hwnd, kIdleQuickExpandTimer);
+        } else if (idleQuickExpandT <= 0.0f) {
+            idleQuickExpandT = 0.0f;
+            KillTimer(hwnd, kIdleQuickExpandTimer);
+        }
+        render();
     }
 
     void advanceVolumeSlider() {
@@ -2230,6 +2441,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kScrollTimer);
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kVolumeTimer);
+        KillTimer(hwnd, kIdleQuickExpandTimer);
         scrollTimerRunning = false;
         deferredRender = false;
         entering = true;
@@ -2266,6 +2478,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kScrollTimer);
         KillTimer(hwnd, kVolumeTimer);
+        KillTimer(hwnd, kIdleQuickExpandTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
@@ -2345,6 +2558,12 @@ struct MediaPopup::Impl {
         pressedPageArrow = false;
         hoverCopy = false;
         pressedCopy = false;
+        hoverIdleQuickExpand = false;
+        pressedIdleQuickExpand = false;
+        idleQuickExpandRect = {};
+        idleQuickExpanded = false;
+        idleQuickExpandOpening = false;
+        idleQuickExpandT = 0.0f;
         if (!hwnd)
             return;
         killTimers();
@@ -2366,6 +2585,7 @@ struct MediaPopup::Impl {
                      hitVolumeSlider(dip(point.x), dip(point.y)) ||
                      hitPageArrow(dip(point.x), dip(point.y)) ||
                      hitCopy(dip(point.x), dip(point.y)) ||
+                     hitIdleQuickExpand(dip(point.x), dip(point.y)) ||
                      hitIdleApp(dip(point.x), dip(point.y)) >= 0)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
@@ -2384,11 +2604,13 @@ struct MediaPopup::Impl {
                 const int idleApp = hitIdleApp(mx, my);
                 const bool arrow = hitPageArrow(mx, my);
                 const bool copy = hitCopy(mx, my);
+                const bool quickExpand = hitIdleQuickExpand(mx, my);
                 if (idleApp != hoverIdleApp || arrow != hoverPageArrow || copy != hoverCopy ||
-                    hoverVolume) {
+                    quickExpand != hoverIdleQuickExpand || hoverVolume) {
                     hoverIdleApp = idleApp;
                     hoverPageArrow = arrow;
                     hoverCopy = copy;
+                    hoverIdleQuickExpand = quickExpand;
                     hoverVolume = false;
                     renderOrDefer();
                 }
@@ -2415,6 +2637,7 @@ struct MediaPopup::Impl {
             hoverIdleApp = -1;
             hoverPageArrow = false;
             hoverCopy = false;
+            hoverIdleQuickExpand = false;
             onPopupLeave();
             renderOrDefer();
             return 0;
@@ -2430,6 +2653,12 @@ struct MediaPopup::Impl {
                 }
                 if (hitCopy(x, y)) {
                     pressedCopy = true;
+                    SetCapture(hwnd);
+                    renderOrDefer();
+                    return 0;
+                }
+                if (hitIdleQuickExpand(x, y)) {
+                    pressedIdleQuickExpand = true;
                     SetCapture(hwnd);
                     renderOrDefer();
                     return 0;
@@ -2493,6 +2722,9 @@ struct MediaPopup::Impl {
                 const bool copy = pressedCopy;
                 const bool copyHit = hitCopy(x, y);
                 pressedCopy = false;
+                const bool quickExpand = pressedIdleQuickExpand;
+                const bool quickExpandHit = hitIdleQuickExpand(x, y);
+                pressedIdleQuickExpand = false;
                 if (arrow && arrowHit) {
                     if (GetCapture() == hwnd)
                         ReleaseCapture();
@@ -2504,6 +2736,12 @@ struct MediaPopup::Impl {
                         ReleaseCapture();
                     copyIdleQuote();
                     renderOrDefer();
+                    return 0;
+                }
+                if (quickExpand && quickExpandHit) {
+                    if (GetCapture() == hwnd)
+                        ReleaseCapture();
+                    toggleIdleQuickExpand();
                     return 0;
                 }
                 if (idleScrollDragging) {
@@ -2609,6 +2847,7 @@ struct MediaPopup::Impl {
             idleScrollDragging = false;
             pressedPageArrow = false;
             pressedCopy = false;
+            pressedIdleQuickExpand = false;
             renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
@@ -2678,6 +2917,8 @@ struct MediaPopup::Impl {
                     return 0;
                 }
                 advanceVolumeSlider();
+            } else if (wp == kIdleQuickExpandTimer) {
+                advanceIdleQuickExpand();
             }
             return 0;
         case WM_DPICHANGED:
@@ -3047,6 +3288,13 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
     impl_->idle = content;
     impl_->available = available;
+    if (!content.quickStartEnabled) {
+        impl_->idleQuickExpanded = false;
+        impl_->idleQuickExpandOpening = false;
+        impl_->idleQuickExpandT = 0.0f;
+        if (impl_->hwnd)
+            KillTimer(impl_->hwnd, kIdleQuickExpandTimer);
+    }
     if (changed) {
         if (quoteChanged) {
             impl_->idleQuoteScrollOffset = 0.0f;
