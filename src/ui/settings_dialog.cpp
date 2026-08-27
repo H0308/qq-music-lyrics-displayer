@@ -1132,6 +1132,30 @@ struct SettingsDialog::Impl {
                             row.controlRect.right - 1.5f, row.controlRect.bottom - 1.5f),
                 1.5f, fluent::metrics::controlRadius - 1.0f);
         }
+        if (row.id == kIdMediaPopupBackgroundColor) {
+            auto* format = painter.textFormat(14.0f, 400, false, true);
+            constexpr float kPreviewSize = 18.0f;
+            constexpr float kPreviewGap = 8.0f;
+            const float textW = format ? painter.measureTextWidth(row.controlText, format) : 0.0f;
+            const float groupW = kPreviewSize + kPreviewGap + textW;
+            const float centerX = (row.controlRect.left + row.controlRect.right) * 0.5f;
+            const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
+            const float groupLeft = centerX - groupW * 0.5f;
+            const D2D1_RECT_F previewRect =
+                D2D1::RectF(groupLeft, centerY - kPreviewSize * 0.5f,
+                            groupLeft + kPreviewSize, centerY + kPreviewSize * 0.5f);
+            painter.fillRoundRect(fluent::toD2D(state.idleCardBackgroundColor), previewRect, 4.0f);
+            painter.strokeRoundRect(row.enabled ? p.cardStroke : p.disabled, previewRect, 1.0f,
+                                    4.0f);
+            if (format) {
+                painter.drawText(
+                    row.controlText, format,
+                    D2D1::RectF(groupLeft + kPreviewSize + kPreviewGap, row.controlRect.top,
+                                row.controlRect.right - 4.0f, row.controlRect.bottom),
+                    textColor);
+            }
+            return;
+        }
         painter.drawText(row.controlText, painter.textFormat(14.0f, 400, true, true),
                          D2D1::RectF(row.controlRect.left + 4.0f, row.controlRect.top,
                                      row.controlRect.right - 4.0f, row.controlRect.bottom),
