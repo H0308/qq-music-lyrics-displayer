@@ -1417,9 +1417,11 @@ struct TaskbarHost::Impl {
         const bool mediaChanged = updateMediaInfo(frame.media);
         const bool popupAvailable = mediaPopupAvailable(frame.visible);
         mediaPopup.setIdleContent(frame.idle, popupAvailable);
+        mediaPopup.setMedia(frame.media, popupAvailable, songChanged);
+        // 先同步完整媒体数据，再建立页面转场层，避免 Idle → Media 时目标层
+        // 先绘制旧歌曲、随后才收到本帧最新标题/歌手而在转场结束时跳变。
         mediaPopup.setPresentationMode(frame.scene, popupAvailable,
                                        hoverControlStyle_ == HoverControlStyle::Inline);
-        mediaPopup.setMedia(frame.media, popupAvailable, songChanged);
         mediaPopup.setProgress(frame.actualPositionMs);
 
         frameRevision_ = frame.frameRevision;

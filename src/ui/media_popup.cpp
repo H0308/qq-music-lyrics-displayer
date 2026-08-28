@@ -252,6 +252,9 @@ struct MediaPopup::Impl {
     PopupPage categoryTransitionFrom = PopupPage::Media;
     IdlePresentation categoryTransitionIdle;
     OverlayMediaInfo categoryTransitionMedia;
+    float categoryTransitionTitleScrollOffset = 0.0f;
+    float categoryTransitionArtistScrollOffset = 0.0f;
+    float categoryTransitionIdleQuoteScrollOffset = 0.0f;
     int categoryTransitionDirection = 1;
     // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
     // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
@@ -983,6 +986,34 @@ struct MediaPopup::Impl {
         }
     }
 
+    bool createMeasuredTextLayout(const std::wstring& text, IDWriteTextFormat* format,
+                                  float layoutHeight, IDWriteTextLayout** out, float& width,
+                                  float& height) {
+        width = 0.0f;
+        height = 0.0f;
+        if (!out)
+            return false;
+        *out = nullptr;
+        if (!renderer.dwrite() || !format || text.empty())
+            return false;
+        if (FAILED(renderer.dwrite()->CreateTextLayout(
+                text.c_str(), static_cast<UINT32>(text.size()), format, 100000.0f,
+                layoutHeight, out)) ||
+            !*out)
+            return false;
+
+        // 正常页和转场快照都用同一个行布局基准；外层绘制再按实际 metrics 垂直居中。
+        (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED((*out)->GetMetrics(&metrics))) {
+            releaseCom(*out);
+            return false;
+        }
+        width = metrics.width;
+        height = metrics.height;
+        return true;
+    }
+
     void buildTextLayouts() {
         if (!textDirty)
             return;
@@ -994,29 +1025,13 @@ struct MediaPopup::Impl {
         artistWidth = 0.0f;
         artistHeight = 0.0f;
 
-        IDWriteFactory* dwrite = renderer.dwrite();
-        if (!dwrite || !fmtTitle || !fmtArtist)
+        if (!renderer.dwrite() || !fmtTitle || !fmtArtist)
             return;
 
-        auto build = [&](const std::wstring& text, IDWriteTextFormat* format,
-                         IDWriteTextLayout** layout, float& width, float& height) {
-            if (text.empty())
-                return;
-            if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
-                                                format, 100000.0f, 40.0f, layout)) ||
-                !*layout)
-                return;
-            // CreateTextLayout 的高度是 40 DIP；若继续沿用格式的居中段落，
-            // DrawTextLayout 外层再做一次垂直居中会把文字推到裁剪区域之外。
-            (*layout)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            DWRITE_TEXT_METRICS metrics{};
-            if (SUCCEEDED((*layout)->GetMetrics(&metrics))) {
-                width = metrics.width;
-                height = metrics.height;
-            }
-        };
-        build(media.title, fmtTitle, &titleLayout, titleWidth, titleHeight);
-        build(media.artist, fmtArtist, &artistLayout, artistWidth, artistHeight);
+        createMeasuredTextLayout(media.title, fmtTitle, 40.0f, &titleLayout, titleWidth,
+                                 titleHeight);
+        createMeasuredTextLayout(media.artist, fmtArtist, 40.0f, &artistLayout, artistWidth,
+                                 artistHeight);
     }
 
     void buildIdleTextLayout() {
@@ -1029,16 +1044,10 @@ struct MediaPopup::Impl {
         if (!renderer.dwrite() || !fmtIdleQuote || idle.sentence.empty())
             return;
 
-        if (FAILED(renderer.dwrite()->CreateTextLayout(
-                idle.sentence.c_str(), static_cast<UINT32>(idle.sentence.size()), fmtIdleQuote,
-                100000.0f, 42.0f, &idleQuoteLayout)) ||
-            !idleQuoteLayout)
+        if (!createMeasuredTextLayout(idle.sentence, fmtIdleQuote, 42.0f, &idleQuoteLayout,
+                                      idleQuoteWidth, idleQuoteHeight))
             return;
-        DWRITE_TEXT_METRICS metrics{};
-        if (SUCCEEDED(idleQuoteLayout->GetMetrics(&metrics))) {
-            idleQuoteWidth = metrics.width;
-            idleQuoteHeight = std::min(42.0f, metrics.height);
-        }
+        idleQuoteHeight = std::min(42.0f, idleQuoteHeight);
     }
 
     void decodeIdleIcons() {
@@ -1389,17 +1398,17 @@ struct MediaPopup::Impl {
         return 18.0f;
     }
 
-    void drawIdleQuoteUnit(ID2D1DeviceContext* rt, float w, const IdlePresentation& content,
-                           bool current) {
+    void drawIdleQuoteText(ID2D1DeviceContext* rt, float w, const IdlePresentation& content,
+                           float quoteHeight, IDWriteTextLayout* layout, float textWidth,
+                           float textHeight, float scrollOffset) {
         if (!rt)
             return;
         const float quoteTop = 40.0f;
-        const float quoteHeight = idleUnitHeight(content, current);
         const D2D1_RECT_F quoteRect =
             D2D1::RectF(16.0f, quoteTop, w - 16.0f, quoteTop + quoteHeight);
-        if (current && idleQuoteLayout && content.sentence == idle.sentence) {
-            drawScrollingText(rt, idleQuoteLayout, idleQuoteWidth, idleQuoteHeight, quoteRect,
-                              idleQuoteScrollOffset, brushText);
+        if (layout && !content.sentence.empty()) {
+            drawScrollingText(rt, layout, textWidth, textHeight, quoteRect, scrollOffset,
+                              brushText);
         } else if (!content.sentence.empty()) {
             drawText(rt, content.sentence, fmtIdleQuote, quoteRect,
                      content.loading ? brushSecondary : brushText);
@@ -1414,6 +1423,18 @@ struct MediaPopup::Impl {
             drawText(rt, content.source, fmtIdleSource,
                      D2D1::RectF(16.0f, sourceTop, w - 16.0f, sourceTop + 18.0f),
                      brushSecondary);
+    }
+
+    void drawIdleQuoteUnit(ID2D1DeviceContext* rt, float w, const IdlePresentation& content,
+                           bool current) {
+        const float quoteHeight = idleUnitHeight(content, current);
+        const bool useCurrentLayout =
+            current && idleQuoteLayout && content.sentence == idle.sentence;
+        drawIdleQuoteText(rt, w, content, quoteHeight,
+                          useCurrentLayout ? idleQuoteLayout : nullptr,
+                          useCurrentLayout ? idleQuoteWidth : 0.0f,
+                          useCurrentLayout ? idleQuoteHeight : 0.0f,
+                          useCurrentLayout ? idleQuoteScrollOffset : 0.0f);
     }
 
     bool idleCopyAvailable(const IdlePresentation& content) const {
@@ -1625,14 +1646,24 @@ struct MediaPopup::Impl {
                      D2D1::RectF(42.0f, 12.0f, 220.0f, 34.0f), brushText);
         }
         drawCover(rt);
-        drawText(rt, snapshot.title, fmtTitle,
-                 D2D1::RectF(kPopupTextLeftDip, 48.0f,
-                             w - kPopupTextRightPaddingDip, 76.0f),
-                 brushText);
-        drawText(rt, snapshot.artist, fmtArtist,
-                 D2D1::RectF(kPopupTextLeftDip, 78.0f,
-                             w - kPopupTextRightPaddingDip, 102.0f),
-                 brushSecondary);
+        IDWriteTextLayout* snapshotTitleLayout = nullptr;
+        IDWriteTextLayout* snapshotArtistLayout = nullptr;
+        float snapshotTitleWidth = 0.0f;
+        float snapshotTitleHeight = 0.0f;
+        float snapshotArtistWidth = 0.0f;
+        float snapshotArtistHeight = 0.0f;
+        createMeasuredTextLayout(snapshot.title, fmtTitle, 40.0f, &snapshotTitleLayout,
+                                 snapshotTitleWidth, snapshotTitleHeight);
+        createMeasuredTextLayout(snapshot.artist, fmtArtist, 40.0f, &snapshotArtistLayout,
+                                 snapshotArtistWidth, snapshotArtistHeight);
+        drawScrollingText(rt, snapshotTitleLayout, snapshotTitleWidth, snapshotTitleHeight,
+                          D2D1::RectF(kPopupTextLeftDip, 48.0f,
+                                      w - kPopupTextRightPaddingDip, 76.0f),
+                          categoryTransitionTitleScrollOffset, brushText);
+        drawScrollingText(rt, snapshotArtistLayout, snapshotArtistWidth, snapshotArtistHeight,
+                          D2D1::RectF(kPopupTextLeftDip, 78.0f,
+                                      w - kPopupTextRightPaddingDip, 102.0f),
+                          categoryTransitionArtistScrollOffset, brushSecondary);
 
         const OverlayMediaInfo current = media;
         media = snapshot;
@@ -1640,6 +1671,8 @@ struct MediaPopup::Impl {
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i);
         media = current;
+        releaseCom(snapshotTitleLayout);
+        releaseCom(snapshotArtistLayout);
     }
 
     void drawPageArrow(ID2D1DeviceContext* rt, float w, PopupPage page,
@@ -1893,8 +1926,16 @@ struct MediaPopup::Impl {
     }
 
     void drawIdleSnapshot(ID2D1DeviceContext* rt, float w, const IdlePresentation& content) {
+        IDWriteTextLayout* snapshotQuoteLayout = nullptr;
+        float snapshotQuoteWidth = 0.0f;
+        float snapshotQuoteHeight = 0.0f;
+        createMeasuredTextLayout(content.sentence, fmtIdleQuote, 42.0f, &snapshotQuoteLayout,
+                                 snapshotQuoteWidth, snapshotQuoteHeight);
+        snapshotQuoteHeight = std::min(42.0f, snapshotQuoteHeight);
         const float quoteTop = 40.0f;
-        const float quoteHeight = idleUnitHeight(content, false);
+        const float quoteHeight = snapshotQuoteLayout
+                                       ? std::max(18.0f, snapshotQuoteHeight)
+                                       : 18.0f;
         const float sourceTop = quoteTop + quoteHeight + 8.0f;
         const float collapsedQuickHeaderTop = sourceTop + 30.0f;
         const float quickHeaderTop = idleQuickHeaderTop(collapsedQuickHeaderTop, content);
@@ -1908,7 +1949,9 @@ struct MediaPopup::Impl {
                                 D2D1_ANTIALIAS_MODE_ALIASED);
         drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                  D2D1::RectF(16.0f, 14.0f, w - 16.0f, 36.0f), brushText);
-        drawIdleQuoteUnit(rt, w, content, false);
+        drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout,
+                          snapshotQuoteWidth, snapshotQuoteHeight,
+                          categoryTransitionIdleQuoteScrollOffset);
         drawIdleCopyButton(rt, w, content, false);
         rt->PopAxisAlignedClip();
 
@@ -1923,6 +1966,7 @@ struct MediaPopup::Impl {
                  D2D1::RectF(16.0f, quickHeaderTop, quickHeaderRight, quickHeaderBottom),
                  brushSecondary);
         drawIdleQuickList(rt, w, listTop, content);
+        releaseCom(snapshotQuoteLayout);
     }
 
     void drawPageContent(ID2D1DeviceContext* rt, float w, PopupPage page, bool oldLayer,
@@ -2366,6 +2410,7 @@ struct MediaPopup::Impl {
         // 打断可能仍在进行的转场：撤掉旧合成层；若本次也需要转场，接下来的
         // render() 会在同一帧内换上新层，不会闪空帧。
         stopCategoryTransition();
+        stopQuickExpandTransition();
         categoryTransitionActive = popupVisible && clientAnimations && !entering && !closing;
         if (categoryTransitionActive) {
             categoryTransitionFrom = from;
@@ -2373,6 +2418,9 @@ struct MediaPopup::Impl {
                                          ? idleContentTransitionFrom
                                          : idle;
             categoryTransitionMedia = media;
+            categoryTransitionTitleScrollOffset = titleScrollOffset;
+            categoryTransitionArtistScrollOffset = artistScrollOffset;
+            categoryTransitionIdleQuoteScrollOffset = idleQuoteScrollOffset;
             categoryTransitionDirection = categoryDirection(from, target);
         }
         idleContentTransitionActive = false;
