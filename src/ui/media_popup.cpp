@@ -39,6 +39,9 @@ constexpr UINT kCloseAnimationMs = 140;
 constexpr float kSongTransitionMs = 220.0f;
 constexpr float kSongTransitionTravelDip = 24.0f;
 constexpr float kCategoryTransitionMs = 240.0f;
+// 页面互切保留方向感，但不把稀疏的卡片内容整体推到可视区外；主要变化由
+// 内容透明度完成，避免用户在过渡中只看到空白背景。
+constexpr float kCategoryTransitionTravelDip = 24.0f;
 constexpr float kInnerContentTransitionMs = 220.0f;
 constexpr float kIdleQuickExpandMs = 160.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
@@ -226,6 +229,8 @@ struct MediaPopup::Impl {
     bool closing = false;
     bool entering = false;
     bool deferredRender = false;
+    int presentationUpdateDepth = 0;
+    bool presentationUpdatePending = false;
     bool placedAbove = true;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
@@ -237,9 +242,8 @@ struct MediaPopup::Impl {
     bool autoTextContrast = false;
     bool materialNeedsApply = true;
     bool backdropDirty = true;
-    bool preserveBackdropOnNextResourceCreate = false;
-    // 最近一次背景采样得到的亮度（-1 表示无效）。页面切换时背景位图被保留，
-    // 画笔重建后直接用它恢复文字对比色，无需再次隐藏窗口抓屏。
+    // 最近一次背景采样得到的亮度（-1 表示无效）。页面切换时背景位图继续复用，
+    // 不需要再次隐藏窗口抓屏；页面文字对比色在绘制当前页面时恢复。
     float lastBackdropLuminance = -1.0f;
     bool coverDirty = true;
     bool sourceIconDirty = true;
@@ -365,6 +369,7 @@ struct MediaPopup::Impl {
     ULONGLONG scrollTickMs = 0;
     ID2D1Bitmap* coverBmp = nullptr;
     ID2D1Bitmap* sourceIconBmp = nullptr;
+    std::wstring sourceIconLoadedFor;
     ID2D1RoundedRectangleGeometry* coverClip = nullptr;
     ID2D1Layer* coverLayer = nullptr;
     ID2D1Bitmap* backdropBmp = nullptr;
@@ -462,22 +467,62 @@ struct MediaPopup::Impl {
         brushProgressTrack->SetOpacity(1.0f);
     }
 
-    MediaPopupBackground activeBackgroundMode() const {
-        return idleMode ? idleBackgroundMode : backgroundMode;
+    MediaPopupBackground backgroundModeForPage(PopupPage page) const {
+        return page == PopupPage::Idle ? idleBackgroundMode : backgroundMode;
     }
 
-    bool frostedBackgroundActive() const {
-        return activeBackgroundMode() == MediaPopupBackground::Frosted;
+    bool frostedBackgroundActiveForPage(PopupPage page) const {
+        return backgroundModeForPage(page) == MediaPopupBackground::Frosted;
     }
 
-    bool dynamicBackgroundEnabled() const {
-        if (idleMode) {
+    bool dynamicBackgroundEnabledForPage(PopupPage page) const {
+        if (page == PopupPage::Idle) {
             // 空闲入口只有在仍有播放场景且已提取专辑色时才切换，纯无播放入口
             // 保留用户设置的磨砂颜色。
             return idleFollowAlbumBackground && playbackScene && media.hasDominantColor &&
                    idleBackgroundMode == MediaPopupBackground::Frosted;
         }
         return followAlbumBackground && backgroundMode == MediaPopupBackground::Frosted;
+    }
+
+    MediaPopupBackground activeBackgroundMode() const {
+        return backgroundModeForPage(currentPage());
+    }
+
+    bool frostedBackgroundActive() const {
+        return frostedBackgroundActiveForPage(currentPage());
+    }
+
+    bool dynamicBackgroundEnabled() const {
+        return dynamicBackgroundEnabledForPage(currentPage());
+    }
+
+    D2D1_COLOR_F cardFillForPage(PopupPage page) const {
+        const auto& p = fluent::palette(fluent::ThemeTarget::Window);
+        const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
+        D2D1_COLOR_F cardFill = p.cardFillSolid;
+        if (page == PopupPage::Idle) {
+            // 无播放组合面板的纯色模式只跟随窗口深浅色，颜色设置只参与磨砂 tint。
+            cardFill = dark ? D2D1::ColorF(D2D1::ColorF::Black)
+                            : D2D1::ColorF(D2D1::ColorF::White);
+            if (frostedBackgroundActiveForPage(page)) {
+                const float tintAlpha = dark ? 0.10f : 0.16f;
+                if (dynamicBackgroundEnabledForPage(page)) {
+                    cardFill = p.cardFill;
+                    cardFill.a = tintAlpha;
+                } else {
+                    cardFill = idleBackgroundColorCustomized
+                                   ? fluent::toD2D(idleBackgroundColor, tintAlpha)
+                                   : p.cardFill;
+                }
+            }
+        } else if (frostedBackgroundActiveForPage(page)) {
+            // 播放中的音乐控件卡片使用原有磨砂逻辑；无播放组合面板的自定义颜色
+            // 不参与这里的绘制。
+            cardFill = p.cardFill;
+            cardFill.a = dark ? 0.10f : 0.16f;
+        }
+        return cardFill;
     }
 
     void releaseDynamicBackgroundResources() {
@@ -496,10 +541,10 @@ struct MediaPopup::Impl {
             brushDisabled->SetColor(p.disabled);
     }
 
-    void applyBackdropTextContrast(float luminance) {
+    void applyBackdropTextContrastForPage(float luminance, PopupPage page) {
         // 无播放组合面板没有单独的字体颜色开关，磨砂模式始终根据后方内容
         // 选择黑/白文字；播放中的媒体卡片仍由设置项控制。
-        if (!idleMode && !autoTextContrast) {
+        if (page == PopupPage::Media && !autoTextContrast) {
             resetBackdropTextColors();
             return;
         }
@@ -520,6 +565,10 @@ struct MediaPopup::Impl {
             brushSecondary->SetColor(secondary);
         if (brushDisabled)
             brushDisabled->SetColor(disabled);
+    }
+
+    void applyBackdropTextContrast(float luminance) {
+        applyBackdropTextContrastForPage(luminance, currentPage());
     }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -603,7 +652,6 @@ struct MediaPopup::Impl {
     void releaseDrawingResources() {
         stopCategoryTransition();
         stopQuickExpandTransition();
-        preserveBackdropOnNextResourceCreate = false;
         releaseVisualResources();
         renderer.discard();
         themeDirty = true;
@@ -624,21 +672,19 @@ struct MediaPopup::Impl {
                               sizeof(disableTransitions));
     }
 
-    void releaseVisualResources(bool preserveBackdrop = false) {
+    void releaseVisualResources() {
         releaseBitmap(coverBmp);
         releaseBitmap(sourceIconBmp);
+        sourceIconLoadedFor.clear();
         for (auto*& bitmap : idleIconBitmaps)
             releaseBitmap(bitmap);
         idleIconBitmaps.clear();
         idleIconsDirty = true;
-        if (!preserveBackdrop) {
-            releaseBitmap(backdropBmp);
-            releaseCom(backdropBlur);
-            lastBackdropLuminance = -1.0f;
-        }
         sourceIconDirty = true;
-        if (!preserveBackdrop)
-            backdropDirty = true;
+        releaseBitmap(backdropBmp);
+        releaseCom(backdropBlur);
+        lastBackdropLuminance = -1.0f;
+        backdropDirty = true;
         releaseBrush(brushBackground);
         releaseBrush(brushStroke);
         releaseBrush(brushText);
@@ -676,8 +722,8 @@ struct MediaPopup::Impl {
         releaseCom(coverClip);
         media_control::release(controlGeometry);
         releaseCom(coverLayer);
-        // 几何图层会随页面资源一起重建；只保留背景快照和模糊效果，
-        // 避免在 createResources() 中覆盖仍然存活的几何对象。
+        // 几何图层会随页面资源一起重建；页面互切时另外保留已解码的页面位图，
+        // 避免来源页快照因资源重建而丢失图标。
         releaseCom(backdropClip);
         releaseCom(backdropLayer);
     }
@@ -710,37 +756,13 @@ struct MediaPopup::Impl {
     bool createResources() {
         if (!themeDirty && brushBackground)
             return true;
-        const bool preserveBackdrop = preserveBackdropOnNextResourceCreate;
-        preserveBackdropOnNextResourceCreate = false;
-        releaseVisualResources(preserveBackdrop);
+        releaseVisualResources();
         auto* rt = renderer.renderTarget();
         if (!rt)
             return false;
 
         const auto& p = fluent::palette(fluent::ThemeTarget::Window);
-        const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
-        D2D1_COLOR_F cardFill = p.cardFillSolid;
-        if (idleMode) {
-            // 无播放组合面板的纯色模式只跟随窗口深浅色，颜色设置只参与磨砂 tint。
-            cardFill = dark ? D2D1::ColorF(D2D1::ColorF::Black)
-                            : D2D1::ColorF(D2D1::ColorF::White);
-            if (frostedBackgroundActive()) {
-                const float tintAlpha = dark ? 0.10f : 0.16f;
-                if (dynamicBackgroundEnabled()) {
-                    cardFill = p.cardFill;
-                    cardFill.a = tintAlpha;
-                } else {
-                    cardFill = idleBackgroundColorCustomized
-                                   ? fluent::toD2D(idleBackgroundColor, tintAlpha)
-                                   : p.cardFill;
-                }
-            }
-        } else if (frostedBackgroundActive()) {
-            // 保持播放中的音乐控件卡片原有磨砂逻辑；无播放组合面板的自定义颜色
-            // 不参与这里的绘制。
-            cardFill = p.cardFill;
-            cardFill.a = dark ? 0.10f : 0.16f;
-        }
+        const D2D1_COLOR_F cardFill = cardFillForPage(currentPage());
         if (FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
@@ -789,16 +811,16 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 画笔按调色板重建后，如果背景快照被保留（页面互切场景），沿用之前
-        // 采样的亮度恢复文字对比色，避免为重新采样而隐藏窗口造成可见闪烁。
+        // 画笔按调色板重建后，如果背景快照仍然有效，沿用之前采样的亮度恢复
+        // 文字对比色，避免为重新采样而隐藏窗口造成可见闪烁。
         if (backdropBmp && lastBackdropLuminance >= 0.0f)
             applyBackdropTextContrast(lastBackdropLuminance);
         themeDirty = false;
         return true;
     }
 
-    bool createDynamicBackgroundResources() {
-        if (!dynamicBackgroundEnabled())
+    bool createDynamicBackgroundResources(bool enabled) {
+        if (!enabled)
             return false;
         if (!dynamicBackgroundDirty && brushDynamicGradient && brushDynamicGlow)
             return true;
@@ -843,14 +865,24 @@ struct MediaPopup::Impl {
         return true;
     }
 
-    bool captureBackdrop() {
+    bool createDynamicBackgroundResources() {
+        return createDynamicBackgroundResources(dynamicBackgroundEnabled());
+    }
+
+    bool captureBackdrop(bool force = false) {
         if (!backdropDirty)
             return true;
+        // 页面互切不改变窗口后方的场景；已有快照时直接复用，即使其他设置
+        // 把 dirty 标记置上，也不能在可见转场中通过隐藏窗口重新抓屏。
+        if (categoryTransitionActive && backdropBmp && lastBackdropLuminance >= 0.0f) {
+            backdropDirty = false;
+            return true;
+        }
         backdropDirty = false;
         releaseCom(backdropBlur);
         releaseBitmap(backdropBmp);
         resetBackdropTextColors();
-        if (!frostedBackgroundActive() || !hwnd)
+        if ((!force && !frostedBackgroundActive()) || !hwnd)
             return true;
 
         const int width = cardWidthPx;
@@ -947,7 +979,8 @@ struct MediaPopup::Impl {
         }
         DeleteObject(dib);
         backdropBmp = captured;
-        applyBackdropTextContrast(sampledLuminance);
+        if (frostedBackgroundActive())
+            applyBackdropTextContrast(sampledLuminance);
 
         ID2D1Effect* blur = nullptr;
         HRESULT hr = rt->CreateEffect(kGaussianBlurClsid, &blur);
@@ -1273,9 +1306,13 @@ struct MediaPopup::Impl {
 
     void decodeSourceIcon() {
         sourceIconDirty = false;
-        releaseBitmap(sourceIconBmp);
         auto* rt = renderer.renderTarget();
-        if (!rt || media.sourceAppUserModelId.empty())
+        if (media.sourceAppUserModelId.empty()) {
+            releaseBitmap(sourceIconBmp);
+            sourceIconLoadedFor.clear();
+            return;
+        }
+        if (!rt)
             return;
 
         std::vector<BYTE> pixels;
@@ -1290,9 +1327,15 @@ struct MediaPopup::Impl {
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             static_cast<float>(dpi), static_cast<float>(dpi));
         ID2D1Bitmap1* decoded = nullptr;
-        if (SUCCEEDED(rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4,
-                                       &props, &decoded)))
-            sourceIconBmp = decoded;
+        if (FAILED(rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4,
+                                    &props, &decoded)))
+            return;
+
+        // 只有新位图创建成功后才替换旧位图。切换期间路径解析或进程图标读取
+        // 出现一次性失败时，仍然保留上一帧可用的 QQ 音乐图标。
+        releaseBitmap(sourceIconBmp);
+        sourceIconBmp = decoded;
+        sourceIconLoadedFor = media.sourceAppUserModelId;
     }
 
     void drawText(ID2D1DeviceContext* rt, const std::wstring& text, IDWriteTextFormat* format,
@@ -1614,11 +1657,11 @@ struct MediaPopup::Impl {
         drawIdleQuickList(rt, w, listTop, idle);
     }
 
-    void drawMediaContent(ID2D1DeviceContext* rt, float w) {
+    void drawMediaContent(ID2D1DeviceContext* rt, float w, bool useCachedLayers) {
         if (!rt)
             return;
         drawSource(rt);
-        drawCover(rt);
+        drawCover(rt, useCachedLayers);
         drawScrollingText(rt, titleLayout, titleWidth, titleHeight,
                           D2D1::RectF(kPopupTextLeftDip, 48.0f,
                                       w - kPopupTextRightPaddingDip, 76.0f),
@@ -1633,19 +1676,17 @@ struct MediaPopup::Impl {
     }
 
     void drawMediaSnapshot(ID2D1DeviceContext* rt, float w,
-                           const OverlayMediaInfo& snapshot) {
+                           const OverlayMediaInfo& snapshot, bool useCachedLayers) {
         if (!rt)
             return;
         // 类别转场开始前保存的媒体字段可能已经被最新 SMTC 帧替换；
         // 旧层只需要一次静态快照，不参与新的布局和滚动状态。
         if (!snapshot.sourceAppUserModelId.empty()) {
-            const D2D1_RECT_F iconRect = D2D1::RectF(16.0f, 14.0f, 34.0f, 32.0f);
-            rt->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 5.0f, 5.0f), brushAccent);
-            drawText(rt, L"♪", fmtIcon, iconRect, brushTextOnAccent);
+            drawSourceIcon(rt, snapshot.sourceAppUserModelId);
             drawText(rt, sourceLabel(snapshot.sourceAppUserModelId), fmtSource,
                      D2D1::RectF(42.0f, 12.0f, 220.0f, 34.0f), brushText);
         }
-        drawCover(rt);
+        drawCover(rt, useCachedLayers);
         IDWriteTextLayout* snapshotTitleLayout = nullptr;
         IDWriteTextLayout* snapshotArtistLayout = nullptr;
         float snapshotTitleWidth = 0.0f;
@@ -1697,16 +1738,22 @@ struct MediaPopup::Impl {
                     7.0f, brushSecondary, page == PopupPage::Media);
     }
 
-    void drawBackdrop(ID2D1DeviceContext* rt, float w, float h) {
-        if (!frostedBackgroundActive() || (!backdropBlur && !backdropBmp))
+    void drawBackdrop(ID2D1DeviceContext* rt, float w, float h, bool enabled,
+                      bool useCachedLayer) {
+        if (!enabled || !rt || (!backdropBlur && !backdropBmp))
             return;
 
-        const bool clipped = backdropClip && backdropLayer;
+        ID2D1Layer* temporaryLayer = nullptr;
+        ID2D1Layer* clipLayer = useCachedLayer ? backdropLayer : nullptr;
+        if (backdropClip && !clipLayer && FAILED(rt->CreateLayer(&temporaryLayer)))
+            return;
+        clipLayer = clipLayer ? clipLayer : temporaryLayer;
+        const bool clipped = backdropClip && clipLayer;
         if (clipped) {
             rt->PushLayer(D2D1::LayerParameters1(
                               D2D1::InfiniteRect(), backdropClip,
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),
-                          backdropLayer);
+                          clipLayer);
         }
         if (backdropBlur) {
             const D2D1_POINT_2F offset = D2D1::Point2F(0.0f, 0.0f);
@@ -1718,10 +1765,16 @@ struct MediaPopup::Impl {
         }
         if (clipped)
             rt->PopLayer();
+        if (temporaryLayer)
+            temporaryLayer->Release();
     }
 
-    void drawDynamicBackground(ID2D1DeviceContext* rt, float w, float h) {
-        if (!dynamicBackgroundEnabled() || !rt || !brushDynamicGradient || !brushDynamicGlow)
+    void drawBackdrop(ID2D1DeviceContext* rt, float w, float h) {
+        drawBackdrop(rt, w, h, frostedBackgroundActive(), true);
+    }
+
+    void drawDynamicBackground(ID2D1DeviceContext* rt, float w, float h, bool enabled) {
+        if (!enabled || !rt || !brushDynamicGradient || !brushDynamicGlow)
             return;
 
         brushDynamicGradient->SetStartPoint(D2D1::Point2F(0.0f, 0.0f));
@@ -1739,31 +1792,49 @@ struct MediaPopup::Impl {
         rt->FillRoundedRectangle(card, brushDynamicGlow);
     }
 
-    void drawCover(ID2D1DeviceContext* rt) {
+    void drawDynamicBackground(ID2D1DeviceContext* rt, float w, float h) {
+        drawDynamicBackground(rt, w, h, dynamicBackgroundEnabled());
+    }
+
+    void drawCover(ID2D1DeviceContext* rt, bool useCachedLayer) {
         const D2D1_RECT_F rect = D2D1::RectF(16.0f, 44.0f, 16.0f + kCoverSizeDip,
                                              44.0f + kCoverSizeDip);
         rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 10.0f, 10.0f), brushControl);
-        if (coverBmp && coverClip && coverLayer) {
+        ID2D1Layer* temporaryLayer = nullptr;
+        ID2D1Layer* clipLayer = useCachedLayer ? coverLayer : nullptr;
+        if (coverBmp && coverClip && !clipLayer && FAILED(rt->CreateLayer(&temporaryLayer)))
+            clipLayer = nullptr;
+        else
+            clipLayer = clipLayer ? clipLayer : temporaryLayer;
+        if (coverBmp && coverClip && clipLayer) {
             rt->PushLayer(D2D1::LayerParameters1(
                               D2D1::InfiniteRect(), coverClip,
                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                               D2D1::Matrix3x2F::Translation(rect.left, rect.top)),
-                          coverLayer);
+                          clipLayer);
             rt->DrawBitmap(coverBmp, rect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             rt->PopLayer();
+            if (temporaryLayer)
+                temporaryLayer->Release();
             return;
         }
+        if (temporaryLayer)
+            temporaryLayer->Release();
         drawText(rt, L"♪", fmtIcon, rect, brushSecondary);
     }
 
-    void drawSource(ID2D1DeviceContext* rt) {
+    void drawSourceIcon(ID2D1DeviceContext* rt, const std::wstring& source) {
         const D2D1_RECT_F iconRect = D2D1::RectF(16.0f, 14.0f, 34.0f, 32.0f);
-        if (sourceIconBmp) {
+        if (sourceIconBmp && sourceIconLoadedFor == source) {
             rt->DrawBitmap(sourceIconBmp, iconRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
             rt->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 5.0f, 5.0f), brushAccent);
             drawText(rt, L"♪", fmtIcon, iconRect, brushTextOnAccent);
         }
+    }
+
+    void drawSource(ID2D1DeviceContext* rt) {
+        drawSourceIcon(rt, media.sourceAppUserModelId);
         drawText(rt, sourceLabel(media.sourceAppUserModelId), fmtSource,
                  D2D1::RectF(42.0f, 12.0f, 200.0f, 34.0f), brushText);
     }
@@ -1970,7 +2041,7 @@ struct MediaPopup::Impl {
     }
 
     void drawPageContent(ID2D1DeviceContext* rt, float w, PopupPage page, bool oldLayer,
-                         bool updateHitTest) {
+                         bool updateHitTest, bool useCachedLayers) {
         if (page == PopupPage::Idle) {
             if (oldLayer && categoryTransitionFrom == PopupPage::Idle)
                 drawIdleSnapshot(rt, w, categoryTransitionIdle);
@@ -1978,24 +2049,98 @@ struct MediaPopup::Impl {
                 drawIdle(rt, w, updateHitTest);
         } else {
             if (oldLayer && categoryTransitionFrom == PopupPage::Media)
-                drawMediaSnapshot(rt, w, categoryTransitionMedia);
+                drawMediaSnapshot(rt, w, categoryTransitionMedia, useCachedLayers);
             else
-                drawMediaContent(rt, w);
+                drawMediaContent(rt, w, useCachedLayers);
         }
     }
 
     void drawPageLayer(ID2D1DeviceContext* rt, float w, PopupPage page, bool oldLayer,
-                       bool updateHitTest) {
-        drawPageContent(rt, w, page, oldLayer, updateHitTest);
+                       bool updateHitTest, bool useCachedLayers) {
+        drawPageContent(rt, w, page, oldLayer, updateHitTest, useCachedLayers);
         if (page == PopupPage::Media)
             drawVolumeControl(rt, w, page, updateHitTest);
         drawPageArrow(rt, w, page, updateHitTest);
     }
 
+    void drawCardBackground(ID2D1DeviceContext* rt, float w, float h, PopupPage page,
+                            bool useCachedLayer) {
+        if (!rt)
+            return;
+
+        D2D1_COLOR_F previousFill{};
+        if (brushBackground)
+            previousFill = brushBackground->GetColor();
+        if (brushBackground)
+            brushBackground->SetColor(cardFillForPage(page));
+        drawBackdrop(rt, w, h, frostedBackgroundActiveForPage(page), useCachedLayer);
+
+        const auto card = D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, h),
+                                             kPopupCornerDip, kPopupCornerDip);
+        rt->FillRoundedRectangle(card, brushBackground);
+        drawDynamicBackground(rt, w, h, dynamicBackgroundEnabledForPage(page));
+        rt->DrawRoundedRectangle(card, brushStroke, 1.0f);
+
+        // 页面切换不再重建画笔；目标页的文字对比色要在普通交换链接管前
+        // 由当前页面显式恢复，避免复用上一页画笔颜色。
+        if (frostedBackgroundActiveForPage(page) && backdropBmp &&
+            lastBackdropLuminance >= 0.0f) {
+            applyBackdropTextContrastForPage(lastBackdropLuminance, page);
+        } else {
+            resetBackdropTextColors();
+        }
+
+        if (brushBackground)
+            brushBackground->SetColor(previousFill);
+    }
+
+    void drawCategoryContentLayer(ID2D1DeviceContext* rt, float w, PopupPage page,
+                                  bool oldLayer) {
+        if (!rt)
+            return;
+
+        D2D1_COLOR_F previousText{};
+        D2D1_COLOR_F previousSecondary{};
+        D2D1_COLOR_F previousDisabled{};
+        if (brushText)
+            previousText = brushText->GetColor();
+        if (brushSecondary)
+            previousSecondary = brushSecondary->GetColor();
+        if (brushDisabled)
+            previousDisabled = brushDisabled->GetColor();
+
+        if (frostedBackgroundActiveForPage(page) && backdropBmp &&
+            lastBackdropLuminance >= 0.0f) {
+            applyBackdropTextContrastForPage(lastBackdropLuminance, page);
+        } else {
+            resetBackdropTextColors();
+        }
+
+        // 内容层随卡片横向移动，外层圆角由固定的 DComp 背景层负责；这里仅
+        // 保留局部几何裁剪，避免内容绘制越过自己的卡片范围。
+        const bool clipped = backdropClip != nullptr;
+        if (clipped) {
+            rt->PushLayer(D2D1::LayerParameters1(
+                              D2D1::InfiniteRect(), backdropClip,
+                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE),
+                          nullptr);
+        }
+        drawPageLayer(rt, w, page, oldLayer, false, false);
+        if (clipped)
+            rt->PopLayer();
+
+        if (brushText)
+            brushText->SetColor(previousText);
+        if (brushSecondary)
+            brushSecondary->SetColor(previousSecondary);
+        if (brushDisabled)
+            brushDisabled->SetColor(previousDisabled);
+    }
+
     void drawCategoryContent(ID2D1DeviceContext* rt, float w, float cardH) {
         // 页面互切期间，两页内容承载在两个 DComp 合成层上，横向滑动由合成器
-        // 按刷新率执行（BeginDraw 前统一启动）；交换链只保留卡片底，不重复
-        // 绘制内容，UI 线程不再逐帧重绘。
+        // 按刷新率执行（BeginDraw 前统一启动）；交换链保留上一张完整卡片，不
+        // 重绘或提交透明底，UI 线程不再逐帧刷新主卡片。
         if (categoryTransitionActive)
             return;
         // 快速打开展开/收起期间，一言区与快速打开区承载在两个 DComp 合成层上，
@@ -2004,7 +2149,7 @@ struct MediaPopup::Impl {
             drawPageArrow(rt, w, PopupPage::Idle, false);
             return;
         }
-        drawPageLayer(rt, w, currentPage(), false, true);
+        drawPageLayer(rt, w, currentPage(), false, true, true);
     }
 
     // 把旧页快照和新页内容分别画进两个 DComp 合成层并启动横向位移动画。
@@ -2015,6 +2160,17 @@ struct MediaPopup::Impl {
             !renderer.ensureLyricTransitionLayers(cardWidthPx, cardHeightPx, cardWidthPx,
                                                   cardHeightPx))
             return false;
+
+        const float baseY = cardOriginDip * scale();
+        if (!renderer.ensureLyricTransitionBackdrop(cardWidthPx, cardHeightPx, baseY))
+            return false;
+        if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
+            drawCardBackground(dc, w, popupHeightDip(), categoryTransitionFrom, false);
+            if (!renderer.endLyricTransitionBackdropDraw(dc))
+                return false;
+        } else {
+            return false;
+        }
 
         struct LayerJob {
             int index;
@@ -2029,21 +2185,25 @@ struct MediaPopup::Impl {
             auto* dc = renderer.beginLyricLayerDraw(job.index);
             if (!dc)
                 return false;
-            drawPageLayer(dc, w, job.page, job.oldLayer, false);
+            drawCategoryContentLayer(dc, w, job.page, job.oldLayer);
             if (!renderer.endLyricLayerDraw(job.index, dc))
                 return false;
         }
 
-        const float travel = static_cast<float>(cardWidthPx);
-        const float baseY = cardOriginDip * scale();
+        const float travel = kCategoryTransitionTravelDip * scale();
         const float dir = static_cast<float>(categoryTransitionDirection);
         const float durationSec = kCategoryTransitionMs / 1000.0f;
-        if (!renderer.animateLyricLayerX(0, 0.0f, -dir * travel, baseY, durationSec) ||
-            !renderer.animateLyricLayerX(1, dir * travel, 0.0f, baseY, durationSec))
+        if (!renderer.animateLyricLayerX(0, 0.0f, -dir * travel, baseY, 1.0f, 0.0f,
+                                         durationSec) ||
+            !renderer.animateLyricLayerX(1, dir * travel, 0.0f, baseY, 0.0f, 1.0f,
+                                         durationSec))
             return false;
         categoryLayersActive = true;
+        // 固定背景、两页内容和位移动画在同一个 DComp 提交中挂上去；根交换链
+        // 在整个页面互切期间保持上一张完整卡片，不再出现空白交换链帧。
+        renderer.commit();
         // 合成器动画在 kCategoryTransitionMs 后停在终点；定时器稍加余量收尾：
-        // 撤层并画一帧正常内容。余量内层已静止在终点，交接无跳变。
+        // 先预绘制目标页，再撤层提交。余量内层已静止在终点，交接无跳变。
         SetTimer(hwnd, kCategoryTimer, static_cast<UINT>(kCategoryTransitionMs) + 32,
                  nullptr);
         return true;
@@ -2144,6 +2304,10 @@ struct MediaPopup::Impl {
             return false;
         }
 
+        // 同页面转场：先提交 0 透明度的内容层，再和交换链的目标帧一起提交
+        // 动画状态，避免合成器在首次挂载子视觉时显示一帧空白底色。
+        renderer.commit();
+
         const float quoteBaseY = cardOriginDip * s;
         const float quickBaseY = (cardOriginDip + quickOriginY) * s;
         const float travelPx = delta * s;
@@ -2166,6 +2330,15 @@ struct MediaPopup::Impl {
     bool render() {
         if (!hwnd)
             return false;
+        // 合成层已经覆盖卡片时，任何额外的交换链 Present 都可能把透明底单独
+        // 推给合成器；状态会在转场收尾时统一预绘制并交接。
+        if ((categoryTransitionActive && categoryLayersActive) ||
+            (quickExpandTransitionActive && quickExpandLayersBuilt))
+            return true;
+        if (presentationUpdateDepth > 0) {
+            presentationUpdatePending = true;
+            return true;
+        }
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const int pxW = rc.right - rc.left;
@@ -2183,17 +2356,34 @@ struct MediaPopup::Impl {
         renderer.setDpi(dpi);
         if (!createResources())
             return false;
-        if (dynamicBackgroundEnabled())
+        const bool categoryTransitionNeedsDynamicBackground =
+            categoryTransitionActive &&
+            (dynamicBackgroundEnabledForPage(categoryTransitionFrom) ||
+             dynamicBackgroundEnabledForPage(currentPage()));
+        if (categoryTransitionNeedsDynamicBackground)
+            createDynamicBackgroundResources(true);
+        else if (dynamicBackgroundEnabled())
             createDynamicBackgroundResources();
-        if (frostedBackgroundActive())
-            captureBackdrop();
+        const bool categoryTransitionNeedsBackdrop =
+            categoryTransitionActive &&
+            (frostedBackgroundActiveForPage(categoryTransitionFrom) ||
+             frostedBackgroundActiveForPage(currentPage()));
+        const bool prewarmBackdrop =
+            !popupVisible &&
+            (frostedBackgroundActiveForPage(PopupPage::Media) ||
+             frostedBackgroundActiveForPage(PopupPage::Idle));
+        if (frostedBackgroundActive() || categoryTransitionNeedsBackdrop || prewarmBackdrop)
+            captureBackdrop(!frostedBackgroundActive() &&
+                            (categoryTransitionNeedsBackdrop || prewarmBackdrop));
         buildTextLayouts();
         if (coverDirty)
             decodeCover();
         if (sourceIconDirty)
             decodeSourceIcon();
-        if (idleMode) {
-            buildIdleTextLayout();
+        if (idleMode ||
+            (categoryTransitionActive && categoryTransitionFrom == PopupPage::Idle)) {
+            if (idleMode)
+                buildIdleTextLayout();
             decodeIdleIcons();
         }
 
@@ -2211,10 +2401,8 @@ struct MediaPopup::Impl {
         buttonRects[2] = D2D1::RectF(w * 0.5f + 66.0f, cardOriginDip + 164.0f,
                                      w * 0.5f + 102.0f, cardOriginDip + 200.0f);
 
-        // 页面互切：先把两页内容装入 DComp 合成层并启动横向位移动画。放在
-        // BeginDraw 之前：若装层失败，stopCategoryTransition 后本帧仍按正常
-        // 页面绘制内容，不会输出只含卡片底的空内容帧。present() 时层与卡片底
-        // 同帧提交，不会闪空帧。
+        // 页面互切：把固定圆角底板、两页内容和横向位移动画一次性提交到
+        // DComp。主交换链保留上一张完整卡片，切换期间不再清空或 Present。
         if (categoryTransitionActive && !categoryLayersActive &&
             !startCategoryLayerTransition(w))
             stopCategoryTransition();
@@ -2223,19 +2411,15 @@ struct MediaPopup::Impl {
             !startQuickExpandLayerTransition(w))
             stopQuickExpandTransition();
 
+        const bool categoryLayersCoverCard = categoryTransitionActive && categoryLayersActive;
+        if (categoryLayersCoverCard)
+            return true;
+
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
-        drawBackdrop(rt, w, cardH);
-
-        const D2D1_RECT_F card = D2D1::RectF(0.0f, 0.0f, w, cardH);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
-                                 brushBackground);
-        drawDynamicBackground(rt, w, cardH);
-        rt->DrawRoundedRectangle(D2D1::RoundedRect(card, kPopupCornerDip, kPopupCornerDip),
-                                 brushStroke, 1.0f);
-
+        drawCardBackground(rt, w, cardH, currentPage(), true);
         drawCategoryContent(rt, w, cardH);
 
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -2261,6 +2445,59 @@ struct MediaPopup::Impl {
             return false;
         }
         return true;
+    }
+
+    void beginPresentationUpdate() {
+        if (presentationUpdateDepth++ == 0)
+            presentationUpdatePending = false;
+    }
+
+    void endPresentationUpdate() {
+        if (presentationUpdateDepth <= 0)
+            return;
+        if (--presentationUpdateDepth > 0)
+            return;
+
+        const bool pending = presentationUpdatePending;
+        presentationUpdatePending = false;
+        if (!pending || !popupVisible)
+            return;
+        if (entering || closing) {
+            deferredRender = true;
+            return;
+        }
+        render();
+    }
+
+    void finishCategoryTransition() {
+        if (!categoryTransitionActive)
+            return;
+
+        // 先在转场层仍覆盖着交换链时预绘制最终页面。这样 Present 的新交换链
+        // 内容不会直接暴露给用户；随后只提交撤层操作，避免出现撤层后的整卡
+        // 重绘帧。
+        const bool canPrimeTarget = popupVisible && !entering && !closing;
+        if (canPrimeTarget) {
+            categoryTransitionActive = false;
+            render();
+        }
+        stopCategoryTransition();
+        renderer.commit();
+    }
+
+    void finishQuickExpandTransition() {
+        if (!quickExpandTransitionActive)
+            return;
+
+        // 快速启动层的收尾与页面互切相同：先把最终展开状态提交到交换链，
+        // 再单独提交撤层，避免交换链内容与 DComp 层在同一帧交接。
+        const bool canPrimeTarget = popupVisible && !entering && !closing;
+        if (canPrimeTarget) {
+            quickExpandTransitionActive = false;
+            render();
+        }
+        stopQuickExpandTransition();
+        renderer.commit();
     }
 
     void reposition() {
@@ -2311,14 +2548,21 @@ struct MediaPopup::Impl {
         const int hostY = placedAbove ? y : anchorEdgeY;
         const int cardLocalY = placedAbove ? 0 : y - anchorEdgeY;
         const int travel = placedAbove ? anchorEdgeY - y : cardLocalY + popupH;
+        RECT windowRect{};
+        const bool windowRectUnchanged =
+            GetWindowRect(hwnd, &windowRect) && windowRect.left == x &&
+            windowRect.top == hostY && windowRect.right - windowRect.left == popupW &&
+            windowRect.bottom - windowRect.top == travel;
         cardScreenX = x;
         cardScreenY = y;
         cardWidthPx = popupW;
         cardHeightPx = popupH;
         animationTravelPx = static_cast<float>(travel);
         cardOriginDip = dip(cardLocalY);
-        SetWindowPos(hwnd, HWND_TOPMOST, x, hostY, popupW, travel,
-                     SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        if (!windowRectUnchanged) {
+            SetWindowPos(hwnd, HWND_TOPMOST, x, hostY, popupW, travel,
+                         SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        }
     }
 
     int hitButton(float x, float y) const {
@@ -2438,11 +2682,9 @@ struct MediaPopup::Impl {
         idleQuickExpandRect = {};
         stopQuickExpandTransition();
         idleMode = target != PopupPage::Media;
-        // 页面互切只需要按新的页面状态重建画笔、文本和内容位图；保留
-        // DirectComposition 的交换链与视觉树，避免切换期间出现透明空帧闪烁。
-        preserveBackdropOnNextResourceCreate = true;
-        themeDirty = true;
-        coverDirty = true;
+        // 两页共用同一套尺寸和绘制资源；页面背景、文字对比色和内容差异由
+        // drawCategoryContentLayer()/drawCardBackground() 按 page 参数处理，
+        // 不在转场起点拆掉画笔、文字格式和裁剪层，避免动画开始前出现同步卡顿。
         renderer.resetRoot();
         // 两个页面的外层尺寸已经统一；切换时保持 HWND 的位置和大小，
         // 避免 SetWindowPos 在内容转场之外再触发一次窗口级重绘。
@@ -2575,7 +2817,7 @@ struct MediaPopup::Impl {
             return;
         }
         // 展开/收起由 DComp 合成层执行（render() 里装层）；定时器在合成器
-        // 动画到达终点并静止后收尾：撤层并画一帧正常内容完成交接。
+        // 动画到达终点并静止后收尾：先预绘制最终状态，再撤层完成交接。
         quickExpandTransitionActive = true;
         SetTimer(hwnd, kIdleQuickExpandTimer,
                  static_cast<UINT>(kIdleQuickExpandMs) + 32, nullptr);
@@ -2592,7 +2834,7 @@ struct MediaPopup::Impl {
             volumeSliderT = 0.0f;
             KillTimer(hwnd, kVolumeTimer);
         }
-        render();
+        renderOrDefer();
     }
 
     bool hitSource(float x, float y) const {
@@ -2660,6 +2902,10 @@ struct MediaPopup::Impl {
     }
 
     void renderOrDefer() {
+        // DComp 正在独立驱动内容层时，交换链重绘既不能更新层内快照，
+        // 又会制造额外 Present；最终收尾帧会统一提交最新状态。
+        if (categoryTransitionActive || quickExpandTransitionActive)
+            return;
         if (entering || closing) {
             deferredRender = true;
             return;
@@ -2682,7 +2928,10 @@ struct MediaPopup::Impl {
         entering = true;
         closing = false;
         reposition();
-        if (frostedBackgroundActive())
+        const bool canUseFrostedBackdropOnEitherPage =
+            frostedBackgroundActiveForPage(PopupPage::Media) ||
+            frostedBackgroundActiveForPage(PopupPage::Idle);
+        if (canUseFrostedBackdropOnEitherPage)
             backdropDirty = true;
         if (!render()) {
             entering = false;
@@ -3147,7 +3396,7 @@ struct MediaPopup::Impl {
                 if (entering || closing || !popupVisible)
                     return 0;
                 advanceTextScroll();
-                render();
+                renderOrDefer();
             } else if (wp == kVolumeTimer) {
                 if (entering || closing || !popupVisible) {
                     KillTimer(hwnd, kVolumeTimer);
@@ -3156,22 +3405,20 @@ struct MediaPopup::Impl {
                 advanceVolumeSlider();
             } else if (wp == kIdleQuickExpandTimer) {
                 // 快速打开展开/收起的合成器动画已到终点并静止：
-                // 撤掉合成层，画一帧正常页面完成交接。
+                // 先隐藏着预绘制最终页面，再撤掉合成层完成交接。
                 KillTimer(hwnd, kIdleQuickExpandTimer);
                 if (quickExpandTransitionActive) {
-                    stopQuickExpandTransition();
+                    finishQuickExpandTransition();
                     if (popupVisible && !entering && !closing) {
-                        render();
                         refreshPopupHoverAfterTransition();
                     }
                 }
             } else if (wp == kCategoryTimer) {
-                // 合成器动画已到终点并静止：撤掉合成层，画一帧正常页面完成交接。
+                // 合成器动画已到终点并静止：先隐藏着预绘制最终页面，再撤层。
                 KillTimer(hwnd, kCategoryTimer);
                 if (categoryTransitionActive) {
-                    stopCategoryTransition();
+                    finishCategoryTransition();
                     if (popupVisible && !entering && !closing) {
-                        render();
                         refreshPopupHoverAfterTransition();
                     }
                 }
@@ -3490,6 +3737,7 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
                                    impl_->clientAnimations && !impl_->idleMode &&
                                    !impl_->categoryTransitionActive;
     if (changed && impl_->popupVisible &&
+        !impl_->categoryTransitionActive && !impl_->quickExpandTransitionActive &&
         (!impl_->idleMode || dominantColorChanged)) {
         if (impl_->entering || impl_->closing)
             impl_->deferredRender = true;
@@ -3565,6 +3813,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         return;
     }
     if (changed && impl_->popupVisible &&
+        !impl_->categoryTransitionActive && !impl_->quickExpandTransitionActive &&
         (impl_->idleMode || idleAvailabilityChanged)) {
         if (impl_->entering || impl_->closing)
             impl_->deferredRender = true;
@@ -3574,6 +3823,14 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
         impl_->opensOnHover())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+}
+
+void MediaPopup::beginPresentationUpdate() {
+    impl_->beginPresentationUpdate();
+}
+
+void MediaPopup::endPresentationUpdate() {
+    impl_->endPresentationUpdate();
 }
 
 void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool inlineControls) {

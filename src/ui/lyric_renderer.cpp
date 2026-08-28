@@ -454,7 +454,7 @@ bool DCompRenderer::present() {
 }
 
 void DCompRenderer::releaseLyricTransitionLayers() {
-    for (auto& layer : lyricLayers_) {
+    auto releaseLayer = [&](LyricLayer& layer) {
         if (visual_ && layer.visual)
             visual_->RemoveVisual(layer.visual);
         if (layer.visual) {
@@ -478,6 +478,11 @@ void DCompRenderer::releaseLyricTransitionLayers() {
         }
         layer.width = 0;
         layer.height = 0;
+    };
+
+    releaseLayer(transitionBackdrop_);
+    for (auto& layer : lyricLayers_) {
+        releaseLayer(layer);
     }
 }
 
@@ -546,6 +551,87 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
         layer.height = heights[i];
     }
     return true;
+}
+
+bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float offsetY) {
+    if (!dcomp_ || !visual_ || !lyricLayers_[0].visual || width <= 0 || height <= 0)
+        return false;
+
+    if (transitionBackdrop_.surface && transitionBackdrop_.width == width &&
+        transitionBackdrop_.height == height) {
+        return SUCCEEDED(transitionBackdrop_.visual->SetOffsetX(0.0f)) &&
+               SUCCEEDED(transitionBackdrop_.visual->SetOffsetY(offsetY));
+    }
+
+    auto releaseBackdrop = [&]() {
+        if (visual_ && transitionBackdrop_.visual)
+            visual_->RemoveVisual(transitionBackdrop_.visual);
+        if (transitionBackdrop_.visual) {
+            transitionBackdrop_.visual->SetContent(nullptr);
+            transitionBackdrop_.visual->SetEffect(nullptr);
+            transitionBackdrop_.visual->SetClip(nullptr);
+            transitionBackdrop_.visual->Release();
+            transitionBackdrop_.visual = nullptr;
+        }
+        if (transitionBackdrop_.surface) {
+            transitionBackdrop_.surface->Release();
+            transitionBackdrop_.surface = nullptr;
+        }
+        transitionBackdrop_.width = 0;
+        transitionBackdrop_.height = 0;
+    };
+
+    releaseBackdrop();
+    HRESULT hr = dcomp_->CreateVisual(&transitionBackdrop_.visual);
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateSurface(static_cast<UINT>(width), static_cast<UINT>(height),
+                                   DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED,
+                                   &transitionBackdrop_.surface);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.visual->SetContent(transitionBackdrop_.surface);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.visual->SetOffsetX(0.0f);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.visual->SetOffsetY(offsetY);
+    // 内容层已经挂在根视觉上；把固定背景插到第 0 个内容层下面，确保
+    // 它覆盖根交换链、但不会盖住两页正在移动的内容。
+    if (SUCCEEDED(hr))
+        hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, lyricLayers_[0].visual);
+    if (FAILED(hr)) {
+        releaseBackdrop();
+        return false;
+    }
+    transitionBackdrop_.width = width;
+    transitionBackdrop_.height = height;
+    return true;
+}
+
+ID2D1DeviceContext* DCompRenderer::beginLyricTransitionBackdropDraw() {
+    if (!transitionBackdrop_.surface)
+        return nullptr;
+    POINT offset{};
+    ID2D1DeviceContext* dc = nullptr;
+    HRESULT hr = transitionBackdrop_.surface->BeginDraw(
+        nullptr, __uuidof(ID2D1DeviceContext), reinterpret_cast<void**>(&dc), &offset);
+    if (FAILED(hr) || !dc) {
+        if (dc)
+            dc->Release();
+        return nullptr;
+    }
+    const float dipX = static_cast<float>(offset.x) * 96.0f / static_cast<float>(dpi_);
+    const float dipY = static_cast<float>(offset.y) * 96.0f / static_cast<float>(dpi_);
+    dc->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    dc->SetTransform(D2D1::Matrix3x2F::Translation(dipX, dipY));
+    dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    return dc;
+}
+
+bool DCompRenderer::endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc) {
+    if (!transitionBackdrop_.surface || !dc)
+        return false;
+    HRESULT hr = transitionBackdrop_.surface->EndDraw();
+    dc->Release();
+    return SUCCEEDED(hr);
 }
 
 ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
@@ -647,6 +733,7 @@ void DCompRenderer::clearLyricTransitionLayers() {
 }
 
 bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float baseY,
+                                       float fromOpacity, float toOpacity,
                                        float durationSec) {
     if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || durationSec <= 0.0f)
@@ -654,20 +741,31 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
 
     const double duration = static_cast<double>(durationSec);
     IDCompositionAnimation* offsetAnim = nullptr;
+    IDCompositionAnimation* opacityAnim = nullptr;
     HRESULT hr = dcomp_->CreateAnimation(&offsetAnim);
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateAnimation(&opacityAnim);
     if (SUCCEEDED(hr))
         hr = addSmoothStep(offsetAnim, 0.0, duration, fromX, toX) ? S_OK : E_FAIL;
     if (SUCCEEDED(hr))
         hr = offsetAnim->End(duration, toX);
     if (SUCCEEDED(hr))
+        hr = addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity)
+                     ? S_OK
+                     : E_FAIL;
+    if (SUCCEEDED(hr))
+        hr = opacityAnim->End(duration, toOpacity);
+    if (SUCCEEDED(hr))
         hr = lyricLayers_[index].visual->SetOffsetX(offsetAnim);
     if (SUCCEEDED(hr))
         hr = lyricLayers_[index].visual->SetOffsetY(baseY);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].opacity->SetOpacity(1.0f);
+        hr = lyricLayers_[index].opacity->SetOpacity(opacityAnim);
 
     if (offsetAnim)
         offsetAnim->Release();
+    if (opacityAnim)
+        opacityAnim->Release();
     return SUCCEEDED(hr);
 }
 

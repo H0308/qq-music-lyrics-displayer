@@ -44,6 +44,9 @@ public:
     void setMedia(const OverlayMediaInfo& info, bool available,
                   bool animateSongTransition = false);
     void setIdleContent(const IdlePresentation& content, bool available);
+    // 将同一完整展示帧中的多个弹窗状态更新合并为一次绘制/提交。
+    void beginPresentationUpdate();
+    void endPresentationUpdate();
     // 展示类别与具体内容分开同步：scene 不为 Idle 时表示播放媒体；
     // 悬浮控件样式下，播放中的弹窗允许临时切到“每日一言 + 快速启动”组合面板，关闭后回到媒体卡片。
     // 内嵌控件展开时使用与无播放状态相同的“每日一言 + 快速启动”页面。

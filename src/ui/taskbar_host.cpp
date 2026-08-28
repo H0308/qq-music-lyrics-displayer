@@ -1097,14 +1097,18 @@ struct TaskbarHost::Impl {
             // 弹窗样式可能在媒体会话已经存在时才开启；补送当前完整快照，
             // 让弹窗的可用状态和展示类别不依赖下一次 SMTC 事件。
             const bool available = mediaPopupAvailable(sessionVisible_);
+            mediaPopup.beginPresentationUpdate();
             mediaPopup.setIdleContent(idle, available);
             mediaPopup.setPresentationMode(scene_, available,
                                             hoverControlStyle_ == HoverControlStyle::Inline);
             mediaPopup.setMedia(media, available);
+            mediaPopup.endPresentationUpdate();
         } else if (enabled) {
             const bool available = mediaPopupAvailable(sessionVisible_);
+            mediaPopup.beginPresentationUpdate();
             mediaPopup.setPresentationMode(scene_, available,
                                             hoverControlStyle_ == HoverControlStyle::Inline);
+            mediaPopup.endPresentationUpdate();
         }
         mediaPopup.setTriggerOnHover(mediaPopupTrigger_ == MediaPopupTrigger::Hover);
         // 内嵌控件没有媒体卡片可跟随，使用每日一言卡片自己的展开方式。
@@ -1341,15 +1345,22 @@ struct TaskbarHost::Impl {
             if (!patch.playing)
                 karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
         }
+        mediaPopup.beginPresentationUpdate();
         mediaPopup.setProgress(patch.actualPositionMs);
-        if (media.playing != patch.playing) {
+        const bool playingChanged = media.playing != patch.playing;
+        if (playingChanged) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
             mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
             mediaPopup.setPresentationMode(
                 scene_, mediaPopupAvailable(sessionVisible_),
                 hoverControlStyle_ == HoverControlStyle::Inline);
-            // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧
+        }
+        mediaPopup.endPresentationUpdate();
+        if (playingChanged) {
+            // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧；弹窗自身
+            // 的完整展示帧已在上面的批量更新中提交。
+            // 这里仅保留宿主歌词的刷新，不再重复触发弹窗绘制。
             render();
         }
 
@@ -1416,6 +1427,7 @@ struct TaskbarHost::Impl {
                                  (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
         const bool popupAvailable = mediaPopupAvailable(frame.visible);
+        mediaPopup.beginPresentationUpdate();
         mediaPopup.setIdleContent(frame.idle, popupAvailable);
         mediaPopup.setMedia(frame.media, popupAvailable, songChanged);
         // 先同步完整媒体数据，再建立页面转场层，避免 Idle → Media 时目标层
@@ -1423,6 +1435,7 @@ struct TaskbarHost::Impl {
         mediaPopup.setPresentationMode(frame.scene, popupAvailable,
                                        hoverControlStyle_ == HoverControlStyle::Inline);
         mediaPopup.setProgress(frame.actualPositionMs);
+        mediaPopup.endPresentationUpdate();
 
         frameRevision_ = frame.frameRevision;
         requestGeneration_ = frame.requestGeneration;
@@ -4409,10 +4422,12 @@ struct TaskbarHost::Impl {
             karaokeTick_ = 0;
         }
         const bool popupAvailable = mediaPopupAvailable(sessionVisible_);
+        mediaPopup.beginPresentationUpdate();
         mediaPopup.setIdleContent(idle, popupAvailable);
         mediaPopup.setMedia(media, popupAvailable);
         mediaPopup.setPresentationMode(scene_, popupAvailable,
                                        hoverControlStyle_ == HoverControlStyle::Inline);
+        mediaPopup.endPresentationUpdate();
         syncMediaPopupEnabled();
         if (isMinimalMode()) {
             // 极简仍保留歌词和方形封面，因此不释放主任务栏渲染器；只清掉附加背景链和媒体卡片。
@@ -4690,12 +4705,14 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
     const bool popupAvailable = impl_->mediaPopupAvailable(impl_->sessionVisible_);
+    impl_->mediaPopup.beginPresentationUpdate();
     impl_->mediaPopup.setIdleContent(impl_->idle, popupAvailable);
     impl_->mediaPopup.setMedia(info, popupAvailable);
     impl_->mediaPopup.setPresentationMode(
         impl_->scene_, popupAvailable,
         impl_->hoverControlStyle_ == HoverControlStyle::Inline);
     impl_->mediaPopup.setProgress(impl_->positionMs_);
+    impl_->mediaPopup.endPresentationUpdate();
     if (impl_->updateMediaInfo(info))
         impl_->render();
 }

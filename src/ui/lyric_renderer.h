@@ -95,9 +95,14 @@ public:
     bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
                            float toOpacity, float durationSec);
     // 页面横向滑动转场（媒体卡片 ⇄ 空闲面板）：内容已画入层，只让合成器
-    // 按刷新率做 X 位移；层定位在 (0, baseY)，透明度保持不透明。
+    // 按刷新率做 X 位移和透明度过渡；层定位在 (0, baseY)。
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
-                            float durationSec);
+                            float fromOpacity, float toOpacity, float durationSec);
+    // 页面横向滑动转场的固定背景层。背景与内容层一起提交，避免转场期间
+    // 为了补圆角而重绘/提交根交换链。
+    bool ensureLyricTransitionBackdrop(int width, int height, float offsetY);
+    ID2D1DeviceContext* beginLyricTransitionBackdropDraw();
+    bool endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc);
     // 区域覆盖动画（快速打开展开/收起）：层固定在 (offsetX, fromY→toY)，
     // 同时矩形裁剪底边从 clipFromBottom 动画到 clipToBottom（像素，层内坐标）。
     bool animateLyricLayerClipSlide(int index, float offsetX, float fromY, float toY,
@@ -144,6 +149,7 @@ private:
     IDCompositionTarget* target_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
     IDCompositionEffectGroup* rootOpacity_ = nullptr;
+    LyricLayer transitionBackdrop_;
     LyricLayer lyricLayers_[2];
     ID2D1Bitmap1* backBmp_ = nullptr;
     HWND hwnd_ = nullptr;
