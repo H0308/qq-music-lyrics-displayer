@@ -78,6 +78,7 @@ constexpr int kIdContentScrollBar = 401;
 constexpr int kIdIdleAppNames = 460;
 constexpr int kIdleAppNamesOption = -2;
 constexpr int kIdleAppEditOptionBase = 1000;
+constexpr int kIdleAppDragOptionBase = 2000;
 
 constexpr float kWindowW = 760.0f;
 constexpr float kWindowH = 552.0f;
@@ -133,6 +134,7 @@ constexpr float kIdleAppInfoRightInset = 144.0f;
 constexpr float kIdleAppNamesToggleW = 40.0f;
 constexpr float kIdleAppNamesToggleLabelW = 56.0f;
 constexpr float kIdleAppNamesToggleGap = 8.0f;
+constexpr float kIdleAppDragThreshold = 5.0f;
 constexpr float kIdleQuoteBackgroundCardH = 112.0f;
 constexpr float kIdleQuoteBackgroundCardGap = 8.0f;
 constexpr float kIdleQuoteBackgroundRowH = 324.0f;
@@ -225,6 +227,7 @@ struct SettingsDialog::Impl {
         D2D1_RECT_F controlRect{};
         D2D1_RECT_F artworkRect{};
         D2D1_RECT_F addAppRect{};
+        std::vector<D2D1_RECT_F> appItemRects;
         std::vector<D2D1_RECT_F> appEditRects;
         std::vector<D2D1_RECT_F> appDeleteRects;
         std::vector<D2D1_RECT_F> optionRects;
@@ -259,6 +262,11 @@ struct SettingsDialog::Impl {
     float contentMaxScroll = 0.0f;
     bool scrollDragging = false;
     float scrollDragOffset = 0.0f;
+    bool idleAppDragging = false;
+    int idleAppDragIndex = -1;
+    int idleAppDropIndex = -1;
+    float idleAppDragStartX = 0.0f;
+    float idleAppDragStartY = 0.0f;
 
     int hoverId = 0;
     int hoverOption = -1;
@@ -283,6 +291,43 @@ struct SettingsDialog::Impl {
 
     static bool contains(const D2D1_RECT_F& rect, float x, float y) {
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    static bool isIdleAppDragOption(int option) {
+        return option >= kIdleAppDragOptionBase;
+    }
+
+    void resetIdleAppDrag() {
+        idleAppDragging = false;
+        idleAppDragIndex = -1;
+        idleAppDropIndex = -1;
+        idleAppDragStartX = 0.0f;
+        idleAppDragStartY = 0.0f;
+    }
+
+    bool updateIdleAppDropTarget(float x, float y) {
+        const Row* row = findRow(kIdIdleApps);
+        const size_t count = state.idleApps.size();
+        if (!row || !row->enabled || count == 0) {
+            idleAppDropIndex = -1;
+            return false;
+        }
+
+        const float innerX = row->cardRect.left + 16.0f;
+        const float innerRight = row->cardRect.right - 16.0f;
+        const float listTop = row->cardRect.top + kIdleAppsListTop;
+        const D2D1_RECT_F dropRect =
+            D2D1::RectF(innerX, listTop - 4.0f, innerRight,
+                        listTop + static_cast<float>(count) * kIdleAppItemH - 4.0f);
+        if (!contains(dropRect, x, y)) {
+            idleAppDropIndex = -1;
+            return false;
+        }
+
+        const int index = static_cast<int>(std::floor(
+            (y - listTop + kIdleAppItemH * 0.5f) / kIdleAppItemH));
+        idleAppDropIndex = std::clamp(index, 0, static_cast<int>(count));
+        return true;
     }
 
     Row* findRow(int id) {
@@ -608,7 +653,7 @@ struct SettingsDialog::Impl {
                  state.idleQuoteEnabled, kRowH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
-            L"通过文件选择器添加本地 EXE，最多添加 20 个应用；开关统一控制名称显示。",
+            L"可拖动应用条目调整快速启动顺序；通过文件选择器添加本地 EXE，最多添加 10 个应用；开关统一控制名称显示。",
             0.0f, kIdleAppsBaseH + static_cast<float>(
                                             std::max<size_t>(1, state.idleApps.size())) *
                                             kIdleAppItemH);
@@ -896,6 +941,7 @@ struct SettingsDialog::Impl {
                 row.controlRect = D2D1::RectF(0, 0, 0, 0);
                 row.artworkRect = D2D1::RectF(0, 0, 0, 0);
                 row.addAppRect = D2D1::RectF(0, 0, 0, 0);
+                row.appItemRects.clear();
                 row.appEditRects.clear();
                 row.appDeleteRects.clear();
                 row.optionRects.clear();
@@ -929,10 +975,13 @@ struct SettingsDialog::Impl {
                                            hintTop + 30.0f);
                 const float listTop = y + kIdleAppsListTop;
                 const size_t count = state.idleApps.size();
+                row.appItemRects.reserve(count);
                 row.appEditRects.reserve(count);
                 row.appDeleteRects.reserve(count);
                 for (size_t i = 0; i < count; ++i) {
                     const float itemTop = listTop + static_cast<float>(i) * kIdleAppItemH;
+                    row.appItemRects.push_back(
+                        D2D1::RectF(innerX, itemTop, innerRight, itemTop + 44.0f));
                     row.appEditRects.push_back(
                         D2D1::RectF(innerRight - 2.0f * kIdleAppActionW -
                                         kIdleAppActionGap - 12.0f,
@@ -2630,25 +2679,28 @@ struct SettingsDialog::Impl {
 
         for (size_t i = 0; i < count; ++i) {
             const auto& app = state.idleApps[i];
-            const float top = listTop + static_cast<float>(i) * kIdleAppItemH;
-            const D2D1_RECT_F item =
-                D2D1::RectF(innerX, top, innerRight, top + 44.0f);
+            const D2D1_RECT_F item = row.appItemRects[i];
             const int option = hoverId == row.id ? hoverOption : -1;
             const int pressedOptionValue = pressedId == row.id ? pressedOption : -1;
             const bool appHovered = option == static_cast<int>(i) ||
-                                    option == kIdleAppEditOptionBase + static_cast<int>(i);
+                                    option == kIdleAppEditOptionBase + static_cast<int>(i) ||
+                                    option == kIdleAppDragOptionBase + static_cast<int>(i);
             const bool appPressed =
                 pressedOptionValue == static_cast<int>(i) ||
-                pressedOptionValue == kIdleAppEditOptionBase + static_cast<int>(i);
+                pressedOptionValue == kIdleAppEditOptionBase + static_cast<int>(i) ||
+                pressedOptionValue == kIdleAppDragOptionBase + static_cast<int>(i);
             const bool hovered = row.enabled && hoverId == row.id &&
                                  appHovered;
             const bool pressed = row.enabled && pressedId == row.id &&
                                  appPressed;
+            const bool dragging = idleAppDragging && idleAppDragIndex == static_cast<int>(i);
             painter.fillRoundRect(row.enabled ? (hovered ? p.controlHover : p.controlFill)
                                               : p.listHover,
                                   item, 7.0f);
             if (pressed)
                 painter.fillRoundRect(p.controlPressed, item, 7.0f);
+            if (dragging)
+                painter.strokeRoundRect(p.accent, item, 1.5f, 7.0f);
 
             const D2D1_RECT_F iconRect =
                 D2D1::RectF(item.left + 8.0f, item.top + 8.0f, item.left + 36.0f,
@@ -2691,6 +2743,14 @@ struct SettingsDialog::Impl {
             drawAction(deleteRect, L"删除", row.enabled,
                        row.enabled && option == static_cast<int>(i),
                        row.enabled && pressedOptionValue == static_cast<int>(i));
+        }
+
+        if (idleAppDragging && idleAppDropIndex >= 0) {
+            const float dropY = listTop + static_cast<float>(idleAppDropIndex) * kIdleAppItemH - 4.0f;
+            painter.fillRoundRect(
+                p.accent,
+                D2D1::RectF(innerX + 4.0f, dropY - 1.0f, innerRight - 4.0f, dropY + 1.0f),
+                1.0f);
         }
 
         if (count == 0)
@@ -2799,6 +2859,13 @@ struct SettingsDialog::Impl {
                     if (contains(row.appDeleteRects[i], x, y)) {
                         if (option)
                             *option = static_cast<int>(i);
+                        return row.id;
+                    }
+                }
+                for (size_t i = 0; i < row.appItemRects.size(); ++i) {
+                    if (contains(row.appItemRects[i], x, y)) {
+                        if (option)
+                            *option = kIdleAppDragOptionBase + static_cast<int>(i);
                         return row.id;
                     }
                 }
@@ -2927,7 +2994,9 @@ struct SettingsDialog::Impl {
                 actions.onIdleQuoteBackgroundScope(row->selected);
             break;
         case kIdIdleApps:
-            if (option == kIdleAppNamesOption) {
+            if (isIdleAppDragOption(option)) {
+                // 应用条目的普通点击只用于启动拖动，不触发其他操作。
+            } else if (option == kIdleAppNamesOption) {
                 row->checked = !row->checked;
                 state.idleAppNamesVisible = row->checked;
                 if (actions.onIdleAppNamesVisible)
@@ -3158,6 +3227,7 @@ struct SettingsDialog::Impl {
 
     void updateState(const SettingsState& s) {
         state = s;
+        resetIdleAppDrag();
         if (auto* row = findRow(kIdIdleEntry))
             row->checked = s.idleEntryEnabled;
         if (auto* row = findRow(kIdIdleQuote))
@@ -3377,6 +3447,33 @@ struct SettingsDialog::Impl {
                 }
                 return 0;
             }
+            const float pointerX = GET_X_LPARAM(lp) / s;
+            const float pointerY = GET_Y_LPARAM(lp) / s;
+            if (idleAppDragging) {
+                updateIdleAppDropTarget(pointerX, pointerY);
+                hoverId = 0;
+                hoverOption = -1;
+                surface.invalidate();
+                return 0;
+            }
+            if (pressedId == kIdIdleApps && isIdleAppDragOption(pressedOption)) {
+                const float dx = pointerX - idleAppDragStartX;
+                const float dy = pointerY - idleAppDragStartY;
+                if (dx * dx + dy * dy >= kIdleAppDragThreshold * kIdleAppDragThreshold) {
+                    const int index = pressedOption - kIdleAppDragOptionBase;
+                    if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size()) {
+                        idleAppDragging = true;
+                        idleAppDragIndex = index;
+                        pressedId = 0;
+                        pressedOption = -1;
+                        updateIdleAppDropTarget(pointerX, pointerY);
+                        hoverId = 0;
+                        hoverOption = -1;
+                        surface.invalidate();
+                        return 0;
+                    }
+                }
+            }
             if (pressedId != 0) {
                 Row* row = findRow(pressedId);
                 if (row && row->kind == ControlKind::Slider && row->enabled) {
@@ -3404,13 +3501,24 @@ struct SettingsDialog::Impl {
             SetFocus(hwnd);
             focusVisible = false;
             const float s = surface.dipScale();
+            resetIdleAppDrag();
             int option = -1;
-            pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
+            const float pointerX = GET_X_LPARAM(lp) / s;
+            const float pointerY = GET_Y_LPARAM(lp) / s;
+            pressedId = hitTest(pointerX, pointerY, &option);
             pressedOption = option;
+            if (pressedId == kIdIdleApps && isIdleAppDragOption(pressedOption)) {
+                const int index = pressedOption - kIdleAppDragOptionBase;
+                if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size()) {
+                    idleAppDragIndex = index;
+                    idleAppDragStartX = pointerX;
+                    idleAppDragStartY = pointerY;
+                }
+            }
             if (pressedId != 0) {
                 Row* row = findRow(pressedId);
                 if (row && row->kind == ControlKind::Slider && row->enabled)
-                    updateSliderFromPointer(*row, GET_X_LPARAM(lp) / s);
+                    updateSliderFromPointer(*row, pointerX);
             }
             if (pressedId != 0 && pressedId != kIdContentScrollBar)
                 focusedId = pressedId == kIdIdleApps && option == kIdleAppNamesOption
@@ -3431,6 +3539,23 @@ struct SettingsDialog::Impl {
         }
         case WM_LBUTTONUP: {
             const float s = surface.dipScale();
+            if (idleAppDragging) {
+                const int fromIndex = idleAppDragIndex;
+                const int toIndex = idleAppDropIndex;
+                const bool validDrop = fromIndex >= 0 &&
+                                       static_cast<size_t>(fromIndex) < state.idleApps.size() &&
+                                       toIndex >= 0 &&
+                                       toIndex <= static_cast<int>(state.idleApps.size());
+                resetIdleAppDrag();
+                pressedId = 0;
+                pressedOption = -1;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                if (validDrop && actions.onReorderIdleApps)
+                    actions.onReorderIdleApps(fromIndex, toIndex);
+                surface.invalidate();
+                return 0;
+            }
             int option = -1;
             const int hit = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
             const int pressed = pressedId;
@@ -3473,6 +3598,7 @@ struct SettingsDialog::Impl {
             pressedId = 0;
             pressedOption = -1;
             scrollDragging = false;
+            resetIdleAppDrag();
             surface.invalidate();
             return 0;
         case WM_MOUSEWHEEL: {

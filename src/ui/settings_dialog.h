@@ -72,6 +72,7 @@ struct SettingsActions {
     std::function<void(int)> onEditIdleApp;
     std::function<void(bool)> onIdleAppNamesVisible;
     std::function<void(int)> onRemoveIdleApp;
+    std::function<void(int, int)> onReorderIdleApps;
     std::function<void(bool)> onSongInfoVisible;
     std::function<void(bool)> onAlbumCoverVisible;
     std::function<void(bool)> onPlatformIconVisible;

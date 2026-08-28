@@ -58,7 +58,7 @@ struct IdleAppInfo {
     bool pathValid = true;
 };
 
-constexpr std::size_t kMaxIdleApps = 20;
+constexpr std::size_t kMaxIdleApps = 10;
 
 struct IdlePresentation {
     std::wstring sentence;

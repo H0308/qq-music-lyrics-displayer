@@ -1636,6 +1636,28 @@ struct App {
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
+    void reorderIdleApps(int fromIndex, int toIndex) {
+        if (fromIndex < 0 || static_cast<size_t>(fromIndex) >= idleApps_.size() ||
+            toIndex < 0 || toIndex > static_cast<int>(idleApps_.size()))
+            return;
+        if (toIndex == fromIndex || toIndex == fromIndex + 1)
+            return;
+
+        const std::wstring path = idleApps_[static_cast<size_t>(fromIndex)].path;
+        auto begin = idleApps_.begin();
+        if (toIndex > fromIndex) {
+            std::rotate(begin + fromIndex, begin + fromIndex + 1, begin + toIndex);
+        } else {
+            std::rotate(begin + toIndex, begin + fromIndex, begin + fromIndex + 1);
+        }
+        runtime_log::writef(L"[action][idle-entry] app-reordered from=%d to=%d path=%s",
+                            fromIndex, toIndex, path.c_str());
+        saveSettings();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
     void pickIdleApp() {
         if (idleAppPickerOpen_)
             return;
@@ -3607,6 +3629,9 @@ SettingsActions App::buildSettingsActions() {
     act.onEditIdleApp = [this](int index) { editIdleApp(index); };
     act.onIdleAppNamesVisible = [this](bool show) { setIdleAppNamesVisible(show); };
     act.onRemoveIdleApp = [this](int index) { removeIdleApp(index); };
+    act.onReorderIdleApps = [this](int fromIndex, int toIndex) {
+        reorderIdleApps(fromIndex, toIndex);
+    };
     act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
