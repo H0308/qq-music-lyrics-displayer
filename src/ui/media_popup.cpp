@@ -64,11 +64,25 @@ constexpr float kPopupTextLeftDip = 112.0f;
 constexpr float kPopupTextRightPaddingDip = 16.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
 constexpr float kPopupInfoScrollSpeed = 10.0f;
-constexpr float kIdleListHeightDip = 132.0f;
-constexpr float kIdleListExpandedHeightDip = 160.0f;
-constexpr float kIdleListRowHeightDip = 40.0f;
+constexpr std::size_t kIdleQuickColumnCount = 5;
+constexpr float kIdleQuickCellSizeDip = 62.0f;
+constexpr float kIdleQuickCellGapDip = 6.0f;
+constexpr float kIdleQuickRowPitchDip = kIdleQuickCellSizeDip + kIdleQuickCellGapDip;
+constexpr float kIdleQuickGridWidthDip =
+    kIdleQuickCellSizeDip * static_cast<float>(kIdleQuickColumnCount) +
+    kIdleQuickCellGapDip * static_cast<float>(kIdleQuickColumnCount - 1);
+constexpr float kIdleQuickIconSizeDip = 24.0f;
+constexpr float kIdleQuickNamedIconTopDip = 7.0f;
+constexpr float kIdleQuickNamedTextTopInsetDip = 23.0f;
+constexpr float kIdleQuickNamedTextBottomInsetDip = 4.0f;
+constexpr float kIdleListHeightDip = kIdleQuickCellSizeDip;
 constexpr float kIdleListGapDip = 8.0f;
 constexpr float kIdleListBottomPaddingDip = 8.0f;
+// 展开态把卡片底部的可用空间尽量交给列表；实际高度仍由列表顶部和卡片
+// 底部内边距共同限制，内容超过可视区时才启用滚动。
+constexpr float kIdleListExpandedHeightDip =
+    kIdlePopupHeightDip - kIdleListBottomPaddingDip;
+constexpr float kIdleQuickVisualClipPaddingDip = 1.0f;
 constexpr float kIdleQuickExpandedTopDip = 15.0f;
 constexpr float kIdleQuickTitleLeftDip = 16.0f;
 constexpr float kIdleQuickTitleWidthDip = 52.0f;
@@ -339,6 +353,8 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushControl = nullptr;
     ID2D1SolidColorBrush* brushControlHover = nullptr;
     ID2D1SolidColorBrush* brushControlPressed = nullptr;
+    ID2D1SolidColorBrush* brushIdleCell = nullptr;
+    ID2D1SolidColorBrush* brushIdleCellHover = nullptr;
     ID2D1SolidColorBrush* brushAccent = nullptr;
     ID2D1SolidColorBrush* brushAccentHover = nullptr;
     ID2D1SolidColorBrush* brushTextOnAccent = nullptr;
@@ -354,6 +370,7 @@ struct MediaPopup::Impl {
     IDWriteTextFormat* fmtIdleQuote = nullptr;
     IDWriteTextFormat* fmtIdleSource = nullptr;
     IDWriteTextFormat* fmtIdleApp = nullptr;
+    IDWriteInlineObject* idleAppTrimmingSign = nullptr;
     IDWriteTextLayout* titleLayout = nullptr;
     IDWriteTextLayout* artistLayout = nullptr;
     IDWriteTextLayout* idleQuoteLayout = nullptr;
@@ -434,6 +451,42 @@ struct MediaPopup::Impl {
     float idleQuickExpandButtonTop(float headerTop) const {
         // 保持按钮与卡片顶栏一致；展开后顶边仍留出圆角内侧的安全间距。
         return std::max(7.0f, headerTop - 8.0f);
+    }
+
+    std::size_t idleQuickRowCount(const IdlePresentation& content) const {
+        if (content.apps.empty())
+            return 0;
+        return (content.apps.size() + kIdleQuickColumnCount - 1) /
+               kIdleQuickColumnCount;
+    }
+
+    float idleQuickGridContentHeight(const IdlePresentation& content) const {
+        const std::size_t rows = idleQuickRowCount(content);
+        if (rows == 0)
+            return 0.0f;
+        return kIdleQuickCellSizeDip +
+               static_cast<float>(rows - 1) * kIdleQuickRowPitchDip;
+    }
+
+    float idleQuickGridLeft() const {
+        const float availableWidth = idleListRect.right - idleListRect.left;
+        return idleListRect.left +
+               std::max(0.0f, (availableWidth - kIdleQuickGridWidthDip) * 0.5f);
+    }
+
+    float idleQuickListHeight(const IdlePresentation& content, float progress) const {
+        const float expandedHeight = std::min(
+            kIdleListExpandedHeightDip,
+            std::max(kIdleQuickCellSizeDip, idleQuickGridContentHeight(content)));
+        return kIdleListHeightDip +
+               (expandedHeight - kIdleListHeightDip) * std::clamp(progress, 0.0f, 1.0f);
+    }
+
+    float idleQuickListTop(float headerTop) const {
+        const float headerBottom = headerTop + 16.0f;
+        const float expandButtonTop = idleQuickExpandButtonTop(headerTop);
+        return std::max(headerBottom + kIdleListGapDip,
+                        expandButtonTop + 32.0f + kIdleListGapDip);
     }
 
     D2D1_RECT_F idleQuickExpandLocalRect(float headerTop) const {
@@ -694,6 +747,8 @@ struct MediaPopup::Impl {
         releaseBrush(brushControl);
         releaseBrush(brushControlHover);
         releaseBrush(brushControlPressed);
+        releaseBrush(brushIdleCell);
+        releaseBrush(brushIdleCellHover);
         releaseBrush(brushAccent);
         releaseBrush(brushAccentHover);
         releaseBrush(brushTextOnAccent);
@@ -706,6 +761,7 @@ struct MediaPopup::Impl {
         releaseFormat(fmtIdleHeader);
         releaseFormat(fmtIdleQuote);
         releaseFormat(fmtIdleSource);
+        releaseCom(idleAppTrimmingSign);
         releaseFormat(fmtIdleApp);
         releaseCom(titleLayout);
         releaseCom(artistLayout);
@@ -772,6 +828,8 @@ struct MediaPopup::Impl {
             FAILED(rt->CreateSolidColorBrush(p.controlFill, &brushControl)) ||
             FAILED(rt->CreateSolidColorBrush(p.controlHover, &brushControlHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.controlPressed, &brushControlPressed)) ||
+            FAILED(rt->CreateSolidColorBrush(p.listHover, &brushIdleCell)) ||
+            FAILED(rt->CreateSolidColorBrush(p.listSelected, &brushIdleCellHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.accent, &brushAccent)) ||
             FAILED(rt->CreateSolidColorBrush(p.accentHover, &brushAccentHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.textOnAccent, &brushTextOnAccent)) ||
@@ -784,12 +842,22 @@ struct MediaPopup::Impl {
             !createTextFormat(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleQuote,
                                DWRITE_PARAGRAPH_ALIGNMENT_NEAR) ||
             !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleSource) ||
-            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleApp)) {
+            !createTextFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleApp)) {
             releaseDrawingResources();
             return false;
         }
         if (FAILED(fmtTimeRight->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)) ||
-            FAILED(fmtIdleQuote->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING))) {
+            FAILED(fmtIdleQuote->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)) ||
+            FAILED(fmtIdleApp->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER))) {
+            releaseDrawingResources();
+            return false;
+        }
+        DWRITE_TRIMMING idleAppTrimming{
+            DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        if (!renderer.dwrite() ||
+            FAILED(renderer.dwrite()->CreateEllipsisTrimmingSign(
+                fmtIdleApp, &idleAppTrimmingSign)) ||
+            FAILED(fmtIdleApp->SetTrimming(&idleAppTrimming, idleAppTrimmingSign))) {
             releaseDrawingResources();
             return false;
         }
@@ -1114,25 +1182,23 @@ struct MediaPopup::Impl {
     }
 
     void layoutIdleList(float w, float top, const IdlePresentation* content = nullptr) {
-        // 组合卡片高度固定为媒体卡片高度；应用数量较多时只在卡片内部滚动，
-        // 不允许列表绘制或命中区域越过圆角卡片底部。
+        // 收起时只展示第一排；展开时尽量扩大网格可视区，内容超出后在
+        // 列表内部滚动，始终不让内容越过卡片底部。
         const IdlePresentation& listContent = content ? *content : idle;
         const float expandProgress = idleQuickExpandProgress(listContent);
-        const float maxListHeight =
-            kIdleListHeightDip +
-            (kIdleListExpandedHeightDip - kIdleListHeightDip) * expandProgress;
+        const float maxListHeight = idleQuickListHeight(listContent, expandProgress);
         const float availableHeight =
             std::max(0.0f, kIdlePopupHeightDip - top - kIdleListBottomPaddingDip);
         const float listHeight = std::min(maxListHeight, availableHeight);
-        const auto& apps = listContent.apps;
         idleListRect = D2D1::RectF(16.0f, top,
-                                   w - 16.0f - (idleScrollMax > 0.0f
-                                                    ? kIdleScrollBarHitWidthDip
-                                                    : 0.0f),
+                                   w - 16.0f,
                                    top + listHeight);
-        const float contentHeight =
-            apps.empty() ? 0.0f : apps.size() * kIdleListRowHeightDip;
+        const float contentHeight = idleQuickGridContentHeight(listContent);
+        // 当前可视区放不下完整网格时就允许滚动；展开按钮只扩大可视区，
+        // 如果扩大后已经能容纳全部内容，滚动条会自动消失。
         idleScrollMax = std::max(0.0f, contentHeight - listHeight);
+        if (idleScrollMax <= 0.0f)
+            idleScrollOffset = 0.0f;
         if (idleScrollOffset > idleScrollMax)
             idleScrollOffset = idleScrollMax;
 
@@ -1545,35 +1611,70 @@ struct MediaPopup::Impl {
         if (!rt)
             return;
         layoutIdleList(w, top, &content);
-        rt->PushAxisAlignedClip(idleListRect, D2D1_ANTIALIAS_MODE_ALIASED);
+        // 方块边框以几何边界为中心绘制；给可视裁剪区留出 1 DIP，避免首行
+        // 的上边框被裁掉，同时不改变列表的布局和命中区域。
+        const D2D1_RECT_F visualClip =
+            D2D1::RectF(idleListRect.left,
+                        idleListRect.top - kIdleQuickVisualClipPaddingDip,
+                        idleListRect.right,
+                        idleListRect.bottom + kIdleQuickVisualClipPaddingDip);
+        rt->PushAxisAlignedClip(visualClip, D2D1_ANTIALIAS_MODE_ALIASED);
         if (content.apps.empty()) {
             drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
         } else {
+            const float columnGap = kIdleQuickCellGapDip;
+            const float gridLeft = idleQuickGridLeft();
             for (size_t i = 0; i < content.apps.size(); ++i) {
-                const float top = idleListRect.top +
-                                  static_cast<float>(i) * kIdleListRowHeightDip -
-                                  idleScrollOffset;
-                const D2D1_RECT_F row = D2D1::RectF(
-                    idleListRect.left, top, idleListRect.right, top + 36.0f);
-                if (row.bottom < idleListRect.top || row.top > idleListRect.bottom)
+                const size_t column = i % kIdleQuickColumnCount;
+                const size_t rowIndex = i / kIdleQuickColumnCount;
+                const float cellTop = idleListRect.top +
+                                      static_cast<float>(rowIndex) * kIdleQuickRowPitchDip -
+                                      idleScrollOffset;
+                const float cellLeft = gridLeft +
+                                       static_cast<float>(column) *
+                                           (kIdleQuickCellSizeDip + columnGap);
+                const D2D1_RECT_F cell =
+                    D2D1::RectF(cellLeft, cellTop, cellLeft + kIdleQuickCellSizeDip,
+                                cellTop + kIdleQuickCellSizeDip);
+                if (cell.bottom < idleListRect.top || cell.top > idleListRect.bottom)
                     continue;
-                if (static_cast<int>(i) == hoverIdleApp)
-                    rt->FillRoundedRectangle(
-                        D2D1::RoundedRect(row, 7.0f, 7.0f), brushControlHover);
+                const bool hovered = static_cast<int>(i) == hoverIdleApp;
+                const bool valid = content.apps[i].pathValid;
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(cell, 9.0f, 9.0f),
+                    hovered ? brushIdleCellHover : brushIdleCell);
+                if (brushStroke) {
+                    brushStroke->SetOpacity(hovered ? 0.85f : 0.55f);
+                    rt->DrawRoundedRectangle(D2D1::RoundedRect(cell, 9.0f, 9.0f),
+                                             brushStroke, hovered ? 1.0f : 0.75f);
+                    brushStroke->SetOpacity(1.0f);
+                }
 
+                const bool showName = content.showAppNames;
+                const float iconTop = showName
+                                          ? cell.top + kIdleQuickNamedIconTopDip
+                                          : cell.top + (kIdleQuickCellSizeDip -
+                                                        kIdleQuickIconSizeDip) * 0.5f;
                 const D2D1_RECT_F iconRect =
-                    D2D1::RectF(row.left + 8.0f, row.top + 6.0f, row.left + 32.0f,
-                                row.top + 30.0f);
+                    D2D1::RectF(cell.left + (kIdleQuickCellSizeDip - kIdleQuickIconSizeDip) *
+                                             0.5f,
+                                iconTop,
+                                cell.left + (kIdleQuickCellSizeDip + kIdleQuickIconSizeDip) *
+                                             0.5f,
+                                iconTop + kIdleQuickIconSizeDip);
                 if (i < idleIconBitmaps.size() && idleIconBitmaps[i])
-                    rt->DrawBitmap(idleIconBitmaps[i], iconRect, 1.0f,
+                    rt->DrawBitmap(idleIconBitmaps[i], iconRect, valid ? 1.0f : 0.45f,
                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                const D2D1_RECT_F textRect =
-                    D2D1::RectF(row.left + 42.0f, row.top, row.right - 20.0f, row.bottom);
-                drawText(rt, content.apps[i].name.empty() ? L"未命名应用" : content.apps[i].name,
-                         fmtIdleApp, textRect,
-                         content.apps[i].pathValid ? brushText : brushDisabled);
-                drawChevron(rt, D2D1::Point2F(row.right - 11.0f, row.top + 18.0f), 5.5f,
-                            content.apps[i].pathValid ? brushSecondary : brushDisabled);
+                if (showName) {
+                    const D2D1_RECT_F textRect =
+                        D2D1::RectF(cell.left + 4.0f,
+                                    cell.bottom - kIdleQuickNamedTextTopInsetDip,
+                                    cell.right - 4.0f,
+                                    cell.bottom - kIdleQuickNamedTextBottomInsetDip);
+                    drawText(rt,
+                             content.apps[i].name.empty() ? L"未命名应用" : content.apps[i].name,
+                             fmtIdleApp, textRect, valid ? brushText : brushDisabled);
+                }
             }
         }
         rt->PopAxisAlignedClip();
@@ -1599,9 +1700,7 @@ struct MediaPopup::Impl {
         const float quickHeaderTop = idleQuickHeaderTop(collapsedQuickHeaderTop, idle);
         const float quickHeaderBottom = quickHeaderTop + 16.0f;
         const float quickExpandButtonTop = idleQuickExpandButtonTop(quickHeaderTop);
-        const float listTop = std::max(
-            quickHeaderBottom + kIdleListGapDip,
-            quickExpandButtonTop + 32.0f + kIdleListGapDip);
+        const float listTop = idleQuickListTop(quickHeaderTop);
 
         // 快速启动区域从底部向上覆盖每日一言；先裁掉被覆盖的旧内容，
         // 这样在半透明卡片或动态背景下也不会残留文字。
@@ -2012,9 +2111,7 @@ struct MediaPopup::Impl {
         const float quickHeaderTop = idleQuickHeaderTop(collapsedQuickHeaderTop, content);
         const float quickHeaderBottom = quickHeaderTop + 16.0f;
         const float quickExpandButtonTop = idleQuickExpandButtonTop(quickHeaderTop);
-        const float listTop = std::max(
-            quickHeaderBottom + kIdleListGapDip,
-            quickExpandButtonTop + 32.0f + kIdleListGapDip);
+        const float listTop = idleQuickListTop(quickHeaderTop);
 
         rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, quickExpandButtonTop),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
@@ -2230,20 +2327,16 @@ struct MediaPopup::Impl {
         // 层 1（快速打开区）原点对齐展开态按钮顶；按钮与标题同体平移
         const float quickOriginY = expandedButtonTop;
 
-        const float expandedListTop =
-            std::max(expandedHeaderTop + 16.0f + kIdleListGapDip,
-                     expandedButtonTop + 32.0f + kIdleListGapDip);
-        const float collapsedListTop =
-            std::max(collapsedHeaderTop + 16.0f + kIdleListGapDip,
-                     collapsedButtonTop + 32.0f + kIdleListGapDip);
+        const float expandedListTop = idleQuickListTop(expandedHeaderTop);
+        const float collapsedListTop = idleQuickListTop(collapsedHeaderTop);
         auto availableHeight = [&](float listTop) {
             return std::max(0.0f, kIdlePopupHeightDip - listTop -
                                       kIdleListBottomPaddingDip);
         };
         const float expandedListHeight =
-            std::min(kIdleListExpandedHeightDip, availableHeight(expandedListTop));
+            std::min(idleQuickListHeight(idle, 1.0f), availableHeight(expandedListTop));
         const float collapsedListHeight =
-            std::min(kIdleListHeightDip, availableHeight(collapsedListTop));
+            std::min(idleQuickListHeight(idle, 0.0f), availableHeight(collapsedListTop));
         // 层内坐标（原点 = 卡片 y=quickOriginY）的列表可见底边端点
         const float clipBottomExpanded =
             (expandedListTop - quickOriginY) + expandedListHeight;
@@ -2721,13 +2814,32 @@ struct MediaPopup::Impl {
             !contains(idleListRect, x, y))
             return -1;
         const float contentY = y - idleListRect.top + idleScrollOffset;
-        const int index = static_cast<int>(contentY / kIdleListRowHeightDip);
-        if (index < 0 || static_cast<size_t>(index) >= idle.apps.size())
+        const int rowIndex = static_cast<int>(contentY / kIdleQuickRowPitchDip);
+        if (rowIndex < 0)
             return -1;
-        if (!idle.apps[static_cast<size_t>(index)].pathValid)
+        const float rowOffset = std::fmod(contentY, kIdleQuickRowPitchDip);
+        if (rowOffset < 0.0f || rowOffset >= kIdleQuickCellSizeDip)
             return -1;
-        const float rowOffset = std::fmod(contentY, kIdleListRowHeightDip);
-        return rowOffset <= 36.0f ? index : -1;
+        const float gridLeft = idleQuickGridLeft();
+        const float gridRight = gridLeft + kIdleQuickGridWidthDip;
+        if (x < gridLeft || x >= gridRight)
+            return -1;
+        const float columnPosition = x - gridLeft;
+        const int column = static_cast<int>(columnPosition /
+                                            (kIdleQuickCellSizeDip +
+                                             kIdleQuickCellGapDip));
+        if (column < 0 || static_cast<size_t>(column) >= kIdleQuickColumnCount)
+            return -1;
+        const float cellOffset = std::fmod(columnPosition,
+                                           kIdleQuickCellSizeDip +
+                                               kIdleQuickCellGapDip);
+        if (cellOffset < 0.0f || cellOffset >= kIdleQuickCellSizeDip)
+            return -1;
+        const int index = rowIndex * static_cast<int>(kIdleQuickColumnCount) + column;
+        if (static_cast<size_t>(index) >= idle.apps.size() ||
+            !idle.apps[static_cast<size_t>(index)].pathValid)
+            return -1;
+        return index;
     }
 
     bool hitIdleScrollBar(float x, float y) const {
@@ -3760,12 +3872,14 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
                               content.copyEnabled != impl_->idle.copyEnabled ||
                               content.quickStartEnabled != impl_->idle.quickStartEnabled;
     bool changed = quoteChanged ||
+                   content.showAppNames != impl_->idle.showAppNames ||
                    content.apps.size() != impl_->idle.apps.size();
     if (!changed) {
         for (size_t i = 0; i < content.apps.size(); ++i) {
             const auto& oldApp = impl_->idle.apps[i];
             const auto& newApp = content.apps[i];
-            if (oldApp.path != newApp.path || oldApp.name != newApp.name ||
+            if (oldApp.path != newApp.path || oldApp.customName != newApp.customName ||
+                oldApp.name != newApp.name ||
                 oldApp.iconPixels != newApp.iconPixels ||
                 oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
                 oldApp.pathValid != newApp.pathValid) {

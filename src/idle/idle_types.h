@@ -47,9 +47,10 @@ struct IdleQuoteResult {
     std::wstring token;
 };
 
-// 配置只持久化 path；name/icon 是启动或首次展示时读取的运行时资源。
+// path、customName 是配置；name/icon 是启动或首次展示时读取的运行时资源。
 struct IdleAppInfo {
     std::wstring path;
+    std::wstring customName;
     std::wstring name;
     std::shared_ptr<const std::vector<BYTE>> iconPixels;
     UINT iconWidth = 0;
@@ -57,7 +58,7 @@ struct IdleAppInfo {
     bool pathValid = true;
 };
 
-constexpr std::size_t kMaxIdleApps = 5;
+constexpr std::size_t kMaxIdleApps = 20;
 
 struct IdlePresentation {
     std::wstring sentence;
@@ -66,5 +67,6 @@ struct IdlePresentation {
     bool showQuote = true;
     bool copyEnabled = false;
     bool quickStartEnabled = true;
+    bool showAppNames = true;
     std::vector<IdleAppInfo> apps;
 };

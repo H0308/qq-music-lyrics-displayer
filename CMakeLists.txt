@@ -49,6 +49,7 @@ add_executable(QQMusicLyric
     src/ui/fluent_menu.cpp
     src/ui/font_picker_dialog.cpp
     src/ui/color_picker_dialog.cpp
+    src/ui/idle_app_name_dialog.cpp
     src/ui/font_color_dialog.cpp
     src/ui/settings_dialog.cpp
     src/ui/runtime_log_dialog.cpp

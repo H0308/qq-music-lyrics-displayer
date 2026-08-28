@@ -75,6 +75,10 @@ constexpr int kIdIdleCardTrigger = 457;
 constexpr int kIdIdleQuoteBackground = 458;
 constexpr int kIdIdleQuoteBackgroundScope = 459;
 constexpr int kIdContentScrollBar = 401;
+// 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
+constexpr int kIdIdleAppNames = 460;
+constexpr int kIdleAppNamesOption = -2;
+constexpr int kIdleAppEditOptionBase = 1000;
 
 constexpr float kWindowW = 760.0f;
 constexpr float kWindowH = 552.0f;
@@ -124,6 +128,12 @@ constexpr float kScrollWheelDip = 72.0f;
 constexpr float kIdleAppItemH = 52.0f;
 constexpr float kIdleAppsListTop = 76.0f;
 constexpr float kIdleAppsBaseH = 128.0f;
+constexpr float kIdleAppActionW = 58.0f;
+constexpr float kIdleAppActionGap = 8.0f;
+constexpr float kIdleAppInfoRightInset = 144.0f;
+constexpr float kIdleAppNamesToggleW = 40.0f;
+constexpr float kIdleAppNamesToggleLabelW = 56.0f;
+constexpr float kIdleAppNamesToggleGap = 8.0f;
 constexpr float kIdleQuoteBackgroundCardH = 112.0f;
 constexpr float kIdleQuoteBackgroundCardGap = 8.0f;
 constexpr float kIdleQuoteBackgroundRowH = 324.0f;
@@ -216,6 +226,7 @@ struct SettingsDialog::Impl {
         D2D1_RECT_F controlRect{};
         D2D1_RECT_F artworkRect{};
         D2D1_RECT_F addAppRect{};
+        std::vector<D2D1_RECT_F> appEditRects;
         std::vector<D2D1_RECT_F> appDeleteRects;
         std::vector<D2D1_RECT_F> optionRects;
         std::vector<std::wstring> optionHints;
@@ -638,10 +649,11 @@ struct SettingsDialog::Impl {
                  state.idleEntryEnabled && !state.idleCardTriggerSync, kRowTallH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
-            L"通过文件选择器添加本地 EXE，最多添加 5 个应用。",
+            L"通过文件选择器添加本地 EXE，最多添加 20 个应用；开关统一控制名称显示。",
             0.0f, kIdleAppsBaseH + static_cast<float>(
                                             std::max<size_t>(1, state.idleApps.size())) *
                                             kIdleAppItemH);
+        idleApps.checked = state.idleAppNamesVisible;
         idleApps.height = idleApps.minHeight;
         idleApps.enabled = state.idleEntryEnabled;
         updateIdleRowsEnabled();
@@ -914,6 +926,7 @@ struct SettingsDialog::Impl {
                 row.controlRect = D2D1::RectF(0, 0, 0, 0);
                 row.artworkRect = D2D1::RectF(0, 0, 0, 0);
                 row.addAppRect = D2D1::RectF(0, 0, 0, 0);
+                row.appEditRects.clear();
                 row.appDeleteRects.clear();
                 row.optionRects.clear();
             }
@@ -933,18 +946,31 @@ struct SettingsDialog::Impl {
             const float innerRight = contentX + contentW - 16.0f;
             if (row.id == kIdIdleApps) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                const float toggleLeft = innerRight - kIdleAppNamesToggleW;
+                const float toggleLabelRight = toggleLeft - kIdleAppNamesToggleGap;
+                const float toggleLabelLeft = toggleLabelRight - kIdleAppNamesToggleLabelW;
+                row.labelRect = D2D1::RectF(innerX, titleTop,
+                                            std::max(innerX, toggleLabelLeft - kIdleAppNamesToggleGap),
                                             titleTop + row.titleHeight);
+                row.controlRect = D2D1::RectF(toggleLeft, titleTop, innerRight,
+                                              titleTop + row.titleHeight);
                 const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
                 row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
                                            hintTop + 30.0f);
                 const float listTop = y + kIdleAppsListTop;
                 const size_t count = state.idleApps.size();
+                row.appEditRects.reserve(count);
                 row.appDeleteRects.reserve(count);
                 for (size_t i = 0; i < count; ++i) {
                     const float itemTop = listTop + static_cast<float>(i) * kIdleAppItemH;
+                    row.appEditRects.push_back(
+                        D2D1::RectF(innerRight - 2.0f * kIdleAppActionW -
+                                        kIdleAppActionGap - 12.0f,
+                                    itemTop + 10.0f,
+                                    innerRight - kIdleAppActionW - kIdleAppActionGap - 12.0f,
+                                    itemTop + 40.0f));
                     row.appDeleteRects.push_back(
-                        D2D1::RectF(innerRight - 70.0f, itemTop + 10.0f,
+                        D2D1::RectF(innerRight - kIdleAppActionW - 12.0f, itemTop + 10.0f,
                                     innerRight - 12.0f, itemTop + 40.0f));
                 }
                 row.addAppRect = D2D1::RectF(
@@ -1209,11 +1235,10 @@ struct SettingsDialog::Impl {
                          textColor);
     }
 
-    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const Row& row,
+                    bool hovered, bool focused) {
         const auto& p = fluent::palette();
-        const bool hovered = hoverId == row.id;
         const bool enabled = row.enabled;
-        const bool focused = focusedId == row.id && focusVisible;
         const float trackH = std::min(20.0f, row.controlRect.bottom - row.controlRect.top);
         const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
         const D2D1_RECT_F track = D2D1::RectF(
@@ -1244,6 +1269,10 @@ struct SettingsDialog::Impl {
                             track.right - 1.5f, track.bottom - 1.5f),
                 1.5f, std::max(1.0f, radius - 1.5f));
         }
+    }
+
+    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
+        drawToggle(painter, row, hoverId == row.id, focusedId == row.id && focusVisible);
     }
 
     void drawSlider(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
@@ -2603,19 +2632,48 @@ struct SettingsDialog::Impl {
         const size_t count = state.idleApps.size();
         auto* nameFormat = painter.textFormat(13.0f, 600, false, true);
         auto* pathFormat = painter.textFormat(11.0f, 400, false, true);
-        auto* deleteFormat = painter.textFormat(12.0f, 400, true, true);
-        if (!nameFormat || !pathFormat || !deleteFormat)
+        auto* actionFormat = painter.textFormat(11.0f, 600, true, true);
+        if (!nameFormat || !pathFormat || !actionFormat)
             return;
+
+        auto drawAction = [&](const D2D1_RECT_F& rect, const std::wstring& text, bool enabled,
+                              bool hovered, bool pressed) {
+            const D2D1_COLOR_F fill = !enabled ? p.listHover
+                                               : pressed ? p.controlPressed
+                                                         : hovered ? p.controlHover
+                                                                   : p.controlFill;
+            painter.fillRoundRect(fill, rect, 6.0f);
+            painter.strokeRoundRect(enabled ? p.cardStroke : p.disabled, rect, 1.0f, 6.0f);
+            painter.drawText(text, actionFormat, rect, enabled ? p.text : p.disabled);
+        };
+
+        const D2D1_RECT_F toggleLabelRect =
+            D2D1::RectF(row.controlRect.left - kIdleAppNamesToggleGap -
+                            kIdleAppNamesToggleLabelW,
+                        row.controlRect.top, row.controlRect.left - kIdleAppNamesToggleGap,
+                        row.controlRect.bottom);
+        painter.drawText(L"显示名称", painter.textFormat(12.0f, 400, true, true),
+                         toggleLabelRect, row.enabled ? p.textSecondary : p.disabled);
+        drawToggle(painter, row,
+                   row.enabled && hoverId == row.id && hoverOption == kIdleAppNamesOption,
+                   focusedId == kIdIdleAppNames && focusVisible);
 
         for (size_t i = 0; i < count; ++i) {
             const auto& app = state.idleApps[i];
             const float top = listTop + static_cast<float>(i) * kIdleAppItemH;
             const D2D1_RECT_F item =
                 D2D1::RectF(innerX, top, innerRight, top + 44.0f);
+            const int option = hoverId == row.id ? hoverOption : -1;
+            const int pressedOptionValue = pressedId == row.id ? pressedOption : -1;
+            const bool appHovered = option == static_cast<int>(i) ||
+                                    option == kIdleAppEditOptionBase + static_cast<int>(i);
+            const bool appPressed =
+                pressedOptionValue == static_cast<int>(i) ||
+                pressedOptionValue == kIdleAppEditOptionBase + static_cast<int>(i);
             const bool hovered = row.enabled && hoverId == row.id &&
-                                 hoverOption == static_cast<int>(i);
+                                 appHovered;
             const bool pressed = row.enabled && pressedId == row.id &&
-                                 pressedOption == static_cast<int>(i);
+                                 appPressed;
             painter.fillRoundRect(row.enabled ? (hovered ? p.controlHover : p.controlFill)
                                               : p.listHover,
                                   item, 7.0f);
@@ -2644,26 +2702,25 @@ struct SettingsDialog::Impl {
 
             const D2D1_RECT_F nameRect =
                 D2D1::RectF(item.left + 46.0f, item.top + 3.0f,
-                            item.right - 78.0f, item.top + 23.0f);
+                            item.right - kIdleAppInfoRightInset, item.top + 23.0f);
             const D2D1_RECT_F pathRect =
                 D2D1::RectF(item.left + 46.0f, item.top + 22.0f,
-                            item.right - 78.0f, item.bottom - 3.0f);
+                            item.right - kIdleAppInfoRightInset, item.bottom - 3.0f);
             painter.drawTrimmedText(app.name.empty() ? L"未命名应用" : app.name, nameFormat,
                                     nameRect, row.enabled && app.pathValid ? p.text : p.disabled);
             painter.drawTrimmedText(app.pathValid ? app.path : L"路径失效，请重新选择",
                                     pathFormat, pathRect,
                                     row.enabled && app.pathValid ? p.textSecondary : p.disabled);
 
+            const D2D1_RECT_F editRect = row.appEditRects[i];
             const D2D1_RECT_F deleteRect = row.appDeleteRects[i];
-            painter.fillRoundRect(row.enabled ? (hovered ? p.controlPressed : p.controlFill)
-                                              : p.listHover,
-                                  deleteRect, 6.0f);
-            painter.strokeRoundRect(row.enabled ? p.cardStroke : p.disabled, deleteRect, 1.0f,
-                                    6.0f);
-            painter.drawText(L"删除", deleteFormat,
-                             D2D1::RectF(deleteRect.left, deleteRect.top,
-                                         deleteRect.right, deleteRect.bottom),
-                             row.enabled && app.pathValid ? p.textSecondary : p.disabled);
+            drawAction(editRect, L"修改", row.enabled,
+                       row.enabled && option == kIdleAppEditOptionBase + static_cast<int>(i),
+                       row.enabled && pressedOptionValue == kIdleAppEditOptionBase +
+                                                      static_cast<int>(i));
+            drawAction(deleteRect, L"删除", row.enabled,
+                       row.enabled && option == static_cast<int>(i),
+                       row.enabled && pressedOptionValue == static_cast<int>(i));
         }
 
         if (count == 0)
@@ -2756,6 +2813,18 @@ struct SettingsDialog::Impl {
             if (!row.enabled)
                 continue;
             if (row.kind == ControlKind::AppList) {
+                if (contains(row.controlRect, x, y)) {
+                    if (option)
+                        *option = kIdleAppNamesOption;
+                    return row.id;
+                }
+                for (size_t i = 0; i < row.appEditRects.size(); ++i) {
+                    if (contains(row.appEditRects[i], x, y)) {
+                        if (option)
+                            *option = kIdleAppEditOptionBase + static_cast<int>(i);
+                        return row.id;
+                    }
+                }
                 for (size_t i = 0; i < row.appDeleteRects.size(); ++i) {
                     if (contains(row.appDeleteRects[i], x, y)) {
                         if (option)
@@ -2790,8 +2859,12 @@ struct SettingsDialog::Impl {
     std::vector<int> focusOrder() const {
         std::vector<int> order{kIdNav};
         for (const auto& row : rows[activePage]) {
-            if (row.enabled)
+            if (row.enabled && row.id == kIdIdleApps) {
+                order.push_back(kIdIdleAppNames);
                 order.push_back(row.id);
+            } else if (row.enabled) {
+                order.push_back(row.id);
+            }
         }
         return order;
     }
@@ -2825,6 +2898,18 @@ struct SettingsDialog::Impl {
     void onCommand(int id, int option = -1) {
         if (id == kIdNav)
             return;
+        if (id == kIdIdleAppNames) {
+            Row* appRow = findRow(kIdIdleApps);
+            if (!appRow || !appRow->enabled)
+                return;
+            appRow->checked = !appRow->checked;
+            state.idleAppNamesVisible = appRow->checked;
+            if (actions.onIdleAppNamesVisible)
+                actions.onIdleAppNamesVisible(appRow->checked);
+            if (hwnd)
+                surface.invalidate();
+            return;
+        }
         Row* row = findRow(id);
         if (!row || !row->enabled)
             return;
@@ -2895,7 +2980,17 @@ struct SettingsDialog::Impl {
                 actions.onIdleCardTrigger(row->selected);
             break;
         case kIdIdleApps:
-            if (option >= 0) {
+            if (option == kIdleAppNamesOption) {
+                row->checked = !row->checked;
+                state.idleAppNamesVisible = row->checked;
+                if (actions.onIdleAppNamesVisible)
+                    actions.onIdleAppNamesVisible(row->checked);
+            } else if (option >= kIdleAppEditOptionBase) {
+                const int index = option - kIdleAppEditOptionBase;
+                if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size() &&
+                    actions.onEditIdleApp)
+                    actions.onEditIdleApp(index);
+            } else if (option >= 0) {
                 if (actions.onRemoveIdleApp)
                     actions.onRemoveIdleApp(option);
             } else if (state.idleApps.size() < kMaxIdleApps && actions.onAddIdleApp) {
@@ -3136,6 +3231,8 @@ struct SettingsDialog::Impl {
             row->checked = s.idleCardTriggerSync;
         if (auto* row = findRow(kIdIdleCardTrigger))
             row->selected = std::clamp(s.idleCardTrigger, 0, 1);
+        if (auto* row = findRow(kIdIdleApps))
+            row->checked = s.idleAppNamesVisible;
         updateIdleQuoteSourceRow();
         updateIdleAppsRowHeight();
         const bool minimal = s.renderMode == kRenderModeMinimal;
@@ -3374,7 +3471,9 @@ struct SettingsDialog::Impl {
                     updateSliderFromPointer(*row, GET_X_LPARAM(lp) / s);
             }
             if (pressedId != 0 && pressedId != kIdContentScrollBar)
-                focusedId = pressedId;
+                focusedId = pressedId == kIdIdleApps && option == kIdleAppNamesOption
+                                 ? kIdIdleAppNames
+                                 : pressedId;
             if (pressedId == kIdContentScrollBar) {
                 const float y = GET_Y_LPARAM(lp) / s;
                 scrollDragOffset = contains(scrollThumbRect, GET_X_LPARAM(lp) / s, y)
@@ -3547,7 +3646,9 @@ struct SettingsDialog::Impl {
                 return 0;
             }
             if (wp == VK_SPACE || wp == VK_RETURN) {
-                if (focusedId != kIdNav) {
+                if (focusedId == kIdIdleAppNames) {
+                    onCommand(kIdIdleAppNames);
+                } else if (focusedId != kIdNav) {
                     Row* row = findRow(focusedId);
                     if (row && row->enabled && row->kind != ControlKind::Radio)
                         onCommand(focusedId);

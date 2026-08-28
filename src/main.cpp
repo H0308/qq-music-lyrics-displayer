@@ -10,6 +10,7 @@
 #include "ui/manual_search_dialog.h"
 #include "ui/font_picker_dialog.h"
 #include "ui/font_color_dialog.h"
+#include "ui/idle_app_name_dialog.h"
 #include "ui/settings_dialog.h"
 #include "ui/song_toast.h"
 #include "ui/runtime_log_dialog.h"
@@ -535,6 +536,7 @@ struct App {
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
+    std::unique_ptr<IdleAppNameDialog> idleAppNameDialog;
     std::unique_ptr<SettingsDialog> settingsDialog;
     std::unique_ptr<RuntimeLogDialog> runtimeLogDialog;
     std::wstring currentKey;
@@ -592,6 +594,7 @@ struct App {
     // 每日一言任务栏入口：句子缓存与应用图标属于播放链路之外的独立状态。
     bool idleEntryEnabled_ = true;
     bool idleQuoteEnabled_ = true;
+    bool idleAppNamesVisible_ = true;
     IdleQuoteSource idleQuoteSource_ = IdleQuoteSource::Hitokoto;
     IdleQuoteRefreshInterval idleQuoteRefreshInterval_ = IdleQuoteRefreshInterval::Daily;
     std::vector<IdleAppInfo> idleApps_;
@@ -1309,13 +1312,17 @@ struct App {
             app.iconWidth = 0;
             app.iconHeight = 0;
             app.name.clear();
-            if (!app.pathValid) {
+            if (!app.customName.empty()) {
+                app.name = app.customName;
+            } else if (!app.pathValid) {
                 app.name = fallbackExeName(app.path);
-                continue;
+            } else if (!platform_icon::readExeDisplayName(app.path, app.name) ||
+                       app.name.empty()) {
+                app.name = fallbackExeName(app.path);
             }
 
-            if (!platform_icon::readExeDisplayName(app.path, app.name) || app.name.empty())
-                app.name = fallbackExeName(app.path);
+            if (!app.pathValid)
+                continue;
 
             std::vector<BYTE> pixels;
             UINT width = 0;
@@ -1403,6 +1410,7 @@ struct App {
         IdlePresentation presentation;
         presentation.showQuote = idleQuoteEnabled_;
         presentation.quickStartEnabled = idleEntryEnabled_;
+        presentation.showAppNames = idleAppNamesVisible_;
         if (idleQuoteEnabled_) {
             presentation.loading = idleQuoteLoading_;
             presentation.sentence = idleQuoteText_;
@@ -1604,6 +1612,52 @@ struct App {
         idleApps_.push_back(std::move(app));
         prepareIdleApps();
         runtime_log::writef(L"[action][idle-entry] app-added path=%s", path.c_str());
+        saveSettings();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    }
+
+    void editIdleApp(int index) {
+        if (index < 0 || static_cast<size_t>(index) >= idleApps_.size())
+            return;
+        if (idleAppNameDialog && idleAppNameDialog->isOpen()) {
+            SetForegroundWindow(idleAppNameDialog->hwnd());
+            return;
+        }
+        idleAppNameDialog.reset();
+
+        auto dialog = std::make_unique<IdleAppNameDialog>();
+        const auto& app = idleApps_[static_cast<size_t>(index)];
+        const std::wstring initial = app.customName.empty() ? app.name : app.customName;
+        HWND parent = settingsDialog ? settingsDialog->hwnd() : trayHwnd;
+        if (!dialog->create(GetModuleHandleW(nullptr), parent, initial))
+            return;
+        dialog->setApplyCallback([this, index](const std::wstring& name) {
+            if (index < 0 || static_cast<size_t>(index) >= idleApps_.size())
+                return;
+            auto& app = idleApps_[static_cast<size_t>(index)];
+            if (app.customName == name || (app.customName.empty() && app.name == name))
+                return;
+            app.customName = name;
+            prepareIdleApps();
+            runtime_log::writef(L"[action][idle-entry] app-name-changed index=%d name=%s",
+                                index, app.name.c_str());
+            saveSettings();
+            if (settingsDialog)
+                settingsDialog->updateState(currentSettingsState());
+            publishPresentationFrame(monitor.snapshot(), false, true);
+        });
+        idleAppNameDialog = std::move(dialog);
+        idleAppNameDialog->show();
+    }
+
+    void setIdleAppNamesVisible(bool show) {
+        if (idleAppNamesVisible_ == show)
+            return;
+        idleAppNamesVisible_ = show;
+        runtime_log::writef(L"[action][idle-entry] app-names-visibility show=%d",
+                            show ? 1 : 0);
         saveSettings();
         if (settingsDialog)
             settingsDialog->updateState(currentSettingsState());
@@ -2512,6 +2566,7 @@ void App::loadSettings() {
                                 : AlbumCoverEffect::Default;
         idleEntryEnabled_ = j.value("idleEntryEnabled", true);
         idleQuoteEnabled_ = j.value("idleQuoteEnabled", true);
+        idleAppNamesVisible_ = j.value("idleAppNamesVisible", true);
         idleQuoteSource_ = idleQuoteSourceFromConfig(
             j.value("idleQuoteSource", std::string("hitokoto")));
         idleQuoteRefreshInterval_ = idleQuoteIntervalFromConfig(
@@ -2524,8 +2579,18 @@ void App::loadSettings() {
         idleApps_.clear();
         if (j.contains("idleApps") && j["idleApps"].is_array()) {
             for (const auto& value : j["idleApps"]) {
-                if (value.is_string())
-                    idleApps_.push_back({wideOf(value.get<std::string>())});
+                IdleAppInfo app;
+                if (value.is_string()) {
+                    // 兼容旧版本仅保存 EXE 路径的格式。
+                    app.path = wideOf(value.get<std::string>());
+                } else if (value.is_object()) {
+                    app.path = wideOf(value.value("path", std::string()));
+                    app.customName = wideOf(value.value("customName", std::string()));
+                }
+                if (!app.path.empty())
+                    idleApps_.push_back(std::move(app));
+                if (idleApps_.size() >= kMaxIdleApps)
+                    break;
             }
         }
         if (j.contains("idleQuoteCache") && j["idleQuoteCache"].is_object()) {
@@ -2595,6 +2660,7 @@ void App::saveSettings() {
             saveAppearance("Global", globalLyricAppearance_);
         j["idleEntryEnabled"] = idleEntryEnabled_;
         j["idleQuoteEnabled"] = idleQuoteEnabled_;
+        j["idleAppNamesVisible"] = idleAppNamesVisible_;
         j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
         j["idleQuoteRefreshInterval"] =
             idleQuoteIntervalConfigName(idleQuoteRefreshInterval_);
@@ -2603,8 +2669,12 @@ void App::saveSettings() {
             idleQuoteBackgroundScopeConfigName(idleQuoteBackgroundScope_);
         j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
         j["idleApps"] = nlohmann::json::array();
-        for (const auto& app : idleApps_)
-            j["idleApps"].push_back(utf8Of(app.path));
+        for (const auto& app : idleApps_) {
+            j["idleApps"].push_back({
+                {"path", utf8Of(app.path)},
+                {"customName", utf8Of(app.customName)},
+            });
+        }
         j["idleQuoteCache"] = {
             {"source", idleQuoteCacheSource_},
             {"period", idleQuoteCachePeriod_},
@@ -3511,6 +3581,7 @@ SettingsState App::currentSettingsState() const {
             : idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::HalfDay ? 1 : 0;
     st.idleQuoteBackground = idleQuoteBackgroundIndex(idleQuoteBackground_);
     st.idleQuoteBackgroundScope = idleQuoteBackgroundScopeIndex(idleQuoteBackgroundScope_);
+    st.idleAppNamesVisible = idleAppNamesVisible_;
     st.idleApps = idleApps_;
     st.songInfoVisible = songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -3575,6 +3646,8 @@ SettingsActions App::buildSettingsActions() {
     act.onIdleQuoteBackgroundScope =
         [this](int scope) { applyIdleQuoteBackgroundScope(scope); };
     act.onAddIdleApp = [this] { pickIdleApp(); };
+    act.onEditIdleApp = [this](int index) { editIdleApp(index); };
+    act.onIdleAppNamesVisible = [this](bool show) { setIdleAppNamesVisible(show); };
     act.onRemoveIdleApp = [this](int index) { removeIdleApp(index); };
     act.onSongInfoVisible = [this](bool on) { applySongInfoVisible(on); };
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
@@ -3943,6 +4016,9 @@ int main() {
             IsDialogMessageW(app.aboutDialog->hwnd(), &msg))
             continue;
         if (app.updatePromptHwnd_ && IsDialogMessageW(app.updatePromptHwnd_, &msg))
+            continue;
+        if (app.idleAppNameDialog && app.idleAppNameDialog->isOpen() &&
+            IsDialogMessageW(app.idleAppNameDialog->hwnd(), &msg))
             continue;
         if (app.settingsDialog && app.settingsDialog->isOpen() &&
             IsDialogMessageW(app.settingsDialog->hwnd(), &msg))
