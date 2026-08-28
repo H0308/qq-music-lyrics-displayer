@@ -1190,9 +1190,9 @@ struct MediaPopup::Impl {
         const float availableHeight =
             std::max(0.0f, kIdlePopupHeightDip - top - kIdleListBottomPaddingDip);
         const float listHeight = std::min(maxListHeight, availableHeight);
-        idleListRect = D2D1::RectF(16.0f, top,
-                                   w - 16.0f,
-                                   top + listHeight);
+        // 始终为滚动条预留固定槽位，避免滚动条出现或消失时网格横向跳动。
+        const float listRight = w - 16.0f - kIdleScrollBarHitWidthDip;
+        idleListRect = D2D1::RectF(16.0f, top, listRight, top + listHeight);
         const float contentHeight = idleQuickGridContentHeight(listContent);
         // 当前可视区放不下完整网格时就允许滚动；展开按钮只扩大可视区，
         // 如果扩大后已经能容纳全部内容，滚动条会自动消失。
@@ -1202,8 +1202,6 @@ struct MediaPopup::Impl {
         if (idleScrollOffset > idleScrollMax)
             idleScrollOffset = idleScrollMax;
 
-        idleListRect.right = w - 16.0f -
-                             (idleScrollMax > 0.0f ? kIdleScrollBarHitWidthDip : 0.0f);
         idleScrollTrackRect = {};
         idleScrollThumbRect = {};
         if (idleScrollMax <= 0.0f)
