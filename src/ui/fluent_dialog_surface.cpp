@@ -238,8 +238,18 @@ void FluentDialogSurface::Painter::drawTrimmedText(const std::wstring& text,
         return;
     layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-    layout->SetTrimming(&trimming, nullptr);
-    drawTextLayout(layout, D2D1::Point2F(rect.left, rect.top), color);
+    IDWriteInlineObject* trimmingSign = nullptr;
+    if (SUCCEEDED(dwrite_->CreateEllipsisTrimmingSign(format, &trimmingSign)) &&
+        trimmingSign) {
+        layout->SetTrimming(&trimming, trimmingSign);
+    } else {
+        layout->SetTrimming(&trimming, nullptr);
+    }
+    const auto options = static_cast<D2D1_DRAW_TEXT_OPTIONS>(
+        D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    drawTextLayout(layout, D2D1::Point2F(rect.left, rect.top), color, options);
+    if (trimmingSign)
+        trimmingSign->Release();
 }
 
 FluentDialogSurface::~FluentDialogSurface() {

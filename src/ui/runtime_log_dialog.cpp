@@ -359,6 +359,7 @@ struct RuntimeLogDialog::Impl {
 
     void drawCoverCard(fluent::FluentDialogSurface::Painter& painter,
                        const D2D1_RECT_F& rect,
+                       bool playbackActive,
                        bool coverLoaded,
                        const std::shared_ptr<const std::vector<uint8_t>>& image) {
         const auto& p = fluent::palette();
@@ -372,7 +373,8 @@ struct RuntimeLogDialog::Impl {
         drawCoverToggle(painter, showCover);
 
         if (!showCover) {
-            painter.drawText(coverLoaded ? L"加载成功" : L"加载失败",
+            painter.drawText(!playbackActive ? L"未加载"
+                                             : coverLoaded ? L"加载成功" : L"加载失败",
                              painter.textFormat(15.0f, 500, true, true),
                              D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f,
                                          rect.right - 14.0f, rect.bottom - 10.0f),
@@ -387,7 +389,10 @@ struct RuntimeLogDialog::Impl {
         const float imageTop = rect.bottom - imageSize - 6.0f;
         const UINT targetPx = std::max(
             1u, static_cast<UINT>(std::ceil(imageSize * surface.dipScale())));
-        ID2D1Bitmap* bitmap = decodeCoverBitmap(painter.target(), image, surface.dpi(), targetPx);
+        ID2D1Bitmap* bitmap = playbackActive
+                                  ? decodeCoverBitmap(painter.target(), image, surface.dpi(),
+                                                      targetPx)
+                                  : nullptr;
         if (bitmap) {
             painter.target()->DrawBitmap(
                 bitmap, D2D1::RectF(imageLeft, imageTop, imageLeft + imageSize,
@@ -397,7 +402,8 @@ struct RuntimeLogDialog::Impl {
             return;
         }
 
-        painter.drawText(L"加载失败", painter.textFormat(15.0f, 500, true, true),
+        painter.drawText(playbackActive ? L"加载失败" : L"未加载",
+                         painter.textFormat(15.0f, 500, true, true),
                          D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f, rect.right - 14.0f,
                                      rect.bottom - 10.0f),
                          p.text);
@@ -442,7 +448,8 @@ struct RuntimeLogDialog::Impl {
         drawCard(painter, card(0, 0), L"歌曲总时长", durationText(snapshot.durationMs));
         drawCard(painter, card(1, 0), L"歌词来源", snapshot.playbackActive ? snapshot.lyricSource
                                                                          : L"未加载");
-        drawCoverCard(painter, card(2, 0), snapshot.coverLoaded, snapshot.coverImage);
+        drawCoverCard(painter, card(2, 0), snapshot.playbackActive, snapshot.coverLoaded,
+                      snapshot.coverImage);
         drawCard(painter, card(0, 1), L"CPU", percentText(snapshot.cpuPercent));
         drawCard(painter, card(1, 1), L"GPU", percentText(snapshot.gpuPercent));
         drawCard(painter, card(2, 1), L"专用内存", memoryText(snapshot.memoryBytes));
