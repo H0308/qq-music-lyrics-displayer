@@ -32,10 +32,12 @@ constexpr UINT_PTR kEnterTimer = 5;
 constexpr UINT_PTR kVolumeTimer = 6;
 constexpr UINT_PTR kIdleQuickExpandTimer = 7;
 constexpr UINT_PTR kCategoryTimer = 8;
+constexpr UINT_PTR kCopyFeedbackTimer = 9;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
 constexpr UINT kCloseAnimationMs = 140;
+constexpr UINT kCopyFeedbackMs = 900;
 constexpr float kSongTransitionMs = 220.0f;
 constexpr float kSongTransitionTravelDip = 24.0f;
 constexpr float kCategoryTransitionMs = 240.0f;
@@ -307,6 +309,7 @@ struct MediaPopup::Impl {
     bool pressedPageArrow = false;
     bool hoverCopy = false;
     bool pressedCopy = false;
+    bool copySucceeded = false;
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
     std::function<void(const std::wstring&)> onIdleAppOpen;
@@ -672,6 +675,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kVolumeTimer);
         KillTimer(hwnd, kIdleQuickExpandTimer);
         KillTimer(hwnd, kCategoryTimer);
+        KillTimer(hwnd, kCopyFeedbackTimer);
         scrollTimerRunning = false;
         entering = false;
         deferredRender = false;
@@ -1477,7 +1481,7 @@ struct MediaPopup::Impl {
     }
 
     void drawCopyButton(ID2D1DeviceContext* rt, const D2D1_RECT_F& rect, bool hovered,
-                        bool pressed) {
+                        bool pressed, bool succeeded) {
         if (!rt)
             return;
         if (hovered || pressed)
@@ -1487,6 +1491,25 @@ struct MediaPopup::Impl {
 
         const float cx = (rect.left + rect.right) * 0.5f;
         const float cy = (rect.top + rect.bottom) * 0.5f;
+        if (succeeded) {
+            if (brushSecondary) {
+                constexpr float kStrokeWidth = 1.9f;
+                const D2D1_POINT_2F left = D2D1::Point2F(cx - 7.0f, cy + 0.2f);
+                const D2D1_POINT_2F middle = D2D1::Point2F(cx - 2.0f, cy + 5.2f);
+                const D2D1_POINT_2F right = D2D1::Point2F(cx + 7.0f, cy - 5.0f);
+                rt->DrawLine(left, middle, brushSecondary, kStrokeWidth);
+                rt->DrawLine(middle, right, brushSecondary, kStrokeWidth);
+
+                // DrawLine 默认端点是平的，用圆点补齐端帽和折点，让成功态与复制图标
+                // 保持一致的柔和线条。
+                const float capRadius = kStrokeWidth * 0.5f;
+                rt->FillEllipse(D2D1::Ellipse(left, capRadius, capRadius), brushSecondary);
+                rt->FillEllipse(D2D1::Ellipse(middle, capRadius, capRadius), brushSecondary);
+                rt->FillEllipse(D2D1::Ellipse(right, capRadius, capRadius), brushSecondary);
+            }
+            return;
+        }
+
         const D2D1_RECT_F back =
             D2D1::RectF(cx - 6.0f, cy - 7.0f, cx + 4.0f, cy + 6.0f);
         const D2D1_RECT_F front =
@@ -1569,7 +1592,37 @@ struct MediaPopup::Impl {
         const D2D1_RECT_F localCopy =
             D2D1::RectF(copyRight - 32.0f, 7.0f, copyRight, 39.0f);
         drawCopyButton(rt, localCopy, updateHitTest && hoverCopy,
-                       updateHitTest && pressedCopy);
+                       updateHitTest && pressedCopy, copySucceeded);
+        if (updateHitTest && hoverCopy && !copySucceeded && brushControl) {
+            // 提示与按钮同高并放在左侧，避免遮住一言正文，也不会改变按钮占位。
+            constexpr float kTooltipWidthDip = 104.0f;
+            const float tooltipRight = localCopy.left - 8.0f;
+            const D2D1_RECT_F tooltip = D2D1::RectF(
+                std::max(8.0f, tooltipRight - kTooltipWidthDip), 7.0f, tooltipRight, 39.0f);
+
+            // 提示文字沿用卡片当前的动态对比色；气泡底也必须同步切换，避免深色
+            // 背景下出现白字落在浅色控件底上的低对比组合。
+            const D2D1_COLOR_F textColor = brushText ? brushText->GetColor()
+                                                       : D2D1::ColorF(D2D1::ColorF::Black);
+            const bool useBlackText = textColor.r + textColor.g + textColor.b < 1.5f;
+            const D2D1_COLOR_F previousControlFill = brushControl->GetColor();
+            brushControl->SetColor(useBlackText
+                                       ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.82f)
+                                       : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.46f));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(tooltip, 8.0f, 8.0f),
+                                     brushControl);
+            brushControl->SetColor(previousControlFill);
+            if (brushStroke) {
+                brushStroke->SetOpacity(0.7f);
+                rt->DrawRoundedRectangle(D2D1::RoundedRect(tooltip, 8.0f, 8.0f),
+                                         brushStroke, 0.8f);
+                brushStroke->SetOpacity(1.0f);
+            }
+            drawText(rt, L"复制每日一言", fmtIdleSource,
+                     D2D1::RectF(tooltip.left + 8.0f, tooltip.top + 7.0f,
+                                 tooltip.right - 8.0f, tooltip.bottom - 5.0f),
+                     brushText);
+        }
         if (updateHitTest)
             copyRect = D2D1::RectF(localCopy.left, cardOriginDip + localCopy.top,
                                    localCopy.right, cardOriginDip + localCopy.bottom);
@@ -2726,6 +2779,9 @@ struct MediaPopup::Impl {
             return;
         }
         CloseClipboard();
+        KillTimer(hwnd, kCopyFeedbackTimer);
+        copySucceeded = true;
+        SetTimer(hwnd, kCopyFeedbackTimer, kCopyFeedbackMs, nullptr);
         runtime_log::writef(L"[action][media-popup] idle-quote-copied");
     }
 
@@ -2771,6 +2827,9 @@ struct MediaPopup::Impl {
         pressedPageArrow = false;
         hoverCopy = false;
         pressedCopy = false;
+        if (hwnd)
+            KillTimer(hwnd, kCopyFeedbackTimer);
+        copySucceeded = false;
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
         idleQuickExpandRect = {};
@@ -3157,6 +3216,7 @@ struct MediaPopup::Impl {
         pressedPageArrow = false;
         hoverCopy = false;
         pressedCopy = false;
+        copySucceeded = false;
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
         idleQuickExpandRect = {};
@@ -3516,6 +3576,10 @@ struct MediaPopup::Impl {
                     return 0;
                 }
                 advanceVolumeSlider();
+            } else if (wp == kCopyFeedbackTimer) {
+                KillTimer(hwnd, kCopyFeedbackTimer);
+                copySucceeded = false;
+                renderOrDefer();
             } else if (wp == kIdleQuickExpandTimer) {
                 // 快速打开展开/收起的合成器动画已到终点并静止：
                 // 先隐藏着预绘制最终页面，再撤掉合成层完成交接。
@@ -3888,6 +3952,13 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
                 break;
             }
         }
+    }
+
+    if (quoteContentChanged || !content.showQuote || !content.copyEnabled ||
+        content.loading || content.sentence.empty()) {
+        if (impl_->hwnd)
+            KillTimer(impl_->hwnd, kCopyFeedbackTimer);
+        impl_->copySucceeded = false;
     }
 
     if (quoteContentChanged) {
