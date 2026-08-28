@@ -1562,7 +1562,10 @@ struct MediaPopup::Impl {
         }
 
         // 复制和返回操作放在同一排，二者之间固定留出 8 DIP，避免悬浮底互相覆盖。
-        const float copyRight = idleReturnArrowVisible(content) ? w - 52.0f : w - 16.0f;
+        // 页面互切时箭头可能暂时不绘制，但它的槽位仍要保留，避免复制按钮横向跳动。
+        const bool reservePageArrowSlot = idleReturnArrowVisible(content) ||
+                                          categoryTransitionActive;
+        const float copyRight = reservePageArrowSlot ? w - 52.0f : w - 16.0f;
         const D2D1_RECT_F localCopy =
             D2D1::RectF(copyRight - 32.0f, 7.0f, copyRight, 39.0f);
         drawCopyButton(rt, localCopy, updateHitTest && hoverCopy,
