@@ -553,6 +553,18 @@ struct MediaPopup::Impl {
         return dynamicBackgroundEnabledForPage(currentPage());
     }
 
+    bool backdropTextContrastEnabledForPage(PopupPage page) const {
+        // 每日一言没有单独的字体颜色开关，在磨砂背景下仍根据背后内容选择对比色；
+        // 播放中的媒体卡片则由设置项控制，且设置项只在磨砂背景下启用。
+        return frostedBackgroundActiveForPage(page) &&
+               (page == PopupPage::Idle || autoTextContrast);
+    }
+
+    bool hasBackdropTextContrastForPage(PopupPage page) const {
+        return backdropTextContrastEnabledForPage(page) && backdropBmp &&
+               lastBackdropLuminance >= 0.0f;
+    }
+
     D2D1_COLOR_F cardFillForPage(PopupPage page) const {
         const auto& p = fluent::palette(fluent::ThemeTarget::Window);
         const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
@@ -598,9 +610,7 @@ struct MediaPopup::Impl {
     }
 
     void applyBackdropTextContrastForPage(float luminance, PopupPage page) {
-        // 无播放组合面板没有单独的字体颜色开关，磨砂模式始终根据后方内容
-        // 选择黑/白文字；播放中的媒体卡片仍由设置项控制。
-        if (page == PopupPage::Media && !autoTextContrast) {
+        if (!backdropTextContrastEnabledForPage(page)) {
             resetBackdropTextColors();
             return;
         }
@@ -1480,14 +1490,69 @@ struct MediaPopup::Impl {
         rt->FillEllipse(D2D1::Ellipse(right, capRadius, capRadius), brush);
     }
 
+    bool usesBlackTextForControls(PopupPage page) const {
+        if (!hasBackdropTextContrastForPage(page))
+            return !fluent::isDarkMode(fluent::ThemeTarget::Window);
+        if (!brushText)
+            return !fluent::isDarkMode(fluent::ThemeTarget::Window);
+        const D2D1_COLOR_F textColor = brushText->GetColor();
+        return textColor.r + textColor.g + textColor.b < 1.5f;
+    }
+
+    D2D1_COLOR_F adaptiveControlFill(bool pressed, PopupPage page) const {
+        if (usesBlackTextForControls(page))
+            return pressed ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.90f)
+                           : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.82f);
+        return pressed ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.50f)
+                       : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.38f);
+    }
+
+    D2D1_COLOR_F staticControlFill(bool pressed, PopupPage page) const {
+        const D2D1_COLOR_F card = cardFillForPage(page);
+        const float luminance = 0.2126f * card.r + 0.7152f * card.g + 0.0722f * card.b;
+        const bool darkCard = luminance < 0.5f;
+        if (darkCard)
+            return pressed ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f)
+                           : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f);
+        return pressed ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.12f)
+                       : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
+    }
+
+    void drawAdaptiveControlSurface(ID2D1DeviceContext* rt, const D2D1_RECT_F& rect,
+                                    float radius, bool pressed, PopupPage page,
+                                    bool hoverSurface = true) {
+        if (!rt)
+            return;
+        ID2D1SolidColorBrush* brush = hoverSurface
+                                          ? (pressed ? brushControlPressed : brushControlHover)
+                                          : brushControl;
+        if (!brush)
+            return;
+        if (!hasBackdropTextContrastForPage(page)) {
+            if (!frostedBackgroundActiveForPage(page) && hoverSurface) {
+                // 纯色模式不读取背后应用亮度，但悬浮/按下仍使用固定的反色表面。
+                const D2D1_COLOR_F previousColor = brush->GetColor();
+                brush->SetColor(staticControlFill(pressed, page));
+                rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush);
+                brush->SetColor(previousColor);
+                return;
+            }
+            // 磨砂动态适配关闭时，保持原有主题画刷，不读取背后应用亮度。
+            rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush);
+            return;
+        }
+        const D2D1_COLOR_F previousColor = brush->GetColor();
+        brush->SetColor(adaptiveControlFill(pressed, page));
+        rt->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), brush);
+        brush->SetColor(previousColor);
+    }
+
     void drawCopyButton(ID2D1DeviceContext* rt, const D2D1_RECT_F& rect, bool hovered,
                         bool pressed, bool succeeded) {
         if (!rt)
             return;
         if (hovered || pressed)
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(rect, 8.0f, 8.0f),
-                pressed ? brushControlPressed : brushControlHover);
+            drawAdaptiveControlSurface(rt, rect, 8.0f, pressed, PopupPage::Idle);
 
         const float cx = (rect.left + rect.right) * 0.5f;
         const float cy = (rect.top + rect.bottom) * 0.5f;
@@ -1593,25 +1658,16 @@ struct MediaPopup::Impl {
             D2D1::RectF(copyRight - 32.0f, 7.0f, copyRight, 39.0f);
         drawCopyButton(rt, localCopy, updateHitTest && hoverCopy,
                        updateHitTest && pressedCopy, copySucceeded);
-        if (updateHitTest && hoverCopy && !copySucceeded && brushControl) {
+        if (updateHitTest && hoverCopy && !copySucceeded) {
             // 提示与按钮同高并放在左侧，避免遮住一言正文，也不会改变按钮占位。
             constexpr float kTooltipWidthDip = 104.0f;
             const float tooltipRight = localCopy.left - 8.0f;
             const D2D1_RECT_F tooltip = D2D1::RectF(
                 std::max(8.0f, tooltipRight - kTooltipWidthDip), 7.0f, tooltipRight, 39.0f);
 
-            // 提示文字沿用卡片当前的动态对比色；气泡底也必须同步切换，避免深色
-            // 背景下出现白字落在浅色控件底上的低对比组合。
-            const D2D1_COLOR_F textColor = brushText ? brushText->GetColor()
-                                                       : D2D1::ColorF(D2D1::ColorF::Black);
-            const bool useBlackText = textColor.r + textColor.g + textColor.b < 1.5f;
-            const D2D1_COLOR_F previousControlFill = brushControl->GetColor();
-            brushControl->SetColor(useBlackText
-                                       ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.82f)
-                                       : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.46f));
-            rt->FillRoundedRectangle(D2D1::RoundedRect(tooltip, 8.0f, 8.0f),
-                                     brushControl);
-            brushControl->SetColor(previousControlFill);
+            // 提示文字和气泡底沿用同一套动态对比逻辑，避免深色背景下出现白字
+            // 落在浅色控件底上的低对比组合。
+            drawAdaptiveControlSurface(rt, tooltip, 8.0f, false, PopupPage::Idle, false);
             if (brushStroke) {
                 brushStroke->SetOpacity(0.7f);
                 rt->DrawRoundedRectangle(D2D1::RoundedRect(tooltip, 8.0f, 8.0f),
@@ -1647,9 +1703,8 @@ struct MediaPopup::Impl {
             // 可见悬浮底与返回媒体按钮同为 32 DIP；命中区仍额外保留 4 DIP。
             const D2D1_RECT_F hoverRect =
                 D2D1::RectF(trigger.left, local.top, trigger.right, local.bottom);
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(hoverRect, 6.0f, 6.0f),
-                pressedIdleQuickExpand ? brushControlPressed : brushControlHover);
+            drawAdaptiveControlSurface(rt, hoverRect, 6.0f, pressedIdleQuickExpand,
+                                       PopupPage::Idle);
         }
 
         // 收起状态提示向上展开，展开状态提示向下收起。
@@ -1882,9 +1937,7 @@ struct MediaPopup::Impl {
             pageArrowRect = D2D1::RectF(local.left, cardOriginDip + local.top,
                                         local.right, cardOriginDip + local.bottom);
         if (updateHitTest && (hoverPageArrow || pressedPageArrow))
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(local, 8.0f, 8.0f),
-                pressedPageArrow ? brushControlPressed : brushControlHover);
+            drawAdaptiveControlSurface(rt, local, 8.0f, pressedPageArrow, page);
         drawChevron(rt,
                     D2D1::Point2F((local.left + local.right) * 0.5f,
                                   (local.top + local.bottom) * 0.5f),
@@ -2057,9 +2110,8 @@ struct MediaPopup::Impl {
                                                         : brushAccent)
                         : brushControl);
         } else if (hoverButton == index || pressedButton == index) {
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(rect, 18.0f, 18.0f),
-                pressedButton == index ? brushControlPressed : brushControlHover);
+            drawAdaptiveControlSurface(rt, rect, 18.0f, pressedButton == index,
+                                       PopupPage::Media);
         }
 
         ID2D1Brush* iconBrush = enabled ? brushText : brushDisabled;
@@ -2137,9 +2189,7 @@ struct MediaPopup::Impl {
         // 图标悬浮底：与播放键一致的圆形
         if (volume.available &&
             ((interactive && (hoverVolume || pressedVolume)) || volumeSliderOn)) {
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(localIconRect, 16.0f, 16.0f),
-                pressedVolume ? brushControlPressed : brushControlHover);
+            drawAdaptiveControlSurface(rt, localIconRect, 16.0f, pressedVolume, page);
         }
         const float iconCx = (localIconRect.left + localIconRect.right) * 0.5f;
         const int level = !volume.available || volume.muted
@@ -2234,8 +2284,7 @@ struct MediaPopup::Impl {
 
         // 页面切换不再重建画笔；目标页的文字对比色要在普通交换链接管前
         // 由当前页面显式恢复，避免复用上一页画笔颜色。
-        if (frostedBackgroundActiveForPage(page) && backdropBmp &&
-            lastBackdropLuminance >= 0.0f) {
+        if (hasBackdropTextContrastForPage(page)) {
             applyBackdropTextContrastForPage(lastBackdropLuminance, page);
         } else {
             resetBackdropTextColors();
@@ -2260,8 +2309,7 @@ struct MediaPopup::Impl {
         if (brushDisabled)
             previousDisabled = brushDisabled->GetColor();
 
-        if (frostedBackgroundActiveForPage(page) && backdropBmp &&
-            lastBackdropLuminance >= 0.0f) {
+        if (hasBackdropTextContrastForPage(page)) {
             applyBackdropTextContrastForPage(lastBackdropLuminance, page);
         } else {
             resetBackdropTextColors();
