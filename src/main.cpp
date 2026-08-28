@@ -176,7 +176,7 @@ std::string utf8Of(const std::wstring& w) {
     return s;
 }
 
-COLORREF defaultIdleCardBackgroundColor() {
+COLORREF defaultFloatingCardBackgroundColor() {
     return fluent::isDarkMode(fluent::ThemeTarget::Window) ? RGB(0, 0, 0)
                                                             : RGB(255, 255, 255);
 }
@@ -625,16 +625,12 @@ struct App {
     int taskbarPosition_ = 0;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
-    MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
-    MediaPopupBackground mediaPopupBackground_ = MediaPopupBackground::Solid;
-    MediaPopupBackground idleCardBackground_ = MediaPopupBackground::Solid;
-    COLORREF idleCardBackgroundColor_ = RGB(255, 255, 255);
-    bool idleCardBackgroundColorCustomized_ = false;
-    bool idleCardFollowAlbum_ = false;
-    bool idleCardTriggerSync_ = true;
-    MediaPopupTrigger idleCardTrigger_ = MediaPopupTrigger::Hover;
-    bool mediaPopupFollowAlbum_ = false;
-    bool mediaPopupAutoTextContrast_ = false;
+    MediaPopupTrigger floatingCardTrigger_ = MediaPopupTrigger::Hover;
+    MediaPopupBackground floatingCardBackground_ = MediaPopupBackground::Solid;
+    COLORREF floatingCardBackgroundColor_ = RGB(255, 255, 255);
+    bool floatingCardBackgroundColorCustomized_ = false;
+    bool floatingCardFollowAlbum_ = false;
+    bool floatingCardAutoTextContrast_ = true;
     // 切歌弹窗（灵动岛）：主屏幕中下方短暂弹出歌曲信息，固定鼠标穿透
     std::unique_ptr<SongToast> songToast_;
     bool songToastEnabled_ = false;
@@ -933,19 +929,16 @@ struct App {
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setHoverControlStyle(
             minimal ? HoverControlStyle::Inline : hoverControlStyle_);
-        taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
-        taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
-        taskbarHost->setIdleCardBackground(idleCardBackground_);
-        taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
-                                                idleCardBackgroundColorCustomized_);
+        taskbarHost->setFloatingCardTrigger(floatingCardTrigger_);
+        taskbarHost->setFloatingCardBackground(floatingCardBackground_);
+        taskbarHost->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
+                                                     floatingCardBackgroundColorCustomized_);
         taskbarHost->setIdleQuoteBackground(
             minimal ? IdleQuoteBackground::None : idleQuoteBackground_);
         taskbarHost->setIdleQuoteBackgroundScope(
             minimal ? IdleQuoteBackgroundScope::None : idleQuoteBackgroundScope_);
-        taskbarHost->setIdleCardFollowAlbum(idleCardFollowAlbum_);
-        taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
-        taskbarHost->setMediaPopupFollowAlbum(mediaPopupFollowAlbum_);
-        taskbarHost->setMediaPopupAutoTextContrast(mediaPopupAutoTextContrast_);
+        taskbarHost->setFloatingCardFollowAlbum(floatingCardFollowAlbum_);
+        taskbarHost->setFloatingCardAutoTextContrast(floatingCardAutoTextContrast_);
         taskbarHost->setAlbumCoverEffect(
             minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
         taskbarHost->setSpectrumStyle(spectrumStyle_);
@@ -1015,69 +1008,36 @@ struct App {
         saveSettings();
     }
 
-    void applyMediaPopupTrigger(int mode) {
-        mediaPopupTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
+    void applyFloatingCardTrigger(int mode) {
+        floatingCardTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
         if (taskbarHost)
-            taskbarHost->setMediaPopupTrigger(mediaPopupTrigger_);
-        logSettingInt(L"media-popup-trigger", mode == 1 ? 1 : 0);
+            taskbarHost->setFloatingCardTrigger(floatingCardTrigger_);
+        logSettingInt(L"floating-card-trigger", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
-    void applyMediaPopupBackground(int mode) {
-        mediaPopupBackground_ = mode == 1 ? MediaPopupBackground::Frosted
-                                          : MediaPopupBackground::Solid;
+    void applyFloatingCardBackground(int mode) {
+        floatingCardBackground_ = mode == 1 ? MediaPopupBackground::Frosted
+                                             : MediaPopupBackground::Solid;
         if (taskbarHost)
-            taskbarHost->setMediaPopupBackground(mediaPopupBackground_);
-        logSettingInt(L"media-popup-background", mode == 1 ? 1 : 0);
+            taskbarHost->setFloatingCardBackground(floatingCardBackground_);
+        logSettingInt(L"floating-card-background", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
-    void applyIdleCardBackground(int mode) {
-        idleCardBackground_ = mode == 1 ? MediaPopupBackground::Frosted
-                                        : MediaPopupBackground::Solid;
+    void applyFloatingCardFollowAlbum(bool on) {
+        floatingCardFollowAlbum_ = on;
         if (taskbarHost)
-            taskbarHost->setIdleCardBackground(idleCardBackground_);
-        logSettingInt(L"idle-card-background", mode == 1 ? 1 : 0);
+            taskbarHost->setFloatingCardFollowAlbum(on);
+        logSettingBool(L"floating-card-follow-album", on);
         saveSettings();
     }
 
-    void applyIdleCardFollowAlbum(bool on) {
-        idleCardFollowAlbum_ = on;
+    void applyFloatingCardAutoTextContrast(bool on) {
+        floatingCardAutoTextContrast_ = on;
         if (taskbarHost)
-            taskbarHost->setIdleCardFollowAlbum(on);
-        logSettingBool(L"idle-card-follow-album", on);
-        saveSettings();
-    }
-
-    void applyIdleCardTriggerSync(bool sync) {
-        idleCardTriggerSync_ = sync;
-        if (taskbarHost)
-            taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
-        logSettingBool(L"idle-card-trigger-sync", sync);
-        saveSettings();
-    }
-
-    void applyIdleCardTrigger(int mode) {
-        idleCardTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
-        if (taskbarHost)
-            taskbarHost->setIdleCardTrigger(idleCardTriggerSync_, idleCardTrigger_);
-        logSettingInt(L"idle-card-trigger", mode == 1 ? 1 : 0);
-        saveSettings();
-    }
-
-    void applyMediaPopupFollowAlbum(bool on) {
-        mediaPopupFollowAlbum_ = on;
-        if (taskbarHost)
-            taskbarHost->setMediaPopupFollowAlbum(on);
-        logSettingBool(L"media-popup-follow-album", on);
-        saveSettings();
-    }
-
-    void applyMediaPopupAutoTextContrast(bool on) {
-        mediaPopupAutoTextContrast_ = on;
-        if (taskbarHost)
-            taskbarHost->setMediaPopupAutoTextContrast(on);
-        logSettingBool(L"media-popup-auto-text-contrast", on);
+            taskbarHost->setFloatingCardAutoTextContrast(on);
+        logSettingBool(L"floating-card-auto-text-contrast", on);
         saveSettings();
     }
 
@@ -1195,8 +1155,8 @@ struct App {
         if (taskbarHost) {
             taskbarHost->refreshTheme();
             applyFontAppearance();
-            taskbarHost->setIdleCardBackgroundColor(effectiveIdleCardBackgroundColor(),
-                                                    idleCardBackgroundColorCustomized_);
+            taskbarHost->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
+                                                         floatingCardBackgroundColorCustomized_);
         }
         refreshThemeWindows();
         if (settingsDialog && settingsDialog->isOpen())
@@ -2387,8 +2347,8 @@ struct App {
     void applyFontAppearance();
     void applyFontColors();
     COLORREF effectivePlayedColor() const;
-    COLORREF effectiveIdleCardBackgroundColor() const;
-    void applyIdleCardBackgroundColor(COLORREF color);
+    COLORREF effectiveFloatingCardBackgroundColor() const;
+    void applyFloatingCardBackgroundColor(COLORREF color);
     const FontColorDialog::ThemeState& currentLyricAppearance() const;
     void tryExtractAlbumColor();
     void loadSettings();
@@ -2481,25 +2441,21 @@ void App::loadSettings() {
         hoverControlStyle_ = j.value("hoverControlStyle", 0) == 1
                                  ? HoverControlStyle::Popup
                                  : HoverControlStyle::Inline;
-        mediaPopupTrigger_ = j.value("mediaPopupTrigger", 0) == 1
-                                 ? MediaPopupTrigger::Click
-                                 : MediaPopupTrigger::Hover;
-        mediaPopupBackground_ = j.value("mediaPopupBackground", std::string("solid")) ==
-                                        "frosted"
-                                    ? MediaPopupBackground::Frosted
-                                    : MediaPopupBackground::Solid;
-        const std::string idleCardBackgroundValue =
-            j.value("idleCardBackground", j.value("mediaPopupBackground", std::string("solid")));
-        idleCardBackground_ = idleCardBackgroundValue == "frosted"
-                                  ? MediaPopupBackground::Frosted
-                                  : MediaPopupBackground::Solid;
-        idleCardFollowAlbum_ = j.value("idleCardFollowAlbum", false);
-        idleCardTriggerSync_ = j.value("idleCardTriggerSync", true);
-        idleCardTrigger_ = j.value("idleCardTrigger", 0) == 1
-                               ? MediaPopupTrigger::Click
-                               : MediaPopupTrigger::Hover;
-        mediaPopupFollowAlbum_ = j.value("mediaPopupFollowAlbum", false);
-        mediaPopupAutoTextContrast_ = j.value("mediaPopupAutoTextContrast", false);
+        const int floatingCardTrigger =
+            j.value("floatingCardTrigger", j.value("mediaPopupTrigger", 0));
+        floatingCardTrigger_ = floatingCardTrigger == 1 ? MediaPopupTrigger::Click
+                                                         : MediaPopupTrigger::Hover;
+        const std::string floatingCardBackgroundValue = j.value(
+            "floatingCardBackground",
+            j.value("mediaPopupBackground", j.value("idleCardBackground", std::string("solid"))));
+        floatingCardBackground_ = floatingCardBackgroundValue == "frosted"
+                                      ? MediaPopupBackground::Frosted
+                                      : MediaPopupBackground::Solid;
+        floatingCardFollowAlbum_ = j.value(
+            "floatingCardFollowAlbum",
+            j.value("mediaPopupFollowAlbum", j.value("idleCardFollowAlbum", false)));
+        floatingCardAutoTextContrast_ = j.value(
+            "floatingCardAutoTextContrast", j.value("mediaPopupAutoTextContrast", true));
         songToastEnabled_ = j.value("songToast", false);
         songToastDurationSec_ = std::clamp(j.value("songToastDuration", 4), 1, 10);
         songToastSkipFullscreen_ = j.value("songToastSkipFullscreen", true);
@@ -2511,12 +2467,14 @@ void App::loadSettings() {
             j.value("windowTheme", std::string("app")),
             fluent::ThemeMode::FollowApp);
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
-        idleCardBackgroundColorCustomized_ =
+        floatingCardBackgroundColorCustomized_ =
+            j.contains("floatingCardBackgroundColor") ||
             j.contains("idleCardBackgroundColor") || j.contains("mediaPopupBackgroundColor");
-        idleCardBackgroundColor_ = static_cast<COLORREF>(j.value(
-            "idleCardBackgroundColor",
-            j.value("mediaPopupBackgroundColor",
-                    static_cast<unsigned>(defaultIdleCardBackgroundColor()))));
+        floatingCardBackgroundColor_ = static_cast<COLORREF>(j.value(
+            "floatingCardBackgroundColor",
+            j.value("idleCardBackgroundColor",
+                    j.value("mediaPopupBackgroundColor",
+                            static_cast<unsigned>(defaultFloatingCardBackgroundColor())))));
         spectrumOn_ = j.value("spectrum", false);
         const std::string spectrumStyleValue =
             j.value("spectrumStyle", std::string("default"));
@@ -2692,21 +2650,25 @@ void App::saveSettings() {
         // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
-        j["mediaPopupTrigger"] = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
-        j["mediaPopupBackground"] = mediaPopupBackground_ == MediaPopupBackground::Frosted
-                                         ? "frosted"
-                                         : "solid";
-        j["idleCardBackground"] = idleCardBackground_ == MediaPopupBackground::Frosted
-                                       ? "frosted"
-                                       : "solid";
-        if (idleCardBackgroundColorCustomized_)
-            j["idleCardBackgroundColor"] =
-                static_cast<unsigned>(idleCardBackgroundColor_);
-        j["idleCardFollowAlbum"] = idleCardFollowAlbum_;
-        j["idleCardTriggerSync"] = idleCardTriggerSync_;
-        j["idleCardTrigger"] = idleCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
-        j["mediaPopupFollowAlbum"] = mediaPopupFollowAlbum_;
-        j["mediaPopupAutoTextContrast"] = mediaPopupAutoTextContrast_;
+        j["floatingCardTrigger"] = floatingCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
+        j["floatingCardBackground"] = floatingCardBackground_ == MediaPopupBackground::Frosted
+                                           ? "frosted"
+                                           : "solid";
+        if (floatingCardBackgroundColorCustomized_)
+            j["floatingCardBackgroundColor"] =
+                static_cast<unsigned>(floatingCardBackgroundColor_);
+        j["floatingCardFollowAlbum"] = floatingCardFollowAlbum_;
+        j["floatingCardAutoTextContrast"] = floatingCardAutoTextContrast_;
+        j.erase("mediaPopupTrigger");
+        j.erase("mediaPopupBackground");
+        j.erase("mediaPopupBackgroundColor");
+        j.erase("idleCardBackground");
+        j.erase("idleCardBackgroundColor");
+        j.erase("idleCardFollowAlbum");
+        j.erase("idleCardTriggerSync");
+        j.erase("idleCardTrigger");
+        j.erase("mediaPopupFollowAlbum");
+        j.erase("mediaPopupAutoTextContrast");
         j["songToast"] = songToastEnabled_;
         j["songToastDuration"] = songToastDurationSec_;
         j["songToastSkipFullscreen"] = songToastSkipFullscreen_;
@@ -3470,18 +3432,18 @@ COLORREF App::effectivePlayedColor() const {
     return (lyricFollowAlbum_ && hasAlbumColor_) ? albumColor_ : currentLyricAppearance().played;
 }
 
-COLORREF App::effectiveIdleCardBackgroundColor() const {
-    return idleCardBackgroundColorCustomized_
-               ? idleCardBackgroundColor_
-               : defaultIdleCardBackgroundColor();
+COLORREF App::effectiveFloatingCardBackgroundColor() const {
+    return floatingCardBackgroundColorCustomized_
+               ? floatingCardBackgroundColor_
+               : defaultFloatingCardBackgroundColor();
 }
 
-void App::applyIdleCardBackgroundColor(COLORREF color) {
-    idleCardBackgroundColor_ = color;
-    idleCardBackgroundColorCustomized_ = true;
+void App::applyFloatingCardBackgroundColor(COLORREF color) {
+    floatingCardBackgroundColor_ = color;
+    floatingCardBackgroundColorCustomized_ = true;
     if (taskbarHost)
-        taskbarHost->setIdleCardBackgroundColor(idleCardBackgroundColor_, true);
-    runtime_log::writef(L"[action][idle-entry] background-color=#%02X%02X%02X",
+        taskbarHost->setFloatingCardBackgroundColor(floatingCardBackgroundColor_, true);
+    runtime_log::writef(L"[action][floating-card] background-color=#%02X%02X%02X",
                         GetRValue(color), GetGValue(color), GetBValue(color));
     saveSettings();
 }
@@ -3598,15 +3560,11 @@ SettingsState App::currentSettingsState() const {
     st.renderMode = renderMode_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
-    st.mediaPopupTrigger = mediaPopupTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
-    st.mediaPopupBackground = mediaPopupBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
-    st.idleCardBackground = idleCardBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
-    st.idleCardBackgroundColor = effectiveIdleCardBackgroundColor();
-    st.idleCardFollowAlbum = idleCardFollowAlbum_;
-    st.idleCardTriggerSync = idleCardTriggerSync_;
-    st.idleCardTrigger = idleCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
-    st.mediaPopupFollowAlbum = mediaPopupFollowAlbum_;
-    st.mediaPopupAutoTextContrast = mediaPopupAutoTextContrast_;
+    st.floatingCardTrigger = floatingCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
+    st.floatingCardBackground = floatingCardBackground_ == MediaPopupBackground::Frosted ? 1 : 0;
+    st.floatingCardBackgroundColor = effectiveFloatingCardBackgroundColor();
+    st.floatingCardFollowAlbum = floatingCardFollowAlbum_;
+    st.floatingCardAutoTextContrast = floatingCardAutoTextContrast_;
     st.songToastEnabled = songToastEnabled_;
     st.songToastDurationSec = songToastDurationSec_;
     st.songToastSkipFullscreen = songToastSkipFullscreen_;
@@ -3668,16 +3626,13 @@ SettingsActions App::buildSettingsActions() {
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
-    act.onMediaPopupTrigger = [this](int mode) { applyMediaPopupTrigger(mode); };
-    act.onMediaPopupBackground = [this](int mode) { applyMediaPopupBackground(mode); };
-    act.onIdleCardBackground = [this](int mode) { applyIdleCardBackground(mode); };
-    act.onIdleCardBackgroundColor =
-        [this](COLORREF color) { applyIdleCardBackgroundColor(color); };
-    act.onIdleCardFollowAlbum = [this](bool on) { applyIdleCardFollowAlbum(on); };
-    act.onIdleCardTriggerSync = [this](bool sync) { applyIdleCardTriggerSync(sync); };
-    act.onIdleCardTrigger = [this](int mode) { applyIdleCardTrigger(mode); };
-    act.onMediaPopupFollowAlbum = [this](bool on) { applyMediaPopupFollowAlbum(on); };
-    act.onMediaPopupAutoTextContrast = [this](bool on) { applyMediaPopupAutoTextContrast(on); };
+    act.onFloatingCardTrigger = [this](int mode) { applyFloatingCardTrigger(mode); };
+    act.onFloatingCardBackground = [this](int mode) { applyFloatingCardBackground(mode); };
+    act.onFloatingCardBackgroundColor =
+        [this](COLORREF color) { applyFloatingCardBackgroundColor(color); };
+    act.onFloatingCardFollowAlbum = [this](bool on) { applyFloatingCardFollowAlbum(on); };
+    act.onFloatingCardAutoTextContrast =
+        [this](bool on) { applyFloatingCardAutoTextContrast(on); };
     act.onSongToastEnabled = [this](bool on) { applySongToastEnabled(on); };
     act.onSongToastDuration = [this](int seconds) { applySongToastDuration(seconds); };
     act.onSongToastSkipFullscreen = [this](bool on) { applySongToastSkipFullscreen(on); };

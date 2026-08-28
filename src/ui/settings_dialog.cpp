@@ -19,10 +19,13 @@
 
 namespace {
 
-constexpr int kSettingsPageCount = 7;
+constexpr int kSettingsPageCount = 8;
 constexpr int kPerformancePage = 1;
-constexpr int kMediaPopupPage = 2;
-constexpr int kSongToastPage = 5;
+constexpr int kFloatingCardPage = 2;
+constexpr int kMediaPopupPage = 3;
+constexpr int kSpectrumPage = 4;
+constexpr int kLyricsPage = 5;
+constexpr int kSongToastPage = 6;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kRenderModeMinimal = 3;
@@ -41,10 +44,10 @@ constexpr int kIdCoverBackgroundOpacity = 445;
 constexpr int kIdHoverControls = 415;
 constexpr int kIdRenderMode = 416;
 constexpr int kIdHoverControlStyle = 417;
-constexpr int kIdMediaPopupTrigger = 437;
-constexpr int kIdMediaPopupBackground = 418;
-constexpr int kIdMediaPopupFollowAlbum = 426;
-constexpr int kIdMediaPopupAutoTextContrast = 427;
+constexpr int kIdFloatingCardTrigger = 437;
+constexpr int kIdFloatingCardBackground = 418;
+constexpr int kIdFloatingCardFollowAlbum = 426;
+constexpr int kIdFloatingCardAutoTextContrast = 427;
 constexpr int kIdSongToast = 440;
 constexpr int kIdSongToastDuration = 441;
 constexpr int kIdSongToastSkipFullscreen = 442;
@@ -65,13 +68,9 @@ constexpr int kIdIdleEntry = 446;
 constexpr int kIdIdleQuoteSource = 447;
 constexpr int kIdIdleQuoteRefreshInterval = 448;
 constexpr int kIdIdleApps = 449;
-constexpr int kIdMediaPopupBackgroundColor = 451;
-constexpr int kIdIdleCardBackground = 452;
+constexpr int kIdFloatingCardBackgroundColor = 451;
 constexpr int kIdIdleQuoteAlignment = 453;
 constexpr int kIdIdleQuote = 454;
-constexpr int kIdIdleCardFollowAlbum = 455;
-constexpr int kIdIdleCardTriggerSync = 456;
-constexpr int kIdIdleCardTrigger = 457;
 constexpr int kIdIdleQuoteBackground = 458;
 constexpr int kIdIdleQuoteBackgroundScope = 459;
 constexpr int kIdContentScrollBar = 401;
@@ -243,10 +242,10 @@ struct SettingsDialog::Impl {
     fluent::FluentDialogSurface surface;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
-        L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
+        L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
         L"每日一言与应用速启"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
-        L"显示", L"性能", L"悬浮媒体控件与卡片", L"频谱", L"歌词", L"切歌弹窗",
+        L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
         L"每日一言与应用速启"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
@@ -334,41 +333,26 @@ struct SettingsDialog::Impl {
         return row;
     }
 
-    void updateMediaPopupBackgroundRowsEnabled() {
+    void updateFloatingCardRowsEnabled() {
+        const auto* idleEntry = findRow(kIdIdleEntry);
         const auto* controls = findRow(kIdHoverControls);
         const auto* style = findRow(kIdHoverControlStyle);
-        const bool popupEnabled = !minimalModeActive() && controls && controls->checked && style &&
-                                  style->selected == 1;
-        auto* background = findRow(kIdMediaPopupBackground);
-        if (background)
-            background->enabled = popupEnabled;
-        if (auto* trigger = findRow(kIdMediaPopupTrigger))
-            trigger->enabled = popupEnabled;
-        if (auto* followAlbum = findRow(kIdMediaPopupFollowAlbum))
-            followAlbum->enabled = popupEnabled && background && background->selected == 1;
-        if (auto* autoTextContrast = findRow(kIdMediaPopupAutoTextContrast))
-            autoTextContrast->enabled = popupEnabled && background && background->selected == 1;
-    }
-
-    void updateIdleBackgroundRowsEnabled() {
-        const auto* idleEntry = findRow(kIdIdleEntry);
-        const auto* background = findRow(kIdIdleCardBackground);
-        const auto* style = findRow(kIdHoverControlStyle);
-        const bool enabled = !minimalModeActive() && idleEntry && idleEntry->checked;
-        const bool frosted = enabled && background && background->selected == 1;
-        const bool mediaPopupStyle = style && style->selected == 1;
-        if (auto* row = findRow(kIdIdleCardBackground))
-            row->enabled = enabled;
-        if (auto* row = findRow(kIdMediaPopupBackgroundColor))
+        const auto* background = findRow(kIdFloatingCardBackground);
+        const bool mediaCardEnabled = controls && controls->checked && style &&
+                                      style->selected == 1;
+        const bool cardEnabled = !minimalModeActive() &&
+                                 ((idleEntry && idleEntry->checked) || mediaCardEnabled);
+        const bool frosted = cardEnabled && background && background->selected == 1;
+        if (auto* row = findRow(kIdFloatingCardTrigger))
+            row->enabled = cardEnabled;
+        if (auto* row = findRow(kIdFloatingCardBackground))
+            row->enabled = cardEnabled;
+        if (auto* row = findRow(kIdFloatingCardBackgroundColor))
             row->enabled = frosted;
-        if (auto* row = findRow(kIdIdleCardFollowAlbum))
+        if (auto* row = findRow(kIdFloatingCardFollowAlbum))
             row->enabled = frosted;
-        if (auto* row = findRow(kIdIdleCardTriggerSync))
-            row->enabled = enabled && mediaPopupStyle;
-        const auto* triggerSync = findRow(kIdIdleCardTriggerSync);
-        if (auto* row = findRow(kIdIdleCardTrigger))
-            row->enabled = enabled &&
-                           (!mediaPopupStyle || (triggerSync && !triggerSync->checked));
+        if (auto* row = findRow(kIdFloatingCardAutoTextContrast))
+            row->enabled = frosted;
     }
 
     // 播放进度背景与背景波浪共用同一层背景，二者互斥：
@@ -467,7 +451,6 @@ struct SettingsDialog::Impl {
             row->enabled = !minimalModeActive();
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
             row->enabled = !minimalModeActive() && state.idleQuoteBackground != 0;
-        updateIdleBackgroundRowsEnabled();
         if (auto* row = findRow(kIdIdleApps))
             row->enabled = !minimalModeActive() && state.idleEntryEnabled;
     }
@@ -480,9 +463,9 @@ struct SettingsDialog::Impl {
 
         COLORREF initial = 0;
         const wchar_t* title = nullptr;
-        if (id == kIdMediaPopupBackgroundColor) {
-            initial = state.idleCardBackgroundColor;
-            title = L"快速启动卡片背景颜色";
+        if (id == kIdFloatingCardBackgroundColor) {
+            initial = state.floatingCardBackgroundColor;
+            title = L"悬浮卡片背景颜色";
         } else {
             return;
         }
@@ -493,10 +476,10 @@ struct SettingsDialog::Impl {
             return;
         }
         colorPicker->setApplyCallback([this, id](COLORREF color) {
-            if (id == kIdMediaPopupBackgroundColor) {
-                state.idleCardBackgroundColor = color;
-                if (actions.onIdleCardBackgroundColor)
-                    actions.onIdleCardBackgroundColor(color);
+            if (id == kIdFloatingCardBackgroundColor) {
+                state.floatingCardBackgroundColor = color;
+                if (actions.onFloatingCardBackgroundColor)
+                    actions.onFloatingCardBackgroundColor(color);
             }
             if (auto* row = findRow(id))
                 row->controlText = colorText(color);
@@ -623,30 +606,6 @@ struct SettingsDialog::Impl {
                  L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
                  {L"左对齐", L"居中", L"右对齐"}, state.idleQuoteAlignment,
                  state.idleQuoteEnabled, kRowH);
-        addRadio(kIdlePage, kIdIdleCardBackground, L"快速启动卡片背景",
-                 L"纯色跟随窗口深浅色显示白色或黑色；磨砂玻璃使用 Windows 背景材质，下面的颜色仅作为磨砂颜色叠加。",
-                 {L"纯色", L"磨砂玻璃"}, state.idleCardBackground,
-                 state.idleEntryEnabled, kRowTallH);
-        Row& idleCardBackgroundColor = addButton(
-            kIdlePage, kIdMediaPopupBackgroundColor, L"快速启动卡片背景颜色",
-            L"仅在快速启动卡片的磨砂玻璃模式下生效，用作磨砂材质的颜色叠加。",
-            colorText(state.idleCardBackgroundColor).c_str(), kRowTallH);
-        idleCardBackgroundColor.enabled = state.idleEntryEnabled && state.idleCardBackground == 1;
-        Row& idleCardFollowAlbum = addRow(
-            kIdlePage, kIdIdleCardFollowAlbum, ControlKind::Toggle,
-            L"磨砂玻璃颜色跟随专辑",
-            L"识别到当前音乐并提取到专辑色时，快速启动和每日一言卡片使用与悬浮媒体控件卡片相同的颜色；没有专辑色时继续使用自定义颜色。",
-            40.0f, kRowTallH);
-        idleCardFollowAlbum.checked = state.idleCardFollowAlbum;
-        Row& idleCardTriggerSync = addRow(
-            kIdlePage, kIdIdleCardTriggerSync, ControlKind::Toggle,
-            L"每日一言卡片展开方式跟随媒体卡片",
-            L"开启后使用媒体卡片的悬浮展开或点击展开设置；关闭后使用下面的独立设置。",
-            40.0f, kRowTallH);
-        idleCardTriggerSync.checked = state.idleCardTriggerSync;
-        addRadio(kIdlePage, kIdIdleCardTrigger, L"每日一言卡片展开方式", nullptr,
-                 {L"悬浮展开", L"点击展开"}, state.idleCardTrigger,
-                 state.idleEntryEnabled && !state.idleCardTriggerSync, kRowTallH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
             L"通过文件选择器添加本地 EXE，最多添加 20 个应用；开关统一控制名称显示。",
@@ -692,27 +651,35 @@ struct SettingsDialog::Impl {
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
                  kHoverControlStyleRowH);
-        addRadio(kMediaPopupPage, kIdMediaPopupTrigger, L"媒体卡片展开方式",
-                 L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开",
-                 {L"悬浮展开", L"点击展开"}, state.mediaPopupTrigger,
-                 state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
-        addRadio(kMediaPopupPage, kIdMediaPopupBackground, L"音乐控件卡片背景",
-                 L"保持原有音乐控件卡片的纯色或 Windows 磨砂玻璃背景",
-                 {L"纯色", L"磨砂玻璃"}, state.mediaPopupBackground,
-                 state.hoverControls && state.hoverControlStyle == 1, kRowTallH);
-        Row& followAlbum = addRow(
-            kMediaPopupPage, kIdMediaPopupFollowAlbum, ControlKind::Toggle,
-            L"磨砂背景跟随专辑",
-            L"根据专辑主题颜色实时改变磨砂玻璃颜色", 40.0f,
-            kRowTallH);
-        followAlbum.checked = state.mediaPopupFollowAlbum;
-        Row& autoTextContrast = addRow(
-            kMediaPopupPage, kIdMediaPopupAutoTextContrast, ControlKind::Toggle,
-            L"磨砂媒体卡片字体颜色动态变化",
-            L"根据卡片背后应用的明暗，自动切换黑色或白色文字以提高可读性", 40.0f,
-            kRowTallH);
-        autoTextContrast.checked = state.mediaPopupAutoTextContrast;
-        updateMediaPopupBackgroundRowsEnabled();
+        addHeader(kFloatingCardPage, L"行为");
+        addRadio(kFloatingCardPage, kIdFloatingCardTrigger, L"悬浮卡片展开方式",
+                 L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开。媒体卡片、每日一言和快捷启动卡片共用此设置。",
+                 {L"悬浮展开", L"点击展开"}, state.floatingCardTrigger, !minimal,
+                 kRowTallH);
+        addHeader(kFloatingCardPage, L"背景");
+        addRadio(kFloatingCardPage, kIdFloatingCardBackground, L"悬浮卡片背景",
+                 L"音乐控件、每日一言和快捷启动卡片共用纯色或 Windows 磨砂玻璃背景。",
+                 {L"纯色", L"磨砂玻璃"}, state.floatingCardBackground, !minimal,
+                 kRowTallH);
+        Row& floatingCardBackgroundColor = addButton(
+            kFloatingCardPage, kIdFloatingCardBackgroundColor, L"悬浮卡片背景颜色",
+            L"磨砂背景未使用有效专辑色时，媒体卡片、每日一言和快捷启动卡片共用此颜色。",
+            colorText(state.floatingCardBackgroundColor).c_str(), kRowTallH);
+        floatingCardBackgroundColor.enabled = !minimal && state.floatingCardBackground == 1;
+        Row& floatingCardFollowAlbum = addRow(
+            kFloatingCardPage, kIdFloatingCardFollowAlbum, ControlKind::Toggle,
+            L"磨砂玻璃颜色跟随专辑",
+            L"播放音乐且提取到有效专辑色时，磨砂卡片使用专辑色；无播放时使用上面的自定义颜色。",
+            40.0f, kRowTallH);
+        floatingCardFollowAlbum.checked = state.floatingCardFollowAlbum;
+        addHeader(kFloatingCardPage, L"文字");
+        Row& floatingCardAutoTextContrast = addRow(
+            kFloatingCardPage, kIdFloatingCardAutoTextContrast, ControlKind::Toggle,
+            L"磨砂卡片字体颜色动态变化",
+            L"根据卡片背后内容的明暗，自动切换黑色或白色文字；媒体卡片、每日一言和快捷启动卡片共用此设置。",
+            40.0f, kRowTallH);
+        floatingCardAutoTextContrast.checked = state.floatingCardAutoTextContrast;
+        updateFloatingCardRowsEnabled();
         Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
                                 L"切歌时弹出歌曲信息",
                                 L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
@@ -741,40 +708,43 @@ struct SettingsDialog::Impl {
                      L"横向歌词，关闭逐字与转场"},
                     std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
 
-        Row& spectrum = addToggle(3, kIdSpectrum, L"频谱", minimal ? false : state.spectrumOn);
+        Row& spectrum = addToggle(kSpectrumPage, kIdSpectrum, L"频谱",
+                                  minimal ? false : state.spectrumOn);
         spectrum.enabled = !minimal;
-        addRadio(3, kIdSpectrumStyle, L"频谱样式", nullptr,
+        addRadio(kSpectrumPage, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
                  state.spectrumOn && !minimal,
                  kSpectrumStyleRowH);
         Row& spectrumBackground =
-            addToggle(3, kIdSpectrumBackground, L"背景波浪",
+            addToggle(kSpectrumPage, kIdSpectrumBackground, L"背景波浪",
                       minimal ? false : state.spectrumBackground);
         spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 && !minimal;
-        addSlider(3, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
+        addSlider(kSpectrumPage, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
                   state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground &&
                       !minimal);
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
-        addToggle(4, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
-        addRadio(4, kIdAlignment, L"歌词对齐", nullptr, {L"左对齐", L"居中", L"右对齐"},
+        addToggle(kLyricsPage, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
+        addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
+                 {L"左对齐", L"居中", L"右对齐"},
                  state.lyricAlignment, true, kRowH);
-        addButton(4, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
-        addToggle(4, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
-        addToggle(4, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
+        addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
+        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
+        addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
                                             ? L"正在检查翻译和罗马音…"
                                             : state.secondaryAvailability == 2
                                                   ? L"当前歌曲无翻译或罗马音"
                                                   : L"";
-        addRadio(4, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
+        addRadio(kLyricsPage, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
                  {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
                  state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
-        addToggle(4, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
+        addToggle(kLyricsPage, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
-        Row& persistOrder = addRow(4, kIdQqLocalLyricsPersistOrder, ControlKind::Toggle,
+        Row& persistOrder = addRow(kLyricsPage, kIdQqLocalLyricsPersistOrder,
+                                   ControlKind::Toggle,
                                    L"切换版本持久化",
                                    L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
                                    40.0f, kRowTallH);
@@ -783,7 +753,7 @@ struct SettingsDialog::Impl {
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
-        Row& localPath = addButton(4, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
+        Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
     }
@@ -1205,7 +1175,7 @@ struct SettingsDialog::Impl {
                             row.controlRect.right - 1.5f, row.controlRect.bottom - 1.5f),
                 1.5f, fluent::metrics::controlRadius - 1.0f);
         }
-        if (row.id == kIdMediaPopupBackgroundColor) {
+        if (row.id == kIdFloatingCardBackgroundColor) {
             auto* format = painter.textFormat(14.0f, 400, false, true);
             constexpr float kPreviewSize = 18.0f;
             constexpr float kPreviewGap = 8.0f;
@@ -1217,7 +1187,7 @@ struct SettingsDialog::Impl {
             const D2D1_RECT_F previewRect =
                 D2D1::RectF(groupLeft, centerY - kPreviewSize * 0.5f,
                             groupLeft + kPreviewSize, centerY + kPreviewSize * 0.5f);
-            painter.fillRoundRect(fluent::toD2D(state.idleCardBackgroundColor), previewRect, 4.0f);
+            painter.fillRoundRect(fluent::toD2D(state.floatingCardBackgroundColor), previewRect, 4.0f);
             painter.strokeRoundRect(row.enabled ? p.cardStroke : p.disabled, previewRect, 1.0f,
                                     4.0f);
             if (format) {
@@ -2918,6 +2888,7 @@ struct SettingsDialog::Impl {
             row->checked = !row->checked;
             state.idleEntryEnabled = row->checked;
             updateIdleRowsEnabled();
+            updateFloatingCardRowsEnabled();
             if (actions.onIdleEntryEnabled)
                 actions.onIdleEntryEnabled(row->checked);
             break;
@@ -2954,30 +2925,6 @@ struct SettingsDialog::Impl {
             state.idleQuoteBackgroundScope = row->selected;
             if (actions.onIdleQuoteBackgroundScope)
                 actions.onIdleQuoteBackgroundScope(row->selected);
-            break;
-        case kIdIdleCardBackground:
-            state.idleCardBackground = row->selected;
-            if (actions.onIdleCardBackground)
-                actions.onIdleCardBackground(row->selected);
-            updateIdleBackgroundRowsEnabled();
-            break;
-        case kIdIdleCardFollowAlbum:
-            row->checked = !row->checked;
-            state.idleCardFollowAlbum = row->checked;
-            if (actions.onIdleCardFollowAlbum)
-                actions.onIdleCardFollowAlbum(row->checked);
-            break;
-        case kIdIdleCardTriggerSync:
-            row->checked = !row->checked;
-            state.idleCardTriggerSync = row->checked;
-            updateIdleBackgroundRowsEnabled();
-            if (actions.onIdleCardTriggerSync)
-                actions.onIdleCardTriggerSync(row->checked);
-            break;
-        case kIdIdleCardTrigger:
-            state.idleCardTrigger = row->selected;
-            if (actions.onIdleCardTrigger)
-                actions.onIdleCardTrigger(row->selected);
             break;
         case kIdIdleApps:
             if (option == kIdleAppNamesOption) {
@@ -3083,35 +3030,39 @@ struct SettingsDialog::Impl {
                 actions.onHoverControls(row->checked);
             if (auto* style = findRow(kIdHoverControlStyle))
                 style->enabled = row->checked && !minimalModeActive();
-            updateMediaPopupBackgroundRowsEnabled();
+            updateFloatingCardRowsEnabled();
             break;
         case kIdHoverControlStyle:
             if (actions.onHoverControlStyle)
                 actions.onHoverControlStyle(row->selected);
-            updateMediaPopupBackgroundRowsEnabled();
+            updateFloatingCardRowsEnabled();
             updateIdleRowsEnabled();
             break;
-        case kIdMediaPopupTrigger:
-            if (actions.onMediaPopupTrigger)
-                actions.onMediaPopupTrigger(row->selected);
+        case kIdFloatingCardTrigger:
+            state.floatingCardTrigger = row->selected;
+            if (actions.onFloatingCardTrigger)
+                actions.onFloatingCardTrigger(row->selected);
             break;
-        case kIdMediaPopupBackground:
-            if (actions.onMediaPopupBackground)
-                actions.onMediaPopupBackground(row->selected);
-            updateMediaPopupBackgroundRowsEnabled();
+        case kIdFloatingCardBackground:
+            state.floatingCardBackground = row->selected;
+            if (actions.onFloatingCardBackground)
+                actions.onFloatingCardBackground(row->selected);
+            updateFloatingCardRowsEnabled();
             break;
-        case kIdMediaPopupBackgroundColor:
-            openColorPicker(kIdMediaPopupBackgroundColor);
+        case kIdFloatingCardBackgroundColor:
+            openColorPicker(kIdFloatingCardBackgroundColor);
             break;
-        case kIdMediaPopupFollowAlbum:
+        case kIdFloatingCardFollowAlbum:
             row->checked = !row->checked;
-            if (actions.onMediaPopupFollowAlbum)
-                actions.onMediaPopupFollowAlbum(row->checked);
+            state.floatingCardFollowAlbum = row->checked;
+            if (actions.onFloatingCardFollowAlbum)
+                actions.onFloatingCardFollowAlbum(row->checked);
             break;
-        case kIdMediaPopupAutoTextContrast:
+        case kIdFloatingCardAutoTextContrast:
             row->checked = !row->checked;
-            if (actions.onMediaPopupAutoTextContrast)
-                actions.onMediaPopupAutoTextContrast(row->checked);
+            state.floatingCardAutoTextContrast = row->checked;
+            if (actions.onFloatingCardAutoTextContrast)
+                actions.onFloatingCardAutoTextContrast(row->checked);
             break;
         case kIdSongToast:
             row->checked = !row->checked;
@@ -3221,16 +3172,6 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.idleQuoteBackground, 0, 4);
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
             row->selected = std::clamp(s.idleQuoteBackgroundScope, 0, 3);
-        if (auto* row = findRow(kIdIdleCardBackground))
-            row->selected = std::clamp(s.idleCardBackground, 0, 1);
-        if (auto* row = findRow(kIdMediaPopupBackgroundColor))
-            row->controlText = colorText(s.idleCardBackgroundColor);
-        if (auto* row = findRow(kIdIdleCardFollowAlbum))
-            row->checked = s.idleCardFollowAlbum;
-        if (auto* row = findRow(kIdIdleCardTriggerSync))
-            row->checked = s.idleCardTriggerSync;
-        if (auto* row = findRow(kIdIdleCardTrigger))
-            row->selected = std::clamp(s.idleCardTrigger, 0, 1);
         if (auto* row = findRow(kIdIdleApps))
             row->checked = s.idleAppNamesVisible;
         updateIdleQuoteSourceRow();
@@ -3284,16 +3225,17 @@ struct SettingsDialog::Impl {
             row->selected = minimal ? 0 : s.hoverControlStyle;
             row->enabled = s.hoverControls && !minimal;
         }
-        if (auto* row = findRow(kIdMediaPopupBackground)) {
-            row->selected = s.mediaPopupBackground;
-        }
-        if (auto* row = findRow(kIdMediaPopupTrigger))
-            row->selected = s.mediaPopupTrigger;
-        if (auto* row = findRow(kIdMediaPopupFollowAlbum))
-            row->checked = s.mediaPopupFollowAlbum;
-        if (auto* row = findRow(kIdMediaPopupAutoTextContrast))
-            row->checked = s.mediaPopupAutoTextContrast;
-        updateMediaPopupBackgroundRowsEnabled();
+        if (auto* row = findRow(kIdFloatingCardTrigger))
+            row->selected = std::clamp(s.floatingCardTrigger, 0, 1);
+        if (auto* row = findRow(kIdFloatingCardBackground))
+            row->selected = std::clamp(s.floatingCardBackground, 0, 1);
+        if (auto* row = findRow(kIdFloatingCardBackgroundColor))
+            row->controlText = colorText(s.floatingCardBackgroundColor);
+        if (auto* row = findRow(kIdFloatingCardFollowAlbum))
+            row->checked = s.floatingCardFollowAlbum;
+        if (auto* row = findRow(kIdFloatingCardAutoTextContrast))
+            row->checked = s.floatingCardAutoTextContrast;
+        updateFloatingCardRowsEnabled();
         updateIdleRowsEnabled();
         if (auto* row = findRow(kIdSongToast)) {
             row->checked = minimal ? false : s.songToastEnabled;

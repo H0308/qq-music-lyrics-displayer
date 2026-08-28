@@ -296,9 +296,7 @@ struct TaskbarHost::Impl {
     bool trackingLeave_ = false;
     bool controlsOnHover_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
-    MediaPopupTrigger mediaPopupTrigger_ = MediaPopupTrigger::Hover;
-    MediaPopupTrigger idleCardTrigger_ = MediaPopupTrigger::Hover;
-    bool idleCardTriggerSync_ = true;
+    MediaPopupTrigger floatingCardTrigger_ = MediaPopupTrigger::Hover;
     MediaPopup mediaPopup;
     bool mediaPopupEnabled_ = false;
     bool quitting = false;
@@ -1110,13 +1108,7 @@ struct TaskbarHost::Impl {
                                             hoverControlStyle_ == HoverControlStyle::Inline);
             mediaPopup.endPresentationUpdate();
         }
-        mediaPopup.setTriggerOnHover(mediaPopupTrigger_ == MediaPopupTrigger::Hover);
-        // 内嵌控件没有媒体卡片可跟随，使用每日一言卡片自己的展开方式。
-        const bool idleTriggerFollowMedia =
-            idleCardTriggerSync_ && hoverControlStyle_ == HoverControlStyle::Popup;
-        mediaPopup.setIdleTriggerOnHover(
-            (idleTriggerFollowMedia ? mediaPopupTrigger_ : idleCardTrigger_) ==
-            MediaPopupTrigger::Hover);
+        mediaPopup.setTriggerOnHover(floatingCardTrigger_ == MediaPopupTrigger::Hover);
         if (enabled && mouseOver_)
             mediaPopup.onAnchorEnter();
     }
@@ -1153,42 +1145,26 @@ struct TaskbarHost::Impl {
         render();
     }
 
-    void setMediaPopupTrigger(MediaPopupTrigger trigger) {
-        if (mediaPopupTrigger_ == trigger)
+    void setFloatingCardTrigger(MediaPopupTrigger trigger) {
+        if (floatingCardTrigger_ == trigger)
             return;
-        mediaPopupTrigger_ = trigger;
+        floatingCardTrigger_ = trigger;
         syncMediaPopupEnabled();
     }
 
-    void setMediaPopupBackground(MediaPopupBackground mode) {
+    void setFloatingCardBackground(MediaPopupBackground mode) {
         mediaPopup.setBackgroundMode(mode);
     }
 
-    void setIdleCardBackground(MediaPopupBackground mode) {
-        mediaPopup.setIdleBackgroundMode(mode);
+    void setFloatingCardBackgroundColor(COLORREF color, bool customized) {
+        mediaPopup.setBackgroundColor(color, customized);
     }
 
-    void setIdleCardBackgroundColor(COLORREF color, bool customized) {
-        mediaPopup.setIdleBackgroundColor(color, customized);
-    }
-
-    void setIdleCardFollowAlbum(bool on) {
-        mediaPopup.setIdleFollowAlbumBackground(on);
-    }
-
-    void setIdleCardTrigger(bool sync, MediaPopupTrigger trigger) {
-        if (idleCardTriggerSync_ == sync && idleCardTrigger_ == trigger)
-            return;
-        idleCardTriggerSync_ = sync;
-        idleCardTrigger_ = trigger;
-        syncMediaPopupEnabled();
-    }
-
-    void setMediaPopupFollowAlbum(bool on) {
+    void setFloatingCardFollowAlbum(bool on) {
         mediaPopup.setFollowAlbumBackground(on);
     }
 
-    void setMediaPopupAutoTextContrast(bool on) {
+    void setFloatingCardAutoTextContrast(bool on) {
         mediaPopup.setAutoTextContrast(on);
     }
 
@@ -4878,36 +4854,24 @@ void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
     impl_->setHoverControlStyle(style);
 }
 
-void TaskbarHost::setMediaPopupTrigger(MediaPopupTrigger trigger) {
-    impl_->setMediaPopupTrigger(trigger);
+void TaskbarHost::setFloatingCardTrigger(MediaPopupTrigger trigger) {
+    impl_->setFloatingCardTrigger(trigger);
 }
 
-void TaskbarHost::setMediaPopupBackground(MediaPopupBackground mode) {
-    impl_->setMediaPopupBackground(mode);
+void TaskbarHost::setFloatingCardBackground(MediaPopupBackground mode) {
+    impl_->setFloatingCardBackground(mode);
 }
 
-void TaskbarHost::setIdleCardBackground(MediaPopupBackground mode) {
-    impl_->setIdleCardBackground(mode);
+void TaskbarHost::setFloatingCardBackgroundColor(COLORREF color, bool customized) {
+    impl_->setFloatingCardBackgroundColor(color, customized);
 }
 
-void TaskbarHost::setIdleCardBackgroundColor(COLORREF color, bool customized) {
-    impl_->setIdleCardBackgroundColor(color, customized);
+void TaskbarHost::setFloatingCardFollowAlbum(bool on) {
+    impl_->setFloatingCardFollowAlbum(on);
 }
 
-void TaskbarHost::setIdleCardFollowAlbum(bool on) {
-    impl_->setIdleCardFollowAlbum(on);
-}
-
-void TaskbarHost::setIdleCardTrigger(bool sync, MediaPopupTrigger trigger) {
-    impl_->setIdleCardTrigger(sync, trigger);
-}
-
-void TaskbarHost::setMediaPopupFollowAlbum(bool on) {
-    impl_->setMediaPopupFollowAlbum(on);
-}
-
-void TaskbarHost::setMediaPopupAutoTextContrast(bool on) {
-    impl_->setMediaPopupAutoTextContrast(on);
+void TaskbarHost::setFloatingCardAutoTextContrast(bool on) {
+    impl_->setFloatingCardAutoTextContrast(on);
 }
 
 void TaskbarHost::refreshTheme() {

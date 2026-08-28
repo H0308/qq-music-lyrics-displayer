@@ -112,21 +112,12 @@ public:
     void setControlsOnHover(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
-    // 媒体卡片展开方式：悬浮延迟展开或点击立即展开。
-    void setMediaPopupTrigger(MediaPopupTrigger trigger);
-    // 播放中的音乐控件卡片背景：当前纯色或 Windows 系统磨砂材质。
-    void setMediaPopupBackground(MediaPopupBackground mode);
-    // 无播放时快速启动卡片的独立背景模式和磨砂颜色。
-    void setIdleCardBackground(MediaPopupBackground mode);
-    void setIdleCardBackgroundColor(COLORREF color, bool customized);
-    // 每日一言/快速启动卡片的磨砂背景是否跟随当前专辑主色。
-    void setIdleCardFollowAlbum(bool on);
-    // 每日一言卡片展开方式：同步媒体卡片，或使用独立的悬浮/点击设置。
-    void setIdleCardTrigger(bool sync, MediaPopupTrigger trigger);
-    // 是否让磨砂背景跟随当前专辑主色。
-    void setMediaPopupFollowAlbum(bool on);
-    // 是否根据磨砂卡片背后的应用明暗自动切换黑白文字。
-    void setMediaPopupAutoTextContrast(bool on);
+    // 媒体卡片、每日一言和快捷启动卡片共用的展开方式与外观设置。
+    void setFloatingCardTrigger(MediaPopupTrigger trigger);
+    void setFloatingCardBackground(MediaPopupBackground mode);
+    void setFloatingCardBackgroundColor(COLORREF color, bool customized);
+    void setFloatingCardFollowAlbum(bool on);
+    void setFloatingCardAutoTextContrast(bool on);
     // 主题模式或 Windows 外观发生变化时重建任务栏与媒体卡片资源。
     void refreshTheme();
     void setSongInfoVisible(bool on);

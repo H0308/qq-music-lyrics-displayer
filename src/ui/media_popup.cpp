@@ -238,7 +238,6 @@ struct MediaPopup::Impl {
     bool inlineControls = false;
     bool idlePanelManual = false;
     bool triggerOnHover = true;
-    bool idleTriggerOnHover = true;
     bool anchorHover = false;
     bool popupHover = false;
     bool popupVisible = false;
@@ -250,12 +249,10 @@ struct MediaPopup::Impl {
     bool placedAbove = true;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
-    MediaPopupBackground idleBackgroundMode = MediaPopupBackground::Solid;
-    COLORREF idleBackgroundColor = RGB(255, 255, 255);
-    bool idleBackgroundColorCustomized = false;
-    bool idleFollowAlbumBackground = false;
+    COLORREF floatingCardBackgroundColor = RGB(255, 255, 255);
+    bool floatingCardBackgroundColorCustomized = false;
     bool followAlbumBackground = false;
-    bool autoTextContrast = false;
+    bool autoTextContrast = true;
     bool materialNeedsApply = true;
     bool backdropDirty = true;
     // 最近一次背景采样得到的亮度（-1 表示无效）。页面切换时背景位图继续复用，
@@ -404,7 +401,7 @@ struct MediaPopup::Impl {
     }
 
     bool opensOnHover() const {
-        return idleMode ? idleTriggerOnHover : triggerOnHover;
+        return triggerOnHover;
     }
 
     bool idlePageAllowed() const {
@@ -524,7 +521,8 @@ struct MediaPopup::Impl {
     }
 
     MediaPopupBackground backgroundModeForPage(PopupPage page) const {
-        return page == PopupPage::Idle ? idleBackgroundMode : backgroundMode;
+        (void)page;
+        return backgroundMode;
     }
 
     bool frostedBackgroundActiveForPage(PopupPage page) const {
@@ -532,13 +530,11 @@ struct MediaPopup::Impl {
     }
 
     bool dynamicBackgroundEnabledForPage(PopupPage page) const {
-        if (page == PopupPage::Idle) {
-            // 空闲入口只有在仍有播放场景且已提取专辑色时才切换，纯无播放入口
-            // 保留用户设置的磨砂颜色。
-            return idleFollowAlbumBackground && playbackScene && media.hasDominantColor &&
-                   idleBackgroundMode == MediaPopupBackground::Frosted;
-        }
-        return followAlbumBackground && backgroundMode == MediaPopupBackground::Frosted;
+        (void)page;
+        // 专辑色只在播放场景且存在有效专辑色时生效；无播放的组合面板
+        // 继续使用用户设置的磨砂颜色。
+        return followAlbumBackground && playbackScene && media.hasDominantColor &&
+               backgroundMode == MediaPopupBackground::Frosted;
     }
 
     MediaPopupBackground activeBackgroundMode() const {
@@ -554,10 +550,8 @@ struct MediaPopup::Impl {
     }
 
     bool backdropTextContrastEnabledForPage(PopupPage page) const {
-        // 每日一言没有单独的字体颜色开关，在磨砂背景下仍根据背后内容选择对比色；
-        // 播放中的媒体卡片则由设置项控制，且设置项只在磨砂背景下启用。
-        return frostedBackgroundActiveForPage(page) &&
-               (page == PopupPage::Idle || autoTextContrast);
+        // 媒体卡片与每日一言/快捷启动卡片共用同一个动态文字颜色开关。
+        return frostedBackgroundActiveForPage(page) && autoTextContrast;
     }
 
     bool hasBackdropTextContrastForPage(PopupPage page) const {
@@ -570,7 +564,7 @@ struct MediaPopup::Impl {
         const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
         D2D1_COLOR_F cardFill = p.cardFillSolid;
         if (page == PopupPage::Idle) {
-            // 无播放组合面板的纯色模式只跟随窗口深浅色，颜色设置只参与磨砂 tint。
+            // 纯色模式只跟随窗口深浅色；自定义颜色只参与磨砂 tint。
             cardFill = dark ? D2D1::ColorF(D2D1::ColorF::Black)
                             : D2D1::ColorF(D2D1::ColorF::White);
             if (frostedBackgroundActiveForPage(page)) {
@@ -578,17 +572,24 @@ struct MediaPopup::Impl {
                 if (dynamicBackgroundEnabledForPage(page)) {
                     cardFill = p.cardFill;
                     cardFill.a = tintAlpha;
+                } else if (floatingCardBackgroundColorCustomized) {
+                    cardFill = fluent::toD2D(floatingCardBackgroundColor, tintAlpha);
                 } else {
-                    cardFill = idleBackgroundColorCustomized
-                                   ? fluent::toD2D(idleBackgroundColor, tintAlpha)
-                                   : p.cardFill;
+                    cardFill = p.cardFill;
                 }
             }
         } else if (frostedBackgroundActiveForPage(page)) {
-            // 播放中的音乐控件卡片使用原有磨砂逻辑；无播放组合面板的自定义颜色
-            // 不参与这里的绘制。
-            cardFill = p.cardFill;
-            cardFill.a = dark ? 0.10f : 0.16f;
+            const float tintAlpha = dark ? 0.10f : 0.16f;
+            if (dynamicBackgroundEnabledForPage(page)) {
+                cardFill = p.cardFill;
+                cardFill.a = tintAlpha;
+            } else if (floatingCardBackgroundColorCustomized) {
+                cardFill = fluent::toD2D(floatingCardBackgroundColor, tintAlpha);
+            } else {
+                // 未设置自定义颜色时保留系统磨砂卡片的默认颜色。
+                cardFill = p.cardFill;
+                cardFill.a = tintAlpha;
+            }
         }
         return cardFill;
     }
@@ -3800,27 +3801,13 @@ void MediaPopup::setTriggerOnHover(bool on) {
     }
 }
 
-void MediaPopup::setIdleTriggerOnHover(bool on) {
-    if (impl_->idleTriggerOnHover == on)
-        return;
-    impl_->idleTriggerOnHover = on;
-    if (!impl_->hwnd)
-        return;
-    if (!impl_->opensOnHover()) {
-        KillTimer(impl_->hwnd, kShowTimer);
-    } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
-               !impl_->popupVisible) {
-        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
-    }
-}
-
 void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     if (impl_->backgroundMode == mode)
         return;
     impl_->backgroundMode = mode;
     if (mode != MediaPopupBackground::Frosted)
         impl_->releaseDynamicBackgroundResources();
-    if (!impl_->hwnd || impl_->idleMode)
+    if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
     if (!impl_->popupVisible)
@@ -3831,47 +3818,16 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
         impl_->render();
 }
 
-void MediaPopup::setIdleBackgroundMode(MediaPopupBackground mode) {
-    if (impl_->idleBackgroundMode == mode)
+void MediaPopup::setBackgroundColor(COLORREF color, bool customized) {
+    if (impl_->floatingCardBackgroundColor == color &&
+        impl_->floatingCardBackgroundColorCustomized == customized)
         return;
-    impl_->idleBackgroundMode = mode;
-    if (!impl_->hwnd || !impl_->idleMode)
-        return;
-    impl_->releaseDrawingResources();
-    if (!impl_->popupVisible)
-        return;
-    if (impl_->entering || impl_->closing)
-        impl_->deferredRender = true;
-    else
-        impl_->render();
-}
-
-void MediaPopup::setIdleBackgroundColor(COLORREF color, bool customized) {
-    if (impl_->idleBackgroundColor == color &&
-        impl_->idleBackgroundColorCustomized == customized)
-        return;
-    impl_->idleBackgroundColor = color;
-    impl_->idleBackgroundColorCustomized = customized;
-    if (!impl_->hwnd || !impl_->idleMode)
+    impl_->floatingCardBackgroundColor = color;
+    impl_->floatingCardBackgroundColorCustomized = customized;
+    if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
     if (!impl_->popupVisible)
-        return;
-    if (impl_->entering || impl_->closing)
-        impl_->deferredRender = true;
-    else
-        impl_->render();
-}
-
-void MediaPopup::setIdleFollowAlbumBackground(bool on) {
-    if (impl_->idleFollowAlbumBackground == on)
-        return;
-    impl_->idleFollowAlbumBackground = on;
-    if (!impl_->dynamicBackgroundEnabled())
-        impl_->releaseDynamicBackgroundResources();
-    else
-        impl_->dynamicBackgroundDirty = true;
-    if (!impl_->hwnd || !impl_->popupVisible || !impl_->idleMode)
         return;
     if (impl_->entering || impl_->closing)
         impl_->deferredRender = true;
@@ -3887,7 +3843,7 @@ void MediaPopup::setFollowAlbumBackground(bool on) {
         impl_->releaseDynamicBackgroundResources();
     else
         impl_->dynamicBackgroundDirty = true;
-    if (!impl_->hwnd || !impl_->popupVisible || impl_->idleMode)
+    if (!impl_->hwnd || !impl_->popupVisible)
         return;
     if (impl_->entering || impl_->closing)
         impl_->deferredRender = true;
@@ -3901,9 +3857,9 @@ void MediaPopup::setAutoTextContrast(bool on) {
     impl_->autoTextContrast = on;
     if (on)
         impl_->backdropDirty = true;
-    else if (!impl_->idleMode)
+    else
         impl_->resetBackdropTextColors();
-    if (!impl_->hwnd || !impl_->popupVisible || impl_->idleMode)
+    if (!impl_->hwnd || !impl_->popupVisible)
         return;
     if (impl_->entering || impl_->closing)
         impl_->deferredRender = true;
