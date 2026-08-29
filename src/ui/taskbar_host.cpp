@@ -1396,10 +1396,16 @@ struct TaskbarHost::Impl {
             frame.media.title != media.title || frame.media.artist != media.artist ||
             frame.media.sourceAppUserModelId != media.sourceAppUserModelId ||
             frame.media.thumbnail != media.thumbnail;
+        // QQ 的 trackKey 包含时长；同一首歌从未知时长补齐到有效时长时，
+        // 即使封面、专辑字段也在同一批事件中更新，也不能启动整卡切歌动画。
+        const bool durationOnlyMediaUpdate =
+            trackChanged && frame.durationOnlyUpdate && media.durationMs <= 0 &&
+            frame.media.durationMs > 0;
         const bool confirmedDurationChange = media.durationMs > 0 &&
                                              frame.media.durationMs > 0 &&
                                              media.durationMs != frame.media.durationMs;
         const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
+                                 !durationOnlyMediaUpdate &&
                                  (mediaIdentityChanged || confirmedDurationChange);
         const bool mediaChanged = updateMediaInfo(frame.media);
         const bool popupAvailable = mediaPopupAvailable(frame.visible);

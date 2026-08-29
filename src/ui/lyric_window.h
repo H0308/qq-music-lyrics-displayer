@@ -94,6 +94,9 @@ struct PresentationFrame {
 
     bool visible = false;
     bool animateTransition = true;
+    // QQ 时长从未知补齐为有效值时，trackKey 会变化，但这不是换歌；
+    // 宿主据此跳过整卡切换动画，即使封面或专辑字段也在同一帧更新。
+    bool durationOnlyUpdate = false;
 };
 
 // 窗口宿主抽象：TaskbarHost（任务栏内嵌歌词）实现此接口

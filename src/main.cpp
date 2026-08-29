@@ -509,7 +509,10 @@ std::vector<std::wstring> volumeProcessNames(SmtcPlayerType player) {
 std::wstring makeTrackKey(const SmtcSnapshot& snap) {
     if (snap.player == SmtcPlayerType::NetEase && !snap.neteaseSongId.empty())
         return L"netease|" + snap.neteaseSongId;
-    return L"qq|" + LyricProvider::makeKey(snap.title, snap.artist, snap.durationMs);
+    // QQ 切歌窗口可能把上一首的时间线残留带进当前快照；它对展示和歌词匹配
+    // 都是不可信的，不能让这段时长参与曲目身份，否则真实时长到达时会被误判为换歌。
+    const int64_t durationMs = snap.timelineStale ? 0 : snap.durationMs;
+    return L"qq|" + LyricProvider::makeKey(snap.title, snap.artist, durationMs);
 }
 
 bool snapshotMatchesTrackKey(const SmtcSnapshot& snap, const std::wstring& key) {
@@ -1781,7 +1784,8 @@ struct App {
     }
 
     void publishPresentationFrame(const SmtcSnapshot& snap, bool animateTransition,
-                                  bool lyricsChanged = false) {
+                                  bool lyricsChanged = false,
+                                  bool durationOnlyUpdate = false) {
         // SMTC 状态/控制/封面事件只刷新帧字段；完整歌词仅在内容事务变化时复制。
         if (frameRevision_ == 0 || lyricsChanged)
             currentFrame_.lyrics = currentLyrics_;
@@ -1797,6 +1801,7 @@ struct App {
         currentFrame_.visible =
             snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         currentFrame_.animateTransition = animateTransition;
+        currentFrame_.durationOnlyUpdate = durationOnlyUpdate;
         if (currentFrame_.scene == DisplayScene::Idle)
             currentFrame_.statusText = currentFrame_.idle.sentence;
         else if (!snap.sessionAlive)
@@ -2035,6 +2040,7 @@ struct App {
         currentLyricsFromLocal_ = false;
         currentLyricsFromManual_ = false;
         lyricRequestStale_ = snap.timelineStale;
+        const int64_t durationMs = snap.timelineStale ? 0 : snap.durationMs;
         ++requestGeneration_;
         updateRuntimeLogState(snap);
         const std::wstring requestKey = currentKey;
@@ -2047,9 +2053,9 @@ struct App {
         };
         if (snap.player == SmtcPlayerType::NetEase) {
             provider.requestNeteaseAsync(snap.neteaseSongId, snap.title, snap.artist,
-                                         snap.durationMs, postLyricResult);
+                                         durationMs, postLyricResult);
         } else {
-            provider.requestAsync(snap.title, snap.artist, snap.durationMs,
+            provider.requestAsync(snap.title, snap.artist, durationMs,
                                   postLyricResult, forceOnline, forceLocal, persistOrder);
         }
     }
@@ -2111,6 +2117,7 @@ struct App {
             updateRuntimeLogState(snap);
             return;
         }
+        const SmtcPlayerType previousPlayer = lastPlayer_;
         lastPlayer_ = snap.player;
         const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
         if (*spectrumProcess) {
@@ -2132,6 +2139,14 @@ struct App {
 
         const std::wstring key = makeTrackKey(snap);
         const bool trackChanged = key != currentKey && !snap.title.empty();
+        // QQ 的时间线可能晚于媒体属性到达：同一首歌先以未知时长（0）进入，
+        // 随后补上真实时长会让包含时长的 trackKey 变化。这个补齐不是换歌，
+        // 不能因此清掉当前封面/专辑色；歌词仍按新时长重新建立匹配键。
+        const bool durationOnlyTrackUpdate =
+            trackChanged && snap.player == previousPlayer && !snap.timelineStale &&
+            currentDurationMs <= 0 && snap.durationMs > 0 &&
+            snap.title == currentTitle && snap.artist == currentArtist &&
+            snap.sourceAppUserModelId == currentFrame_.media.sourceAppUserModelId;
         // QQ 的曲目键包含时长，切歌后时间线更新会让 trackChanged 再触发一次；
         // 切歌弹窗只认标题/艺术家身份变化，避免同一首歌弹两次。
         const bool songIdentityChanged =
@@ -2145,11 +2160,15 @@ struct App {
             lastStatus = snap.status;
         }
         if (trackChanged) {
-            releaseCurrentResources();
+            // 时长补齐仍需重建歌词请求，但媒体卡片继续沿用当前封面和专辑色，
+            // 避免 0 → 有效时长的那一帧出现空卡片或背景闪回。
+            releaseCurrentLyrics();
+            if (!durationOnlyTrackUpdate)
+                releaseCurrentCover();
             currentKey = key;
             currentTitle = snap.title;
             currentArtist = snap.artist;
-            currentDurationMs = snap.durationMs;
+            currentDurationMs = snap.timelineStale ? 0 : snap.durationMs;
             if (snap.player == SmtcPlayerType::NetEase) {
                 runtime_log::writef(L"[smtc] %s track: %s - %s [%s] (%lld ms)",
                                     playerName(snap.player), snap.title.c_str(), snap.artist.c_str(),
@@ -2163,7 +2182,8 @@ struct App {
                 lastCover_ = snap.thumbnail;
                 logCoverCreated(L"smtc", lastCover_);
             }
-            hasAlbumColor_ = false;
+            if (!durationOnlyTrackUpdate)
+                hasAlbumColor_ = false;
             // 跟随专辑开启时不回退配置色：沿用上一首的专辑色直到新封面取色完成，
             // 避免歌词加载窗口期配置色闪一下再切回专辑色
             lyricLoading_ = true;
@@ -2209,7 +2229,7 @@ struct App {
             lyricLoading_ && currentLyrics_.empty()) {
             startLyricRequest(snap);
         }
-        publishPresentationFrame(snap, !trackChanged, trackChanged);
+        publishPresentationFrame(snap, !trackChanged, trackChanged, durationOnlyTrackUpdate);
         if (trackChanged && songIdentityChanged && songToastEnabled_ &&
             !isMinimalRenderMode()) {
             cancelSongToastCoverWait();
