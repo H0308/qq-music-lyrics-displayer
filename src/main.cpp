@@ -1181,6 +1181,7 @@ struct App {
         lyricFollowAlbum_ = on;
         if (on) {
             tryExtractAlbumColor(); // 立即用当前封面取色
+            applyFontColors();      // 当前曲目已有缓存主色时也要立即刷新歌词
         } else {
             applyFontColors();      // 恢复配置色
         }

@@ -775,7 +775,7 @@ struct SettingsDialog::Impl {
                  {L"左对齐", L"居中", L"右对齐"},
                  state.lyricAlignment, true, kRowH);
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
-        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
+        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色与频谱颜色跟随专辑", state.followAlbum);
         addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
                                             ? L"正在检查翻译和罗马音…"
