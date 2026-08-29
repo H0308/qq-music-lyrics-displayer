@@ -2,6 +2,7 @@
 
 #include "logging/runtime_logger.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <iterator>
 #include <memory>
@@ -50,6 +51,39 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
 bool isDeviceLost(HRESULT hr) {
     return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET ||
            hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
+HRESULT configureRectangleClip(IDCompositionRectangleClip* clip, float left, float top,
+                               float right, float bottom, float cornerRadius) {
+    if (!clip || right <= left || bottom <= top)
+        return E_INVALIDARG;
+
+    float radius = std::max(0.0f, cornerRadius);
+    radius = std::min(radius, std::min(right - left, bottom - top) * 0.5f);
+    HRESULT hr = clip->SetLeft(left);
+    if (SUCCEEDED(hr))
+        hr = clip->SetTop(top);
+    if (SUCCEEDED(hr))
+        hr = clip->SetRight(right);
+    if (SUCCEEDED(hr))
+        hr = clip->SetBottom(bottom);
+    if (SUCCEEDED(hr))
+        hr = clip->SetTopLeftRadiusX(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetTopLeftRadiusY(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetTopRightRadiusX(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetTopRightRadiusY(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetBottomLeftRadiusX(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetBottomLeftRadiusY(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetBottomRightRadiusX(radius);
+    if (SUCCEEDED(hr))
+        hr = clip->SetBottomRightRadiusY(radius);
+    return hr;
 }
 
 } // namespace
@@ -342,6 +376,12 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
             rootOpacity_->Release();
             rootOpacity_ = nullptr;
         }
+        if (rootClip_) {
+            if (visual_)
+                visual_->SetClip(nullptr);
+            rootClip_->Release();
+            rootClip_ = nullptr;
+        }
         if (visual_) {
             visual_->Release();
             visual_ = nullptr;
@@ -487,7 +527,7 @@ void DCompRenderer::releaseLyricTransitionLayers() {
 }
 
 bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
-                                                int height1) {
+                                                int height1, float cornerRadius) {
     if (!dcomp_ || !visual_ || width0 <= 0 || height0 <= 0 || width1 <= 0 || height1 <= 0)
         return false;
     const int widths[2] = {width0, width1};
@@ -495,15 +535,13 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     if (lyricLayers_[0].surface && lyricLayers_[1].surface &&
         lyricLayers_[0].width == width0 && lyricLayers_[0].height == height0 &&
         lyricLayers_[1].width == width1 && lyricLayers_[1].height == height1) {
-        // 复用已有层：裁剪可能被上一次覆盖动画改过，统一重置为整层可见。
+        // 复用已有层：裁剪可能被上一次覆盖动画改过，统一重置边界和圆角。
         for (int i = 0; i < 2; ++i) {
             auto& layer = lyricLayers_[i];
-            if (layer.clip) {
-                layer.clip->SetLeft(0.0f);
-                layer.clip->SetTop(0.0f);
-                layer.clip->SetRight(static_cast<float>(widths[i]));
-                layer.clip->SetBottom(static_cast<float>(heights[i]));
-            }
+            if (FAILED(configureRectangleClip(layer.clip, 0.0f, 0.0f,
+                                              static_cast<float>(widths[i]),
+                                              static_cast<float>(heights[i]), cornerRadius)))
+                return false;
         }
         return true;
     }
@@ -524,13 +562,9 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
         if (SUCCEEDED(hr))
             hr = dcomp_->CreateRectangleClip(&layer.clip);
         if (SUCCEEDED(hr))
-            hr = layer.clip->SetLeft(0.0f);
-        if (SUCCEEDED(hr))
-            hr = layer.clip->SetTop(0.0f);
-        if (SUCCEEDED(hr))
-            hr = layer.clip->SetRight(static_cast<float>(widths[i]));
-        if (SUCCEEDED(hr))
-            hr = layer.clip->SetBottom(static_cast<float>(heights[i]));
+            hr = configureRectangleClip(layer.clip, 0.0f, 0.0f,
+                                        static_cast<float>(widths[i]),
+                                        static_cast<float>(heights[i]), cornerRadius);
         if (SUCCEEDED(hr))
             hr = layer.visual->SetClip(layer.clip);
         if (SUCCEEDED(hr))
@@ -553,14 +587,21 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     return true;
 }
 
-bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float offsetY) {
-    if (!dcomp_ || !visual_ || !lyricLayers_[0].visual || width <= 0 || height <= 0)
+bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float offsetY,
+                                                   float cornerRadius) {
+    if (!dcomp_ || !visual_ || !lyricLayers_[0].visual || !lyricLayers_[1].visual ||
+        width <= 0 || height <= 0)
         return false;
 
-    if (transitionBackdrop_.surface && transitionBackdrop_.width == width &&
-        transitionBackdrop_.height == height) {
+    if (transitionBackdrop_.surface && transitionBackdrop_.visual &&
+        transitionBackdrop_.opacity && transitionBackdrop_.width == width &&
+        transitionBackdrop_.height == height && transitionBackdrop_.clip) {
         return SUCCEEDED(transitionBackdrop_.visual->SetOffsetX(0.0f)) &&
-               SUCCEEDED(transitionBackdrop_.visual->SetOffsetY(offsetY));
+               SUCCEEDED(transitionBackdrop_.visual->SetOffsetY(offsetY)) &&
+               SUCCEEDED(transitionBackdrop_.opacity->SetOpacity(0.0f)) &&
+               SUCCEEDED(configureRectangleClip(transitionBackdrop_.clip, 0.0f, 0.0f,
+                                                static_cast<float>(width),
+                                                static_cast<float>(height), cornerRadius));
     }
 
     auto releaseBackdrop = [&]() {
@@ -572,6 +613,14 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
             transitionBackdrop_.visual->SetClip(nullptr);
             transitionBackdrop_.visual->Release();
             transitionBackdrop_.visual = nullptr;
+        }
+        if (transitionBackdrop_.clip) {
+            transitionBackdrop_.clip->Release();
+            transitionBackdrop_.clip = nullptr;
+        }
+        if (transitionBackdrop_.opacity) {
+            transitionBackdrop_.opacity->Release();
+            transitionBackdrop_.opacity = nullptr;
         }
         if (transitionBackdrop_.surface) {
             transitionBackdrop_.surface->Release();
@@ -588,15 +637,34 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
                                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_ALPHA_MODE_PREMULTIPLIED,
                                    &transitionBackdrop_.surface);
     if (SUCCEEDED(hr))
+        hr = dcomp_->CreateRectangleClip(&transitionBackdrop_.clip);
+    if (SUCCEEDED(hr))
+        hr = configureRectangleClip(transitionBackdrop_.clip, 0.0f, 0.0f,
+                                    static_cast<float>(width), static_cast<float>(height),
+                                    cornerRadius);
+    // 透明度初始为 0：挂载提交阶段背景层不可见，待动画提交阶段再转可见，
+    // 避免新表面首帧在合成器里显示空白底色（与内容层的两段提交一致）。
+    if (SUCCEEDED(hr))
+        hr = dcomp_->CreateEffectGroup(&transitionBackdrop_.opacity);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.opacity->SetOpacity(0.0f);
+    if (SUCCEEDED(hr))
         hr = transitionBackdrop_.visual->SetContent(transitionBackdrop_.surface);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.visual->SetEffect(transitionBackdrop_.opacity);
+    if (SUCCEEDED(hr))
+        hr = transitionBackdrop_.visual->SetClip(transitionBackdrop_.clip);
     if (SUCCEEDED(hr))
         hr = transitionBackdrop_.visual->SetOffsetX(0.0f);
     if (SUCCEEDED(hr))
         hr = transitionBackdrop_.visual->SetOffsetY(offsetY);
-    // 内容层已经挂在根视觉上；把固定背景插到第 0 个内容层下面，确保
-    // 它覆盖根交换链、但不会盖住两页正在移动的内容。
+    // 内容层以 AddVisual(TRUE, nullptr) 逐个插到所有兄弟层的最底部，因此
+    // 两个内容层中 lyricLayers_[1] 才是 z 序最底的一层。固定背景必须以它为
+    // 参考插到它后面（insertAbove=FALSE），才能只覆盖根交换链、而不盖住
+    // 两页正在移动的内容；以 lyricLayers_[0] 为参考会把背景压在新页内容层
+    // 之上，整场转场新页都被不透明的背景层挡住，收尾撤层时整体弹出。
     if (SUCCEEDED(hr))
-        hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, lyricLayers_[0].visual);
+        hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, lyricLayers_[1].visual);
     if (FAILED(hr)) {
         releaseBackdrop();
         return false;
@@ -604,6 +672,12 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
     transitionBackdrop_.width = width;
     transitionBackdrop_.height = height;
     return true;
+}
+
+bool DCompRenderer::showLyricTransitionBackdrop() {
+    if (!transitionBackdrop_.opacity)
+        return false;
+    return SUCCEEDED(transitionBackdrop_.opacity->SetOpacity(1.0f));
 }
 
 ID2D1DeviceContext* DCompRenderer::beginLyricTransitionBackdropDraw() {
@@ -880,6 +954,22 @@ void DCompRenderer::commit() {
         dcomp_->Commit();
 }
 
+void DCompRenderer::waitForCommitCompletion() {
+    if (dcomp_)
+        dcomp_->WaitForCommitCompletion();
+}
+
+bool DCompRenderer::setRootRoundedClip(float top, float bottom, float cornerRadius) {
+    if (!dcomp_ || !visual_ || width_ <= 0 || height_ <= 0)
+        return false;
+    if (!rootClip_ && FAILED(dcomp_->CreateRectangleClip(&rootClip_)))
+        return false;
+    if (FAILED(configureRectangleClip(rootClip_, 0.0f, top, static_cast<float>(width_), bottom,
+                                      cornerRadius)))
+        return false;
+    return SUCCEEDED(visual_->SetClip(rootClip_));
+}
+
 void DCompRenderer::discard() {
     releaseBackBuffer();
     releaseLyricTransitionLayers();
@@ -891,7 +981,10 @@ void DCompRenderer::discard() {
     };
     if (visual_ && rootOpacity_)
         visual_->SetEffect(nullptr);
+    if (visual_ && rootClip_)
+        visual_->SetClip(nullptr);
     release(rootOpacity_);
+    release(rootClip_);
     release(visual_);
     release(target_);
     release(swapchain_);

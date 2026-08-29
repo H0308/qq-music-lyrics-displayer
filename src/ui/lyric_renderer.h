@@ -89,7 +89,9 @@ public:
 
     // 单行歌词转场用的两个临时合成层（旧行/新行），内容只在转场开始时绘制一次，
     // 位移和透明度由 DirectComposition 按刷新率执行。两层可指定不同尺寸。
-    bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1);
+    // cornerRadius 为物理像素；默认为 0，保留歌词行/快速展开层的矩形边界。
+    bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1,
+                                     float cornerRadius = 0.0f);
     ID2D1DeviceContext* beginLyricLayerDraw(int index);
     bool endLyricLayerDraw(int index, ID2D1DeviceContext* dc);
     bool animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
@@ -99,10 +101,14 @@ public:
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
                             float fromOpacity, float toOpacity, float durationSec);
     // 页面横向滑动转场的固定背景层。背景与内容层一起提交，避免转场期间
-    // 为了补圆角而重绘/提交根交换链。
-    bool ensureLyricTransitionBackdrop(int width, int height, float offsetY);
+    // 为了补圆角而重绘/提交根交换链。创建/复用时透明度为 0，由调用方在
+    // 动画提交阶段调 showLyricTransitionBackdrop() 转可见。
+    bool ensureLyricTransitionBackdrop(int width, int height, float offsetY,
+                                        float cornerRadius = 0.0f);
     ID2D1DeviceContext* beginLyricTransitionBackdropDraw();
     bool endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc);
+    // 两段提交的第二阶段：背景层从挂载时的 0 透明度转为可见。
+    bool showLyricTransitionBackdrop();
     // 区域覆盖动画（快速打开展开/收起）：层固定在 (offsetX, fromY→toY)，
     // 同时矩形裁剪底边从 clipFromBottom 动画到 clipToBottom（像素，层内坐标）。
     bool animateLyricLayerClipSlide(int index, float offsetX, float fromY, float toY,
@@ -113,7 +119,11 @@ public:
     bool animateRoot(float fromX, float toX, float fromY, float toY,
                      float fromOpacity, float toOpacity, float durationSec);
     void resetRoot();
+    // 给弹出卡片的根视觉设置物理像素圆角裁剪；未调用时根视觉保持矩形。
+    bool setRootRoundedClip(float top, float bottom, float cornerRadius);
     void commit();
+    // 等待上一批 DComposition 命令被合成器处理完，用于交换链与覆盖层交接。
+    void waitForCommitCompletion();
 
     // 释放全部资源。
     void releaseAll();
@@ -148,6 +158,7 @@ private:
     IDCompositionDevice* dcomp_ = nullptr;
     IDCompositionTarget* target_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;
+    IDCompositionRectangleClip* rootClip_ = nullptr;
     IDCompositionEffectGroup* rootOpacity_ = nullptr;
     LyricLayer transitionBackdrop_;
     LyricLayer lyricLayers_[2];
