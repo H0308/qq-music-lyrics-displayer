@@ -3851,7 +3851,11 @@ bool App::launchUpdateInstaller(const std::wstring& path) {
         return false;
     }
     runtime_log::writef(L"[action][update] installer-start result=ok");
-    requestQuit();
+    // 更新安装器已经接管后，不能再等待任务栏探测、网络请求等退出析构路径。
+    // 这些同步清理在部分电脑上可能长时间阻塞，导致前台窗口和托盘已消失，
+    // 但 QQMusicLyric.exe 仍存活，使 Restart Manager 无法再次关闭它。
+    // ExitProcess 会立即释放本进程持有的文件句柄，交由已启动的安装器继续覆盖文件。
+    ExitProcess(0);
     return true;
 }
 
