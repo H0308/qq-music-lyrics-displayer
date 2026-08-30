@@ -399,6 +399,13 @@ struct TaskbarHost::Impl {
     int slowTick_ = 0; // 慢速分支计数器
 
     // 渲染
+    struct VerticalLyricPart {
+        IDWriteTextLayout* layout = nullptr;
+        float width = 0.0f;
+        float height = 0.0f;
+        bool rotated = false;
+    };
+
     DCompRenderer renderer;
     IDWriteTextFormat* fmtTitle_ = nullptr;
     IDWriteTextFormat* fmtArtist_ = nullptr;
@@ -408,9 +415,10 @@ struct TaskbarHost::Impl {
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
-    // 侧边任务栏使用独立的竖排布局；中文/符号逐字排列，英文整句旋转后排列。
+    // 侧边任务栏使用独立的竖排布局；中文/符号逐字排列，连续英文片段整组旋转。
     // 横向布局仍保留给上下任务栏和逐字时间轴计算，避免两种排版互相改变测量结果。
     IDWriteTextLayout* verticalLyricLayout_ = nullptr;
+    std::vector<VerticalLyricPart> verticalLyricParts_;
     IDWriteTextLayout* nextLyricLayout_ = nullptr;
     IDWriteTextLayout* secondaryLayout_ = nullptr;
     // 行切换动画保留上一帧的布局，避免新行直接替换导致文字瞬移。
@@ -423,6 +431,7 @@ struct TaskbarHost::Impl {
     float verticalLyricWidth_ = 0.0f;
     float verticalLyricHeight_ = 0.0f;
     bool verticalLyricRotated_ = false;
+    std::vector<VerticalLyricPart> outgoingVerticalLyricParts_;
     float outgoingVerticalLyricWidth_ = 0.0f;
     float outgoingVerticalLyricHeight_ = 0.0f;
     bool outgoingVerticalLyricRotated_ = false;
@@ -2294,10 +2303,12 @@ struct TaskbarHost::Impl {
         r(artistLayout_);
         r(lyricLayout_);
         r(verticalLyricLayout_);
+        releaseVerticalLyricParts(verticalLyricParts_);
         r(nextLyricLayout_);
         r(secondaryLayout_);
         r(outgoingLyricLayout_);
         r(outgoingVerticalLyricLayout_);
+        releaseVerticalLyricParts(outgoingVerticalLyricParts_);
         r(outgoingSecondaryLayout_);
         r(outgoingNextLyricLayout_);
         r(brushBg_);
@@ -2621,6 +2632,7 @@ struct TaskbarHost::Impl {
             outgoingVerticalLyricLayout_->Release();
             outgoingVerticalLyricLayout_ = nullptr;
         }
+        releaseVerticalLyricParts(outgoingVerticalLyricParts_);
         if (outgoingSecondaryLayout_) {
             outgoingSecondaryLayout_->Release();
             outgoingSecondaryLayout_ = nullptr;
@@ -2777,6 +2789,66 @@ struct TaskbarHost::Impl {
 
     // ---------- 排版 ----------
 
+    static bool isCjkVerticalCharacter(wchar_t ch) {
+        return (ch >= 0x2E80 && ch <= 0x2FFF) ||
+               (ch >= 0x3000 && ch <= 0x30FF) ||
+               (ch >= 0x3400 && ch <= 0x9FFF) ||
+               (ch >= 0xAC00 && ch <= 0xD7AF);
+    }
+
+    static bool isLatinVerticalCharacter(wchar_t ch) {
+        return (ch >= L'A' && ch <= L'Z') ||
+               (ch >= L'a' && ch <= L'z') ||
+               (ch >= 0x00C0 && ch <= 0x024F) ||
+               (ch >= 0x1E00 && ch <= 0x1EFF) ||
+               (ch >= 0xFF21 && ch <= 0xFF3A) ||
+               (ch >= 0xFF41 && ch <= 0xFF5A);
+    }
+
+    static bool isLatinRunConnector(wchar_t ch) {
+        switch (ch) {
+        case L' ':
+        case L'\t':
+        case L'\'':
+        case L'’':
+        case L'-':
+        case L'‐':
+        case L'‑':
+        case L'_':
+        case L'&':
+        case L'+':
+        case L'/':
+        case L'.':
+        case L',':
+        case L'!':
+        case L'?':
+        case L':':
+        case L';':
+        case L'%':
+        case L'#':
+        case L'@':
+        case L'=':
+        case L'(':
+        case L')':
+        case L'[':
+        case L']':
+        case L'{':
+        case L'}':
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool isLatinRunCharacter(wchar_t ch) {
+        return isLatinVerticalCharacter(ch) || (ch >= L'0' && ch <= L'9') ||
+               (ch >= 0xFF10 && ch <= 0xFF19) || isLatinRunConnector(ch);
+    }
+
+    static bool isLatinRunStartCharacter(wchar_t ch) {
+        return isLatinRunCharacter(ch) && !isLatinRunConnector(ch);
+    }
+
     static wchar_t verticalPunctuationGlyph(wchar_t ch) {
         // 普通括号在逐字竖排时会保持“竖着的原字形”，改用 Unicode 竖排字形，
         // 让括号曲线横向展开。中英文及常见全角/中文成对括号统一处理。
@@ -2884,17 +2956,9 @@ struct TaskbarHost::Impl {
                 continue;
             }
 
-            const bool cjk = (c >= 0x2E80 && c <= 0x2FFF) ||
-                             (c >= 0x3000 && c <= 0x30FF) ||
-                             (c >= 0x3400 && c <= 0x9FFF) ||
-                             (c >= 0xAC00 && c <= 0xD7AF);
-            if (cjk)
+            if (isCjkVerticalCharacter(c))
                 return false;
-            const bool latin = (c >= L'A' && c <= L'Z') ||
-                               (c >= L'a' && c <= L'z') ||
-                               (c >= 0x00C0 && c <= 0x024F) ||
-                               (c >= 0x1E00 && c <= 0x1EFF);
-            hasLatin = hasLatin || latin;
+            hasLatin = hasLatin || isLatinVerticalCharacter(c);
             ++i;
         }
         return hasLatin;
@@ -2947,6 +3011,140 @@ struct TaskbarHost::Impl {
             height = metrics.height;
         }
         return height > 0.0f;
+    }
+
+    void releaseVerticalLyricParts(std::vector<VerticalLyricPart>& parts) {
+        for (auto& part : parts) {
+            if (part.layout)
+                part.layout->Release();
+        }
+        parts.clear();
+    }
+
+    bool hasMixedVerticalLyric(const std::wstring& text) const {
+        bool hasLatin = false;
+        bool hasCjk = false;
+        for (size_t i = 0; i < text.size();) {
+            const wchar_t c = text[i];
+            if (c == L'\r' || c == L'\n') {
+                ++i;
+                continue;
+            }
+            if (c >= 0xD800 && c <= 0xDFFF) {
+                if (c <= 0xDBFF && i + 1 < text.size() &&
+                    text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
+                    i += 2;
+                else
+                    ++i;
+                continue;
+            }
+            hasLatin = hasLatin || isLatinVerticalCharacter(c);
+            hasCjk = hasCjk || isCjkVerticalCharacter(c);
+            if (hasLatin && hasCjk)
+                return true;
+            ++i;
+        }
+        return false;
+    }
+
+    bool createMixedVerticalLyricLayout(const std::wstring& text, float layoutWidth,
+                                        std::vector<VerticalLyricPart>& parts, float& width,
+                                        float& height) {
+        releaseVerticalLyricParts(parts);
+        width = layoutWidth;
+        height = 0.0f;
+        if (!renderer.dwrite() || !fmtLyric_ || text.empty() || layoutWidth <= 0.0f)
+            return false;
+
+        IDWriteFactory* dwrite = renderer.dwrite();
+        auto appendPart = [&](const std::wstring& partText, bool rotated) {
+            if (partText.empty())
+                return true;
+
+            IDWriteTextLayout* layout = nullptr;
+            const HRESULT hr = dwrite->CreateTextLayout(
+                partText.c_str(), static_cast<UINT32>(partText.size()), fmtLyric_,
+                rotated ? 100000.0f : layoutWidth, 100000.0f, &layout);
+            if (FAILED(hr) || !layout) {
+                if (layout)
+                    layout->Release();
+                return false;
+            }
+            layout->SetTextAlignment(rotated ? DWRITE_TEXT_ALIGNMENT_LEADING
+                                              : DWRITE_TEXT_ALIGNMENT_CENTER);
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+
+            DWRITE_TEXT_METRICS metrics{};
+            if (FAILED(layout->GetMetrics(&metrics))) {
+                layout->Release();
+                return false;
+            }
+            const float partWidth = rotated ? metrics.height : layoutWidth;
+            const float partHeight = rotated ? metrics.width : metrics.height;
+            if (partHeight <= 0.0f) {
+                layout->Release();
+                return true;
+            }
+            parts.push_back({layout, partWidth, partHeight, rotated});
+            height += partHeight;
+            return true;
+        };
+
+        bool created = true;
+        for (size_t i = 0; i < text.size();) {
+            if (text[i] == L'\r' || text[i] == L'\n') {
+                ++i;
+                continue;
+            }
+
+            if (isLatinRunStartCharacter(text[i])) {
+                const size_t start = i;
+                size_t end = i;
+                while (end < text.size()) {
+                    if (text[end] == L'\r' || text[end] == L'\n')
+                        break;
+                    if (text[end] >= 0xD800 && text[end] <= 0xDFFF)
+                        break;
+                    if (!isLatinRunCharacter(text[end]))
+                        break;
+                    ++end;
+                }
+                size_t partEnd = end;
+                while (partEnd > start &&
+                       (text[partEnd - 1] == L' ' || text[partEnd - 1] == L'\t'))
+                    --partEnd;
+                if (partEnd > start && !appendPart(text.substr(start, partEnd - start), true)) {
+                    created = false;
+                    break;
+                }
+                i = end;
+                continue;
+            }
+
+            size_t units = 1;
+            const wchar_t first = text[i];
+            if (first >= 0xD800 && first <= 0xDBFF && i + 1 < text.size() &&
+                text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
+                units = 2;
+            }
+            std::wstring glyph = text.substr(i, units);
+            if (units == 1)
+                glyph[0] = verticalPunctuationGlyph(glyph[0]);
+            if (!appendPart(glyph, false)) {
+                created = false;
+                break;
+            }
+            i += units;
+        }
+
+        if (!created || parts.empty() || height <= 0.0f) {
+            releaseVerticalLyricParts(parts);
+            width = 0.0f;
+            height = 0.0f;
+            return false;
+        }
+        return true;
     }
 
     void buildTextLayouts(float leftW, float rightW) {
@@ -3032,8 +3230,10 @@ struct TaskbarHost::Impl {
             outgoingLyricHeight_ = lyricHeight_;
             if (outgoingVerticalLyricLayout_)
                 outgoingVerticalLyricLayout_->Release();
+            releaseVerticalLyricParts(outgoingVerticalLyricParts_);
             outgoingVerticalLyricLayout_ = verticalLyricLayout_;
             verticalLyricLayout_ = nullptr;
+            outgoingVerticalLyricParts_.swap(verticalLyricParts_);
             outgoingVerticalLyricWidth_ = verticalLyricWidth_;
             outgoingVerticalLyricHeight_ = verticalLyricHeight_;
             outgoingVerticalLyricRotated_ = verticalLyricRotated_;
@@ -3091,6 +3291,7 @@ struct TaskbarHost::Impl {
                 lyricLayout_->Release();
             if (verticalLyricLayout_)
                 verticalLyricLayout_->Release();
+            releaseVerticalLyricParts(verticalLyricParts_);
             if (secondaryLayout_)
                 secondaryLayout_->Release();
             lyricLayout_ = nullptr;
@@ -3118,6 +3319,7 @@ struct TaskbarHost::Impl {
         lyricWidth_ = 0.0f;
         lyricHeight_ = 0.0f;
         verticalLyricLayout_ = nullptr;
+        verticalLyricParts_.clear();
         verticalLyricWidth_ = 0.0f;
         verticalLyricHeight_ = 0.0f;
         verticalLyricRotated_ = false;
@@ -3139,9 +3341,15 @@ struct TaskbarHost::Impl {
                 int verticalPxW = 0;
                 int verticalPxH = 0;
                 clientPixelSize(verticalPxW, verticalPxH);
-                createVerticalLyricLayout(lyric, dip(verticalPxW), &verticalLyricLayout_,
-                                          verticalLyricWidth_, verticalLyricHeight_,
-                                          verticalLyricRotated_);
+                const float verticalWidth = dip(verticalPxW);
+                if (hasMixedVerticalLyric(lyric)) {
+                    createMixedVerticalLyricLayout(lyric, verticalWidth, verticalLyricParts_,
+                                                   verticalLyricWidth_, verticalLyricHeight_);
+                } else {
+                    createVerticalLyricLayout(lyric, verticalWidth, &verticalLyricLayout_,
+                                              verticalLyricWidth_, verticalLyricHeight_,
+                                              verticalLyricRotated_);
+                }
             }
         }
         if (!doubleLineLyrics && !secondary.empty() && fmtSecondary_) {
@@ -4043,6 +4251,46 @@ struct TaskbarHost::Impl {
             fxBmp->Release();
     }
 
+    void drawVerticalLyricParts(const std::vector<VerticalLyricPart>& parts, float blockH,
+                                float areaH, float railW, float y, float offset,
+                                ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
+                                ID2D1Brush* glow = nullptr,
+                                ID2D1Brush* karaokeBrush = nullptr,
+                                float karaokeProgress = 0.0f, float opacity = 1.0f,
+                                bool singleCopy = false) {
+        if (!renderer.renderTarget() || parts.empty() || blockH <= 0.0f || areaH <= 0.0f)
+            return;
+
+        const float progress = std::clamp(karaokeProgress, 0.0f, 1.0f);
+        const float sungExtent = blockH * progress;
+        const float loopH = blockH + kVerticalLyricGap;
+        const int copyCount = karaokeBrush || singleCopy || blockH <= areaH ? 1 : 2;
+        const float base = y + offset;
+        for (int copy = 0; copy < copyCount; ++copy) {
+            float partTop = base - copy * loopH;
+            float partOffset = 0.0f;
+            for (const auto& part : parts) {
+                if (!part.layout || part.width <= 0.0f || part.height <= 0.0f)
+                    continue;
+
+                float partProgress = 0.0f;
+                if (karaokeBrush) {
+                    partProgress = std::clamp((sungExtent - partOffset) / part.height,
+                                              0.0f, 1.0f);
+                }
+                ID2D1Brush* partKaraoke =
+                    karaokeBrush && partProgress > 0.0f ? karaokeBrush : nullptr;
+                const float partX = part.rotated ? (railW - part.width) * 0.5f : 0.0f;
+                drawVerticalScrollingText(
+                    part.layout, part.width, part.height, areaH, partX, partTop, 0.0f, brush,
+                    outline, glow, partKaraoke, partProgress, opacity, LyricAlignment::Center,
+                    true, part.rotated);
+                partTop += part.height;
+                partOffset += part.height;
+            }
+        }
+    }
+
     void drawVerticalLyrics(const VerticalLayout& layout) {
         auto* rt = renderer.renderTarget();
         if (!rt || layout.lyricBottom <= layout.lyricY)
@@ -4072,10 +4320,17 @@ struct TaskbarHost::Impl {
                                        : nullptr;
         const LyricAlignment alignment = LyricAlignment::Center;
 
-        auto drawLine = [&](IDWriteTextLayout* textLayout, float textW, float textH, float y,
-                            float offset, ID2D1Brush* brush, float opacity, bool singleCopy,
-                            bool rotated, ID2D1Brush* outline, ID2D1Brush* glow,
-                            ID2D1Brush* karaokeBrush, float karaokeProgress) {
+        auto drawLine = [&](IDWriteTextLayout* textLayout,
+                            const std::vector<VerticalLyricPart>* parts, float textW,
+                            float textH, float y, float offset, ID2D1Brush* brush, float opacity,
+                            bool singleCopy, bool rotated, ID2D1Brush* outline,
+                            ID2D1Brush* glow, ID2D1Brush* karaokeBrush,
+                            float karaokeProgress) {
+            if (parts && !parts->empty()) {
+                drawVerticalLyricParts(*parts, textH, areaH, layout.w, y, offset, brush, outline,
+                                       glow, karaokeBrush, karaokeProgress, opacity, singleCopy);
+                return;
+            }
             // 旋转英文的实际横向宽度通常小于任务栏槽宽，单独居中，避免整句贴在
             // 侧边栏外沿；中文逐字布局本身已经使用完整槽宽。
             const float textX = rotated ? (layout.w - textW) * 0.5f : 0.0f;
@@ -4092,14 +4347,16 @@ struct TaskbarHost::Impl {
 
         rt->PushAxisAlignedClip(D2D1::RectF(0.0f, layout.lyricY, layout.w, layout.lyricBottom),
                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        if (lyricTransitionActive_ && outgoingVerticalLyricLayout_) {
+        if (lyricTransitionActive_ &&
+            (outgoingVerticalLyricLayout_ || !outgoingVerticalLyricParts_.empty())) {
             const LyricTransitionSample transition = lyricTransitionSample();
             const float travel = std::clamp(areaH * 0.24f, 18.0f, 48.0f);
             const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
             const float oldY = layout.lyricY - direction * travel * transition.movement;
             const float newY = layout.lyricY + direction * travel *
                                                          (1.0f - transition.movement);
-            drawLine(outgoingVerticalLyricLayout_, outgoingVerticalLyricWidth_,
+            drawLine(outgoingVerticalLyricLayout_, &outgoingVerticalLyricParts_,
+                     outgoingVerticalLyricWidth_,
                      outgoingVerticalLyricHeight_, oldY, outgoingLyricScrollOffset_,
                      outgoingBrush, 1.0f - transition.fadeOut, true,
                      outgoingVerticalLyricRotated_, outgoingOutline, outgoingGlow, nullptr,
@@ -4109,17 +4366,19 @@ struct TaskbarHost::Impl {
             const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
             const float incomingKaraokeX = incomingKaraoke ? karaokeSmoothStep(*incomingLine)
                                                            : 0.0f;
-            drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_, newY,
+            drawLine(verticalLyricLayout_, &verticalLyricParts_, verticalLyricWidth_,
+                     verticalLyricHeight_, newY,
                      lyricScrollOffset_,
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
                      transition.fadeIn, true, verticalLyricRotated_, effectOutline, effectGlow,
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
                      verticalKaraokeProgress(incomingKaraokeX));
-        } else if (verticalLyricLayout_) {
+        } else if (verticalLyricLayout_ || !verticalLyricParts_.empty()) {
             const LyricLine* currentLine = !idleScene ? karaokeLine() : nullptr;
             const bool karaoke = currentLine && brushLyric_ && brushLyricDim_;
             const float karaokeX = karaoke ? karaokeSmoothStep(*currentLine) : 0.0f;
-            drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_,
+            drawLine(verticalLyricLayout_, &verticalLyricParts_, verticalLyricWidth_,
+                     verticalLyricHeight_,
                      layout.lyricY, lyricScrollOffset_,
                      karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
                      1.0f, false, verticalLyricRotated_, effectOutline, effectGlow,
