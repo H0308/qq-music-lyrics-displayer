@@ -2777,8 +2777,64 @@ struct TaskbarHost::Impl {
 
     // ---------- 排版 ----------
 
+    static wchar_t verticalPunctuationGlyph(wchar_t ch) {
+        // 普通括号在逐字竖排时会保持“竖着的原字形”，改用 Unicode 竖排字形，
+        // 让括号曲线横向展开。中英文及常见全角/中文成对括号统一处理。
+        switch (ch) {
+        case L'(':
+        case L'（':
+            return L'︵';
+        case L')':
+        case L'）':
+            return L'︶';
+        case L'[':
+        case L'［':
+            return L'﹇';
+        case L']':
+        case L'］':
+            return L'﹈';
+        case L'{':
+        case L'｛':
+            return L'︷';
+        case L'}':
+        case L'｝':
+            return L'︸';
+        case L'<':
+        case L'〈':
+        case L'＜':
+            return L'︿';
+        case L'>':
+        case L'〉':
+        case L'＞':
+            return L'﹀';
+        case L'〔':
+            return L'︹';
+        case L'〕':
+            return L'︺';
+        case L'【':
+            return L'︻';
+        case L'】':
+            return L'︼';
+        case L'《':
+            return L'︽';
+        case L'》':
+            return L'︾';
+        case L'「':
+            return L'﹁';
+        case L'」':
+            return L'﹂';
+        case L'『':
+            return L'﹃';
+        case L'』':
+            return L'﹄';
+        default:
+            return ch;
+        }
+    }
+
     // 把一行歌词拆成逐字换行的布局。中文和符号按 Unicode 码点处理，
-    // 避免 UTF-16 代理项被拆开后出现半个字符；纯拉丁文本走整句旋转布局。
+    // 常见括号转换为竖排字形；避免 UTF-16 代理项被拆开后出现半个字符。
+    // 纯拉丁文本走整句旋转布局。
     std::wstring makeVerticalLyricText(const std::wstring& text, bool topToBottom) const {
         std::vector<std::wstring> glyphs;
         for (size_t i = 0; i < text.size();) {
@@ -2792,7 +2848,10 @@ struct TaskbarHost::Impl {
                 text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
                 units = 2;
             }
-            glyphs.emplace_back(text.substr(i, units));
+            std::wstring glyph = text.substr(i, units);
+            if (units == 1)
+                glyph[0] = verticalPunctuationGlyph(glyph[0]);
+            glyphs.emplace_back(std::move(glyph));
             i += units;
         }
         if (!topToBottom)
