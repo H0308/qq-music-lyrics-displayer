@@ -408,8 +408,8 @@ struct TaskbarHost::Impl {
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
-    // 侧边任务栏使用独立的逐字竖排布局；横向布局仍保留给上下任务栏
-    // 和逐字时间轴计算，避免两种排版互相改变测量结果。
+    // 侧边任务栏使用独立的竖排布局；中文/符号逐字排列，英文整句旋转后排列。
+    // 横向布局仍保留给上下任务栏和逐字时间轴计算，避免两种排版互相改变测量结果。
     IDWriteTextLayout* verticalLyricLayout_ = nullptr;
     IDWriteTextLayout* nextLyricLayout_ = nullptr;
     IDWriteTextLayout* secondaryLayout_ = nullptr;
@@ -422,8 +422,10 @@ struct TaskbarHost::Impl {
     float outgoingLyricHeight_ = 0.0f;
     float verticalLyricWidth_ = 0.0f;
     float verticalLyricHeight_ = 0.0f;
+    bool verticalLyricRotated_ = false;
     float outgoingVerticalLyricWidth_ = 0.0f;
     float outgoingVerticalLyricHeight_ = 0.0f;
+    bool outgoingVerticalLyricRotated_ = false;
     float outgoingLyricBlockHeight_ = 0.0f;
     float outgoingLyricScrollOffset_ = 0.0f;
     float outgoingSecondaryWidth_ = 0.0f;
@@ -2631,6 +2633,7 @@ struct TaskbarHost::Impl {
         outgoingLyricHeight_ = 0.0f;
         outgoingVerticalLyricWidth_ = 0.0f;
         outgoingVerticalLyricHeight_ = 0.0f;
+        outgoingVerticalLyricRotated_ = false;
         outgoingSecondaryWidth_ = 0.0f;
         outgoingSecondaryHeight_ = 0.0f;
         outgoingLyricBlockHeight_ = 0.0f;
@@ -2774,8 +2777,8 @@ struct TaskbarHost::Impl {
 
     // ---------- 排版 ----------
 
-    // 把一行歌词拆成逐字换行的布局。中文、英文和符号都按 Unicode 码点处理，
-    // 避免 UTF-16 代理项被拆开后出现半个字符；侧边任务栏再用同一布局做纵向滚动。
+    // 把一行歌词拆成逐字换行的布局。中文和符号按 Unicode 码点处理，
+    // 避免 UTF-16 代理项被拆开后出现半个字符；纯拉丁文本走整句旋转布局。
     std::wstring makeVerticalLyricText(const std::wstring& text, bool topToBottom) const {
         std::vector<std::wstring> glyphs;
         for (size_t i = 0; i < text.size();) {
@@ -2804,27 +2807,67 @@ struct TaskbarHost::Impl {
         return result;
     }
 
+    bool useRotatedVerticalLyric(const std::wstring& text) const {
+        bool hasLatin = false;
+        for (size_t i = 0; i < text.size();) {
+            const wchar_t c = text[i];
+            if (c == L'\r' || c == L'\n') {
+                ++i;
+                continue;
+            }
+            if (c >= 0xD800 && c <= 0xDFFF) {
+                // 代理项和 CJK 之外的复杂文字仍走逐字布局，避免旋转后破坏字形组合。
+                if (c <= 0xDBFF && i + 1 < text.size() &&
+                    text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
+                    i += 2;
+                else
+                    ++i;
+                continue;
+            }
+
+            const bool cjk = (c >= 0x2E80 && c <= 0x2FFF) ||
+                             (c >= 0x3000 && c <= 0x30FF) ||
+                             (c >= 0x3400 && c <= 0x9FFF) ||
+                             (c >= 0xAC00 && c <= 0xD7AF);
+            if (cjk)
+                return false;
+            const bool latin = (c >= L'A' && c <= L'Z') ||
+                               (c >= L'a' && c <= L'z') ||
+                               (c >= 0x00C0 && c <= 0x024F) ||
+                               (c >= 0x1E00 && c <= 0x1EFF);
+            hasLatin = hasLatin || latin;
+            ++i;
+        }
+        return hasLatin;
+    }
+
     bool createVerticalLyricLayout(const std::wstring& text, float layoutWidth,
-                                   IDWriteTextLayout** out, float& width, float& height) {
+                                   IDWriteTextLayout** out, float& width, float& height,
+                                   bool& rotated) {
         width = 0.0f;
         height = 0.0f;
+        rotated = false;
         if (!out)
             return false;
         *out = nullptr;
         if (!renderer.dwrite() || !fmtLyric_ || text.empty() || layoutWidth <= 0.0f)
             return false;
 
-        const bool topToBottom = taskbarEdge_ == ABE_LEFT;
-        const std::wstring verticalText = makeVerticalLyricText(text, topToBottom);
-        if (verticalText.empty() ||
+        const bool rotateText = useRotatedVerticalLyric(text);
+        // 竖向英文统一使用截图中的顺时针 90° 角度；原文本顺序无需反转，
+        // 这样视觉上仍按原句从上向下阅读。
+        const std::wstring layoutText = rotateText ? text
+                                                   : makeVerticalLyricText(text, true);
+        if (layoutText.empty() ||
             FAILED(renderer.dwrite()->CreateTextLayout(
-                verticalText.c_str(), static_cast<UINT32>(verticalText.size()), fmtLyric_,
-                layoutWidth, 100000.0f, out)) ||
+                layoutText.c_str(), static_cast<UINT32>(layoutText.size()), fmtLyric_,
+                rotateText ? 100000.0f : layoutWidth, 100000.0f, out)) ||
             !*out) {
             return false;
         }
 
-        (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        (*out)->SetTextAlignment(rotateText ? DWRITE_TEXT_ALIGNMENT_LEADING
+                                             : DWRITE_TEXT_ALIGNMENT_CENTER);
         (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         DWRITE_TEXT_METRICS metrics{};
@@ -2833,10 +2876,17 @@ struct TaskbarHost::Impl {
             *out = nullptr;
             return false;
         }
-        // metrics.width 是字符墨宽，而不是布局槽宽；绘制/命中需要保留完整的
-        // 任务栏横向槽宽，才能让每个字在窄栏中保持居中。
-        width = layoutWidth;
-        height = metrics.height;
+        if (rotateText) {
+            // 横向整句旋转 90° 后，原文本高度成为竖栏宽度，原文本宽度成为滚动长度。
+            width = metrics.height;
+            height = metrics.width;
+            rotated = true;
+        } else {
+            // metrics.width 是字符墨宽，而不是布局槽宽；绘制/命中需要保留完整的
+            // 任务栏横向槽宽，才能让每个字在窄栏中保持居中。
+            width = layoutWidth;
+            height = metrics.height;
+        }
         return height > 0.0f;
     }
 
@@ -2927,6 +2977,7 @@ struct TaskbarHost::Impl {
             verticalLyricLayout_ = nullptr;
             outgoingVerticalLyricWidth_ = verticalLyricWidth_;
             outgoingVerticalLyricHeight_ = verticalLyricHeight_;
+            outgoingVerticalLyricRotated_ = verticalLyricRotated_;
             outgoingLyricScrollOffset_ = outgoingLyricOffset;
             if (sceneTransition) {
                 // 场景转场需要保留旧场景的完整文本块。这里的 next 布局属于
@@ -3010,6 +3061,7 @@ struct TaskbarHost::Impl {
         verticalLyricLayout_ = nullptr;
         verticalLyricWidth_ = 0.0f;
         verticalLyricHeight_ = 0.0f;
+        verticalLyricRotated_ = false;
         secondaryWidth_ = 0.0f;
         secondaryHeight_ = 0.0f;
         if (!lyric.empty()) {
@@ -3029,7 +3081,8 @@ struct TaskbarHost::Impl {
                 int verticalPxH = 0;
                 clientPixelSize(verticalPxW, verticalPxH);
                 createVerticalLyricLayout(lyric, dip(verticalPxW), &verticalLyricLayout_,
-                                          verticalLyricWidth_, verticalLyricHeight_);
+                                          verticalLyricWidth_, verticalLyricHeight_,
+                                          verticalLyricRotated_);
             }
         }
         if (!doubleLineLyrics && !secondary.empty() && fmtSecondary_) {
@@ -3792,8 +3845,8 @@ struct TaskbarHost::Impl {
         float offset, ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
         ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
         float karaokeX = 0.0f, float opacity = 1.0f,
-        LyricAlignment alignment = LyricAlignment::Center, bool topToBottom = true,
-        bool singleCopy = false) {
+        LyricAlignment alignment = LyricAlignment::Center, bool singleCopy = false,
+        bool rotated = false) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || textW <= 0.0f || textH <= 0.0f || areaH <= 0.0f)
             return;
@@ -3802,10 +3855,12 @@ struct TaskbarHost::Impl {
         if (opacity >= 0.999f)
             opacity = 1.0f;
 
-        // 这里的 layout 已经是“每个字一行”的 DirectWrite 布局，因此只做 Y
-        // 方向平移，不再旋转整句。左右侧通过布局文字顺序镜像，字形始终保持正向。
+        // rotated 布局保存的是整句横向文字：左右侧共用截图中的固定角度，
+        // 再映射到同一个竖向滚动槽；中文逐字布局则保持字形正向。
         ID2D1Bitmap* fxBmp = nullptr;
-        if (glow || outline)
+        // 离屏缓存按横向布局的原始尺寸创建；旋转文字直接绘制，避免把
+        // “横向宽高”交换后再交给未旋转的缓存目标而截断英文句子。
+        if (!rotated && (glow || outline))
             fxBmp = textFxBitmap(layout, textW, textH, brush, outline, glow);
         ID2D1Brush* brushes[4] = {fxBmp ? nullptr : brush, fxBmp ? nullptr : outline,
                                   fxBmp ? nullptr : glow, karaokeBrush};
@@ -3827,10 +3882,9 @@ struct TaskbarHost::Impl {
 
         rt->PushAxisAlignedClip(D2D1::RectF(x, y, x + textW, y + areaH),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
-        // 右侧即使文本超出可视区，也要让原句的首字从底部开始，
-        // 不能把溢出时的负空间裁成 0，否则会变成从顶部反向出现。
-        const float alignedTop = topToBottom ? y : y + areaH - textH;
-        const float base = alignedTop - offset;
+        // 两侧统一从上向下滚动。第二份副本放在前一份上方，确保内容离开底部
+        // 后从顶部无缝接回，而不会因为右侧任务栏的文字顺序而反向上跑。
+        const float base = y + offset;
         float bases[2]{};
         int count = 0;
         if (karaokeBrush || singleCopy || textH <= areaH) {
@@ -3838,8 +3892,23 @@ struct TaskbarHost::Impl {
         } else {
             const float loopH = textH + kVerticalLyricGap;
             bases[count++] = base;
-            bases[count++] = base + loopH;
+            bases[count++] = base - loopH;
         }
+
+        auto rotatedTransform = [&](float drawX, float top) {
+            // D2D 坐标系的 Y 轴向下，统一使用顺时针 90°，匹配截图中的固定角度。
+            return D2D1::Matrix3x2F(0.0f, 1.0f, -1.0f, 0.0f, drawX + textW, top);
+        };
+
+        auto drawRotatedLayout = [&](float drawX, float top, ID2D1Brush* drawBrush) {
+            if (!drawBrush)
+                return;
+            D2D1_MATRIX_3X2_F previous{};
+            rt->GetTransform(&previous);
+            rt->SetTransform(rotatedTransform(drawX, top) * previous);
+            rt->DrawTextLayout(D2D1::Point2F(0.0f, 0.0f), layout, drawBrush);
+            rt->SetTransform(previous);
+        };
 
         if (fxBmp) {
             constexpr float textFxPad = 3.0f;
@@ -3864,32 +3933,47 @@ struct TaskbarHost::Impl {
                 for (int i = 0; i < count; ++i) {
                     if (glow) {
                         for (auto& d : kDirs)
-                            rt->DrawTextLayout(
-                                D2D1::Point2F(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f),
-                                layout, glow);
+                            if (rotated)
+                                drawRotatedLayout(x + d[0] * 2.4f,
+                                                  bases[i] + d[1] * 2.4f, glow);
+                            else
+                                rt->DrawTextLayout(
+                                    D2D1::Point2F(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f),
+                                    layout, glow);
                     }
                     if (outline) {
                         for (auto& d : kDirs)
-                            rt->DrawTextLayout(
-                                D2D1::Point2F(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f),
-                                layout, outline);
+                            if (rotated)
+                                drawRotatedLayout(x + d[0] * 1.2f,
+                                                  bases[i] + d[1] * 1.2f, outline);
+                            else
+                                rt->DrawTextLayout(
+                                    D2D1::Point2F(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f),
+                                    layout, outline);
                     }
                 }
             }
-            for (int i = 0; i < count; ++i)
-                rt->DrawTextLayout(D2D1::Point2F(x, bases[i]), layout, brush);
+            for (int i = 0; i < count; ++i) {
+                if (rotated)
+                    drawRotatedLayout(x, bases[i], brush);
+                else
+                    rt->DrawTextLayout(D2D1::Point2F(x, bases[i]), layout, brush);
+            }
         }
 
-        // karaokeX 在竖排路径中传入的是“已唱比例”：左侧从上向下填充，
-        // 右侧从下向上填充，与 makeVerticalLyricText 的字符顺序一致。
+        // karaokeX 在竖排路径中统一从上向下填充；旋转英文也按最终可见的
+        // 竖向顺序裁剪，避免左右任务栏出现相反的高亮方向。
         if (karaokeBrush && karaokeX > 0.0f) {
             const float progress = std::clamp(karaokeX, 0.0f, 1.0f);
-            const float top = topToBottom ? bases[0] : bases[0] + textH * (1.0f - progress);
-            const float bottom = topToBottom ? bases[0] + textH * progress : bases[0] + textH;
+            const float top = bases[0];
+            const float bottom = bases[0] + textH * progress;
             if (bottom > top) {
                 rt->PushAxisAlignedClip(D2D1::RectF(x, top, x + textW, bottom),
                                         D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                rt->DrawTextLayout(D2D1::Point2F(x, bases[0]), layout, karaokeBrush);
+                if (rotated)
+                    drawRotatedLayout(x, bases[0], karaokeBrush);
+                else
+                    rt->DrawTextLayout(D2D1::Point2F(x, bases[0]), layout, karaokeBrush);
                 rt->PopAxisAlignedClip();
             }
         }
@@ -3907,7 +3991,6 @@ struct TaskbarHost::Impl {
 
         const float areaH = layout.lyricBottom - layout.lyricY;
         const bool idleScene = scene_ == DisplayScene::Idle;
-        const bool topToBottom = taskbarEdge_ == ABE_LEFT;
         ID2D1Brush* primaryBrush = idleScene
                                        ? static_cast<ID2D1Brush*>(brushText_)
                                        : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
@@ -3932,11 +4015,14 @@ struct TaskbarHost::Impl {
 
         auto drawLine = [&](IDWriteTextLayout* textLayout, float textW, float textH, float y,
                             float offset, ID2D1Brush* brush, float opacity, bool singleCopy,
-                            ID2D1Brush* outline, ID2D1Brush* glow,
+                            bool rotated, ID2D1Brush* outline, ID2D1Brush* glow,
                             ID2D1Brush* karaokeBrush, float karaokeProgress) {
-            drawVerticalScrollingText(textLayout, textW, textH, areaH, 0.0f, y, offset, brush,
+            // 旋转英文的实际横向宽度通常小于任务栏槽宽，单独居中，避免整句贴在
+            // 侧边栏外沿；中文逐字布局本身已经使用完整槽宽。
+            const float textX = rotated ? (layout.w - textW) * 0.5f : 0.0f;
+            drawVerticalScrollingText(textLayout, textW, textH, areaH, textX, y, offset, brush,
                                       outline, glow, karaokeBrush, karaokeProgress, opacity,
-                                      alignment, topToBottom, singleCopy);
+                                      alignment, singleCopy, rotated);
         };
 
         auto verticalKaraokeProgress = [&](float karaokeX) {
@@ -3956,8 +4042,9 @@ struct TaskbarHost::Impl {
                                                          (1.0f - transition.movement);
             drawLine(outgoingVerticalLyricLayout_, outgoingVerticalLyricWidth_,
                      outgoingVerticalLyricHeight_, oldY, outgoingLyricScrollOffset_,
-                     outgoingBrush, 1.0f - transition.fadeOut, true, outgoingOutline,
-                     outgoingGlow, nullptr, 0.0f);
+                     outgoingBrush, 1.0f - transition.fadeOut, true,
+                     outgoingVerticalLyricRotated_, outgoingOutline, outgoingGlow, nullptr,
+                     0.0f);
 
             const LyricLine* incomingLine = !idleScene ? karaokeLine() : nullptr;
             const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
@@ -3966,7 +4053,7 @@ struct TaskbarHost::Impl {
             drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_, newY,
                      lyricScrollOffset_,
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
-                     transition.fadeIn, true, effectOutline, effectGlow,
+                     transition.fadeIn, true, verticalLyricRotated_, effectOutline, effectGlow,
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
                      verticalKaraokeProgress(incomingKaraokeX));
         } else if (verticalLyricLayout_) {
@@ -3976,7 +4063,7 @@ struct TaskbarHost::Impl {
             drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_,
                      layout.lyricY, lyricScrollOffset_,
                      karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
-                     1.0f, false, effectOutline, effectGlow,
+                     1.0f, false, verticalLyricRotated_, effectOutline, effectGlow,
                      karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
                      verticalKaraokeProgress(karaokeX));
         }
@@ -4945,11 +5032,13 @@ struct TaskbarHost::Impl {
                     if (verticalLyricExtent > lyricAreaH) {
                         const float sungX =
                             (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
+                        // 普通竖向跑马灯的 offset 正值代表向下；逐字高亮跟随时，
+                        // 只有内容超出底部后才向上回收文本，避免当前字被推出可视区。
                         const float target = std::clamp(
-                            verticalLyricExtent *
-                                    (lyricWidth_ > 0.0f ? sungX / lyricWidth_ : 0.0f) -
-                                lyricAreaH * 0.3f,
-                            0.0f, verticalLyricExtent - lyricAreaH);
+                            lyricAreaH * 0.3f -
+                                verticalLyricExtent *
+                                    (lyricWidth_ > 0.0f ? sungX / lyricWidth_ : 0.0f),
+                            lyricAreaH - verticalLyricExtent, 0.0f);
                         const float diff = target - lyricScrollOffset_;
                         const float followDtMs =
                             std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
