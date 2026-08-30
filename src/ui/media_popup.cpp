@@ -263,6 +263,9 @@ struct MediaPopup::Impl {
     int presentationUpdateDepth = 0;
     bool presentationUpdatePending = false;
     bool placedAbove = true;
+    // 横向任务栏按上下弹出；侧边任务栏按宿主左右弹出。
+    bool sideAnchored = false;
+    bool popupOnRightOfAnchor = false;
     bool themeDirty = true;
     MediaPopupBackground backgroundMode = MediaPopupBackground::Solid;
     COLORREF floatingCardBackgroundColor = RGB(255, 255, 255);
@@ -2754,6 +2757,56 @@ struct MediaPopup::Impl {
         const int workTop = static_cast<int>(work.top);
         const int workRight = static_cast<int>(work.right);
         const int workBottom = static_cast<int>(work.bottom);
+        // 侧边任务栏的宿主是窄竖栏，卡片应贴在它的外侧并以宿主中心对齐。
+        // 这里把 HWND 直接放在卡片最终矩形上，卡片内部坐标保持从 (0, 0)
+        // 开始，避免沿用上下弹出时仅支持 Y 方向的 cardOriginDip。
+        const int anchorWidth = anchorRect.right - anchorRect.left;
+        const int anchorHeight = anchorRect.bottom - anchorRect.top;
+        // 直接使用歌词宿主自身的长宽比，而不是依赖 Shell_TrayWnd 的外框。
+        // 某些 Explorer 版本会让外框覆盖整块屏幕，但宿主尺寸仍准确反映
+        // 当前任务栏是横向还是侧边。
+        const bool verticalTaskbar = anchorHeight > anchorWidth;
+        sideAnchored = verticalTaskbar;
+        if (verticalTaskbar) {
+            const int monitorCenterX = (info.rcMonitor.left + info.rcMonitor.right) / 2;
+            popupOnRightOfAnchor = (anchorRect.left + anchorRect.right) / 2 < monitorCenterX;
+
+            int x = popupOnRightOfAnchor ? anchorRect.right + gap
+                                         : anchorRect.left - gap - popupW;
+            const int anchorCenterY = (anchorRect.top + anchorRect.bottom) / 2;
+            int y = anchorCenterY - popupH / 2;
+            y = std::clamp(y, workTop, std::max(workTop, workBottom - popupH));
+
+            if (popupOnRightOfAnchor && x + popupW > workRight) {
+                popupOnRightOfAnchor = false;
+                x = anchorRect.left - gap - popupW;
+            } else if (!popupOnRightOfAnchor && x < workLeft) {
+                popupOnRightOfAnchor = true;
+                x = anchorRect.right + gap;
+            }
+            x = std::clamp(x, workLeft, std::max(workLeft, workRight - popupW));
+
+            cardScreenX = x;
+            cardScreenY = y;
+            cardWidthPx = popupW;
+            cardHeightPx = popupH;
+            cardOriginDip = 0.0f;
+            // 初始状态让卡片外缘贴住宿主边缘，随后沿 X 轴滑入。
+            animationTravelPx = static_cast<float>(popupW + gap);
+
+            RECT windowRect{};
+            const bool windowRectUnchanged =
+                GetWindowRect(hwnd, &windowRect) && windowRect.left == x &&
+                windowRect.top == y && windowRect.right - windowRect.left == popupW &&
+                windowRect.bottom - windowRect.top == popupH;
+            if (!windowRectUnchanged) {
+                SetWindowPos(hwnd, HWND_TOPMOST, x, y, popupW, popupH,
+                             SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            }
+            return;
+        }
+
+        sideAnchored = false;
         const int anchorCenterX = (anchorRect.left + anchorRect.right) / 2;
         int x = anchorCenterX - popupW / 2;
         x = std::clamp(x, workLeft, std::max(workLeft, workRight - popupW));
@@ -3200,8 +3253,14 @@ struct MediaPopup::Impl {
         // 窗口本身保持固定位置，只让 DirectComposition 根视觉做位移动画。
         // 透明度始终为 1，避免淡入淡出时出现第二层背板。
         renderer.resetRoot();
-        const float fromY = placedAbove ? animationTravelPx : -animationTravelPx;
-        if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f,
+        const float fromX = sideAnchored
+                                ? (popupOnRightOfAnchor ? -animationTravelPx
+                                                         : animationTravelPx)
+                                : 0.0f;
+        const float fromY = sideAnchored ? 0.0f
+                                         : (placedAbove ? animationTravelPx
+                                                        : -animationTravelPx);
+        if (!renderer.animateRoot(fromX, 0.0f, fromY, 0.0f,
                                   1.0f, 1.0f,
                                   static_cast<float>(kOpenAnimationMs) / 1000.0f)) {
             renderer.resetRoot();
@@ -3228,8 +3287,14 @@ struct MediaPopup::Impl {
         deferredRender = false;
         closing = true;
         runtime_log::writef(L"[action][media-popup] hide");
-        const float toY = placedAbove ? animationTravelPx : -animationTravelPx;
-        if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, toY,
+        const float toX = sideAnchored
+                              ? (popupOnRightOfAnchor ? -animationTravelPx
+                                                       : animationTravelPx)
+                              : 0.0f;
+        const float toY = sideAnchored ? 0.0f
+                                       : (placedAbove ? animationTravelPx
+                                                      : -animationTravelPx);
+        if (!renderer.animateRoot(0.0f, toX, 0.0f, toY,
                                   1.0f, 1.0f,
                                   static_cast<float>(kCloseAnimationMs) / 1000.0f)) {
             hideImmediate();

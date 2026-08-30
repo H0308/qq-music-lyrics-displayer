@@ -22,8 +22,8 @@ public:
     // 拖动/滚轮调整音量（percent 0-100）
     void setCallback(std::function<void(int percent)> cb);
 
-    // 显示在锚点矩形（音量按钮的屏幕坐标）上方居中；空间不足时放到下方
-    void showNear(const RECT& anchorRect);
+    // 横向任务栏显示在锚点上方/下方；侧边任务栏贴着任务栏左右显示，并按锚点垂直居中
+    void showNear(const RECT& anchorRect, bool verticalTaskbar, bool popupOnRight);
     void hide();
     bool isVisible() const;
 

@@ -219,7 +219,7 @@ struct VolumePopup::Impl {
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
     }
 
-    void showNear(const RECT& anchorRect) {
+    void showNear(const RECT& anchorRect, bool verticalTaskbar, bool popupOnRight) {
         if (!hwnd)
             return;
         KillTimer(hwnd, kHideTimer);
@@ -234,14 +234,35 @@ struct VolumePopup::Impl {
         GetMonitorInfoW(monitor, &info);
         const RECT work = info.rcWork;
 
-        const int anchorCenterX = (anchorRect.left + anchorRect.right) / 2;
-        int x = anchorCenterX - popupW / 2;
-        x = std::clamp(x, static_cast<int>(work.left),
-                       std::max(static_cast<int>(work.left),
-                                static_cast<int>(work.right) - popupW));
-        int y = anchorRect.top - gap - popupH;
-        if (y < work.top)
-            y = anchorRect.bottom + gap;
+        int x = 0;
+        int y = 0;
+        if (verticalTaskbar) {
+            x = popupOnRight ? anchorRect.right + gap : anchorRect.left - gap - popupW;
+            if (popupOnRight && x + popupW > work.right) {
+                popupOnRight = false;
+                x = anchorRect.left - gap - popupW;
+            } else if (!popupOnRight && x < work.left) {
+                popupOnRight = true;
+                x = anchorRect.right + gap;
+            }
+            x = std::clamp(x, static_cast<int>(work.left),
+                           std::max(static_cast<int>(work.left),
+                                    static_cast<int>(work.right) - popupW));
+            const int anchorCenterY = (anchorRect.top + anchorRect.bottom) / 2;
+            y = anchorCenterY - popupH / 2;
+            y = std::clamp(y, static_cast<int>(work.top),
+                           std::max(static_cast<int>(work.top),
+                                    static_cast<int>(work.bottom) - popupH));
+        } else {
+            const int anchorCenterX = (anchorRect.left + anchorRect.right) / 2;
+            x = anchorCenterX - popupW / 2;
+            x = std::clamp(x, static_cast<int>(work.left),
+                           std::max(static_cast<int>(work.left),
+                                    static_cast<int>(work.right) - popupW));
+            y = anchorRect.top - gap - popupH;
+            if (y < work.top)
+                y = anchorRect.bottom + gap;
+        }
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, popupW, popupH,
                      SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         if (!visible) {
@@ -441,8 +462,8 @@ void VolumePopup::setCallback(std::function<void(int)> cb) {
     impl_->onChange = std::move(cb);
 }
 
-void VolumePopup::showNear(const RECT& anchorRect) {
-    impl_->showNear(anchorRect);
+void VolumePopup::showNear(const RECT& anchorRect, bool verticalTaskbar, bool popupOnRight) {
+    impl_->showNear(anchorRect, verticalTaskbar, popupOnRight);
 }
 
 void VolumePopup::hide() {

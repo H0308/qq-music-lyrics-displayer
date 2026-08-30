@@ -491,7 +491,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
             row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteAlignment))
-            row->enabled = quoteEnabled;
+            row->enabled = quoteEnabled && !state.verticalTaskbar;
         if (auto* row = findRow(kIdIdleQuoteBackground))
             row->enabled = !minimalModeActive();
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
@@ -605,6 +605,7 @@ struct SettingsDialog::Impl {
 
     void createControls() {
         const bool minimal = state.renderMode == kRenderModeMinimal;
+        const bool vertical = state.verticalTaskbar;
         addHeader(0, L"主题");
         addRadio(0, kIdTaskbarTheme, L"任务栏内容主题",
              L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
@@ -619,7 +620,9 @@ struct SettingsDialog::Impl {
                               L"选择字体…", kRowTallH);
         font.valueText = state.fontDesc;
         addHeader(0, L"任务栏歌词");
-        addToggle(0, kIdSongInfo, L"显示歌曲信息", state.songInfoVisible);
+        Row& songInfo = addToggle(0, kIdSongInfo, L"显示歌曲信息",
+                                  vertical ? false : state.songInfoVisible);
+        songInfo.enabled = !vertical;
         addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
         Row& platformIcon = addToggle(0, kIdPlatformIcon, L"显示平台图标",
                                        state.platformIconVisible);
@@ -649,8 +652,8 @@ struct SettingsDialog::Impl {
                  state.idleQuoteEnabled, kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteAlignment, L"每日一言字体对齐方式",
                  L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
-                 {L"左对齐", L"居中", L"右对齐"}, state.idleQuoteAlignment,
-                 state.idleQuoteEnabled, kRowH);
+                 {L"左对齐", L"居中", L"右对齐"}, vertical ? 0 : state.idleQuoteAlignment,
+                 state.idleQuoteEnabled && !vertical, kRowH);
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
             L"可拖动应用条目调整快速启动顺序；通过文件选择器添加本地 EXE，最多添加 10 个应用；开关统一控制名称显示。",
@@ -753,38 +756,42 @@ struct SettingsDialog::Impl {
                      L"横向歌词，关闭逐字与转场"},
                     std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
 
+        const bool spectrumEnabled = !minimal && !vertical;
         Row& spectrum = addToggle(kSpectrumPage, kIdSpectrum, L"频谱",
-                                  minimal ? false : state.spectrumOn);
-        spectrum.enabled = !minimal;
+                                  spectrumEnabled ? state.spectrumOn : false);
+        spectrum.enabled = spectrumEnabled;
         addRadio(kSpectrumPage, kIdSpectrumStyle, L"频谱样式", nullptr,
-                 {L"默认", L"柱状图", L"梦幻波浪"}, state.spectrumStyle,
-                 state.spectrumOn && !minimal,
+                 {L"默认", L"柱状图", L"梦幻波浪"}, vertical ? 0 : state.spectrumStyle,
+                 state.spectrumOn && spectrumEnabled,
                  kSpectrumStyleRowH);
         Row& spectrumBackground =
             addToggle(kSpectrumPage, kIdSpectrumBackground, L"背景波浪",
-                      minimal ? false : state.spectrumBackground);
-        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 && !minimal;
+                      spectrumEnabled ? state.spectrumBackground : false);
+        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 &&
+                                     spectrumEnabled;
         addSlider(kSpectrumPage, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
                   state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground &&
-                      !minimal);
+                      spectrumEnabled);
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
-        addToggle(kLyricsPage, kIdDoubleLine, L"双行歌词", state.doubleLineLyrics);
+        addToggle(kLyricsPage, kIdDoubleLine, L"双行歌词",
+                  vertical ? false : state.doubleLineLyrics).enabled = !vertical;
         addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
                  {L"左对齐", L"居中", L"右对齐"},
-                 state.lyricAlignment, true, kRowH);
+                 vertical ? 0 : state.lyricAlignment, !vertical, kRowH);
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
         addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色与频谱颜色跟随专辑", state.followAlbum);
-        addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音", state.secondaryEnabled);
+        addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
+                  vertical ? false : state.secondaryEnabled).enabled = !vertical;
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
                                             ? L"正在检查翻译和罗马音…"
                                             : state.secondaryAvailability == 2
                                                   ? L"当前歌曲无翻译或罗马音"
                                                   : L"";
         addRadio(kLyricsPage, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
-                 {L"翻译", L"罗马音"}, state.preferRomanization ? 1 : 0,
-                 state.secondaryEnabled && state.secondaryAvailability == 0,
+                 {L"翻译", L"罗马音"}, vertical ? 0 : (state.preferRomanization ? 1 : 0),
+                 !vertical && state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
         addToggle(kLyricsPage, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
@@ -3227,6 +3234,7 @@ struct SettingsDialog::Impl {
 
     void updateState(const SettingsState& s) {
         state = s;
+        const bool vertical = s.verticalTaskbar;
         resetIdleAppDrag();
         if (auto* row = findRow(kIdIdleEntry))
             row->checked = s.idleEntryEnabled;
@@ -3237,7 +3245,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
             row->selected = std::clamp(s.idleQuoteRefreshInterval, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteAlignment))
-            row->selected = std::clamp(s.idleQuoteAlignment, 0, 2);
+            row->selected = vertical ? 0 : std::clamp(s.idleQuoteAlignment, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteBackground))
             row->selected = std::clamp(s.idleQuoteBackground, 0, 4);
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
@@ -3247,8 +3255,10 @@ struct SettingsDialog::Impl {
         updateIdleQuoteSourceRow();
         updateIdleAppsRowHeight();
         const bool minimal = s.renderMode == kRenderModeMinimal;
-        if (auto* row = findRow(kIdSongInfo))
-            row->checked = s.songInfoVisible;
+        if (auto* row = findRow(kIdSongInfo)) {
+            row->checked = vertical ? false : s.songInfoVisible;
+            row->enabled = !vertical;
+        }
         if (auto* row = findRow(kIdAlbumCover))
             row->checked = s.albumCoverVisible;
         if (auto* row = findRow(kIdPlatformIcon)) {
@@ -3260,21 +3270,21 @@ struct SettingsDialog::Impl {
             row->enabled = s.albumCoverVisible && !minimal;
         }
         if (auto* row = findRow(kIdSpectrum)) {
-            row->checked = minimal ? false : s.spectrumOn;
-            row->enabled = !minimal;
+            row->checked = minimal || vertical ? false : s.spectrumOn;
+            row->enabled = !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumStyle)) {
-            row->selected = std::clamp(s.spectrumStyle, 0, 2);
-            row->enabled = s.spectrumOn && !minimal;
+            row->selected = vertical ? 0 : std::clamp(s.spectrumStyle, 0, 2);
+            row->enabled = s.spectrumOn && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumBackground)) {
-            row->checked = minimal ? false : s.spectrumBackground;
-            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && !minimal;
+            row->checked = minimal || vertical ? false : s.spectrumBackground;
+            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumOpacity)) {
             row->value = std::clamp(s.spectrumOpacity, 0, 100);
             row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground &&
-                           !minimal;
+                           !minimal && !vertical;
         }
         if (auto* row = findRow(kIdTaskbarBackground)) {
             row->selected = minimal ? 0 : std::clamp(s.taskbarBackground, 0, 2);
@@ -3338,12 +3348,18 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdFollowAlbum))
             row->checked = s.followAlbum;
-        if (auto* row = findRow(kIdDoubleLine))
-            row->checked = s.doubleLineLyrics;
-        if (auto* row = findRow(kIdAlignment))
-            row->selected = s.lyricAlignment;
-        if (auto* row = findRow(kIdSecondaryOn))
-            row->checked = s.secondaryEnabled;
+        if (auto* row = findRow(kIdDoubleLine)) {
+            row->checked = vertical ? false : s.doubleLineLyrics;
+            row->enabled = !vertical;
+        }
+        if (auto* row = findRow(kIdAlignment)) {
+            row->selected = vertical ? 0 : s.lyricAlignment;
+            row->enabled = !vertical;
+        }
+        if (auto* row = findRow(kIdSecondaryOn)) {
+            row->checked = vertical ? false : s.secondaryEnabled;
+            row->enabled = !vertical;
+        }
         if (auto* row = findRow(kIdSecondaryType)) {
             row->hint = s.secondaryAvailability == 1
                             ? L"正在检查翻译和罗马音…"
@@ -3351,8 +3367,8 @@ struct SettingsDialog::Impl {
             row->showHint = !row->hint.empty();
             row->minHeight = row->showHint ? kRowTallH : kRowH;
             row->height = row->minHeight;
-            row->selected = s.preferRomanization ? 1 : 0;
-            row->enabled = s.secondaryEnabled && s.secondaryAvailability == 0;
+            row->selected = vertical ? 0 : (s.preferRomanization ? 1 : 0);
+            row->enabled = !vertical && s.secondaryEnabled && s.secondaryAvailability == 0;
         }
         if (auto* row = findRow(kIdQqLocalLyricsEnabled))
             row->checked = s.qqLocalLyricsEnabled;

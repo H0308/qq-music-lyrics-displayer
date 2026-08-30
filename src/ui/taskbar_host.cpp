@@ -13,6 +13,7 @@
 #include <dwrite.h>
 #include <gdiplus.h>
 #include <objbase.h>
+#include <shellapi.h>
 #include <uiautomation.h>
 #include <windowsx.h>
 
@@ -46,6 +47,12 @@ constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
 constexpr float kSongInfoLyricGap = 0.0f; // 歌曲信息与歌词之间的左侧间距
 constexpr float kCornerRadius = 8.0f;
+constexpr float kVerticalMinLengthDip = 220.0f;
+constexpr float kVerticalMaxLengthDip = 320.0f;
+constexpr float kVerticalRailPadding = 4.0f;
+constexpr float kVerticalCoverGap = 6.0f;
+constexpr float kVerticalControlsGap = 4.0f;
+constexpr float kVerticalLyricGap = 6.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
@@ -135,6 +142,49 @@ bool isTaskbarCenterAlign() {
                     L"TaskbarAl", 1) != 0;
 }
 
+bool isValidTaskbarEdge(UINT edge) {
+    return edge == ABE_LEFT || edge == ABE_TOP || edge == ABE_RIGHT || edge == ABE_BOTTOM;
+}
+
+UINT queryTaskbarEdge(HWND taskbar, const RECT& taskbarRect) {
+    APPBARDATA data{};
+    data.cbSize = sizeof(data);
+    if (SHAppBarMessage(ABM_GETTASKBARPOS, &data) != 0 && isValidTaskbarEdge(data.uEdge))
+        return data.uEdge;
+
+    // ABM_GETTASKBARPOS 是首选；旧版 Shell 或第三方任务栏替代实现不可用时，
+    // 用任务栏矩形相对显示器边界的位置兜底，避免把侧边任务栏误判成横向。
+    HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        const int width = taskbarRect.right - taskbarRect.left;
+        const int height = taskbarRect.bottom - taskbarRect.top;
+        if (height > width) {
+            if (taskbarRect.left <= info.rcMonitor.left)
+                return ABE_LEFT;
+            if (taskbarRect.right >= info.rcMonitor.right)
+                return ABE_RIGHT;
+        } else {
+            if (taskbarRect.top <= info.rcMonitor.top)
+                return ABE_TOP;
+            if (taskbarRect.bottom >= info.rcMonitor.bottom)
+                return ABE_BOTTOM;
+        }
+    }
+    return (taskbarRect.bottom - taskbarRect.top) > (taskbarRect.right - taskbarRect.left)
+               ? ABE_LEFT
+               : ABE_BOTTOM;
+}
+
+bool isVerticalTaskbarEdge(UINT edge) {
+    return edge == ABE_LEFT || edge == ABE_RIGHT;
+}
+
+int taskbarCrossPixels(const RECT& rect, UINT edge) {
+    return isVerticalTaskbarEdge(edge) ? rect.right - rect.left : rect.bottom - rect.top;
+}
+
 // 以下两个函数都是【阻塞型跨进程调用】（GetWindowText = 同步 SendMessage，UIA = 阻塞 COM），
 // 只允许在探测工作线程上调用。若放在 UI 线程，explorer 同时向我们的任务栏子窗口
 // 发消息时会形成双向死等（WER: AppHangXProcB1，explorer 挂起、对方是本进程）
@@ -199,7 +249,7 @@ void queryTaskbarButtonsUia(IUIAutomation* uia, HWND taskbar, std::vector<RECT>&
         el->get_CurrentIsOffscreen(&offscreen);
         el->get_CurrentBoundingRectangle(&rc);
         el->Release();
-        if (!offscreen && rc.right > rc.left)
+        if (!offscreen && rc.right > rc.left && rc.bottom > rc.top)
             out.push_back(rc);
     }
     arr->Release();
@@ -252,8 +302,9 @@ struct TaskbarHost::Impl {
     std::vector<RECT> uiaButtons_;
     UINT dpi_ = 96;
     bool centerAlign_ = true;
+    UINT taskbarEdge_ = ABE_BOTTOM;
     bool lightTheme_ = false;
-    int positionMode_ = 0; // 0 = 通知区域左侧；1 = 任务栏最左侧
+    int positionMode_ = 0; // 0 = 通知区域前；1 = 任务栏起始端
 
     // 避让探测工作线程：UIA / GetWindowText 等阻塞型跨进程调用全部在这里执行，
     // UI 线程永不阻塞，从根上避免与 explorer 互相死等。结果经原子指针交付
@@ -357,14 +408,22 @@ struct TaskbarHost::Impl {
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
+    // 侧边任务栏使用独立的逐字竖排布局；横向布局仍保留给上下任务栏
+    // 和逐字时间轴计算，避免两种排版互相改变测量结果。
+    IDWriteTextLayout* verticalLyricLayout_ = nullptr;
     IDWriteTextLayout* nextLyricLayout_ = nullptr;
     IDWriteTextLayout* secondaryLayout_ = nullptr;
     // 行切换动画保留上一帧的布局，避免新行直接替换导致文字瞬移。
     IDWriteTextLayout* outgoingLyricLayout_ = nullptr;
+    IDWriteTextLayout* outgoingVerticalLyricLayout_ = nullptr;
     IDWriteTextLayout* outgoingSecondaryLayout_ = nullptr;
     IDWriteTextLayout* outgoingNextLyricLayout_ = nullptr;
     float outgoingLyricWidth_ = 0.0f;
     float outgoingLyricHeight_ = 0.0f;
+    float verticalLyricWidth_ = 0.0f;
+    float verticalLyricHeight_ = 0.0f;
+    float outgoingVerticalLyricWidth_ = 0.0f;
+    float outgoingVerticalLyricHeight_ = 0.0f;
     float outgoingLyricBlockHeight_ = 0.0f;
     float outgoingLyricScrollOffset_ = 0.0f;
     float outgoingSecondaryWidth_ = 0.0f;
@@ -479,6 +538,8 @@ struct TaskbarHost::Impl {
     bool layoutDirty_ = true;
     int lastPxW_ = 0;
     int lastPxH_ = 0;
+    int lastLogicalPxW_ = 0;
+    int lastLogicalPxH_ = 0;
     // 静止跳帧：updateScroll 每帧重算 scrollAnimating_（跑马灯/跟随滚动/转场收尾是否在动），
     // karaokeSettled_ 表示逐字平滑已收敛；两者都静止且无脏状态时可跳过整帧重绘。
     bool scrollAnimating_ = true;
@@ -505,6 +566,35 @@ struct TaskbarHost::Impl {
 
     float scale() const { return static_cast<float>(dpi_) / 96.0f; }
     float dip(int px) const { return static_cast<float>(px) / scale(); }
+
+    bool isVerticalTaskbar() const { return isVerticalTaskbarEdge(taskbarEdge_); }
+
+    void clientPixelSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        if (!hwnd)
+            return;
+        RECT rc{};
+        if (GetClientRect(hwnd, &rc)) {
+            width = rc.right - rc.left;
+            height = rc.bottom - rc.top;
+        }
+    }
+
+    void logicalClientPixelSize(int& width, int& height) const {
+        clientPixelSize(width, height);
+    }
+
+    void clientPointToLogicalDip(float clientX, float clientY, float& xDip,
+                                 float& yDip) const {
+        xDip = clientX / scale();
+        yDip = clientY / scale();
+    }
+
+    POINT logicalDipToClientPoint(float xDip, float yDip) const {
+        return POINT{static_cast<LONG>(std::lround(xDip * scale())),
+                     static_cast<LONG>(std::lround(yDip * scale()))};
+    }
 
     bool updateMediaInfo(const OverlayMediaInfo& info) {
         bool thumbChanged = info.thumbnail != media.thumbnail;
@@ -546,6 +636,7 @@ struct TaskbarHost::Impl {
         centerAlign_ = isTaskbarCenterAlign();
         lightTheme_ = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         updateRects();
+        taskbarEdge_ = queryTaskbarEdge(taskbar_, rcTaskbar_);
         return true;
     }
 
@@ -671,14 +762,18 @@ struct TaskbarHost::Impl {
         return true;
     }
 
-    // 任务栏上的占用区间 [left, right)（屏幕坐标，已合并）：UIA 按钮 + 通知区 +
-    // TrafficMonitor。开始按钮的 HWND 矩形与 UIA StartButton 重复，合并后无害，
-    // 留着可在 UIA 不可用时兜底
+    // 任务栏主轴上的占用区间（屏幕坐标，已合并）：横向任务栏取 [left, right)，
+    // 纵向任务栏取 [top, bottom)。来源为 UIA 按钮 + 通知区 + TrafficMonitor。
+    // 开始按钮的 HWND 矩形与 UIA StartButton 重复，合并后无害，留着可在 UIA
+    // 不可用时兜底。
     std::vector<std::pair<int, int>> occupiedIntervals() const {
         std::vector<std::pair<int, int>> v;
-        auto add = [&v](const RECT& r) {
-            if (r.right > r.left)
-                v.emplace_back(r.left, r.right);
+        const bool vertical = isVerticalTaskbar();
+        auto add = [&v, vertical](const RECT& r) {
+            const int start = vertical ? r.top : r.left;
+            const int end = vertical ? r.bottom : r.right;
+            if (end > start)
+                v.emplace_back(start, end);
         };
         for (const RECT& r : uiaButtons_)
             add(r);
@@ -704,18 +799,21 @@ struct TaskbarHost::Impl {
 
         updateRects();
 
-        int taskbarH = rcTaskbar_.bottom - rcTaskbar_.top;
-        int marginY = std::max(2, (int)std::lround(2.0f * scale()));
-        int pxH = taskbarH - marginY * 2;
-        if (pxH < 16)
-            pxH = taskbarH;
+        const bool vertical = isVerticalTaskbar();
+        const int taskbarCross = taskbarCrossPixels(rcTaskbar_, taskbarEdge_);
+        const int crossMargin = std::max(2, (int)std::lround(2.0f * scale()));
+        int crossPx = taskbarCross - crossMargin * 2;
+        if (crossPx < 16)
+            crossPx = taskbarCross;
+        if (crossPx <= 0)
+            return;
 
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
-        float minWidthDip = kMinWidthDip;
-        float maxWidthDip = kMaxWidthDip;
-        if (!songInfoVisible_ && scene_ != DisplayScene::Idle) {
+        float minWidthDip = vertical ? kVerticalMinLengthDip : kMinWidthDip;
+        float maxWidthDip = vertical ? kVerticalMaxLengthDip : kMaxWidthDip;
+        if (!vertical && !songInfoVisible_ && scene_ != DisplayScene::Idle) {
             // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为可见的封面区域。
-            const float compactLeftDip = albumCoverVisible_ ? coverSlotWidth(dip(pxH)) : 0.0f;
+            const float compactLeftDip = albumCoverVisible_ ? coverSlotWidth(dip(crossPx)) : 0.0f;
             minWidthDip = kMinWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
             maxWidthDip = kMaxWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
         }
@@ -723,59 +821,77 @@ struct TaskbarHost::Impl {
         int maxW = (int)std::lround(maxWidthDip * scale());
         // 仅独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
         const float spectrumExtra = spectrumExtraW();
-        if (spectrumExtra > 0.0f) {
+        if (!vertical && spectrumExtra > 0.0f) {
             int extra = (int)std::lround(spectrumExtra * scale());
             minW += extra;
             maxW += extra;
         }
 
-        // 空闲区间 = 任务栏减去占用区间
+        // 空闲区间 = 任务栏主轴减去占用区间
         struct Span {
             int l, r;
         };
         std::vector<Span> spans;
-        int cursor = rcTaskbar_.left;
+        const int majorStart = vertical ? rcTaskbar_.top : rcTaskbar_.left;
+        const int majorEnd = vertical ? rcTaskbar_.bottom : rcTaskbar_.right;
+        int cursor = majorStart;
         for (const auto& o : occupiedIntervals()) {
             if (o.first > cursor)
-                spans.push_back({cursor, o.first});
-            cursor = std::max(cursor, o.second);
+                spans.push_back({cursor, std::min(o.first, majorEnd)});
+            cursor = std::max(cursor, std::min(o.second, majorEnd));
         }
-        if (cursor < rcTaskbar_.right)
-            spans.push_back({cursor, rcTaskbar_.right});
+        if (cursor < majorEnd)
+            spans.push_back({cursor, majorEnd});
         if (spans.empty())
-            spans.push_back({rcTaskbar_.left, rcTaskbar_.right});
+            spans.push_back({majorStart, majorEnd});
 
-        auto usableW = [gap](const Span& s) { return s.r - s.l - gap * 2; };
-        // 原位优先：模式 0 锚定最右空闲区（通知区/TrafficMonitor 左侧），
-        // 模式 1 锚定最左空闲区（居中任务栏时在开始按钮左侧，左对齐时在应用图标右侧）
+        auto usableMajor = [gap](const Span& s) { return s.r - s.l - gap * 2; };
+        // 原位优先：模式 0 锚定通知区域之前的主轴末端空闲区，模式 1 锚定
+        // 任务栏起始端空闲区。横向对应右/左，纵向对应下/上。
         const Span& pref = positionMode_ == 1 ? spans.front() : spans.back();
 
-        int pxW = 0;
+        int pxMajor = 0;
         int x = 0;
+        int y = 0;
         auto place = [&](const Span& s, int w) {
-            pxW = w;
-            x = positionMode_ == 1 ? s.l + gap : s.r - gap - w;
+            pxMajor = w;
+            const int major = positionMode_ == 1 ? s.l + gap : s.r - gap - w;
+            if (vertical) {
+                x = taskbarEdge_ == ABE_LEFT ? rcTaskbar_.left + crossMargin
+                                             : rcTaskbar_.right - crossMargin - crossPx;
+                y = major;
+            } else {
+                x = major;
+                y = rcTaskbar_.top + crossMargin;
+            }
         };
-        if (usableW(pref) >= minW) {
-            place(pref, std::min(usableW(pref), maxW)); // 原位优先：被挤压先收缩宽度
+        if (usableMajor(pref) >= minW) {
+            place(pref, std::min(usableMajor(pref), maxW)); // 原位优先：被挤压先收缩长度
         } else {
-            // 压到最小宽度仍放不下：换到容得下的最大空闲区
+            // 压到最小长度仍放不下：换到容得下的最大空闲区
             const Span* best = nullptr;
             for (const auto& s : spans) {
-                if (usableW(s) >= minW && (!best || s.r - s.l > best->r - best->l))
+                if (usableMajor(s) >= minW && (!best || s.r - s.l > best->r - best->l))
                     best = &s;
             }
             if (best) {
-                place(*best, std::min(usableW(*best), maxW));
+                place(*best, std::min(usableMajor(*best), maxW));
             } else {
-                // 全任务栏都放不下：维持最小宽度锚在原位（与旧行为一致，允许重叠）
+                // 全任务栏都放不下：维持最小长度锚在原位（与旧行为一致，允许重叠）
                 place(pref, minW);
             }
         }
-        if (x < rcTaskbar_.left)
+        if (vertical) {
+            if (y < rcTaskbar_.top)
+                y = rcTaskbar_.top;
+            if (pxMajor <= majorEnd - majorStart && y + pxMajor > rcTaskbar_.bottom)
+                y = rcTaskbar_.bottom - pxMajor;
+        } else if (x < rcTaskbar_.left) {
             x = rcTaskbar_.left;
+        }
 
-        int y = rcTaskbar_.top + marginY;
+        const int pxW = vertical ? crossPx : pxMajor;
+        const int pxH = vertical ? pxMajor : crossPx;
 
         POINT pt{x, y};
         if (taskbarEmbedded_)
@@ -798,6 +914,8 @@ struct TaskbarHost::Impl {
         UINT dpi = GetDpiForWindow(taskbar_);
         bool center = isTaskbarCenterAlign();
         bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
+        const UINT edge = queryTaskbarEdge(taskbar_, rcTaskbar);
+        const bool edgeChanged = edge != taskbarEdge_;
         bool themeChanged = light != lightTheme_;
 
         RECT rcStart{};
@@ -806,17 +924,27 @@ struct TaskbarHost::Impl {
 
         // TrafficMonitor / UIA 按钮矩形由探测工作线程提供（pickProbeResult），
         // 这里只做非阻塞检查，UI 线程不允许出现阻塞型跨进程调用
-        bool changed = dpi != dpi_ || center != centerAlign_ || themeChanged ||
+        bool changed = dpi != dpi_ || center != centerAlign_ || edgeChanged ||
+                       themeChanged ||
                        !EqualRect(&rcTaskbar, &rcTaskbar_) ||
                        !EqualRect(&rcNotify, &rcNotify_) ||
                        !EqualRect(&rcStart, &rcStart_);
         if (changed) {
-            // 封面位图按显示尺寸解码（decodeCover），DPI/任务栏高度变化时按新尺寸重解码
-            if (dpi != dpi_ ||
-                (rcTaskbar.bottom - rcTaskbar.top) != (rcTaskbar_.bottom - rcTaskbar_.top))
+            // 封面位图按显示尺寸解码（decodeCover），DPI/任务栏厚度或方向变化时按新尺寸重解码
+            if (dpi != dpi_ || edge != taskbarEdge_ ||
+                taskbarCrossPixels(rcTaskbar, edge) != taskbarCrossPixels(rcTaskbar_, taskbarEdge_))
                 coverDirty = true;
             dpi_ = dpi;
             centerAlign_ = center;
+            taskbarEdge_ = edge;
+            if (edgeChanged)
+                renderer.resetRoot();
+            if (edgeChanged) {
+                // 左右侧的竖排文字方向相反；任务栏方向变化时必须重建逐字布局，
+                // 同时丢弃沿用自另一方向的滚动偏移。
+                textDirty_ = true;
+                lyricScrollOffset_ = 0.0f;
+            }
             rcTaskbar_ = rcTaskbar;
             rcNotify_ = rcNotify;
             rcStart_ = rcStart;
@@ -1989,7 +2117,9 @@ struct TaskbarHost::Impl {
         D2D1_ELLIPSE inner{center, innerRadius, innerRadius};
 
         // Direct2D 的正角度就是顺时针旋转；整个唱片组以中心为轴同步旋转。
-        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center));
+        D2D1_MATRIX_3X2_F previous{};
+        rt->GetTransform(&previous);
+        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center) * previous);
         if (brushCoverHalo_)
             rt->FillEllipse(outer, brushCoverHalo_);
         if (brushVinylBase_)
@@ -2028,7 +2158,7 @@ struct TaskbarHost::Impl {
             rt->FillEllipse(D2D1_ELLIPSE{center, std::max(0.8f, s * 0.025f),
                                          std::max(0.8f, s * 0.025f)},
                             brushVinylBase_);
-        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->SetTransform(previous);
     }
 
     void drawPlatformIcon(float coverX, float coverY, float s) {
@@ -2161,9 +2291,11 @@ struct TaskbarHost::Impl {
         r(titleLayout_);
         r(artistLayout_);
         r(lyricLayout_);
+        r(verticalLyricLayout_);
         r(nextLyricLayout_);
         r(secondaryLayout_);
         r(outgoingLyricLayout_);
+        r(outgoingVerticalLyricLayout_);
         r(outgoingSecondaryLayout_);
         r(outgoingNextLyricLayout_);
         r(brushBg_);
@@ -2483,6 +2615,10 @@ struct TaskbarHost::Impl {
             outgoingLyricLayout_->Release();
             outgoingLyricLayout_ = nullptr;
         }
+        if (outgoingVerticalLyricLayout_) {
+            outgoingVerticalLyricLayout_->Release();
+            outgoingVerticalLyricLayout_ = nullptr;
+        }
         if (outgoingSecondaryLayout_) {
             outgoingSecondaryLayout_->Release();
             outgoingSecondaryLayout_ = nullptr;
@@ -2493,6 +2629,8 @@ struct TaskbarHost::Impl {
         }
         outgoingLyricWidth_ = 0.0f;
         outgoingLyricHeight_ = 0.0f;
+        outgoingVerticalLyricWidth_ = 0.0f;
+        outgoingVerticalLyricHeight_ = 0.0f;
         outgoingSecondaryWidth_ = 0.0f;
         outgoingSecondaryHeight_ = 0.0f;
         outgoingLyricBlockHeight_ = 0.0f;
@@ -2636,6 +2774,72 @@ struct TaskbarHost::Impl {
 
     // ---------- 排版 ----------
 
+    // 把一行歌词拆成逐字换行的布局。中文、英文和符号都按 Unicode 码点处理，
+    // 避免 UTF-16 代理项被拆开后出现半个字符；侧边任务栏再用同一布局做纵向滚动。
+    std::wstring makeVerticalLyricText(const std::wstring& text, bool topToBottom) const {
+        std::vector<std::wstring> glyphs;
+        for (size_t i = 0; i < text.size();) {
+            if (text[i] == L'\r' || text[i] == L'\n') {
+                ++i;
+                continue;
+            }
+            size_t units = 1;
+            const wchar_t first = text[i];
+            if (first >= 0xD800 && first <= 0xDBFF && i + 1 < text.size() &&
+                text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
+                units = 2;
+            }
+            glyphs.emplace_back(text.substr(i, units));
+            i += units;
+        }
+        if (!topToBottom)
+            std::reverse(glyphs.begin(), glyphs.end());
+
+        std::wstring result;
+        for (const auto& glyph : glyphs) {
+            if (!result.empty())
+                result.push_back(L'\n');
+            result += glyph;
+        }
+        return result;
+    }
+
+    bool createVerticalLyricLayout(const std::wstring& text, float layoutWidth,
+                                   IDWriteTextLayout** out, float& width, float& height) {
+        width = 0.0f;
+        height = 0.0f;
+        if (!out)
+            return false;
+        *out = nullptr;
+        if (!renderer.dwrite() || !fmtLyric_ || text.empty() || layoutWidth <= 0.0f)
+            return false;
+
+        const bool topToBottom = taskbarEdge_ == ABE_LEFT;
+        const std::wstring verticalText = makeVerticalLyricText(text, topToBottom);
+        if (verticalText.empty() ||
+            FAILED(renderer.dwrite()->CreateTextLayout(
+                verticalText.c_str(), static_cast<UINT32>(verticalText.size()), fmtLyric_,
+                layoutWidth, 100000.0f, out)) ||
+            !*out) {
+            return false;
+        }
+
+        (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        DWRITE_TEXT_METRICS metrics{};
+        if (FAILED((*out)->GetMetrics(&metrics))) {
+            (*out)->Release();
+            *out = nullptr;
+            return false;
+        }
+        // metrics.width 是字符墨宽，而不是布局槽宽；绘制/命中需要保留完整的
+        // 任务栏横向槽宽，才能让每个字在窄栏中保持居中。
+        width = layoutWidth;
+        height = metrics.height;
+        return height > 0.0f;
+    }
+
     void buildTextLayouts(float leftW, float rightW) {
         // 文本布局以超宽无换行创建，度量与区域宽度无关，leftW/rightW 仅保留签名兼容
         (void)leftW;
@@ -2717,6 +2921,12 @@ struct TaskbarHost::Impl {
             lyricLayout_ = nullptr;
             outgoingLyricWidth_ = lyricWidth_;
             outgoingLyricHeight_ = lyricHeight_;
+            if (outgoingVerticalLyricLayout_)
+                outgoingVerticalLyricLayout_->Release();
+            outgoingVerticalLyricLayout_ = verticalLyricLayout_;
+            verticalLyricLayout_ = nullptr;
+            outgoingVerticalLyricWidth_ = verticalLyricWidth_;
+            outgoingVerticalLyricHeight_ = verticalLyricHeight_;
             outgoingLyricScrollOffset_ = outgoingLyricOffset;
             if (sceneTransition) {
                 // 场景转场需要保留旧场景的完整文本块。这里的 next 布局属于
@@ -2769,6 +2979,8 @@ struct TaskbarHost::Impl {
             resetLyricTransition();
             if (lyricLayout_)
                 lyricLayout_->Release();
+            if (verticalLyricLayout_)
+                verticalLyricLayout_->Release();
             if (secondaryLayout_)
                 secondaryLayout_->Release();
             lyricLayout_ = nullptr;
@@ -2795,6 +3007,9 @@ struct TaskbarHost::Impl {
         lyricLayout_ = nullptr;
         lyricWidth_ = 0.0f;
         lyricHeight_ = 0.0f;
+        verticalLyricLayout_ = nullptr;
+        verticalLyricWidth_ = 0.0f;
+        verticalLyricHeight_ = 0.0f;
         secondaryWidth_ = 0.0f;
         secondaryHeight_ = 0.0f;
         if (!lyric.empty()) {
@@ -2807,6 +3022,14 @@ struct TaskbarHost::Impl {
                 lyricLayout_->GetMetrics(&m);
                 lyricWidth_ = m.width;
                 lyricHeight_ = m.height;
+            }
+
+            if (isVerticalTaskbar()) {
+                int verticalPxW = 0;
+                int verticalPxH = 0;
+                clientPixelSize(verticalPxW, verticalPxH);
+                createVerticalLyricLayout(lyric, dip(verticalPxW), &verticalLyricLayout_,
+                                          verticalLyricWidth_, verticalLyricHeight_);
             }
         }
         if (!doubleLineLyrics && !secondary.empty() && fmtSecondary_) {
@@ -2858,11 +3081,17 @@ struct TaskbarHost::Impl {
         // 动态滚动速度：让歌词在当前行时长内滚动完一圈。两句间隔越小速度越快，
         // 间隔大到算出的速度低于 kLyricScrollSpeed 时保持最慢速度不变
         lyricScrollSpeed_ = kLyricScrollSpeed;
-        if (currentLine >= 0 && (size_t)currentLine + 1 < lines.size() && lyricWidth_ > 0.0f) {
+        const float lyricScrollExtent =
+            isVerticalTaskbar() && verticalLyricHeight_ > 0.0f ? verticalLyricHeight_
+                                                               : lyricWidth_;
+        const float lyricScrollLoopGap = isVerticalTaskbar() ? kVerticalLyricGap
+                                                              : kTextPadding * 2.0f;
+        if (currentLine >= 0 && (size_t)currentLine + 1 < lines.size() &&
+            lyricScrollExtent > 0.0f) {
             int64_t durMs =
                 lines[(size_t)currentLine + 1].ms - lines[(size_t)currentLine].ms;
             if (durMs > 0) {
-                float loopW = lyricWidth_ + kTextPadding * 2.0f;
+                float loopW = lyricScrollExtent + lyricScrollLoopGap;
                 lyricScrollSpeed_ =
                     std::max(kLyricScrollSpeed, loopW / (static_cast<float>(durMs) / 1000.0f));
             }
@@ -2885,9 +3114,10 @@ struct TaskbarHost::Impl {
     float coverSize() const {
         if (!hwnd)
             return 24.0f;
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        float h = dip(rc.bottom - rc.top);
+        int pxW = 0;
+        int pxH = 0;
+        logicalClientPixelSize(pxW, pxH);
+        const float h = dip(isVerticalTaskbar() ? pxW : pxH);
         return h - kCoverPadding * 2.0f;
     }
 
@@ -2910,6 +3140,73 @@ struct TaskbarHost::Impl {
         float leftW = 0.0f;
         float rightW = 0.0f;
     };
+
+    struct VerticalLayout {
+        float w = 0.0f;
+        float h = 0.0f;
+        float coverX = 0.0f;
+        float coverY = 0.0f;
+        float coverSize = 0.0f;
+        float lyricY = 0.0f;
+        float lyricBottom = 0.0f;
+        bool showControls = false;
+        float controlRadius = 0.0f;
+        D2D1_POINT_2F controlCenters[4]{};
+    };
+
+    VerticalLayout verticalLayout() const {
+        VerticalLayout layout;
+        int pxW = 0;
+        int pxH = 0;
+        clientPixelSize(pxW, pxH);
+        layout.w = dip(pxW);
+        layout.h = dip(pxH);
+        if (layout.w <= 0.0f || layout.h <= 0.0f)
+            return layout;
+
+        const float pad = std::min(kVerticalRailPadding, layout.w * 0.18f);
+        const float contentW = std::max(1.0f, layout.w - pad * 2.0f);
+        const bool playbackScene = scene_ != DisplayScene::Idle &&
+                                    scene_ != DisplayScene::NoPlayback;
+        if (albumCoverVisible_ && playbackScene) {
+            layout.coverSize = contentW;
+            layout.coverX = (layout.w - layout.coverSize) * 0.5f;
+            layout.coverY = pad;
+        }
+
+        layout.lyricY = layout.coverSize > 0.0f
+                            ? layout.coverY + layout.coverSize + kVerticalCoverGap
+                            : pad;
+        layout.lyricBottom = std::max(layout.lyricY + 1.0f, layout.h - pad);
+        layout.showControls = mouseOver_ && controlsOnHover_ &&
+                              hoverControlStyle_ == HoverControlStyle::Inline && playbackScene;
+        if (layout.showControls) {
+            layout.controlRadius = std::clamp(layout.w * 0.23f, 6.0f, 9.0f);
+            const float diameter = layout.controlRadius * 2.0f;
+            // 与横向内嵌控件复用同一套视觉节奏：按钮中心间距约为 2.8r。
+            const float transportPitch = layout.controlRadius * 2.8f;
+            const float transportGap = std::max(kVerticalControlsGap, transportPitch - diameter);
+            // 音量是独立的辅助操作，与上一首/播放/下一首之间留出更明显的层级间距。
+            const float volumeGap = transportGap + layout.controlRadius * 0.9f;
+            const float blockH = diameter * 4.0f + transportGap * 2.0f + volumeGap;
+            const float controlsTop = layout.lyricY;
+            const float controlsBottom = layout.h - pad;
+            const float freeSpace = controlsBottom - controlsTop - blockH;
+            const float groupTop = controlsTop + std::max(0.0f, freeSpace) * 0.5f;
+            const float firstY = groupTop + layout.controlRadius;
+            if (freeSpace >= 0.0f && groupTop - kVerticalLyricGap > layout.lyricY) {
+                for (int i = 0; i < 3; ++i)
+                    layout.controlCenters[i] =
+                        D2D1::Point2F(layout.w * 0.5f, firstY + i * transportPitch);
+                layout.controlCenters[3] = D2D1::Point2F(
+                    layout.w * 0.5f, firstY + transportPitch * 2.0f + diameter + volumeGap);
+                layout.lyricBottom = groupTop - kVerticalLyricGap;
+            } else {
+                layout.showControls = false;
+            }
+        }
+        return layout;
+    }
 
     LayoutMetrics layoutMetricsForScene(DisplayScene scene, int pxW, int pxH) const {
         LayoutMetrics m;
@@ -3102,11 +3399,14 @@ struct TaskbarHost::Impl {
     // 上一首/播放/下一首 + 音量按钮整体居中：centers[0..2] 为播放控制，
     // centers[3] 为音量按钮。返回 false 表示当前不在内嵌控件展示状态。
     bool inlineControlsLayout(float centers[4], float& cy, float& r) const {
+        if (isVerticalTaskbar())
+            return false;
         if (!controlsOnHover_ || !mouseOver_ || hoverControlStyle_ != HoverControlStyle::Inline)
             return false;
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        int pxW = 0;
+        int pxH = 0;
+        logicalClientPixelSize(pxW, pxH);
+        LayoutMetrics layout = layoutMetrics(pxW, pxH);
         if (layout.w <= 0.0f || layout.h <= 0.0f)
             return false;
         cy = layout.h * 0.5f;
@@ -3135,18 +3435,43 @@ struct TaskbarHost::Impl {
     }
 
     bool hitVolumeButton(float x, float y) const {
+        if (isVerticalTaskbar()) {
+            const VerticalLayout layout = verticalLayout();
+            if (!layout.showControls)
+                return false;
+            float logicalX = 0.0f;
+            float logicalY = 0.0f;
+            clientPointToLogicalDip(x, y, logicalX, logicalY);
+            return std::hypot(logicalX - layout.controlCenters[3].x,
+                              logicalY - layout.controlCenters[3].y) <=
+                   layout.controlRadius + 4.0f;
+        }
         float centers[4]{};
         float cy = 0.0f;
         float r = 0.0f;
         if (!inlineControlsLayout(centers, cy, r))
             return false;
-        x = dip(static_cast<int>(x));
-        y = dip(static_cast<int>(y));
+        float logicalX = 0.0f;
+        float logicalY = 0.0f;
+        clientPointToLogicalDip(x, y, logicalX, logicalY);
+        x = logicalX;
+        y = logicalY;
         return std::hypot(x - centers[3], y - cy) <= r + 4.0f;
     }
 
     // 音量按钮的屏幕坐标矩形（音量滑块浮窗的锚点）
     RECT volumeButtonScreenRect() const {
+        if (isVerticalTaskbar()) {
+            const VerticalLayout layout = verticalLayout();
+            if (layout.showControls) {
+                const float s = scale();
+                POINT pt = logicalDipToClientPoint(layout.controlCenters[3].x,
+                                                   layout.controlCenters[3].y);
+                ClientToScreen(hwnd, &pt);
+                const int half = static_cast<int>(std::lround((layout.controlRadius + 6.0f) * s));
+                return RECT{pt.x - half, pt.y - half, pt.x + half, pt.y + half};
+            }
+        }
         float centers[4]{};
         float cy = 0.0f;
         float r = 0.0f;
@@ -3156,8 +3481,7 @@ struct TaskbarHost::Impl {
             return rc;
         }
         const float s = scale();
-        POINT pt{static_cast<LONG>(std::lround(centers[3] * s)),
-                 static_cast<LONG>(std::lround(cy * s))};
+        POINT pt = logicalDipToClientPoint(centers[3], cy);
         ClientToScreen(hwnd, &pt);
         const int half = static_cast<int>(std::lround((r + 6.0f) * s));
         return RECT{pt.x - half, pt.y - half, pt.x + half, pt.y + half};
@@ -3176,14 +3500,36 @@ struct TaskbarHost::Impl {
     int hitButton(float x, float y) const {
         if (!controlsOnHover_ || !mouseOver_ || hoverControlStyle_ != HoverControlStyle::Inline)
             return -1;
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
+        if (isVerticalTaskbar()) {
+            const VerticalLayout layout = verticalLayout();
+            if (!layout.showControls)
+                return -1;
+            float logicalX = 0.0f;
+            float logicalY = 0.0f;
+            clientPointToLogicalDip(x, y, logicalX, logicalY);
+            for (int i = 0; i < 3; ++i) {
+                const bool enabled = i == 0 ? media.canPrev
+                                            : i == 1 ? media.canPlayPause : media.canNext;
+                if (enabled &&
+                    std::hypot(logicalX - layout.controlCenters[i].x,
+                               logicalY - layout.controlCenters[i].y) <=
+                        layout.controlRadius + 4.0f)
+                    return i;
+            }
+            return -1;
+        }
         // 鼠标消息使用像素坐标，而 render 使用 DIP；先统一到 DIP，
         // 并与 render 使用完全相同的左侧分区计算。
-        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        int pxW = 0;
+        int pxH = 0;
+        logicalClientPixelSize(pxW, pxH);
+        LayoutMetrics layout = layoutMetrics(pxW, pxH);
         float w = layout.w;
-        x = dip(static_cast<int>(x));
-        y = dip(static_cast<int>(y));
+        float logicalX = 0.0f;
+        float logicalY = 0.0f;
+        clientPointToLogicalDip(x, y, logicalX, logicalY);
+        x = logicalX;
+        y = logicalY;
         float leftW = layout.leftW;
         if (x < leftW || x > w)
             return -1;
@@ -3441,6 +3787,202 @@ struct TaskbarHost::Impl {
             fxBmp->Release();
     }
 
+    void drawVerticalScrollingText(
+        IDWriteTextLayout* layout, float textW, float textH, float areaH, float x, float y,
+        float offset, ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
+        ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
+        float karaokeX = 0.0f, float opacity = 1.0f,
+        LyricAlignment alignment = LyricAlignment::Center, bool topToBottom = true,
+        bool singleCopy = false) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !layout || textW <= 0.0f || textH <= 0.0f || areaH <= 0.0f)
+            return;
+        (void)alignment;
+        opacity = std::clamp(opacity, 0.0f, 1.0f);
+        if (opacity >= 0.999f)
+            opacity = 1.0f;
+
+        // 这里的 layout 已经是“每个字一行”的 DirectWrite 布局，因此只做 Y
+        // 方向平移，不再旋转整句。左右侧通过布局文字顺序镜像，字形始终保持正向。
+        ID2D1Bitmap* fxBmp = nullptr;
+        if (glow || outline)
+            fxBmp = textFxBitmap(layout, textW, textH, brush, outline, glow);
+        ID2D1Brush* brushes[4] = {fxBmp ? nullptr : brush, fxBmp ? nullptr : outline,
+                                  fxBmp ? nullptr : glow, karaokeBrush};
+        ID2D1Brush* changed[4] = {};
+        float previousOpacity[4] = {};
+        int changedCount = 0;
+        for (ID2D1Brush* candidate : brushes) {
+            if (!candidate || opacity >= 0.999f)
+                continue;
+            bool alreadyChanged = false;
+            for (int i = 0; i < changedCount; ++i)
+                alreadyChanged = alreadyChanged || changed[i] == candidate;
+            if (alreadyChanged)
+                continue;
+            previousOpacity[changedCount] = candidate->GetOpacity();
+            candidate->SetOpacity(previousOpacity[changedCount] * opacity);
+            changed[changedCount++] = candidate;
+        }
+
+        rt->PushAxisAlignedClip(D2D1::RectF(x, y, x + textW, y + areaH),
+                                D2D1_ANTIALIAS_MODE_ALIASED);
+        // 右侧即使文本超出可视区，也要让原句的首字从底部开始，
+        // 不能把溢出时的负空间裁成 0，否则会变成从顶部反向出现。
+        const float alignedTop = topToBottom ? y : y + areaH - textH;
+        const float base = alignedTop - offset;
+        float bases[2]{};
+        int count = 0;
+        if (karaokeBrush || singleCopy || textH <= areaH) {
+            bases[count++] = base;
+        } else {
+            const float loopH = textH + kVerticalLyricGap;
+            bases[count++] = base;
+            bases[count++] = base + loopH;
+        }
+
+        if (fxBmp) {
+            constexpr float textFxPad = 3.0f;
+            const float textFxW = textW + textFxPad * 2.0f;
+            const float textFxH = textH + textFxPad * 2.0f;
+            for (int i = 0; i < count; ++i)
+                rt->DrawBitmap(fxBmp,
+                               D2D1::RectF(x - textFxPad, bases[i] - textFxPad,
+                                           x - textFxPad + textFxW,
+                                           bases[i] - textFxPad + textFxH),
+                               opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        } else {
+            static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
+                                                  {0.7071f, 0.7071f},
+                                                  {0.0f, 1.0f},
+                                                  {-0.7071f, 0.7071f},
+                                                  {-1.0f, 0.0f},
+                                                  {-0.7071f, -0.7071f},
+                                                  {0.0f, -1.0f},
+                                                  {0.7071f, -0.7071f}};
+            if (glow || outline) {
+                for (int i = 0; i < count; ++i) {
+                    if (glow) {
+                        for (auto& d : kDirs)
+                            rt->DrawTextLayout(
+                                D2D1::Point2F(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f),
+                                layout, glow);
+                    }
+                    if (outline) {
+                        for (auto& d : kDirs)
+                            rt->DrawTextLayout(
+                                D2D1::Point2F(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f),
+                                layout, outline);
+                    }
+                }
+            }
+            for (int i = 0; i < count; ++i)
+                rt->DrawTextLayout(D2D1::Point2F(x, bases[i]), layout, brush);
+        }
+
+        // karaokeX 在竖排路径中传入的是“已唱比例”：左侧从上向下填充，
+        // 右侧从下向上填充，与 makeVerticalLyricText 的字符顺序一致。
+        if (karaokeBrush && karaokeX > 0.0f) {
+            const float progress = std::clamp(karaokeX, 0.0f, 1.0f);
+            const float top = topToBottom ? bases[0] : bases[0] + textH * (1.0f - progress);
+            const float bottom = topToBottom ? bases[0] + textH * progress : bases[0] + textH;
+            if (bottom > top) {
+                rt->PushAxisAlignedClip(D2D1::RectF(x, top, x + textW, bottom),
+                                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                rt->DrawTextLayout(D2D1::Point2F(x, bases[0]), layout, karaokeBrush);
+                rt->PopAxisAlignedClip();
+            }
+        }
+        rt->PopAxisAlignedClip();
+        for (int i = 0; i < changedCount; ++i)
+            changed[i]->SetOpacity(previousOpacity[i]);
+        if (fxBmp)
+            fxBmp->Release();
+    }
+
+    void drawVerticalLyrics(const VerticalLayout& layout) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || layout.lyricBottom <= layout.lyricY)
+            return;
+
+        const float areaH = layout.lyricBottom - layout.lyricY;
+        const bool idleScene = scene_ == DisplayScene::Idle;
+        const bool topToBottom = taskbarEdge_ == ABE_LEFT;
+        ID2D1Brush* primaryBrush = idleScene
+                                       ? static_cast<ID2D1Brush*>(brushText_)
+                                       : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
+                                                                               : brushText_);
+        const bool outgoingIdleScene = outgoingScene_ == DisplayScene::Idle;
+        ID2D1Brush* outgoingBrush = outgoingIdleScene
+                                        ? static_cast<ID2D1Brush*>(brushText_)
+                                        : primaryBrush;
+        ID2D1Brush* effectOutline = !idleScene && lyricOutline_
+                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                        : nullptr;
+        ID2D1Brush* effectGlow = !idleScene && lyricGlow_
+                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_)
+                                     : nullptr;
+        ID2D1Brush* outgoingOutline = !outgoingIdleScene && lyricOutline_
+                                          ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                          : nullptr;
+        ID2D1Brush* outgoingGlow = !outgoingIdleScene && lyricGlow_
+                                       ? static_cast<ID2D1Brush*>(brushLyricGlow_)
+                                       : nullptr;
+        const LyricAlignment alignment = LyricAlignment::Center;
+
+        auto drawLine = [&](IDWriteTextLayout* textLayout, float textW, float textH, float y,
+                            float offset, ID2D1Brush* brush, float opacity, bool singleCopy,
+                            ID2D1Brush* outline, ID2D1Brush* glow,
+                            ID2D1Brush* karaokeBrush, float karaokeProgress) {
+            drawVerticalScrollingText(textLayout, textW, textH, areaH, 0.0f, y, offset, brush,
+                                      outline, glow, karaokeBrush, karaokeProgress, opacity,
+                                      alignment, topToBottom, singleCopy);
+        };
+
+        auto verticalKaraokeProgress = [&](float karaokeX) {
+            return lyricWidth_ > 0.0f
+                       ? std::clamp(karaokeX / lyricWidth_, 0.0f, 1.0f)
+                       : 0.0f;
+        };
+
+        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, layout.lyricY, layout.w, layout.lyricBottom),
+                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (lyricTransitionActive_ && outgoingVerticalLyricLayout_) {
+            const LyricTransitionSample transition = lyricTransitionSample();
+            const float travel = std::clamp(areaH * 0.24f, 18.0f, 48.0f);
+            const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+            const float oldY = layout.lyricY - direction * travel * transition.movement;
+            const float newY = layout.lyricY + direction * travel *
+                                                         (1.0f - transition.movement);
+            drawLine(outgoingVerticalLyricLayout_, outgoingVerticalLyricWidth_,
+                     outgoingVerticalLyricHeight_, oldY, outgoingLyricScrollOffset_,
+                     outgoingBrush, 1.0f - transition.fadeOut, true, outgoingOutline,
+                     outgoingGlow, nullptr, 0.0f);
+
+            const LyricLine* incomingLine = !idleScene ? karaokeLine() : nullptr;
+            const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+            const float incomingKaraokeX = incomingKaraoke ? karaokeSmoothStep(*incomingLine)
+                                                           : 0.0f;
+            drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_, newY,
+                     lyricScrollOffset_,
+                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
+                     transition.fadeIn, true, effectOutline, effectGlow,
+                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+                     verticalKaraokeProgress(incomingKaraokeX));
+        } else if (verticalLyricLayout_) {
+            const LyricLine* currentLine = !idleScene ? karaokeLine() : nullptr;
+            const bool karaoke = currentLine && brushLyric_ && brushLyricDim_;
+            const float karaokeX = karaoke ? karaokeSmoothStep(*currentLine) : 0.0f;
+            drawLine(verticalLyricLayout_, verticalLyricWidth_, verticalLyricHeight_,
+                     layout.lyricY, lyricScrollOffset_,
+                     karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
+                     1.0f, false, effectOutline, effectGlow,
+                     karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+                     verticalKaraokeProgress(karaokeX));
+        }
+        rt->PopAxisAlignedClip();
+    }
+
     LyricAlignment activeLyricAlignment() const {
         return scene_ == DisplayScene::Idle ? idleQuoteAlignment_ : lyricAlignment_;
     }
@@ -3489,10 +4031,12 @@ struct TaskbarHost::Impl {
         else if (activeLyricAlignment() == LyricAlignment::Right)
             anchorX = x + areaW;
         const D2D1_POINT_2F anchor = D2D1::Point2F(anchorX, y + textH * 0.5f);
-        rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor));
+        D2D1_MATRIX_3X2_F previous{};
+        rt->GetTransform(&previous);
+        rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor) * previous);
         drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
                                 karaokeBrush, karaokeX, opacity, singleCopy);
-        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->SetTransform(previous);
     }
 
     void drawDoubleLineLyrics(float lyricAreaX, float lyricAreaW, float h,
@@ -3586,7 +4130,8 @@ struct TaskbarHost::Impl {
         if (!rt || !lyricLayout_ || !outgoingLyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return;
 
-        const LyricArea outgoingArea = lyricAreaForScene(outgoingScene_, lastPxW_, lastPxH_);
+        const LyricArea outgoingArea =
+            lyricAreaForScene(outgoingScene_, lastLogicalPxW_, lastLogicalPxH_);
         const LyricTransitionSample transition = lyricTransitionSample();
         const float movementT = transition.movement;
         const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
@@ -3792,7 +4337,8 @@ struct TaskbarHost::Impl {
 
     bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
                                      float lyricBlockH) {
-        if (useDoubleLineLyrics() || !lyricTransitionActive_ || !outgoingLyricLayout_ ||
+        if (isVerticalTaskbar() || useDoubleLineLyrics() || !lyricTransitionActive_ ||
+            !outgoingLyricLayout_ ||
             !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
         if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_, lastPxW_, lastPxH_))
@@ -3835,7 +4381,8 @@ struct TaskbarHost::Impl {
                                   float lyricBlockH) {
         // 图层增删不单独 Commit：改动挂起到 render() 末尾 present() 的 Commit，与承载
         // 歌词的底层新帧同批上屏，避免「图层已撤、底层新帧未上屏」的空窗闪烁。
-        if (lyricTransitionDCompEnd_ || (showControls && lyricTransitionDCompActive_) ||
+        if ((isVerticalTaskbar() && lyricTransitionDCompActive_) || lyricTransitionDCompEnd_ ||
+            (showControls && lyricTransitionDCompActive_) ||
             (lyricTransitionDCompActive_ && karaokeLine())) {
             renderer.clearLyricTransitionLayers();
             lyricTransitionDCompActive_ = false;
@@ -3855,6 +4402,133 @@ struct TaskbarHost::Impl {
         }
     }
 
+    void renderVerticalTaskbar(float w, float h, ID2D1Effect* coverBlurChain) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || w <= 0.0f || h <= 0.0f)
+            return;
+
+        const VerticalLayout layout = verticalLayout();
+        if (layout.w <= 0.0f || layout.h <= 0.0f)
+            return;
+
+        rt->BeginDraw();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+        const float radius = std::min(kCornerRadius, w * 0.5f);
+        D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), radius, radius};
+        if (coverBlurChain && coverLayer_ && brushBackground_) {
+            ID2D1RoundedRectangleGeometry* clip = nullptr;
+            if (auto* factory = renderer.d2d())
+                factory->CreateRoundedRectangleGeometry(bg, &clip);
+            if (clip) {
+                rt->PushLayer(D2D1::LayerParameters1(
+                                  D2D1::InfiniteRect(), clip,
+                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                  D2D1::Matrix3x2F::Identity(),
+                                  coverBackgroundOpacityPct_ / 100.0f),
+                              coverLayer_);
+                rt->DrawImage(coverBlurChain, D2D1::Point2F(0.0f, 0.0f));
+                rt->PopLayer();
+                clip->Release();
+                brushBackground_->SetColor(lightTheme_
+                                               ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f)
+                                               : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f));
+                rt->FillRoundedRectangle(bg, brushBackground_);
+            }
+        } else if (background_ == TaskbarBackground::Solid && brushBackground_) {
+            brushBackground_->SetColor(lightTheme_
+                                           ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.85f)
+                                           : D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.85f));
+            rt->FillRoundedRectangle(bg, brushBackground_);
+        }
+
+        rt->FillRoundedRectangle(bg, brushBg_);
+        if (mouseOver_ && brushHover_)
+            rt->FillRoundedRectangle(bg, brushHover_);
+
+        if (progressBackgroundActive() && brushProgressBg_ && media.durationMs > 0) {
+            const float fraction = static_cast<float>(std::clamp(
+                static_cast<double>(positionMs_) / static_cast<double>(media.durationMs), 0.0,
+                1.0));
+            const float fillBottom = h * fraction;
+            if (fillBottom > 0.5f) {
+                const COLORREF c = media.hasDominantColor ? media.dominantColor
+                                                          : fluent::accentColor();
+                brushProgressBg_->SetColor(
+                    fluent::toD2D(c, progressBackgroundOpacityPct_ / 100.0f));
+                const float fillRadius = std::min({radius, fillBottom * 0.5f, w * 0.5f});
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, fillBottom), fillRadius,
+                                      fillRadius),
+                    brushProgressBg_);
+            }
+        }
+
+        if (taskbarDynamicBackgroundVisible())
+            drawIdleQuoteBackground(w, h, w);
+
+        const bool playbackScene = scene_ != DisplayScene::Idle &&
+                                    scene_ != DisplayScene::NoPlayback;
+        if (layout.coverSize > 0.0f && playbackScene) {
+            const float s = layout.coverSize;
+            if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
+                drawVinylCover(layout.coverX, layout.coverY, s);
+            } else {
+                const D2D1_RECT_F coverRect =
+                    D2D1::RectF(layout.coverX, layout.coverY, layout.coverX + s,
+                                layout.coverY + s);
+                if (coverBmp && coverClip_ && coverLayer_) {
+                    rt->PushLayer(D2D1::LayerParameters1(
+                                      D2D1::InfiniteRect(), coverClip_,
+                                      D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                      D2D1::Matrix3x2F::Translation(layout.coverX, layout.coverY)),
+                                  coverLayer_);
+                    rt->DrawBitmap(coverBmp, coverRect, 1.0f,
+                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    rt->PopLayer();
+                } else if (brushDim_) {
+                    rt->FillRoundedRectangle(
+                        D2D1::RoundedRect(coverRect, std::min(4.0f, s * 0.18f),
+                                          std::min(4.0f, s * 0.18f)),
+                        brushDim_);
+                }
+            }
+            drawPlatformIcon(layout.coverX, layout.coverY, layout.coverSize);
+        }
+
+        if (layout.showControls) {
+            for (int i = 0; i < 3; ++i)
+                drawButton(i, layout.controlCenters[i], layout.controlRadius);
+            drawVolumeButton(layout.controlCenters[3], layout.controlRadius);
+        } else {
+            drawVerticalLyrics(layout);
+        }
+
+        const HRESULT hr = rt->EndDraw();
+        if (hr == D2DERR_RECREATE_TARGET) {
+            discardDeviceResources();
+            return;
+        }
+        if (SUCCEEDED(hr)) {
+            if (songTransitionPending_) {
+                songTransitionPending_ = false;
+                renderer.resetRoot();
+                if (!isMinimalMode()) {
+                    const float travel = kSongTransitionTravelDip * scale();
+                    const float fromY = taskbarEdge_ == ABE_LEFT ? -travel : travel;
+                    if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
+                                              kSongTransitionMs / 1000.0f))
+                        renderer.resetRoot();
+                }
+            }
+            if (!renderer.present())
+                discardDeviceResources();
+        } else {
+            runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
+        }
+    }
+
     void render() {
         if (!visible || !hwnd)
             return;
@@ -3866,20 +4540,27 @@ struct TaskbarHost::Impl {
             layoutDirty_ = false;
         }
 
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        int pxW = rc.right - rc.left;
-        int pxH = rc.bottom - rc.top;
+        int pxW = 0;
+        int pxH = 0;
+        clientPixelSize(pxW, pxH);
         if (pxW <= 0 || pxH <= 0)
             return;
+        const bool vertical = isVerticalTaskbar();
+        int logicalPxW = pxW;
+        int logicalPxH = pxH;
         if (pxW != lastPxW_ || pxH != lastPxH_) {
             if (lyricTransitionDCompActive_)
                 lyricTransitionDCompEnd_ = true;
             lastPxW_ = pxW;
             lastPxH_ = pxH;
             geomDirty_ = true;
-            // 文本布局以超宽无换行创建，度量与窗口尺寸无关，无需重建
+            if (vertical)
+                textDirty_ = true;
+            // 横向文本布局以超宽无换行创建，度量与窗口尺寸无关；侧边竖排布局
+            // 依赖任务栏窄栏宽度，已在上面标记 textDirty_ 以便重建。
         }
+        lastLogicalPxW_ = logicalPxW;
+        lastLogicalPxH_ = logicalPxH;
 
         if (!renderer.bind(hwnd, pxW, pxH))
             return;
@@ -3896,7 +4577,22 @@ struct TaskbarHost::Impl {
         if (platformIconDirty)
             decodePlatformIcon();
 
-        LayoutMetrics layout = layoutMetrics(pxW, pxH);
+        if (vertical) {
+            if (textDirty_ || songInfoDirty_)
+                buildTextLayouts(0.0f, 0.0f);
+            if (lyricTransitionDCompActive_) {
+                renderer.clearLyricTransitionLayers();
+                lyricTransitionDCompActive_ = false;
+                lyricTransitionDCompEnd_ = false;
+            }
+            ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp
+                                              ? ensureCoverBlurChain(dip(pxW), dip(pxH))
+                                              : nullptr;
+            renderVerticalTaskbar(dip(pxW), dip(pxH), coverBlurChain);
+            return;
+        }
+
+        LayoutMetrics layout = layoutMetrics(logicalPxW, logicalPxH);
         float w = layout.w;
         float h = layout.h;
         float leftW = layout.leftW;
@@ -4154,7 +4850,12 @@ struct TaskbarHost::Impl {
                 renderer.resetRoot();
                 if (!isMinimalMode()) {
                     const float travel = kSongTransitionTravelDip * scale();
-                    if (!renderer.animateRoot(travel, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f,
+                    const bool vertical = isVerticalTaskbar();
+                    const float fromX = vertical ? 0.0f : travel;
+                    const float fromY = vertical
+                                            ? (taskbarEdge_ == ABE_LEFT ? -travel : travel)
+                                            : 0.0f;
+                    if (!renderer.animateRoot(fromX, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
                                               kSongTransitionMs / 1000.0f))
                         renderer.resetRoot();
                 }
@@ -4193,7 +4894,8 @@ struct TaskbarHost::Impl {
 
         // 静止跳帧判定：本帧有任何滚动/转场在动就置 animating，供 onTimer 决定是否重绘
         bool animating = wasTransitioning;
-        auto marquee = [&](float textW, float areaW, float speed, float& offset) {
+        auto marquee = [&](float textW, float areaW, float speed, float& offset,
+                           float loopGap = kTextPadding * 2.0f) {
             if (!clientAnimations_) {
                 if (offset != 0.0f) {
                     offset = 0.0f;
@@ -4208,16 +4910,72 @@ struct TaskbarHost::Impl {
                 }
                 return;
             }
-            float loopW = textW + kTextPadding * 2.0f;
+            float loopW = textW + loopGap;
             offset = std::fmod(offset + speed * std::max(dt, 0.0f), loopW);
             if (offset < 0.0f)
                 offset += loopW;
             animating = true;
         };
 
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        LayoutMetrics layout = layoutMetrics(rc.right - rc.left, rc.bottom - rc.top);
+        int pxW = 0;
+        int pxH = 0;
+        logicalClientPixelSize(pxW, pxH);
+        if (isVerticalTaskbar()) {
+            const VerticalLayout verticalLayoutState = verticalLayout();
+            const float lyricAreaH = verticalLayoutState.lyricBottom -
+                                     verticalLayoutState.lyricY;
+            if (lyricAreaH <= 0.0f) {
+                scrollAnimating_ = animating;
+                return;
+            }
+
+            const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
+            const bool lyricMarqueePlaying = media.playing;
+            const bool idleMarquee = scene_ == DisplayScene::Idle;
+            const float verticalLyricExtent = verticalLyricHeight_ > 0.0f
+                                                  ? verticalLyricHeight_
+                                                  : lyricWidth_;
+            if (verticalLayoutState.showControls) {
+                scrollAnimating_ = animating;
+                return;
+            }
+            if (karaokeLine() && clientAnimations_) {
+                const float before = lyricScrollOffset_;
+                if (!holdLyricScroll) {
+                    if (verticalLyricExtent > lyricAreaH) {
+                        const float sungX =
+                            (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
+                        const float target = std::clamp(
+                            verticalLyricExtent *
+                                    (lyricWidth_ > 0.0f ? sungX / lyricWidth_ : 0.0f) -
+                                lyricAreaH * 0.3f,
+                            0.0f, verticalLyricExtent - lyricAreaH);
+                        const float diff = target - lyricScrollOffset_;
+                        const float followDtMs =
+                            std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
+                        const float alpha = 1.0f - std::exp(-followDtMs / kKaraokeScrollFollowMs);
+                        lyricScrollOffset_ =
+                            std::fabs(diff) < 0.5f ? target : lyricScrollOffset_ + diff * alpha;
+                    } else {
+                        lyricScrollOffset_ = 0.0f;
+                    }
+                }
+                if (lyricScrollOffset_ != before)
+                    animating = true;
+            } else if (karaokeLine()) {
+                if (lyricScrollOffset_ != 0.0f) {
+                    lyricScrollOffset_ = 0.0f;
+                    animating = true;
+                }
+            } else if ((lyricMarqueePlaying || idleMarquee) && !holdLyricScroll) {
+                marquee(verticalLyricExtent, lyricAreaH,
+                        idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_,
+                        kVerticalLyricGap);
+            }
+            scrollAnimating_ = animating;
+            return;
+        }
+        LayoutMetrics layout = layoutMetrics(pxW, pxH);
         if (layout.h <= 0.0f || layout.w <= 0.0f) {
             scrollAnimating_ = animating;
             return;
@@ -4567,7 +5325,8 @@ struct TaskbarHost::Impl {
             }
             if (volHover && appVolume_.available) {
                 volumePopup_.onAnchorEnter();
-                volumePopup_.showNear(volumeButtonScreenRect());
+                volumePopup_.showNear(volumeButtonScreenRect(), isVerticalTaskbar(),
+                                      taskbarEdge_ == ABE_LEFT);
             }
             return 0;
         }
@@ -4794,6 +5553,10 @@ void TaskbarHost::setStatusText(const std::wstring& text) {
 
 bool TaskbarHost::isTaskbar() const {
     return true;
+}
+
+bool TaskbarHost::isVerticalTaskbar() const {
+    return impl_ && impl_->isVerticalTaskbar();
 }
 
 int TaskbarHost::currentLine() const {

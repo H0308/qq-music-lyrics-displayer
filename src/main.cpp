@@ -646,6 +646,7 @@ struct App {
     // 渲染模式：0 正常；1 低渲染（~30fps，降低 GPU/CPU 占用）；2 完全停止；
     // 3 极简（不降低歌词刷新率，只关闭附加视觉与弹窗）
     int renderMode_ = 0;
+    bool taskbarVertical_ = false; // 当前任务栏是否为左右侧的竖向布局
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
@@ -794,8 +795,10 @@ struct App {
     }
 
     void applySecondaryLyricMode() {
-        const bool showTranslation = secondaryLyricEnabled_ && !preferRomanization_;
-        const bool showRomanization = secondaryLyricEnabled_ && preferRomanization_;
+        const bool showTranslation = !taskbarVertical_ && secondaryLyricEnabled_ &&
+                                     !preferRomanization_;
+        const bool showRomanization = !taskbarVertical_ && secondaryLyricEnabled_ &&
+                                      preferRomanization_;
         for (auto* h : hosts())
             h->setSecondaryLyricMode(showTranslation, showRomanization);
     }
@@ -812,7 +815,7 @@ struct App {
     void applySongInfoVisible(bool on) {
         songInfoVisible_ = on;
         if (taskbarHost)
-            taskbarHost->setSongInfoVisible(on);
+            taskbarHost->setSongInfoVisible(taskbarVertical_ ? false : on);
         logSettingBool(L"song-info-visible", on);
         saveSettings();
     }
@@ -843,16 +846,18 @@ struct App {
     }
 
     void applySpectrumOn(bool on) {
-        spectrumOn_ = on;
+        spectrumOn_ = taskbarVertical_ ? false : on;
         syncSpectrumWithMode();
-        logSettingBool(L"spectrum", on);
+        logSettingBool(L"spectrum", spectrumOn_);
         saveSettings();
     }
 
     void applySpectrumStyle(int style) {
-        spectrumStyle_ = style == 1 ? SpectrumStyle::Bars
-                                     : style == 2 ? SpectrumStyle::DreamyWave
-                                                   : SpectrumStyle::Default;
+        spectrumStyle_ = taskbarVertical_
+                             ? SpectrumStyle::Default
+                             : style == 1 ? SpectrumStyle::Bars
+                                          : style == 2 ? SpectrumStyle::DreamyWave
+                                                        : SpectrumStyle::Default;
         if (taskbarHost)
             taskbarHost->setSpectrumStyle(spectrumStyle_);
         logSettingInt(L"spectrum-style", spectrumStyle_ == SpectrumStyle::Bars
@@ -862,10 +867,10 @@ struct App {
     }
 
     void applySpectrumBackground(bool on) {
-        spectrumBackground_ = on;
+        spectrumBackground_ = taskbarVertical_ ? false : on;
         if (taskbarHost)
-            taskbarHost->setSpectrumBackground(isMinimalRenderMode() ? false : on);
-        logSettingBool(L"spectrum-background", on);
+            taskbarHost->setSpectrumBackground(isMinimalRenderMode() ? false : spectrumBackground_);
+        logSettingBool(L"spectrum-background", spectrumBackground_);
         saveSettings();
     }
 
@@ -924,11 +929,21 @@ struct App {
     }
 
     // 各设置字段保存用户的常规配置；极简模式只在推送到宿主时临时覆盖有效值，
-    // 退出后重新推送原配置，避免用户切换性能模式时丢失显示偏好。
+    // 退出后重新推送原配置，避免用户切换性能模式时丢失显示偏好。竖向任务栏则
+    // 额外关闭不适合窄栏的有效显示，但歌词相关配置仍保留，切回横向即可继续使用。
     void applyEffectiveTaskbarSettings() {
         if (!taskbarHost)
             return;
         const bool minimal = isMinimalRenderMode();
+        const bool vertical = taskbarVertical_;
+        taskbarHost->setSecondaryLyricMode(
+            vertical ? false : (secondaryLyricEnabled_ && !preferRomanization_),
+            vertical ? false : (secondaryLyricEnabled_ && preferRomanization_));
+        taskbarHost->setDoubleLineLyrics(vertical ? false : doubleLineLyricsEnabled_);
+        taskbarHost->setLyricAlignment(vertical ? LyricAlignment::Left : lyricAlignment_);
+        taskbarHost->setIdleQuoteAlignment(vertical ? LyricAlignment::Left
+                                                    : idleQuoteAlignment_);
+        taskbarHost->setSongInfoVisible(vertical ? false : songInfoVisible_);
         taskbarHost->setControlsOnHover(hoverPlaybackControls_);
         taskbarHost->setHoverControlStyle(
             minimal ? HoverControlStyle::Inline : hoverControlStyle_);
@@ -945,7 +960,7 @@ struct App {
         taskbarHost->setAlbumCoverEffect(
             minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
         taskbarHost->setSpectrumStyle(spectrumStyle_);
-        taskbarHost->setSpectrumBackground(minimal ? false : spectrumBackground_);
+        taskbarHost->setSpectrumBackground(minimal || vertical ? false : spectrumBackground_);
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         taskbarHost->setProgressBackground(minimal ? false : progressBackground_);
         taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
@@ -955,10 +970,11 @@ struct App {
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
     }
 
-    // 频谱实际启停 = 用户开关 && 正常渲染模式 && 宿主存在；
-    // 低渲染/完全停止/极简模式都强制暂停捕获线程。
+    // 频谱实际启停 = 用户开关 && 横向任务栏 && 正常渲染模式 && 宿主存在；
+    // 低渲染/完全停止/极简模式及竖向任务栏都强制暂停捕获线程。
     void syncSpectrumWithMode() {
-        const bool active = spectrumOn_ && isNormalRenderMode() && taskbarHost != nullptr;
+        const bool active = spectrumOn_ && !taskbarVertical_ && isNormalRenderMode() &&
+                            taskbarHost != nullptr;
         if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
@@ -971,6 +987,35 @@ struct App {
             if (taskbarHost)
                 taskbarHost->setSpectrumVisible(false);
         }
+    }
+
+    void syncTaskbarOrientation() {
+        if (!taskbarHost)
+            return;
+        const bool vertical = taskbarHost->isVerticalTaskbar();
+        if (vertical == taskbarVertical_)
+            return;
+
+        taskbarVertical_ = vertical;
+        if (vertical) {
+            const bool spectrumChanged = spectrumOn_ || spectrumBackground_ ||
+                                         spectrumStyle_ != SpectrumStyle::Default;
+            // 频谱及其背景会侵占窄栏的可用空间；切换到竖向时固定关闭并持久化。
+            spectrumOn_ = false;
+            spectrumBackground_ = false;
+            spectrumStyle_ = SpectrumStyle::Default;
+            if (spectrumChanged) {
+                logSettingBool(L"spectrum", false);
+                logSettingBool(L"spectrum-background", false);
+                logSettingInt(L"spectrum-style", 0);
+                saveSettings();
+            }
+        }
+
+        applyEffectiveTaskbarSettings();
+        syncSpectrumWithMode();
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
     }
 
     void applyRenderMode(int mode) {
@@ -1195,7 +1240,7 @@ struct App {
     void applyDoubleLineLyrics(bool on) {
         doubleLineLyricsEnabled_ = on;
         if (taskbarHost)
-            taskbarHost->setDoubleLineLyrics(on);
+            taskbarHost->setDoubleLineLyrics(taskbarVertical_ ? false : on);
         logSettingBool(L"double-line-lyrics", on);
         saveSettings();
     }
@@ -1205,7 +1250,8 @@ struct App {
                           : alignment == 2 ? LyricAlignment::Right
                                            : LyricAlignment::Left;
         if (taskbarHost)
-            taskbarHost->setLyricAlignment(lyricAlignment_);
+            taskbarHost->setLyricAlignment(taskbarVertical_ ? LyricAlignment::Left
+                                                             : lyricAlignment_);
         logSettingInt(L"lyric-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
         saveSettings();
     }
@@ -1215,7 +1261,8 @@ struct App {
                               : alignment == 2 ? LyricAlignment::Right
                                                : LyricAlignment::Left;
         if (taskbarHost)
-            taskbarHost->setIdleQuoteAlignment(idleQuoteAlignment_);
+            taskbarHost->setIdleQuoteAlignment(taskbarVertical_ ? LyricAlignment::Left
+                                                                 : idleQuoteAlignment_);
         logSettingInt(L"daily-quote-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
         saveSettings();
     }
@@ -1879,6 +1926,7 @@ struct App {
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
         taskbarHost->setPositionMode(taskbarPosition_);
         taskbarHost->setRenderMode(renderMode_);
+        syncTaskbarOrientation();
         applyEffectiveTaskbarSettings();
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
@@ -2318,6 +2366,7 @@ struct App {
 
     // 30fps：插值进度 -> 二分定位当前行
     void onFrame() {
+        syncTaskbarOrientation();
         SmtcSnapshot snap = monitor.snapshot();
         if (!snap.sessionAlive) return;
         if (!snapshotMatchesTrackKey(snap, currentKey))
@@ -2341,7 +2390,7 @@ struct App {
             // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
             h->applyPlaybackPatch(playback);
         }
-        if (taskbarHost && spectrumOn_) {
+        if (taskbarHost && spectrumOn_ && !taskbarVertical_) {
             SpectrumPatch spectrumPatch;
             spectrumPatch.frameRevision = currentFrame_.frameRevision;
             spectrumPatch.requestGeneration = currentFrame_.requestGeneration;
@@ -3577,6 +3626,7 @@ void App::setAutoCheckOnStartup(bool enabled) {
 
 SettingsState App::currentSettingsState() const {
     SettingsState st;
+    const bool vertical = taskbarVertical_;
     st.idleEntryEnabled = idleEntryEnabled_;
     st.idleQuoteEnabled = idleQuoteEnabled_;
     st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1 : 0;
@@ -3588,13 +3638,14 @@ SettingsState App::currentSettingsState() const {
     st.idleQuoteBackgroundScope = idleQuoteBackgroundScopeIndex(idleQuoteBackgroundScope_);
     st.idleAppNamesVisible = idleAppNamesVisible_;
     st.idleApps = idleApps_;
-    st.songInfoVisible = songInfoVisible_;
+    st.verticalTaskbar = vertical;
+    st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
     st.platformIconVisible = platformIconVisible_;
     st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
-    st.spectrumOn = spectrumOn_;
-    st.spectrumStyle = spectrumStyleIndex(spectrumStyle_);
-    st.spectrumBackground = spectrumBackground_;
+    st.spectrumOn = vertical ? false : spectrumOn_;
+    st.spectrumStyle = spectrumStyleIndex(vertical ? SpectrumStyle::Default : spectrumStyle_);
+    st.spectrumBackground = vertical ? false : spectrumBackground_;
     st.spectrumOpacity = spectrumOpacity_;
     st.progressBackground = progressBackground_;
     st.progressBackgroundOpacity = progressBackgroundOpacity_;
@@ -3615,15 +3666,19 @@ SettingsState App::currentSettingsState() const {
     st.taskbarThemeMode = taskbarThemeMode_;
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
-    st.doubleLineLyrics = doubleLineLyricsEnabled_;
-    st.lyricAlignment = lyricAlignment_ == LyricAlignment::Center
-                            ? 1
-                            : lyricAlignment_ == LyricAlignment::Right ? 2 : 0;
-    st.idleQuoteAlignment = idleQuoteAlignment_ == LyricAlignment::Center
-                                ? 1
-                                : idleQuoteAlignment_ == LyricAlignment::Right ? 2 : 0;
-    st.secondaryEnabled = secondaryLyricEnabled_;
-    st.preferRomanization = preferRomanization_;
+    st.doubleLineLyrics = vertical ? false : doubleLineLyricsEnabled_;
+    st.lyricAlignment = vertical
+                            ? 0
+                            : lyricAlignment_ == LyricAlignment::Center
+                                  ? 1
+                                  : lyricAlignment_ == LyricAlignment::Right ? 2 : 0;
+    st.idleQuoteAlignment = vertical
+                                ? 0
+                                : idleQuoteAlignment_ == LyricAlignment::Center
+                                      ? 1
+                                      : idleQuoteAlignment_ == LyricAlignment::Right ? 2 : 0;
+    st.secondaryEnabled = vertical ? false : secondaryLyricEnabled_;
+    st.preferRomanization = vertical ? false : preferRomanization_;
     st.secondaryAvailability = lyricLoading_ ? 1
                                : (!currentHasTranslation_ && !currentHasRomanization_) ? 2 : 0;
     st.qqLocalLyricsEnabled = qqLocalLyricsEnabled_;
@@ -3701,6 +3756,7 @@ SettingsActions App::buildSettingsActions() {
 
 void App::showSettings() {
     runtime_log::writef(L"[action][dialog] open=settings");
+    syncTaskbarOrientation();
     if (settingsDialog && !settingsDialog->isOpen())
         settingsDialog.reset();
 

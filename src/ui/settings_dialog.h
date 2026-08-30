@@ -47,6 +47,7 @@ struct SettingsState {
     int songToastPosition = 1;      // 0 中上 1 中下
     fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
+    bool verticalTaskbar = false; // 侧边任务栏：禁用不适合窄栏的设置项
     bool followAlbum = false;
     bool doubleLineLyrics = false;
     int lyricAlignment = 0; // 0 左对齐 1 居中 2 右对齐

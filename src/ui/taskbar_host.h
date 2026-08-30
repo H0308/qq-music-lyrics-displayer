@@ -67,8 +67,8 @@ enum class RenderMode {
 };
 
 // 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
-// 外观参考 Windows 11 原生媒体控制卡片：左侧显示圆角封面+歌名+歌手，
-// 右侧显示当前行歌词（超长自动滚动），鼠标悬浮时右侧叠加显示播放控制按钮。
+// 横向任务栏显示圆角封面、歌名/歌手和当前行歌词（超长自动滚动），鼠标悬浮
+// 时歌词区可切换为播放控制；侧边任务栏改用窄栏封面、逐字竖排歌词和纵向控件。
 class TaskbarHost : public ILyricHost {
 public:
     TaskbarHost();
@@ -91,6 +91,7 @@ public:
     const std::vector<LyricLine>& lyrics() const override;
 
     bool isTaskbar() const override;
+    bool isVerticalTaskbar() const;
     int currentLine() const override;
     const std::wstring& statusText() const override;
 
