@@ -133,7 +133,7 @@
 
 ## 软件测试版本
 
-- QQ音乐：22.5.2
+- QQ音乐：2252 ~ 2260
 - 网易云音乐：3.1.38 (64 位)(Build: 205386) Patch:5ca9ba0，额外需要安装 BetterNCM + InfLink-rs；适配版本以 InfLink-rs 项目的测试范围为准
 - Windows 10版本：Windows 10 22H2（除任务栏防遮挡外，其余核心功能基本正常）
 - Windows 11版本：Windows 11 25H2（OS build：26200.9168）、26H2（OS build：26300.9278）
