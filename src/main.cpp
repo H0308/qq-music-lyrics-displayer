@@ -1413,7 +1413,7 @@ struct App {
             return std::wstring(greeting) + L"，牛马快乐日用一首歌开启周末美好时光～";
         case IdleDayType::Workday:
         default:
-            return std::wstring(greeting) + L"，致敬奋斗者，闲暇时光用一首歌的时候放松一下心情吧～";
+            return std::wstring(greeting) + L"，致敬奋斗者，闲暇时光用一首歌的时间1放松一下心情吧～";
         }
     }
 
