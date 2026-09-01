@@ -354,6 +354,10 @@ void FluentButton::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
 
 // ---------------- FluentEdit ----------------
 
+namespace {
+constexpr UINT_PTR kEditCueSubclassId = 1;
+} // namespace
+
 bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit) {
     id_ = id;
     directEdit_ = directEdit;
@@ -376,10 +380,44 @@ bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool dire
 
     editFont_ = createUiFont(GetDpiForWindow(hwnd_));
     SendMessageW(hEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(editFont_), TRUE);
-    if (cueBanner) {
-        SendMessageW(hEdit_, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cueBanner));
+    if (cueBanner && *cueBanner) {
+        // EM_SETCUEBANNER 的占位色由系统绘制，不随深浅主题变化（深色下不可读），
+        // 改为子类化 EDIT 后用主题次要文字色自绘。
+        cueBanner_ = cueBanner;
+        SetWindowSubclass(hEdit_, &FluentEdit::editCueProc, kEditCueSubclassId,
+                          reinterpret_cast<DWORD_PTR>(this));
     }
     return true;
+}
+
+LRESULT CALLBACK FluentEdit::editCueProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                         UINT_PTR subclassId, DWORD_PTR refData) {
+    FluentEdit* self = reinterpret_cast<FluentEdit*>(refData);
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(h, &FluentEdit::editCueProc, subclassId);
+        return DefSubclassProc(h, msg, wp, lp);
+    }
+    if (msg == WM_PAINT && self && GetWindowTextLengthW(h) == 0) {
+        LRESULT result = DefSubclassProc(h, msg, wp, lp);
+        HDC hdc = GetDC(h);
+        if (hdc) {
+            RECT rc{};
+            SendMessageW(h, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&rc));
+            HFONT oldFont = self->editFont_
+                                ? static_cast<HFONT>(SelectObject(hdc, self->editFont_))
+                                : nullptr;
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, toColorRef(palette().textSecondary));
+            DrawTextW(hdc, self->cueBanner_.c_str(),
+                      static_cast<int>(self->cueBanner_.size()), &rc,
+                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_EDITCONTROL);
+            if (oldFont)
+                SelectObject(hdc, oldFont);
+            ReleaseDC(h, hdc);
+        }
+        return result;
+    }
+    return DefSubclassProc(h, msg, wp, lp);
 }
 
 std::wstring FluentEdit::text() const {

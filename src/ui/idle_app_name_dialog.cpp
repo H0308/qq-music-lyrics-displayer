@@ -33,6 +33,10 @@ struct IdleAppNameDialog::Impl {
     fluent::FluentButton cancelButton;
 
     std::wstring initial;
+    std::wstring title;
+    std::wstring subtitle;
+    std::wstring placeholder;
+    int maxLength = 0;
     ApplyCallback onApply;
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -58,9 +62,12 @@ struct IdleAppNameDialog::Impl {
     }
 
     void createControls() {
-        titleLabel.create(hwnd, kIdTitle, L"修改应用名称", false, 20.0f, 600);
-        subtitleLabel.create(hwnd, kIdSubtitle, L"留空后将恢复 EXE 的默认名称", true, 13.0f, 400);
-        nameEdit.create(hwnd, kIdNameEdit, L"输入应用名称");
+        titleLabel.create(hwnd, kIdTitle, title.c_str(), false, 20.0f, 600);
+        subtitleLabel.create(hwnd, kIdSubtitle, subtitle.c_str(), true, 13.0f, 400);
+        nameEdit.create(hwnd, kIdNameEdit, placeholder.c_str());
+        if (maxLength > 0)
+            SendMessageW(nameEdit.editHwnd(), EM_SETLIMITTEXT,
+                         static_cast<WPARAM>(maxLength), 0);
         nameEdit.setText(initial);
         okButton.create(hwnd, kIdOk, L"确定", true);
         cancelButton.create(hwnd, kIdCancel, L"取消", false);
@@ -171,8 +178,14 @@ IdleAppNameDialog::~IdleAppNameDialog() {
     destroy();
 }
 
-bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& initial) {
+bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& initial,
+                               const wchar_t* title, const wchar_t* subtitle,
+                               const wchar_t* placeholder, int maxLength) {
     impl_->initial = initial;
+    impl_->title = title ? title : L"";
+    impl_->subtitle = subtitle ? subtitle : L"";
+    impl_->placeholder = placeholder ? placeholder : L"";
+    impl_->maxLength = maxLength;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -201,7 +214,8 @@ bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& 
     const int x = base.left + ((base.right - base.left) - w) / 2;
     const int y = base.top + ((base.bottom - base.top) - h) / 2;
     impl_->hwnd = CreateWindowExW(kDialogExStyle,
-                                  wc.lpszClassName, L"修改应用名称", kDialogStyle | WS_VISIBLE,
+                                  wc.lpszClassName, impl_->title.c_str(),
+                                  kDialogStyle | WS_VISIBLE,
                                   x, y, w, h, parent, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;

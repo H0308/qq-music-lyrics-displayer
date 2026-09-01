@@ -98,10 +98,14 @@ private:
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
+    // 内嵌 EDIT 的子类过程：默认绘制后补绘主题色占位文本
+    static LRESULT CALLBACK editCueProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                        UINT_PTR subclassId, DWORD_PTR refData);
     void layoutEdit();
     void repaintEdit();
 
     int id_ = 0;
+    std::wstring cueBanner_;
     HWND hEdit_ = nullptr;
     HWND editParent_ = nullptr;
     HFONT editFont_ = nullptr;

@@ -36,6 +36,7 @@
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
+#include <cwctype>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -325,6 +326,20 @@ IdleQuoteSource idleQuoteSourceFromConfig(const std::string& value) {
     return value == "jinrishici" ? IdleQuoteSource::Jinrishici : IdleQuoteSource::Hitokoto;
 }
 
+constexpr size_t kIdleCustomWelcomeMaxLen = 20;
+
+// 自定义欢迎语归一化：超长截断；纯空白等同于未设置（恢复默认欢迎语）。
+std::wstring normalizeIdleCustomWelcome(std::wstring text) {
+    if (text.size() > kIdleCustomWelcomeMaxLen)
+        text.resize(kIdleCustomWelcomeMaxLen);
+    const bool allSpace = std::all_of(text.begin(), text.end(), [](wchar_t c) {
+        return iswspace(c) != 0;
+    });
+    if (allSpace)
+        text.clear();
+    return text;
+}
+
 const char* idleQuoteIntervalConfigName(IdleQuoteRefreshInterval interval) {
     switch (interval) {
     case IdleQuoteRefreshInterval::HalfDay:
@@ -540,6 +555,7 @@ struct App {
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
     std::unique_ptr<IdleAppNameDialog> idleAppNameDialog;
+    std::unique_ptr<IdleAppNameDialog> idleWelcomeDialog;
     std::unique_ptr<SettingsDialog> settingsDialog;
     std::unique_ptr<RuntimeLogDialog> runtimeLogDialog;
     std::wstring currentKey;
@@ -598,6 +614,8 @@ struct App {
     bool idleEntryEnabled_ = true;
     bool idleQuoteEnabled_ = true;
     bool idleAppNamesVisible_ = true;
+    // 自定义欢迎语：非空时在关闭每日一言后始终显示，不再随时间和日期变化。
+    std::wstring idleCustomWelcome_;
     IdleQuoteSource idleQuoteSource_ = IdleQuoteSource::Hitokoto;
     IdleQuoteRefreshInterval idleQuoteRefreshInterval_ = IdleQuoteRefreshInterval::Daily;
     std::vector<IdleAppInfo> idleApps_;
@@ -1413,7 +1431,7 @@ struct App {
             return std::wstring(greeting) + L"，牛马快乐日用一首歌开启周末美好时光～";
         case IdleDayType::Workday:
         default:
-            return std::wstring(greeting) + L"，致敬奋斗者，闲暇时光用一首歌的时间1放松一下心情吧～";
+            return std::wstring(greeting) + L"，致敬奋斗者，闲暇时光用一首歌的时间放松一下心情吧～";
         }
     }
 
@@ -1434,7 +1452,8 @@ struct App {
                 presentation.source += idleQuoteOrigin_;
             }
         } else {
-            presentation.sentence = defaultIdleWelcome();
+            presentation.sentence = idleCustomWelcome_.empty() ? defaultIdleWelcome()
+                                                               : idleCustomWelcome_;
         }
         presentation.apps = idleApps_;
         return presentation;
@@ -1442,7 +1461,8 @@ struct App {
 
     void refreshIdleWelcome() {
         const SmtcSnapshot snap = monitor.snapshot();
-        if (!idleEntryEnabled_ || idleQuoteEnabled_ || snap.sessionAlive)
+        if (!idleEntryEnabled_ || idleQuoteEnabled_ || snap.sessionAlive ||
+            !idleCustomWelcome_.empty())
             return;
         if (currentFrame_.idle.sentence == defaultIdleWelcome())
             return;
@@ -1661,6 +1681,35 @@ struct App {
         });
         idleAppNameDialog = std::move(dialog);
         idleAppNameDialog->show();
+    }
+
+    void editIdleWelcome() {
+        if (idleWelcomeDialog && idleWelcomeDialog->isOpen()) {
+            SetForegroundWindow(idleWelcomeDialog->hwnd());
+            return;
+        }
+        idleWelcomeDialog.reset();
+
+        auto dialog = std::make_unique<IdleAppNameDialog>();
+        HWND parent = settingsDialog ? settingsDialog->hwnd() : trayHwnd;
+        if (!dialog->create(GetModuleHandleW(nullptr), parent, idleCustomWelcome_,
+                            L"自定义欢迎语",
+                            L"最多 20 个字符，留空后恢复默认欢迎语",
+                            L"输入欢迎语",
+                            static_cast<int>(kIdleCustomWelcomeMaxLen)))
+            return;
+        dialog->setApplyCallback([this](const std::wstring& text) {
+            const std::wstring normalized = normalizeIdleCustomWelcome(text);
+            if (idleCustomWelcome_ == normalized)
+                return;
+            idleCustomWelcome_ = normalized;
+            runtime_log::writef(L"[action][idle-quote] custom-welcome len=%llu",
+                                static_cast<unsigned long long>(normalized.size()));
+            saveSettings();
+            publishPresentationFrame(monitor.snapshot(), false, true);
+        });
+        idleWelcomeDialog = std::move(dialog);
+        idleWelcomeDialog->show();
     }
 
     void setIdleAppNamesVisible(bool show) {
@@ -2617,6 +2666,8 @@ void App::loadSettings() {
         idleEntryEnabled_ = j.value("idleEntryEnabled", true);
         idleQuoteEnabled_ = j.value("idleQuoteEnabled", true);
         idleAppNamesVisible_ = j.value("idleAppNamesVisible", true);
+        idleCustomWelcome_ =
+            normalizeIdleCustomWelcome(wideOf(j.value("idleCustomWelcome", std::string())));
         idleQuoteSource_ = idleQuoteSourceFromConfig(
             j.value("idleQuoteSource", std::string("hitokoto")));
         idleQuoteRefreshInterval_ = idleQuoteIntervalFromConfig(
@@ -2711,6 +2762,7 @@ void App::saveSettings() {
         j["idleEntryEnabled"] = idleEntryEnabled_;
         j["idleQuoteEnabled"] = idleQuoteEnabled_;
         j["idleAppNamesVisible"] = idleAppNamesVisible_;
+        j["idleCustomWelcome"] = utf8Of(idleCustomWelcome_);
         j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
         j["idleQuoteRefreshInterval"] =
             idleQuoteIntervalConfigName(idleQuoteRefreshInterval_);
@@ -3701,6 +3753,7 @@ SettingsActions App::buildSettingsActions() {
         [this](int background) { applyIdleQuoteBackground(background); };
     act.onIdleQuoteBackgroundScope =
         [this](int scope) { applyIdleQuoteBackgroundScope(scope); };
+    act.onEditIdleWelcome = [this] { editIdleWelcome(); };
     act.onAddIdleApp = [this] { pickIdleApp(); };
     act.onEditIdleApp = [this](int index) { editIdleApp(index); };
     act.onIdleAppNamesVisible = [this](bool show) { setIdleAppNamesVisible(show); };

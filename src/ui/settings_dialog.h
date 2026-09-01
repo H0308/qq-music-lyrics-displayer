@@ -69,6 +69,7 @@ struct SettingsActions {
     std::function<void(int)> onIdleQuoteAlignment;
     std::function<void(int)> onIdleQuoteBackground;
     std::function<void(int)> onIdleQuoteBackgroundScope;
+    std::function<void()> onEditIdleWelcome;
     std::function<void()> onAddIdleApp;
     std::function<void(int)> onEditIdleApp;
     std::function<void(bool)> onIdleAppNamesVisible;

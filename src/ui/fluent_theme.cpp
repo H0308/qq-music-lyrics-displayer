@@ -310,10 +310,15 @@ void suppressBorder(HWND hwnd) {
 bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     applyRoundCorners(hwnd, false);
     const bool dark = isDarkMode(ThemeTarget::Window);
-    // 深浅色都使用系统材质；先同步标题栏主题，
-    // 这样 Mica/Acrylic 在用户固定深色且 Windows 当前为浅色时仍能保持一致。
     applyDarkCaption(hwnd, dark);
-    bool applied = applyBackdrop(hwnd, transientWindow);
+    // Mica 会随窗口暗色属性切换，但 Acrylic（transient）不会：深色下或窗口主题与
+    // 系统主题不一致时，Acrylic 仍渲染为浅色（显示后重设暗色属性也不可靠）。
+    // 这两种情况下 transient 窗口关闭材质，改用 paintDialogBackground 的自绘回退
+    // 底色（与 windowBg 同色）保持一致；浅色且主题一致时 Acrylic 表现正常，保留。
+    const bool themeMismatch = dark != detectSystemDarkMode();
+    bool applied = false;
+    if (!(transientWindow && (dark || themeMismatch)))
+        applied = applyBackdrop(hwnd, transientWindow);
 
     if (!applied)
         clearBackdrop(hwnd);

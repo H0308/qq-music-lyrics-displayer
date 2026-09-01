@@ -73,6 +73,7 @@ constexpr int kIdIdleQuoteAlignment = 453;
 constexpr int kIdIdleQuote = 454;
 constexpr int kIdIdleQuoteBackground = 458;
 constexpr int kIdIdleQuoteBackgroundScope = 459;
+constexpr int kIdIdleCustomWelcome = 461;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -492,6 +493,8 @@ struct SettingsDialog::Impl {
             row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteAlignment))
             row->enabled = quoteEnabled && !state.verticalTaskbar;
+        if (auto* row = findRow(kIdIdleCustomWelcome))
+            row->enabled = !quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteBackground))
             row->enabled = !minimalModeActive();
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
@@ -638,9 +641,12 @@ struct SettingsDialog::Impl {
         idleEntry.checked = state.idleEntryEnabled;
         Row& idleQuote = addRow(
             kIdlePage, kIdIdleQuote, ControlKind::Toggle, L"显示每日一言",
-            L"关闭后显示按时间和日期类型生成的默认欢迎语；每日一言来源、更新频率和缓存会保留。",
+            L"关闭后显示按时间和日期类型生成的默认欢迎语，可在下方自定义；每日一言来源、更新频率和缓存会保留。",
             40.0f, kRowTallH);
         idleQuote.checked = state.idleQuoteEnabled;
+        addButton(kIdlePage, kIdIdleCustomWelcome, L"自定义欢迎语",
+                  L"关闭每日一言后始终显示自定义内容，最多 20 个字符且不能为纯空格；留空则恢复按时间和日期类型生成的默认欢迎语。",
+                  L"编辑…", kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
                  state.idleQuoteSource == 1
                      ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
@@ -2980,6 +2986,10 @@ struct SettingsDialog::Impl {
             updateIdleRowsEnabled();
             if (actions.onIdleQuoteEnabled)
                 actions.onIdleQuoteEnabled(row->checked);
+            break;
+        case kIdIdleCustomWelcome:
+            if (actions.onEditIdleWelcome)
+                actions.onEditIdleWelcome();
             break;
         case kIdIdleQuoteSource:
             state.idleQuoteSource = row->selected;
