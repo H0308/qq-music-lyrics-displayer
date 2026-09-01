@@ -200,8 +200,7 @@ Palette makeDark() {
     return p;
 }
 
-void applyAccent(Palette& p) {
-    COLORREF a = accentColor();
+void applyAccent(Palette& p, COLORREF a) {
     p.accent = toD2D(a);
     // 悬停变亮、按下变暗
     auto scale = [](D2D1_COLOR_F c, float f) {
@@ -238,8 +237,10 @@ bool isDarkMode(ThemeTarget target) {
 
 COLORREF accentColor() {
     try {
-        winrt::Windows::UI::ViewManagement::UISettings settings;
-        auto c = settings.GetColorValue(
+        // 缓存 UISettings 对象，避免每次调用都重新激活运行时类；
+        // GetColorValue 读取的始终是系统当前值，缓存对象不影响实时性。
+        static winrt::Windows::UI::ViewManagement::UISettings cachedSettings;
+        auto c = cachedSettings.GetColorValue(
             winrt::Windows::UI::ViewManagement::UIColorType::Accent);
         return RGB(c.R, c.G, c.B);
     } catch (...) {
@@ -257,16 +258,21 @@ const Palette& palette() {
 }
 
 const Palette& palette(ThemeTarget target) {
-    static Palette light = [] {
-        Palette p = makeLight();
-        applyAccent(p);
-        return p;
-    }();
-    static Palette dark = [] {
-        Palette p = makeDark();
-        applyAccent(p);
-        return p;
-    }();
+    // Palette 是静态缓存，但系统强调色会随个性化设置即时变化；
+    // 与 isDarkMode 每次实时读取一样，这里在使用时比对当前强调色，
+    // 变化时同步刷新派生色（accentHover/accentPressed/textOnAccent），
+    // 避免系统换色后必须重启程序才生效。
+    static Palette light = makeLight();
+    static Palette dark = makeDark();
+    static bool accentApplied = false;
+    static COLORREF cachedAccent = 0;
+    const COLORREF current = accentColor();
+    if (!accentApplied || current != cachedAccent) {
+        cachedAccent = current;
+        applyAccent(light, current);
+        applyAccent(dark, current);
+        accentApplied = true;
+    }
     return isDarkMode(target) ? dark : light;
 }
 
