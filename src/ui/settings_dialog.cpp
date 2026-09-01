@@ -99,7 +99,7 @@ constexpr float kRowGap = 8.0f;
 constexpr float kModeGridGap = 8.0f;
 constexpr float kModeGridCardH = 56.0f;
 constexpr float kModeGridTopGap = 10.0f;
-constexpr float kModeGridNoteGap = 8.0f;
+constexpr float kModeGridNoteGap = 12.0f;
 constexpr float kModeGridMinH = 196.0f;
 constexpr float kSpectrumStyleCardH = 96.0f;
 constexpr float kSpectrumStyleCardGap = 8.0f;
@@ -685,10 +685,10 @@ struct SettingsDialog::Impl {
                  !minimal,
                  kIdleQuoteBackgroundRowH);
         addModeGrid(0, kIdIdleQuoteBackgroundScope, L"动态背景作用范围",
-                    L"选择动态背景显示在每日一言、歌词或两者；独立频谱容器和悬浮卡片不使用。",
-                    {L"都不启用", L"仅每日一言启用", L"仅歌词启用", L"都启用"},
-                    {L"不显示动态背景", L"只在每日一言时显示", L"只在播放歌词时显示",
-                     L"每日一言和歌词都显示"},
+                    L"选择动态背景显示在待机内容、歌词或两者；待机内容包括每日一言和默认欢迎语，独立频谱容器和悬浮卡片不使用。",
+                    {L"都不启用", L"仅待机内容启用", L"仅歌词启用", L"都启用"},
+                    {L"不显示动态背景", L"只在待机内容时显示", L"只在播放歌词时显示",
+                     L"待机内容和歌词都显示"},
                     state.idleQuoteBackgroundScope,
                     !minimal && state.idleQuoteBackground != 0,
                     kModeGridMinH);
@@ -868,7 +868,15 @@ struct SettingsDialog::Impl {
             } else if (row.showHint && !row.hint.empty()) {
                 const float hintHeight = measureHintHeight(painter, row);
                 if (hintHeight > 0.0f) {
-                    if (row.id == kIdIdleQuoteBackground) {
+                    if (row.kind == ControlKind::ModeGrid) {
+                        // ModeGrid 的提示文字在卡片网格下方，行高必须包含
+                        // 网格和提示的完整高度，否则多行提示会溢出卡片底边。
+                        const float gridH = kModeGridCardH * 2.0f + kModeGridGap;
+                        requiredHeight = std::max(
+                            requiredHeight, kTitleTopPadding + titleHeight + kModeGridTopGap +
+                                                gridH + kModeGridNoteGap + hintHeight +
+                                                kHintBottomPadding);
+                    } else if (row.id == kIdIdleQuoteBackground) {
                         const float gridH = kIdleQuoteBackgroundCardH * 2.0f +
                                             kIdleQuoteBackgroundCardGap;
                         requiredHeight = std::max(

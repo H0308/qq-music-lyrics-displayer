@@ -49,7 +49,7 @@ enum class IdleQuoteBackground {
     FloatingParticles,
 };
 
-// 任务栏内容动态背景的作用范围：不启用 / 仅每日一言 / 仅歌词 / 两者。
+// 任务栏内容动态背景的作用范围：不启用 / 仅待机内容（每日一言或默认欢迎语）/ 仅歌词 / 两者。
 enum class IdleQuoteBackgroundScope {
     None,
     DailyQuote,

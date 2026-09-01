@@ -1888,12 +1888,13 @@ struct TaskbarHost::Impl {
 
         switch (idleQuoteBackgroundScope_) {
         case IdleQuoteBackgroundScope::DailyQuote:
-            return scene_ == DisplayScene::Idle && idle.showQuote;
+            // “每日一言”范围覆盖整个待机内容场景：关闭每日一言后
+            // 显示的默认欢迎语同样属于待机内容，不随开关丢失动态背景。
+            return scene_ == DisplayScene::Idle;
         case IdleQuoteBackgroundScope::Lyrics:
             return scene_ == DisplayScene::Lyrics;
         case IdleQuoteBackgroundScope::All:
-            return (scene_ == DisplayScene::Idle && idle.showQuote) ||
-                   scene_ == DisplayScene::Lyrics;
+            return scene_ == DisplayScene::Idle || scene_ == DisplayScene::Lyrics;
         case IdleQuoteBackgroundScope::None:
         default:
             return false;
