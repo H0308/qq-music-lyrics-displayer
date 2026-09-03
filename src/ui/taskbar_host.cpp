@@ -281,6 +281,13 @@ bool sameLyrics(const std::vector<LyricLine>& a, const std::vector<LyricLine>& b
 } // namespace
 
 struct TaskbarHost::Impl {
+    struct WindowPlacement {
+        int x = 0;
+        int y = 0;
+        int width = 0;
+        int height = 0;
+    };
+
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
     bool visible = false;
@@ -453,6 +460,8 @@ struct TaskbarHost::Impl {
     DisplayScene outgoingScene_ = DisplayScene::NoPlayback;
     bool outgoingDoubleLine_ = false;
     bool sceneTransitionNeedsRelayout_ = false;
+    int sceneTransitionFromPxW_ = 0;
+    int sceneTransitionFromPxH_ = 0;
     ULONGLONG lyricTransitionStartMs_ = 0;
     int lyricTransitionDirection_ = 1; // 1: 新行从下方进入，-1: 从上方进入
     uint64_t lyricTransitionRevision_ = 0;
@@ -547,12 +556,16 @@ struct TaskbarHost::Impl {
     bool songInfoDirty_ = true; // 标题/歌手布局独立重建，换行不触碰歌曲信息
     bool geomDirty_ = true;
     bool layoutDirty_ = true;
+    bool sceneWindowResizeActive_ = false;
+    bool sceneWindowResizeApplied_ = false;
+    ULONGLONG sceneWindowResizeStartMs_ = 0;
+    WindowPlacement sceneWindowResizeFrom_{};
+    WindowPlacement sceneWindowResizeTo_{};
+    WindowPlacement sceneWindowResizeLastApplied_{};
     int lastPxW_ = 0;
     int lastPxH_ = 0;
     int lastLogicalPxW_ = 0;
     int lastLogicalPxH_ = 0;
-    int sceneTransitionFromPxW_ = 0;
-    int sceneTransitionFromPxH_ = 0;
     // 静止跳帧：updateScroll 每帧重算 scrollAnimating_（跑马灯/跟随滚动/转场收尾是否在动），
     // karaokeSettled_ 表示逐字平滑已收敛；两者都静止且无脏状态时可跳过整帧重绘。
     bool scrollAnimating_ = true;
@@ -806,9 +819,9 @@ struct TaskbarHost::Impl {
         return merged;
     }
 
-    void adjustPosition() {
+    bool calculateWindowPlacement(WindowPlacement& placement) {
         if (!hwnd || !taskbar_)
-            return;
+            return false;
 
         updateRects();
 
@@ -819,7 +832,7 @@ struct TaskbarHost::Impl {
         if (crossPx < 16)
             crossPx = taskbarCross;
         if (crossPx <= 0)
-            return;
+            return false;
 
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
         float minWidthDip = vertical ? kVerticalMinLengthDip : kMinWidthDip;
@@ -903,17 +916,53 @@ struct TaskbarHost::Impl {
             x = rcTaskbar_.left;
         }
 
-        const int pxW = vertical ? crossPx : pxMajor;
-        const int pxH = vertical ? pxMajor : crossPx;
+        placement.x = x;
+        placement.y = y;
+        placement.width = vertical ? crossPx : pxMajor;
+        placement.height = vertical ? pxMajor : crossPx;
+        return placement.width > 0 && placement.height > 0;
+    }
 
-        POINT pt{x, y};
+    void applyWindowPlacement(const WindowPlacement& placement, bool bringToFront = true,
+                              bool noRedraw = false) {
+        if (!hwnd || placement.width <= 0 || placement.height <= 0)
+            return;
+
+        POINT pt{placement.x, placement.y};
         if (taskbarEmbedded_)
             ScreenToClient(taskbar_, &pt);
 
-        // 把窗口提到任务栏子窗口最前面，避免被其他任务栏子窗口盖住
-        SetWindowPos(hwnd, HWND_TOP, pt.x, pt.y, pxW, pxH,
-                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        // 把窗口提到任务栏子窗口最前面，避免被其他任务栏子窗口盖住。
+        // 尺寸转场期间保持 Z 序且禁止系统自动重绘，画面由后续 render() 统一提交。
+        UINT flags = SWP_NOACTIVATE | SWP_FRAMECHANGED;
+        if (!bringToFront)
+            flags |= SWP_NOZORDER;
+        if (noRedraw)
+            flags |= SWP_NOREDRAW;
+        SetWindowPos(hwnd, bringToFront ? HWND_TOP : nullptr, pt.x, pt.y, placement.width,
+                     placement.height, flags);
         mediaPopup.setAnchor(hwnd);
+    }
+
+    void adjustPosition() {
+        cancelSceneWindowResize();
+        WindowPlacement placement;
+        if (calculateWindowPlacement(placement))
+            applyWindowPlacement(placement);
+    }
+
+    bool currentWindowPlacement(WindowPlacement& placement) const {
+        if (!hwnd || !IsWindow(hwnd))
+            return false;
+        RECT rect{};
+        if (!GetWindowRect(hwnd, &rect) || rect.right <= rect.left || rect.bottom <= rect.top)
+            return false;
+
+        placement.x = rect.left;
+        placement.y = rect.top;
+        placement.width = rect.right - rect.left;
+        placement.height = rect.bottom - rect.top;
+        return true;
     }
 
     bool detectChanges() {
@@ -1517,8 +1566,7 @@ struct TaskbarHost::Impl {
         const bool lineChanged = frame.currentLine != currentLine;
         const bool statusChanged = frame.statusText != statusText;
         const bool sceneChanged = frame.scene != scene_;
-        const bool sceneWidthChanged =
-            spectrumExtraForScene(scene_) != spectrumExtraForScene(frame.scene);
+        const bool sceneWidthChanged = sceneWidthPolicyDiffers(scene_, frame.scene);
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
                                  frame.idle.source != idle.source ||
                                  frame.idle.loading != idle.loading ||
@@ -1588,8 +1636,19 @@ struct TaskbarHost::Impl {
             }
         }
         scene_ = frame.scene;
-        if (sceneWidthChanged)
-            layoutDirty_ = true;
+        if (sceneWidthChanged) {
+            if (shouldAnimateScene) {
+                // 与内容转场使用同一段平滑时间曲线，窗口宽度/锚点连续变化，避免
+                // 在转场开始或结束时一次性收窄/撑开并触发位图重绑闪烁。
+                if (beginSceneWindowResize())
+                    layoutDirty_ = false;
+                else
+                    layoutDirty_ = true;
+            } else {
+                cancelSceneWindowResize();
+                layoutDirty_ = true;
+            }
+        }
         idle = frame.idle;
         if (frame.actualPositionMs != positionMs_ && !media.playing)
             karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
@@ -1680,6 +1739,84 @@ struct TaskbarHost::Impl {
     // 独立频谱只占用播放场景；Idle 不预留频谱宽度，使用普通窗口宽度。
     float spectrumExtraForScene(DisplayScene scene) const {
         return scene == DisplayScene::Idle ? 0.0f : spectrumExtraW();
+    }
+
+    bool sceneUsesCompactWidth(DisplayScene scene) const {
+        return !isVerticalTaskbar() && !songInfoVisible_ && scene != DisplayScene::Idle;
+    }
+
+    bool sceneWidthPolicyDiffers(DisplayScene from, DisplayScene to) const {
+        if (isVerticalTaskbar())
+            return false;
+        return sceneUsesCompactWidth(from) != sceneUsesCompactWidth(to) ||
+               spectrumExtraForScene(from) != spectrumExtraForScene(to);
+    }
+
+    void cancelSceneWindowResize() {
+        sceneWindowResizeActive_ = false;
+        sceneWindowResizeApplied_ = false;
+        sceneWindowResizeStartMs_ = 0;
+    }
+
+    bool beginSceneWindowResize() {
+        WindowPlacement from;
+        WindowPlacement to;
+        if (!currentWindowPlacement(from) || !calculateWindowPlacement(to))
+            return false;
+        if (from.x == to.x && from.y == to.y && from.width == to.width &&
+            from.height == to.height) {
+            cancelSceneWindowResize();
+            return false;
+        }
+
+        sceneWindowResizeFrom_ = from;
+        sceneWindowResizeTo_ = to;
+        sceneWindowResizeLastApplied_ = from;
+        sceneWindowResizeApplied_ = true;
+        sceneWindowResizeStartMs_ = monotonicNowMs();
+        sceneWindowResizeActive_ = true;
+        return true;
+    }
+
+    bool updateSceneWindowResize(ULONGLONG now) {
+        if (!sceneWindowResizeActive_)
+            return false;
+        if (now < sceneWindowResizeStartMs_)
+            now = sceneWindowResizeStartMs_;
+
+        const float progress = std::clamp(
+            static_cast<float>(now - sceneWindowResizeStartMs_) / kSceneTransitionMs, 0.0f,
+            1.0f);
+        const float t = smoothStep(progress);
+        WindowPlacement placement;
+        placement.x = static_cast<int>(std::lround(
+            sceneWindowResizeFrom_.x +
+            (sceneWindowResizeTo_.x - sceneWindowResizeFrom_.x) * t));
+        placement.y = static_cast<int>(std::lround(
+            sceneWindowResizeFrom_.y +
+            (sceneWindowResizeTo_.y - sceneWindowResizeFrom_.y) * t));
+        placement.width = static_cast<int>(std::lround(
+            sceneWindowResizeFrom_.width +
+            (sceneWindowResizeTo_.width - sceneWindowResizeFrom_.width) * t));
+        placement.height = static_cast<int>(std::lround(
+            sceneWindowResizeFrom_.height +
+            (sceneWindowResizeTo_.height - sceneWindowResizeFrom_.height) * t));
+
+        const bool changed =
+            !sceneWindowResizeApplied_ || placement.x != sceneWindowResizeLastApplied_.x ||
+            placement.y != sceneWindowResizeLastApplied_.y ||
+            placement.width != sceneWindowResizeLastApplied_.width ||
+            placement.height != sceneWindowResizeLastApplied_.height;
+        if (changed) {
+            applyWindowPlacement(placement, false, true);
+            sceneWindowResizeLastApplied_ = placement;
+            sceneWindowResizeApplied_ = true;
+        }
+        if (progress >= 1.0f) {
+            sceneWindowResizeActive_ = false;
+            sceneWindowResizeStartMs_ = 0;
+        }
+        return true;
     }
 
     float spectrumLevel(int index) const {
@@ -2302,6 +2439,7 @@ struct TaskbarHost::Impl {
     }
 
     void discardDeviceResources() {
+        cancelSceneWindowResize();
         auto r = [](auto*& p) {
             if (p) {
                 p->Release();
@@ -2671,6 +2809,10 @@ struct TaskbarHost::Impl {
 
     // 丢弃当前行过渡：清空待启动/进行中状态并释放旧布局，下一次排版直接提交最终行。
     void resetLyricTransition() {
+        if (sceneWindowResizeActive_) {
+            cancelSceneWindowResize();
+            layoutDirty_ = true;
+        }
         lyricTransitionPending_ = false;
         lyricTransitionActive_ = false;
         lyricTransitionKind_ = LyricTransitionKind::None;
@@ -4542,8 +4684,8 @@ struct TaskbarHost::Impl {
         }
     }
 
-    // 每日一言与歌词属于任务栏的两个展示场景。场景切换时只移动内容层；
-    // 若独立频谱的场景占位发生变化，窗口先按目标场景重算宽度，旧内容仍按旧尺寸绘制。
+    // 每日一言与歌词属于任务栏的两个展示场景。场景切换时内容层与外层尺寸
+    // 使用同一段转场时序，旧内容仍按切换前的内容区绘制，避免水平布局跳变。
     void drawSceneTransition(float w, float lyricAreaX, float lyricAreaW, float h,
                              float lyricBlockH) {
         auto* rt = renderer.renderTarget();
@@ -4956,6 +5098,9 @@ struct TaskbarHost::Impl {
     void render() {
         if (!visible || !hwnd)
             return;
+
+        if (sceneWindowResizeActive_)
+            updateSceneWindowResize(monotonicNowMs());
 
         // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
         // 把刚刚收缩/扩展的窗口尺寸恢复回去。
@@ -5527,6 +5672,8 @@ struct TaskbarHost::Impl {
     bool hasHighFrequencyAnimation() const {
         if (lyricTransitionPending_ || lyricTransitionActive_)
             return true;
+        if (sceneWindowResizeActive_)
+            return true;
         if (taskbarDynamicBackgroundAnimating())
             return true;
         if (media.playing && scrollAnimating_)
@@ -5650,6 +5797,8 @@ struct TaskbarHost::Impl {
             platformIconDirty)
             return true;
         if (lyricTransitionPending_ || lyricTransitionActive_)
+            return true;
+        if (sceneWindowResizeActive_)
             return true;
         if (taskbarDynamicBackgroundAnimating())
             return true;
