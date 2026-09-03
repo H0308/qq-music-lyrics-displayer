@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -270,9 +271,136 @@ void clearIconBlackMatte(std::vector<BYTE>& pixels, UINT width, UINT height) {
     }
 }
 
+bool readIconPixelsFromHicon(HICON icon, std::vector<BYTE>& pixels, UINT& width,
+                             UINT& height) {
+    if (!icon)
+        return false;
+
+    ICONINFO iconInfo{};
+    if (!GetIconInfo(icon, &iconInfo))
+        return false;
+
+    HDC screenDc = GetDC(nullptr);
+    bool ok = false;
+    do {
+        if (!screenDc || !iconInfo.hbmColor)
+            break;
+
+        BITMAP colorBitmap{};
+        if (GetObjectW(iconInfo.hbmColor, sizeof(colorBitmap), &colorBitmap) !=
+            sizeof(colorBitmap))
+            break;
+        if (colorBitmap.bmWidth <= 0 || colorBitmap.bmHeight <= 0)
+            break;
+
+        const UINT iconWidth = static_cast<UINT>(colorBitmap.bmWidth);
+        const UINT iconHeight = static_cast<UINT>(colorBitmap.bmHeight);
+        std::vector<BYTE> colorPixels(static_cast<size_t>(iconWidth) * iconHeight * 4);
+
+        BITMAPINFO colorInfo{};
+        colorInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        colorInfo.bmiHeader.biWidth = static_cast<LONG>(iconWidth);
+        colorInfo.bmiHeader.biHeight = -static_cast<LONG>(iconHeight);
+        colorInfo.bmiHeader.biPlanes = 1;
+        colorInfo.bmiHeader.biBitCount = 32;
+        colorInfo.bmiHeader.biCompression = BI_RGB;
+        if (GetDIBits(screenDc, iconInfo.hbmColor, 0, iconHeight, colorPixels.data(),
+                      &colorInfo, DIB_RGB_COLORS) != static_cast<int>(iconHeight))
+            break;
+
+        // 32 位图标的颜色位图通常自带 alpha。旧式图标可能把 alpha 全置 0，
+        // 此时改用 AND mask；不能直接让 GDI+ FromHICON 合成，否则透明列可能
+        // 被转换成不透明白色（例如 VS Code 图标中的竖条）。
+        bool hasColorAlpha = colorBitmap.bmBitsPixel == 32;
+        if (hasColorAlpha) {
+            hasColorAlpha = false;
+            for (size_t i = 3; i < colorPixels.size(); i += 4) {
+                if (colorPixels[i] != 0) {
+                    hasColorAlpha = true;
+                    break;
+                }
+            }
+        }
+
+        std::vector<BYTE> maskPixels;
+        UINT maskStride = 0;
+        bool hasMask = false;
+        if (iconInfo.hbmMask) {
+            BITMAP maskBitmap{};
+            if (GetObjectW(iconInfo.hbmMask, sizeof(maskBitmap), &maskBitmap) ==
+                    sizeof(maskBitmap) &&
+                maskBitmap.bmWidth >= static_cast<LONG>(iconWidth) &&
+                maskBitmap.bmHeight >= static_cast<LONG>(iconHeight)) {
+                maskStride = ((iconWidth + 31u) / 32u) * 4u;
+                maskPixels.resize(static_cast<size_t>(maskStride) * iconHeight);
+                // 1 位 DIB 在 DIB_RGB_COLORS 模式下需要两个 RGBQUAD 调色板项。
+                // BITMAPINFO 自带的 bmiColors[1] 不够，直接传入会覆盖栈内存。
+                struct MaskBitmapInfo {
+                    BITMAPINFOHEADER bmiHeader;
+                    RGBQUAD bmiColors[2];
+                } maskInfo{};
+                maskInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                maskInfo.bmiHeader.biWidth = static_cast<LONG>(iconWidth);
+                maskInfo.bmiHeader.biHeight = -static_cast<LONG>(iconHeight);
+                maskInfo.bmiHeader.biPlanes = 1;
+                maskInfo.bmiHeader.biBitCount = 1;
+                maskInfo.bmiHeader.biCompression = BI_RGB;
+                maskInfo.bmiHeader.biClrUsed = 2;
+                hasMask = GetDIBits(screenDc, iconInfo.hbmMask, 0, iconHeight,
+                                    maskPixels.data(),
+                                    reinterpret_cast<BITMAPINFO*>(&maskInfo),
+                                    DIB_RGB_COLORS) == static_cast<int>(iconHeight);
+            }
+        }
+        const bool useMask = hasMask && !hasColorAlpha;
+
+        auto premultiply = [](BYTE value, BYTE alpha) -> BYTE {
+            return static_cast<BYTE>((static_cast<unsigned>(value) * alpha + 127u) / 255u);
+        };
+        for (UINT y = 0; y < iconHeight; ++y) {
+            for (UINT x = 0; x < iconWidth; ++x) {
+                BYTE* pixel = colorPixels.data() +
+                              (static_cast<size_t>(y) * iconWidth + x) * 4;
+                BYTE alpha = hasColorAlpha ? pixel[3] : 255;
+                if (useMask) {
+                    const BYTE maskByte = maskPixels[static_cast<size_t>(y) * maskStride + x / 8];
+                    if ((maskByte & (0x80u >> (x & 7u))) != 0)
+                        alpha = 0;
+                }
+                if (alpha == 0) {
+                    pixel[0] = pixel[1] = pixel[2] = pixel[3] = 0;
+                    continue;
+                }
+                pixel[0] = premultiply(pixel[0], alpha);
+                pixel[1] = premultiply(pixel[1], alpha);
+                pixel[2] = premultiply(pixel[2], alpha);
+                pixel[3] = alpha;
+            }
+        }
+
+        pixels = std::move(colorPixels);
+        width = iconWidth;
+        height = iconHeight;
+        ok = true;
+    } while (false);
+
+    if (screenDc)
+        ReleaseDC(nullptr, screenDc);
+    if (iconInfo.hbmColor)
+        DeleteObject(iconInfo.hbmColor);
+    if (iconInfo.hbmMask)
+        DeleteObject(iconInfo.hbmMask);
+    return ok;
+}
+
 bool readIconPixels(HICON icon, std::vector<BYTE>& pixels, UINT& width, UINT& height) {
     if (!icon)
         return false;
+
+    if (readIconPixelsFromHicon(icon, pixels, width, height)) {
+        clearIconBlackMatte(pixels, width, height);
+        return true;
+    }
 
     std::unique_ptr<Gdiplus::Bitmap> bitmap(Gdiplus::Bitmap::FromHICON(icon));
     if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok)
