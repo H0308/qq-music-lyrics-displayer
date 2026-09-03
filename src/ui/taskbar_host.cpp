@@ -551,6 +551,8 @@ struct TaskbarHost::Impl {
     int lastPxH_ = 0;
     int lastLogicalPxW_ = 0;
     int lastLogicalPxH_ = 0;
+    int sceneTransitionFromPxW_ = 0;
+    int sceneTransitionFromPxH_ = 0;
     // 静止跳帧：updateScroll 每帧重算 scrollAnimating_（跑马灯/跟随滚动/转场收尾是否在动），
     // karaokeSettled_ 表示逐字平滑已收敛；两者都静止且无脏状态时可跳过整帧重绘。
     bool scrollAnimating_ = true;
@@ -830,8 +832,8 @@ struct TaskbarHost::Impl {
         }
         int minW = (int)std::lround(minWidthDip * scale());
         int maxW = (int)std::lround(maxWidthDip * scale());
-        // 仅独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
-        const float spectrumExtra = spectrumExtraW();
+        // 仅播放场景的独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
+        const float spectrumExtra = spectrumExtraForScene(scene_);
         if (!vertical && spectrumExtra > 0.0f) {
             int extra = (int)std::lround(spectrumExtra * scale());
             minW += extra;
@@ -1515,6 +1517,8 @@ struct TaskbarHost::Impl {
         const bool lineChanged = frame.currentLine != currentLine;
         const bool statusChanged = frame.statusText != statusText;
         const bool sceneChanged = frame.scene != scene_;
+        const bool sceneWidthChanged =
+            spectrumExtraForScene(scene_) != spectrumExtraForScene(frame.scene);
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
                                  frame.idle.source != idle.source ||
                                  frame.idle.loading != idle.loading ||
@@ -1574,6 +1578,8 @@ struct TaskbarHost::Impl {
                 if (shouldAnimateScene) {
                     outgoingScene_ = scene_;
                     outgoingDoubleLine_ = useDoubleLineLyrics();
+                    sceneTransitionFromPxW_ = lastLogicalPxW_;
+                    sceneTransitionFromPxH_ = lastLogicalPxH_;
                     lyricTransitionKind_ = LyricTransitionKind::Scene;
                     lyricTransitionDirection_ = frame.scene == DisplayScene::Lyrics ? 1 : -1;
                     lyricTransitionPending_ = true;
@@ -1582,6 +1588,8 @@ struct TaskbarHost::Impl {
             }
         }
         scene_ = frame.scene;
+        if (sceneWidthChanged)
+            layoutDirty_ = true;
         idle = frame.idle;
         if (frame.actualPositionMs != positionMs_ && !media.playing)
             karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
@@ -1667,6 +1675,11 @@ struct TaskbarHost::Impl {
         return spectrumVisible_ && !backgroundWaveEnabled()
                    ? spectrumClusterW() + kTextPadding
                    : 0.0f;
+    }
+
+    // 独立频谱只占用播放场景；Idle 不预留频谱宽度，使用普通窗口宽度。
+    float spectrumExtraForScene(DisplayScene scene) const {
+        return scene == DisplayScene::Idle ? 0.0f : spectrumExtraW();
     }
 
     float spectrumLevel(int index) const {
@@ -3538,7 +3551,7 @@ struct TaskbarHost::Impl {
             m.rightW = m.w;
             return m;
         }
-        float effW = m.w - spectrumExtraW();
+        float effW = m.w - spectrumExtraForScene(scene);
         m.leftW = songInfoVisible_ ? effW * kLeftRatio : coverSlotWidth(m.h);
         m.rightW = m.w - m.leftW;
         return m;
@@ -3558,7 +3571,8 @@ struct TaskbarHost::Impl {
         const float start = songInfoVisible_ && scene != DisplayScene::Idle ? kSongInfoLyricGap
                                                                              : kTextPadding;
         return {layout.leftW + start,
-                std::max(1.0f, layout.rightW - start - kTextPadding - spectrumExtraW())};
+                std::max(1.0f,
+                         layout.rightW - start - kTextPadding - spectrumExtraForScene(scene))};
     }
 
     // 当前行有逐字时间轴且歌词布局对应该行时返回该行；极简模式强制使用普通横向滚动。
@@ -4528,16 +4542,20 @@ struct TaskbarHost::Impl {
         }
     }
 
-    // 每日一言与歌词属于任务栏的两个展示场景。场景切换时只移动内容层，
-    // 外层背景和窗口保持不动；这样不会把窗口定位变化误认为内容翻页动画。
+    // 每日一言与歌词属于任务栏的两个展示场景。场景切换时只移动内容层；
+    // 若独立频谱的场景占位发生变化，窗口先按目标场景重算宽度，旧内容仍按旧尺寸绘制。
     void drawSceneTransition(float w, float lyricAreaX, float lyricAreaW, float h,
                              float lyricBlockH) {
         auto* rt = renderer.renderTarget();
         if (!rt || !lyricLayout_ || !outgoingLyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return;
 
-        const LyricArea outgoingArea =
-            lyricAreaForScene(outgoingScene_, lastLogicalPxW_, lastLogicalPxH_);
+        const int outgoingPxW = sceneTransitionFromPxW_ > 0 ? sceneTransitionFromPxW_
+                                                            : lastLogicalPxW_;
+        const int outgoingPxH = sceneTransitionFromPxH_ > 0 ? sceneTransitionFromPxH_
+                                                            : lastLogicalPxH_;
+        const LyricArea outgoingArea = lyricAreaForScene(outgoingScene_, outgoingPxW,
+                                                         outgoingPxH);
         const LyricTransitionSample transition = lyricTransitionSample();
         const float movementT = transition.movement;
         const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
@@ -5010,7 +5028,8 @@ struct TaskbarHost::Impl {
         float lyricStart = lyricStartPadding();
         float lyricAreaX = leftW + lyricStart;
         float lyricAreaW =
-            std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
+            std::max(1.0f,
+                     rightW - lyricStart - kTextPadding - spectrumExtraForScene(scene_));
         float secondaryGap = secondaryLayout_ ? 1.0f : 0.0f;
         float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
         float lyricY = h * 0.5f - lyricBlockH * 0.5f;
@@ -5395,10 +5414,11 @@ struct TaskbarHost::Impl {
         float rightW = layout.rightW;
         float infoX = infoStartX();
         float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
-        // 与 render 一致：滚动/跟随范围不含频谱独占区
+        // 与 render 一致：播放歌词不含频谱独占区，Idle 每日一言使用完整窗口。
         float lyricStart = lyricStartPadding();
         float lyricAreaW =
-            std::max(1.0f, rightW - lyricStart - kTextPadding - spectrumExtraW());
+            std::max(1.0f,
+                     rightW - lyricStart - kTextPadding - spectrumExtraForScene(scene_));
         const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
         // 普通横向歌词只在播放中推进；每日一言无播放状态也允许慢速滚动。
         // 暂停歌词时保留偏移，恢复播放后从原位置继续。
