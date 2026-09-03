@@ -21,6 +21,11 @@ struct SettingsState {
     int idleQuoteBackgroundScope = 1; // 0 都不启用 1 仅每日一言启用 2 仅歌词启用 3 都启用
     bool idleAppNamesVisible = true;
     std::vector<IdleAppInfo> idleApps;
+    bool tickTickApiTokenConfigured = false;
+    bool tickTickConnected = false;
+    bool tickTickConnecting = false;
+    bool tickTickSyncing = false;
+    std::wstring tickTickStatus;
     bool songInfoVisible = true;
     bool albumCoverVisible = true;
     bool platformIconVisible = false;
@@ -70,6 +75,10 @@ struct SettingsActions {
     std::function<void(int)> onIdleQuoteBackground;
     std::function<void(int)> onIdleQuoteBackgroundScope;
     std::function<void()> onEditIdleWelcome;
+    std::function<void()> onEditTickTickApiToken;
+    std::function<void()> onTickTickConnect;
+    std::function<void()> onTickTickRefresh;
+    std::function<void()> onTickTickDisconnect;
     std::function<void()> onAddIdleApp;
     std::function<void(int)> onEditIdleApp;
     std::function<void(bool)> onIdleAppNamesVisible;

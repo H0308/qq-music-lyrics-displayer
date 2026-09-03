@@ -1,6 +1,7 @@
 #include "lyric/cover_provider.h"
 #include "lyric/lyric_provider.h"
 #include "idle/idle_quote_provider.h"
+#include "idle/ticktick_provider.h"
 #include "app_info.h"
 #include "ui/font_style.h"
 #include "ui/lyric_window.h"
@@ -62,6 +63,7 @@ constexpr UINT kMsgAppVolumeChanged = WM_APP + 5;
 constexpr UINT kMsgIdleQuoteReady = WM_APP + 6;
 constexpr UINT kMsgIdleAppReady = WM_APP + 7;
 constexpr UINT kMsgHolidayReady = WM_APP + 8;
+constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -167,6 +169,11 @@ struct IdleQuotePayload {
 struct HolidayPayload {
     uint64_t generation = 0;
     HolidayCalendarResult result;
+};
+
+struct TickTickTasksPayload {
+    uint64_t generation = 0;
+    TickTickTasksResult result;
 };
 
 std::string utf8Of(const std::wstring& w) {
@@ -547,6 +554,7 @@ struct App {
     LyricProvider provider;
     CoverProvider coverProvider;
     IdleQuoteProvider idleQuoteProvider_;
+    TickTickProvider tickTickProvider_;
     AppVolumeController appVolume_;   // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;   // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
@@ -556,6 +564,7 @@ struct App {
     std::unique_ptr<FontColorDialog> fontColorDialog;
     std::unique_ptr<IdleAppNameDialog> idleAppNameDialog;
     std::unique_ptr<IdleAppNameDialog> idleWelcomeDialog;
+    std::unique_ptr<IdleAppNameDialog> tickTickApiTokenDialog;
     std::unique_ptr<SettingsDialog> settingsDialog;
     std::unique_ptr<RuntimeLogDialog> runtimeLogDialog;
     std::wstring currentKey;
@@ -632,6 +641,17 @@ struct App {
     uint64_t idleQuoteRequestGeneration_ = 0;
     std::string idleQuoteAttemptKey_;
     std::string idleQuoteRequestKey_;
+
+    // 滴答清单今日任务：普通用户 API 口令由 TickTickProvider 保存在 Windows
+    // 凭据管理器；这里只保留连接状态和当前展示快照。
+    TickTickService tickTickService_ = TickTickService::Dida365;
+    std::wstring tickTickApiToken_;
+    bool tickTickConnected_ = false;
+    bool tickTickConnecting_ = false;
+    bool tickTickTasksLoading_ = false;
+    std::wstring tickTickStatus_ = L"请在设置中连接滴答清单";
+    std::vector<IdleTaskInfo> todayTasks_;
+    uint64_t tickTickRequestGeneration_ = 0;
 
     // 当前年份节假日类型缓存：只在启动或缓存过期时请求全年数据，日常判断不访问网络。
     int holidayCalendarYear_ = 0;
@@ -1456,6 +1476,10 @@ struct App {
                                                                : idleCustomWelcome_;
         }
         presentation.apps = idleApps_;
+        presentation.todayTasks = todayTasks_;
+        presentation.todayTasksLoading = tickTickTasksLoading_;
+        presentation.todayTasksConnected = tickTickConnected_;
+        presentation.todayTasksStatus = tickTickStatus_;
         return presentation;
     }
 
@@ -1960,6 +1984,7 @@ struct App {
                 publishPresentationFrame(monitor.snapshot(), false, true);
             }
         });
+        host->setMediaPopupOpenedCallback([this] { refreshTickTickTasks(); });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)
@@ -2483,6 +2508,11 @@ struct App {
     void setAutoCheckOnStartup(bool enabled);
     void pickQqLocalLyricsPath();
     void applyQqLocalLyricsPath(const std::wstring& path);
+    void editTickTickApiToken();
+    void connectTickTick();
+    void refreshTickTickTasks();
+    void disconnectTickTick();
+    void onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload);
     void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
                                bool persistOrder = false);
     void applyFontAppearance();
@@ -2498,11 +2528,143 @@ struct App {
     static LRESULT CALLBACK updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
 
+void App::editTickTickApiToken() {
+    if (tickTickApiTokenDialog && tickTickApiTokenDialog->isOpen()) {
+        SetForegroundWindow(tickTickApiTokenDialog->hwnd());
+        return;
+    }
+    tickTickApiTokenDialog.reset();
+
+    auto dialog = std::make_unique<IdleAppNameDialog>();
+    HWND parent = settingsDialog ? settingsDialog->hwnd() : trayHwnd;
+    if (!dialog->create(GetModuleHandleW(nullptr), parent, std::wstring(),
+                        L"设置滴答清单 API 口令",
+                        L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建并复制；留空可清除",
+                        L"输入 API 口令", 256))
+        return;
+    dialog->setApplyCallback([this](const std::wstring& text) {
+        std::wstring normalized = text;
+        while (!normalized.empty() && iswspace(normalized.front()) != 0)
+            normalized.erase(normalized.begin());
+        while (!normalized.empty() && iswspace(normalized.back()) != 0)
+            normalized.pop_back();
+
+        ++tickTickRequestGeneration_;
+        tickTickConnected_ = false;
+        tickTickConnecting_ = false;
+        tickTickTasksLoading_ = false;
+        todayTasks_.clear();
+        if (normalized.empty()) {
+            tickTickProvider_.clearApiToken(tickTickService_);
+            tickTickApiToken_.clear();
+            tickTickStatus_ = L"请在设置中填写 API 口令";
+        } else if (!tickTickProvider_.saveApiToken(tickTickService_, normalized)) {
+            tickTickStatus_ = L"无法保存滴答清单 API 口令";
+        } else {
+            tickTickApiToken_ = std::move(normalized);
+            tickTickStatus_ = L"API 口令已保存，请点击连接滴答清单";
+        }
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+    });
+    tickTickApiTokenDialog = std::move(dialog);
+    tickTickApiTokenDialog->show();
+}
+
+void App::connectTickTick() {
+    if (tickTickConnecting_ || tickTickTasksLoading_)
+        return;
+    if (tickTickApiToken_.empty()) {
+        tickTickConnected_ = false;
+        tickTickStatus_ = L"请先填写滴答清单 API 口令";
+        todayTasks_.clear();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+        return;
+    }
+
+    tickTickConnecting_ = true;
+    refreshTickTickTasks();
+}
+
+void App::refreshTickTickTasks() {
+    if (tickTickTasksLoading_)
+        return;
+    if (tickTickApiToken_.empty()) {
+        tickTickConnected_ = false;
+        tickTickConnecting_ = false;
+        tickTickStatus_ = L"请在设置中填写滴答清单 API 口令";
+        todayTasks_.clear();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+        return;
+    }
+
+    ++tickTickRequestGeneration_;
+    const uint64_t generation = tickTickRequestGeneration_;
+    tickTickTasksLoading_ = true;
+    if (tickTickConnecting_)
+        tickTickConnected_ = false;
+    tickTickStatus_ = tickTickConnecting_ ? L"正在连接并同步今日任务…" : L"正在同步今日任务…";
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
+    tickTickProvider_.requestTodayTasksAsync(
+        tickTickService_, tickTickApiToken_,
+        [this, generation](TickTickTasksResult result) {
+            auto* payload = new TickTickTasksPayload{generation, std::move(result)};
+            if (!PostThreadMessageW(mainThread, kMsgTickTickTasksReady, 0,
+                                    reinterpret_cast<LPARAM>(payload)))
+                delete payload;
+        });
+}
+
+void App::disconnectTickTick() {
+    ++tickTickRequestGeneration_;
+    tickTickProvider_.clearApiToken(tickTickService_);
+    tickTickApiToken_.clear();
+    tickTickConnected_ = false;
+    tickTickConnecting_ = false;
+    tickTickTasksLoading_ = false;
+    todayTasks_.clear();
+    tickTickStatus_ = L"已断开滴答清单连接";
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
+}
+
+void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
+    if (!payload || payload->generation != tickTickRequestGeneration_)
+        return;
+    tickTickTasksLoading_ = false;
+    tickTickConnecting_ = false;
+    if (payload->result.ok) {
+        tickTickConnected_ = true;
+        todayTasks_ = std::move(payload->result.tasks);
+        tickTickStatus_ = todayTasks_.empty()
+                              ? L"已连接，今天没有待办任务"
+                              : std::wstring(L"已连接 · ") +
+                                    std::to_wstring(todayTasks_.size()) + L" 项今日任务";
+    } else {
+        tickTickConnected_ = !payload->result.authRequired && !tickTickApiToken_.empty();
+        todayTasks_.clear();
+        tickTickStatus_ = payload->result.error.empty() ? L"滴答清单任务同步失败"
+                                                        : payload->result.error;
+    }
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
+}
+
 void App::loadSettings() {
     std::wstring dir = configDir();
     if (dir.empty())
         return;
     settingsPath_ = dir + L"\\settings.json";
+    tickTickProvider_.loadApiToken(tickTickService_, tickTickApiToken_);
     logDirectory_ = runtime_log::RuntimeLogger::defaultDirectory();
     bool migrateLegacyLogDirectory = false;
     provider.setManualOverrideDir(dir + L"\\manual_lyrics");
@@ -2728,6 +2890,13 @@ void App::loadSettings() {
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
     } catch (...) {
     }
+    tickTickConnected_ = false;
+    tickTickConnecting_ = false;
+    tickTickTasksLoading_ = false;
+    if (tickTickApiToken_.empty())
+        tickTickStatus_ = L"请在设置中填写 API 口令";
+    else
+        tickTickStatus_ = L"API 口令已配置，正在同步今日任务…";
     if (migrateLegacyLogDirectory)
         saveSettings();
 }
@@ -2770,6 +2939,7 @@ void App::saveSettings() {
         j["idleQuoteBackgroundScope"] =
             idleQuoteBackgroundScopeConfigName(idleQuoteBackgroundScope_);
         j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
+        j.erase("tickTickClientId");
         j["idleApps"] = nlohmann::json::array();
         for (const auto& app : idleApps_) {
             j["idleApps"].push_back({
@@ -3690,6 +3860,11 @@ SettingsState App::currentSettingsState() const {
     st.idleQuoteBackgroundScope = idleQuoteBackgroundScopeIndex(idleQuoteBackgroundScope_);
     st.idleAppNamesVisible = idleAppNamesVisible_;
     st.idleApps = idleApps_;
+    st.tickTickApiTokenConfigured = !tickTickApiToken_.empty();
+    st.tickTickConnected = tickTickConnected_;
+    st.tickTickConnecting = tickTickConnecting_;
+    st.tickTickSyncing = tickTickTasksLoading_;
+    st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -3801,6 +3976,10 @@ SettingsActions App::buildSettingsActions() {
     act.onIdleQuoteAlignment = [this](int a) { applyIdleQuoteAlignment(a); };
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
+    act.onEditTickTickApiToken = [this] { editTickTickApiToken(); };
+    act.onTickTickConnect = [this] { connectTickTick(); };
+    act.onTickTickRefresh = [this] { refreshTickTickTasks(); };
+    act.onTickTickDisconnect = [this] { disconnectTickTick(); };
     act.onQqLocalLyricsEnabled = [this](bool on) { applyQqLocalLyricsEnabled(on); };
     act.onQqLocalLyricsPersistOrder = [this](bool on) { applyQqLocalLyricsPersistOrder(on); };
     act.onPickQqLocalLyricsPath = [this] { pickQqLocalLyricsPath(); };
@@ -4079,6 +4258,7 @@ int main() {
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });
     app.refreshHolidayCalendar(false);
     app.refreshIdleQuote(false);
+    app.refreshTickTickTasks();
     app.refreshIdleWelcome();
     app.appVolume_.setChangedCallback(
         [&app] { PostThreadMessageW(app.mainThread, kMsgAppVolumeChanged, 0, 0); });
@@ -4124,6 +4304,10 @@ int main() {
                 app.onHolidayReady(std::unique_ptr<HolidayPayload>(
                     reinterpret_cast<HolidayPayload*>(msg.lParam)));
             }
+            else if (msg.message == kMsgTickTickTasksReady) {
+                app.onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload>(
+                    reinterpret_cast<TickTickTasksPayload*>(msg.lParam)));
+            }
             continue;
         }
         if (app.aboutDialog && app.aboutDialog->isOpen() &&
@@ -4133,6 +4317,9 @@ int main() {
             continue;
         if (app.idleAppNameDialog && app.idleAppNameDialog->isOpen() &&
             IsDialogMessageW(app.idleAppNameDialog->hwnd(), &msg))
+            continue;
+        if (app.tickTickApiTokenDialog && app.tickTickApiTokenDialog->isOpen() &&
+            IsDialogMessageW(app.tickTickApiTokenDialog->hwnd(), &msg))
             continue;
         if (app.settingsDialog && app.settingsDialog->isOpen() &&
             IsDialogMessageW(app.settingsDialog->hwnd(), &msg))

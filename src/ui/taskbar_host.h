@@ -87,6 +87,7 @@ public:
     void setAppVolumeCallback(std::function<void(int percent)> cb) override;
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
+    void setMediaPopupOpenedCallback(std::function<void()> cb);
 
     const std::vector<LyricLine>& lyrics() const override;
 

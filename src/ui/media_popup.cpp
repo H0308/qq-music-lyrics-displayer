@@ -87,10 +87,15 @@ constexpr float kIdleListExpandedHeightDip =
 constexpr float kIdleQuickVisualClipPaddingDip = 1.0f;
 constexpr float kIdleQuickExpandedTopDip = 15.0f;
 constexpr float kIdleQuickTitleLeftDip = 16.0f;
-constexpr float kIdleQuickTitleWidthDip = 52.0f;
-constexpr float kIdleQuickTitleButtonGapDip = 8.0f;
 constexpr float kIdleQuickTriggerHorizontalPaddingDip = 8.0f;
 constexpr float kIdleQuickTriggerVerticalPaddingDip = 4.0f;
+constexpr float kIdleQuickExpandButtonRightPaddingDip = 16.0f;
+constexpr float kIdleQuickTabWidthDip = 112.0f;
+constexpr float kIdleQuickTabGapDip = 6.0f;
+constexpr float kIdleQuickTabHeightDip = 28.0f;
+constexpr float kIdleQuickTabContentGapDip = 8.0f;
+constexpr float kIdleTaskRowHeightDip = 28.0f;
+constexpr float kIdleTaskRowGapDip = 6.0f;
 constexpr float kIdleScrollBarWidthDip = 3.0f;
 constexpr float kIdleScrollBarHitWidthDip = 12.0f;
 // 两个页面的内容布局基准：活页绘制、转场快照与合成层转场共用同一套纵向
@@ -113,6 +118,11 @@ constexpr float kMediaArtistBottomDip = 102.0f;
 // 这里保留 Direct2D 标准 Gaussian Blur CLSID 的内部定义。
 constexpr CLSID kGaussianBlurClsid = {
     0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
+
+enum class IdleQuickTab {
+    QuickStart,
+    TodayTasks,
+};
 
 class GdiplusInit {
 public:
@@ -329,6 +339,7 @@ struct MediaPopup::Impl {
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
     std::function<void(const std::wstring&)> onIdleAppOpen;
+    std::function<void()> onPanelOpened;
 
     // 应用音量控件：图标+数值固定在右上角；点击图标从图标处向左过渡展开卡内滑块
     AppVolumeState volume;
@@ -351,8 +362,11 @@ struct MediaPopup::Impl {
     int64_t deferredPositionMs = -1;
     float idleScrollOffset = 0.0f;
     float idleScrollMax = 0.0f;
+    IdleQuickTab idleQuickTab = IdleQuickTab::QuickStart;
     int hoverIdleApp = -1;
     int pressedIdleApp = -1;
+    int hoverIdleQuickTab = -1;
+    int pressedIdleQuickTab = -1;
     bool hoverIdleQuickExpand = false;
     bool pressedIdleQuickExpand = false;
     bool idleScrollDragging = false;
@@ -361,6 +375,7 @@ struct MediaPopup::Impl {
     D2D1_RECT_F idleScrollTrackRect{};
     D2D1_RECT_F idleScrollThumbRect{};
     D2D1_RECT_F idleQuickExpandRect{};
+    D2D1_RECT_F idleQuickTabRects[2]{};
     bool idleTextDirty = true;
     bool idleIconsDirty = true;
     std::vector<ID2D1Bitmap*> idleIconBitmaps;
@@ -380,6 +395,10 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushAccent = nullptr;
     ID2D1SolidColorBrush* brushAccentHover = nullptr;
     ID2D1SolidColorBrush* brushTextOnAccent = nullptr;
+    ID2D1SolidColorBrush* brushTaskPriorityHigh = nullptr;
+    ID2D1SolidColorBrush* brushTaskPriorityMedium = nullptr;
+    ID2D1SolidColorBrush* brushTaskPriorityLow = nullptr;
+    ID2D1SolidColorBrush* brushTaskPriorityNone = nullptr;
     ID2D1LinearGradientBrush* brushDynamicGradient = nullptr;
     ID2D1RadialGradientBrush* brushDynamicGlow = nullptr;
 
@@ -490,6 +509,19 @@ struct MediaPopup::Impl {
                static_cast<float>(rows - 1) * kIdleQuickRowPitchDip;
     }
 
+    float idleQuickTaskContentHeight(const IdlePresentation& content) const {
+        if (content.todayTasks.empty())
+            return 0.0f;
+        return static_cast<float>(content.todayTasks.size()) * kIdleTaskRowHeightDip +
+               static_cast<float>(content.todayTasks.size() - 1) * kIdleTaskRowGapDip;
+    }
+
+    float idleQuickListContentHeight(const IdlePresentation& content) const {
+        return idleQuickTab == IdleQuickTab::TodayTasks
+                   ? idleQuickTaskContentHeight(content)
+                   : idleQuickGridContentHeight(content);
+    }
+
     float idleQuickGridLeft() const {
         const float availableWidth = idleListRect.right - idleListRect.left;
         return idleListRect.left +
@@ -499,7 +531,7 @@ struct MediaPopup::Impl {
     float idleQuickListHeight(const IdlePresentation& content, float progress) const {
         const float expandedHeight = std::min(
             kIdleListExpandedHeightDip,
-            std::max(kIdleQuickCellSizeDip, idleQuickGridContentHeight(content)));
+            std::max(kIdleQuickCellSizeDip, idleQuickListContentHeight(content)));
         return kIdleListHeightDip +
                (expandedHeight - kIdleListHeightDip) * std::clamp(progress, 0.0f, 1.0f);
     }
@@ -511,15 +543,25 @@ struct MediaPopup::Impl {
                         expandButtonTop + 32.0f + kIdleListGapDip);
     }
 
-    D2D1_RECT_F idleQuickExpandLocalRect(float headerTop) const {
-        const float left = kIdleQuickTitleLeftDip + kIdleQuickTitleWidthDip +
-                           kIdleQuickTitleButtonGapDip;
+    float idleQuickTabContentOffset(float progress) const {
+        return (kIdleQuickTabHeightDip + kIdleQuickTabContentGapDip) *
+               std::clamp(progress, 0.0f, 1.0f);
+    }
+
+    float idleQuickTabTop(float contentTop, float progress) const {
+        return contentTop - idleQuickTabContentOffset(progress);
+    }
+
+    D2D1_RECT_F idleQuickExpandLocalRect(float w, float headerTop) const {
+        const float left = std::max(
+            kIdleQuickTitleLeftDip,
+            w - kIdleQuickExpandButtonRightPaddingDip - 32.0f);
         const float top = idleQuickExpandButtonTop(headerTop);
         return D2D1::RectF(left, top, left + 32.0f, top + 32.0f);
     }
 
-    D2D1_RECT_F idleQuickTriggerLocalRect(float headerTop) const {
-        const D2D1_RECT_F button = idleQuickExpandLocalRect(headerTop);
+    D2D1_RECT_F idleQuickTriggerLocalRect(float w, float headerTop) const {
+        const D2D1_RECT_F button = idleQuickExpandLocalRect(w, headerTop);
         return D2D1::RectF(
             kIdleQuickTitleLeftDip - kIdleQuickTriggerHorizontalPaddingDip,
             button.top - kIdleQuickTriggerVerticalPaddingDip,
@@ -536,7 +578,8 @@ struct MediaPopup::Impl {
         float collapsedHeaderTop = 0.0f; // 快速打开标题行顶（收起态）
         float headerTop = 0.0f;          // 按当前展开进度插值后的标题行顶
         float expandButtonTop = 0.0f;
-        float listTop = 0.0f;            // 应用列表可视区顶
+        float tabTop = 0.0f;             // 快捷启动/今日任务 Tab 顶
+        float listTop = 0.0f;            // 当前 Tab 内容可视区顶
     };
 
     IdleLayout idleLayout(const IdlePresentation& content, float quoteHeight) const {
@@ -547,20 +590,23 @@ struct MediaPopup::Impl {
         layout.collapsedHeaderTop = layout.sourceTop + kIdleQuickHeaderGapDip;
         layout.headerTop = idleQuickHeaderTop(layout.collapsedHeaderTop, content);
         layout.expandButtonTop = idleQuickExpandButtonTop(layout.headerTop);
-        layout.listTop = idleQuickListTop(layout.headerTop);
+        const float progress = idleQuickExpandProgress(content);
+        layout.tabTop = idleQuickListTop(layout.headerTop);
+        layout.listTop = layout.tabTop + idleQuickTabContentOffset(progress);
         return layout;
     }
 
-    // “快速打开”标题行：展开按钮 + 标题文本；活页、快照与展开层转场共用。
+    // “快捷启动与今日任务”标题行：展开按钮 + 标题文本；活页、快照与展开层
+    // 转场共用同一套几何。
     void drawIdleQuickHeader(ID2D1DeviceContext* rt, float w, float headerTop,
                              const IdlePresentation& content, bool updateHitTest) {
-        drawIdleQuickExpandButton(rt, headerTop, content, updateHitTest);
-        const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(headerTop);
+        drawIdleQuickExpandButton(rt, w, headerTop, content, updateHitTest);
+        const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(w, headerTop);
         const float headerRight =
             content.quickStartEnabled ? expandButton.left - 8.0f : w - 16.0f;
-        drawText(rt, L"快速打开", fmtIdleHeader,
+        drawText(rt, L"快捷启动与今日任务", fmtIdleHeader,
                  D2D1::RectF(16.0f, headerTop, headerRight,
-                             headerTop + kIdleQuickHeaderHeightDip),
+                              headerTop + kIdleQuickHeaderHeightDip),
                  brushSecondary);
     }
 
@@ -825,6 +871,10 @@ struct MediaPopup::Impl {
         releaseBrush(brushAccent);
         releaseBrush(brushAccentHover);
         releaseBrush(brushTextOnAccent);
+        releaseBrush(brushTaskPriorityHigh);
+        releaseBrush(brushTaskPriorityMedium);
+        releaseBrush(brushTaskPriorityLow);
+        releaseBrush(brushTaskPriorityNone);
         releaseDynamicBackgroundResources();
         releaseFormat(fmtSource);
         releaseFormat(fmtTimeRight);
@@ -906,6 +956,14 @@ struct MediaPopup::Impl {
             FAILED(rt->CreateSolidColorBrush(p.accent, &brushAccent)) ||
             FAILED(rt->CreateSolidColorBrush(p.accentHover, &brushAccentHover)) ||
             FAILED(rt->CreateSolidColorBrush(p.textOnAccent, &brushTextOnAccent)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0xD13438, 0.96f),
+                                             &brushTaskPriorityHigh)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0x2F78D0, 0.96f),
+                                             &brushTaskPriorityMedium)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0xD99A00, 0.96f),
+                                             &brushTaskPriorityLow)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0x8A8A8A, 0.82f),
+                                             &brushTaskPriorityNone)) ||
             !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtSource) ||
             !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtTimeRight) ||
             !createTextFormat(16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtTitle) ||
@@ -1266,8 +1324,8 @@ struct MediaPopup::Impl {
         // 始终为滚动条预留固定槽位，避免滚动条出现或消失时网格横向跳动。
         const float listRight = w - 16.0f - kIdleScrollBarHitWidthDip;
         idleListRect = D2D1::RectF(16.0f, top, listRight, top + listHeight);
-        const float contentHeight = idleQuickGridContentHeight(listContent);
-        // 当前可视区放不下完整网格时就允许滚动；展开按钮只扩大可视区，
+        const float contentHeight = idleQuickListContentHeight(listContent);
+        // 当前可视区放不下完整内容时就允许滚动；展开按钮只扩大可视区，
         // 如果扩大后已经能容纳全部内容，滚动条会自动消失。
         idleScrollMax = std::max(0.0f, contentHeight - listHeight);
         if (idleScrollMax <= 0.0f)
@@ -1743,7 +1801,7 @@ struct MediaPopup::Impl {
                                    localCopy.right, cardOriginDip + localCopy.bottom);
     }
 
-    void drawIdleQuickExpandButton(ID2D1DeviceContext* rt, float headerTop,
+    void drawIdleQuickExpandButton(ID2D1DeviceContext* rt, float w, float headerTop,
                                    const IdlePresentation& content, bool updateHitTest) {
         if (!rt || !content.quickStartEnabled) {
             if (updateHitTest)
@@ -1751,8 +1809,8 @@ struct MediaPopup::Impl {
             return;
         }
 
-        const D2D1_RECT_F local = idleQuickExpandLocalRect(headerTop);
-        const D2D1_RECT_F trigger = idleQuickTriggerLocalRect(headerTop);
+        const D2D1_RECT_F local = idleQuickExpandLocalRect(w, headerTop);
+        const D2D1_RECT_F trigger = idleQuickTriggerLocalRect(w, headerTop);
         if (updateHitTest) {
             idleQuickExpandRect = D2D1::RectF(
                 trigger.left, cardOriginDip + trigger.top, trigger.right,
@@ -1776,11 +1834,178 @@ struct MediaPopup::Impl {
             6.5f, brushSecondary, !idleQuickExpanded);
     }
 
+    void drawIdleQuickTabs(ID2D1DeviceContext* rt, float w, float top, float progress,
+                           bool updateHitTest) {
+        if (!rt)
+            return;
+        if (progress <= 0.01f) {
+            if (updateHitTest) {
+                idleQuickTabRects[0] = {};
+                idleQuickTabRects[1] = {};
+            }
+            return;
+        }
+
+        const float tabWidth = std::min(
+            kIdleQuickTabWidthDip,
+            std::max(1.0f, (w - 32.0f - kIdleQuickTabGapDip) * 0.5f));
+        const float left = 16.0f;
+        const D2D1_RECT_F tabs[2] = {
+            D2D1::RectF(left, top, left + tabWidth, top + kIdleQuickTabHeightDip),
+            D2D1::RectF(left + tabWidth + kIdleQuickTabGapDip, top,
+                        left + tabWidth * 2.0f + kIdleQuickTabGapDip,
+                        top + kIdleQuickTabHeightDip),
+        };
+        if (updateHitTest) {
+            idleQuickTabRects[0] = tabs[0];
+            idleQuickTabRects[1] = tabs[1];
+        }
+
+        const float opacity = std::clamp(progress, 0.0f, 1.0f);
+        const wchar_t* labels[2] = {L"快速启动", L"今日任务"};
+        for (int i = 0; i < 2; ++i) {
+            const bool selected =
+                (i == 0 && idleQuickTab == IdleQuickTab::QuickStart) ||
+                (i == 1 && idleQuickTab == IdleQuickTab::TodayTasks);
+            const bool hovered = i == hoverIdleQuickTab;
+            const bool pressed = i == pressedIdleQuickTab;
+            if (selected && brushAccent) {
+                const float previousOpacity = brushAccent->GetOpacity();
+                brushAccent->SetOpacity(previousOpacity * 0.16f * opacity);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(tabs[i], 8.0f, 8.0f),
+                                         brushAccent);
+                brushAccent->SetOpacity(previousOpacity);
+            }
+            if (hovered || pressed)
+                drawAdaptiveControlSurface(rt, tabs[i], 8.0f, pressed, PopupPage::Idle);
+            if (selected && brushAccent) {
+                const float previousOpacity = brushAccent->GetOpacity();
+                brushAccent->SetOpacity(previousOpacity * opacity);
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(
+                        D2D1::RectF(tabs[i].left + 12.0f, tabs[i].bottom - 2.0f,
+                                    tabs[i].right - 12.0f, tabs[i].bottom),
+                        1.0f, 1.0f),
+                    brushAccent);
+                brushAccent->SetOpacity(previousOpacity);
+            }
+            ID2D1SolidColorBrush* textBrush = selected ? brushText : brushSecondary;
+            if (textBrush) {
+                const float previousOpacity = textBrush->GetOpacity();
+                textBrush->SetOpacity(previousOpacity * opacity);
+                drawText(rt, labels[i], fmtIdleApp, tabs[i], textBrush);
+                textBrush->SetOpacity(previousOpacity);
+            }
+        }
+    }
+
+    void drawIdleTodayTasks(ID2D1DeviceContext* rt, const IdlePresentation& content) {
+        if (!rt)
+            return;
+        if (content.todayTasks.empty()) {
+            const std::wstring message =
+                content.todayTasksLoading
+                    ? L"正在同步今日任务…"
+                    : !content.todayTasksStatus.empty()
+                          ? content.todayTasksStatus
+                          : !content.todayTasksConnected ? L"请在设置中连接滴答清单"
+                                                         : L"今天没有待办任务";
+            drawText(rt, message, fmtIdleApp, idleListRect,
+                     content.todayTasksLoading ? brushSecondary : brushDisabled);
+            return;
+        }
+
+        for (size_t i = 0; i < content.todayTasks.size(); ++i) {
+            const auto& task = content.todayTasks[i];
+            const float rowTop = idleListRect.top +
+                                 static_cast<float>(i) *
+                                     (kIdleTaskRowHeightDip + kIdleTaskRowGapDip) -
+                                 idleScrollOffset;
+            const D2D1_RECT_F row =
+                D2D1::RectF(idleListRect.left, rowTop, idleListRect.right,
+                            rowTop + kIdleTaskRowHeightDip);
+            if (row.bottom < idleListRect.top || row.top > idleListRect.bottom)
+                continue;
+
+            rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), brushIdleCell);
+            if (brushStroke) {
+                brushStroke->SetOpacity(0.45f);
+                rt->DrawRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), brushStroke,
+                                         0.75f);
+                brushStroke->SetOpacity(1.0f);
+            }
+            ID2D1SolidColorBrush* priorityBrush = nullptr;
+            switch (task.priority) {
+            case IdleTaskPriority::High:
+                priorityBrush = brushTaskPriorityHigh;
+                break;
+            case IdleTaskPriority::Medium:
+                priorityBrush = brushTaskPriorityMedium;
+                break;
+            case IdleTaskPriority::Low:
+                priorityBrush = brushTaskPriorityLow;
+                break;
+            case IdleTaskPriority::None:
+            default:
+                priorityBrush = brushTaskPriorityNone;
+                break;
+            }
+            if (priorityBrush) {
+                const float previousOpacity = priorityBrush->GetOpacity();
+                priorityBrush->SetOpacity(previousOpacity * 0.95f);
+                rt->FillRoundedRectangle(
+                    D2D1::RoundedRect(
+                        D2D1::RectF(row.left, row.top + 6.0f, row.left + 4.0f,
+                                    row.bottom - 7.0f),
+                        1.5f, 1.5f),
+                    priorityBrush);
+                priorityBrush->SetOpacity(previousOpacity);
+            }
+
+            const D2D1_RECT_F checkbox =
+                D2D1::RectF(row.left + 12.0f, row.top + 7.0f, row.left + 26.0f,
+                            row.top + 21.0f);
+            if (task.completed && brushAccent) {
+                rt->FillRoundedRectangle(D2D1::RoundedRect(checkbox, 4.0f, 4.0f),
+                                         brushAccent);
+                ID2D1Brush* checkBrush = brushTextOnAccent ? brushTextOnAccent : brushText;
+                if (checkBrush) {
+                    rt->DrawLine(D2D1::Point2F(checkbox.left + 3.0f, checkbox.top + 7.0f),
+                                 D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
+                                 checkBrush, 1.4f);
+                    rt->DrawLine(D2D1::Point2F(checkbox.left + 6.0f, checkbox.top + 10.0f),
+                                 D2D1::Point2F(checkbox.right - 3.0f, checkbox.top + 4.0f),
+                                 checkBrush, 1.4f);
+                }
+            } else if (brushSecondary) {
+                brushSecondary->SetOpacity(0.82f);
+                rt->DrawRoundedRectangle(D2D1::RoundedRect(checkbox, 4.0f, 4.0f),
+                                         brushSecondary, 1.1f);
+                brushSecondary->SetOpacity(1.0f);
+            }
+
+            ID2D1Brush* titleBrush = task.completed ? brushDisabled : brushText;
+            ID2D1Brush* dueBrush = task.completed
+                                       ? brushDisabled
+                                       : task.overdue ? brushAccent : brushSecondary;
+            drawText(rt, task.title, fmtSource,
+                     D2D1::RectF(row.left + 38.0f, row.top + 3.0f,
+                                 row.right - 96.0f, row.bottom - 3.0f),
+                     titleBrush);
+            drawText(rt, task.dueText, fmtTimeRight,
+                     D2D1::RectF(row.right - 92.0f, row.top + 3.0f, row.right - 8.0f,
+                                 row.bottom - 3.0f),
+                     dueBrush);
+        }
+    }
+
     void drawIdleQuickList(ID2D1DeviceContext* rt, float w, float top,
-                           const IdlePresentation& content) {
+                           const IdlePresentation& content, bool updateHitTest) {
         if (!rt)
             return;
         layoutIdleList(w, top, &content);
+        const float progress = idleQuickExpandProgress(content);
+        drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress), progress, updateHitTest);
         // 方块边框以几何边界为中心绘制；给可视裁剪区留出 1 DIP，避免首行
         // 的上边框被裁掉，同时不改变列表的布局和命中区域。
         const D2D1_RECT_F visualClip =
@@ -1789,7 +2014,9 @@ struct MediaPopup::Impl {
                         idleListRect.right,
                         idleListRect.bottom + kIdleQuickVisualClipPaddingDip);
         rt->PushAxisAlignedClip(visualClip, D2D1_ANTIALIAS_MODE_ALIASED);
-        if (content.apps.empty()) {
+        if (idleQuickTab == IdleQuickTab::TodayTasks) {
+            drawIdleTodayTasks(rt, content);
+        } else if (content.apps.empty()) {
             drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
         } else {
             const float columnGap = kIdleQuickCellGapDip;
@@ -1909,7 +2136,7 @@ struct MediaPopup::Impl {
 
         drawIdleQuickDivider(rt, w, layout.headerTop, idle);
         drawIdleQuickHeader(rt, w, layout.headerTop, idle, updateHitTest);
-        drawIdleQuickList(rt, w, layout.listTop, idle);
+        drawIdleQuickList(rt, w, layout.listTop, idle, updateHitTest);
     }
 
     // 标题/艺术家两行滚动文本：活页用缓存布局与当前滚动偏移，转场快照用
@@ -2280,7 +2507,7 @@ struct MediaPopup::Impl {
 
         drawIdleQuickDivider(rt, w, layout.headerTop, content);
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
-        drawIdleQuickList(rt, w, layout.listTop, content);
+        drawIdleQuickList(rt, w, layout.listTop, content, false);
         releaseCom(snapshotQuoteLayout);
     }
 
@@ -2473,8 +2700,10 @@ struct MediaPopup::Impl {
         // 层 1（快速打开区）原点对齐展开态按钮顶；按钮与标题同体平移
         const float quickOriginY = expandedButtonTop;
 
-        const float expandedListTop = idleQuickListTop(expandedHeaderTop);
-        const float collapsedListTop = idleQuickListTop(collapsedHeaderTop);
+        const float expandedListTop = idleQuickListTop(expandedHeaderTop) +
+                                      idleQuickTabContentOffset(1.0f);
+        const float collapsedListTop = idleQuickListTop(collapsedHeaderTop) +
+                                       idleQuickTabContentOffset(0.0f);
         auto availableHeight = [&](float listTop) {
             return std::max(0.0f, kIdlePopupHeightDip - listTop -
                                       kIdleListBottomPaddingDip);
@@ -2529,7 +2758,7 @@ struct MediaPopup::Impl {
             dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -quickOriginY) *
                              baseTransform);
             drawIdleQuickHeader(dc, w, expandedHeaderTop, idle, false);
-            drawIdleQuickList(dc, w, expandedListTop, idle);
+            drawIdleQuickList(dc, w, expandedListTop, idle, false);
             idleQuickExpandT = savedT;
             if (!renderer.endLyricLayerDraw(1, dc))
                 return false;
@@ -2921,7 +3150,7 @@ struct MediaPopup::Impl {
         runtime_log::writef(L"[action][media-popup] idle-quote-copied");
     }
 
-    // 页面级交互元素（页面切换箭头、一言复制、快速打开展开）的悬浮/按下状态。
+    // 页面级交互元素（页面切换箭头、一言复制、快速启动展开和 Tab）的悬浮/按下状态。
     void resetPageInteractionState() {
         hoverPageArrow = false;
         pressedPageArrow = false;
@@ -2931,6 +3160,10 @@ struct MediaPopup::Impl {
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
         idleQuickExpandRect = {};
+        hoverIdleQuickTab = -1;
+        pressedIdleQuickTab = -1;
+        idleQuickTabRects[0] = {};
+        idleQuickTabRects[1] = {};
     }
 
     void setPage(PopupPage target, bool userInitiated = false) {
@@ -3008,9 +3241,22 @@ struct MediaPopup::Impl {
                contains(idleQuickExpandRect, x, y);
     }
 
+    int hitIdleQuickTab(float x, float y) const {
+        y -= cardOriginDip;
+        if (categoryTransitionActive || quickExpandTransitionActive || !idleMode ||
+            !idle.quickStartEnabled || !idleQuickExpanded || idleQuickExpandT < 0.99f)
+            return -1;
+        for (int i = 0; i < 2; ++i) {
+            if (contains(idleQuickTabRects[i], x, y))
+                return i;
+        }
+        return -1;
+    }
+
     int hitIdleApp(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode || idle.apps.empty() ||
+        if (categoryTransitionActive || !idleMode || idleQuickTab != IdleQuickTab::QuickStart ||
+            idle.apps.empty() ||
             !contains(idleListRect, x, y))
             return -1;
         const float contentY = y - idleListRect.top + idleScrollOffset;
@@ -3228,6 +3474,7 @@ struct MediaPopup::Impl {
     void showPopup() {
         if (!hwnd || !enabled || !available)
             return;
+        const bool wasVisible = popupVisible;
         KillTimer(hwnd, kShowTimer);
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kCloseTimer);
@@ -3270,6 +3517,8 @@ struct MediaPopup::Impl {
         popupVisible = true;
         runtime_log::writef(L"[action][media-popup] shown trigger=%s",
                             opensOnHover() ? L"hover" : L"click");
+        if (!wasVisible && onPanelOpened)
+            onPanelOpened();
         SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
     }
 
@@ -3390,6 +3639,7 @@ struct MediaPopup::Impl {
                      hitPageArrow(dip(point.x), dip(point.y)) ||
                      hitCopy(dip(point.x), dip(point.y)) ||
                      hitIdleQuickExpand(dip(point.x), dip(point.y)) ||
+                     hitIdleQuickTab(dip(point.x), dip(point.y)) >= 0 ||
                      hitIdleApp(dip(point.x), dip(point.y)) >= 0)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
@@ -3409,12 +3659,15 @@ struct MediaPopup::Impl {
                 const bool arrow = hitPageArrow(mx, my);
                 const bool copy = hitCopy(mx, my);
                 const bool quickExpand = hitIdleQuickExpand(mx, my);
+                const int quickTab = hitIdleQuickTab(mx, my);
                 if (idleApp != hoverIdleApp || arrow != hoverPageArrow || copy != hoverCopy ||
-                    quickExpand != hoverIdleQuickExpand || hoverVolume) {
+                    quickExpand != hoverIdleQuickExpand || quickTab != hoverIdleQuickTab ||
+                    hoverVolume) {
                     hoverIdleApp = idleApp;
                     hoverPageArrow = arrow;
                     hoverCopy = copy;
                     hoverIdleQuickExpand = quickExpand;
+                    hoverIdleQuickTab = quickTab;
                     hoverVolume = false;
                     renderOrDefer();
                 }
@@ -3442,6 +3695,7 @@ struct MediaPopup::Impl {
             hoverPageArrow = false;
             hoverCopy = false;
             hoverIdleQuickExpand = false;
+            hoverIdleQuickTab = -1;
             onPopupLeave();
             renderOrDefer();
             return 0;
@@ -3463,6 +3717,13 @@ struct MediaPopup::Impl {
                 }
                 if (hitIdleQuickExpand(x, y)) {
                     pressedIdleQuickExpand = true;
+                    SetCapture(hwnd);
+                    renderOrDefer();
+                    return 0;
+                }
+                const int quickTab = hitIdleQuickTab(x, y);
+                if (quickTab >= 0) {
+                    pressedIdleQuickTab = quickTab;
                     SetCapture(hwnd);
                     renderOrDefer();
                     return 0;
@@ -3546,6 +3807,19 @@ struct MediaPopup::Impl {
                     if (GetCapture() == hwnd)
                         ReleaseCapture();
                     toggleIdleQuickExpand();
+                    return 0;
+                }
+                const int pressedTab = pressedIdleQuickTab;
+                const int tabHit = hitIdleQuickTab(x, y);
+                pressedIdleQuickTab = -1;
+                if (pressedTab >= 0 && pressedTab == tabHit) {
+                    if (GetCapture() == hwnd)
+                        ReleaseCapture();
+                    idleQuickTab = pressedTab == 0 ? IdleQuickTab::QuickStart
+                                                   : IdleQuickTab::TodayTasks;
+                    idleScrollOffset = 0.0f;
+                    hoverIdleApp = -1;
+                    renderOrDefer();
                     return 0;
                 }
                 if (idleScrollDragging) {
@@ -3652,6 +3926,7 @@ struct MediaPopup::Impl {
             pressedPageArrow = false;
             pressedCopy = false;
             pressedIdleQuickExpand = false;
+            pressedIdleQuickTab = -1;
             renderOrDefer();
             return 0;
         case WM_MOUSEACTIVATE:
@@ -3874,6 +4149,10 @@ void MediaPopup::setIdleAppOpenCallback(std::function<void(const std::wstring&)>
     impl_->onIdleAppOpen = std::move(cb);
 }
 
+void MediaPopup::setPanelOpenedCallback(std::function<void()> cb) {
+    impl_->onPanelOpened = std::move(cb);
+}
+
 void MediaPopup::setEnabled(bool enabled) {
     impl_->enabled = enabled;
     if (!enabled) {
@@ -4045,7 +4324,11 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
                               content.quickStartEnabled != impl_->idle.quickStartEnabled;
     bool changed = quoteChanged ||
                    content.showAppNames != impl_->idle.showAppNames ||
-                   content.apps.size() != impl_->idle.apps.size();
+                   content.apps.size() != impl_->idle.apps.size() ||
+                   content.todayTasks.size() != impl_->idle.todayTasks.size() ||
+                   content.todayTasksLoading != impl_->idle.todayTasksLoading ||
+                   content.todayTasksConnected != impl_->idle.todayTasksConnected ||
+                   content.todayTasksStatus != impl_->idle.todayTasksStatus;
     if (!changed) {
         for (size_t i = 0; i < content.apps.size(); ++i) {
             const auto& oldApp = impl_->idle.apps[i];
@@ -4055,6 +4338,18 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
                 oldApp.iconPixels != newApp.iconPixels ||
                 oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
                 oldApp.pathValid != newApp.pathValid) {
+                changed = true;
+                break;
+            }
+        }
+    }
+    if (!changed) {
+        for (size_t i = 0; i < content.todayTasks.size(); ++i) {
+            const auto& oldTask = impl_->idle.todayTasks[i];
+            const auto& newTask = content.todayTasks[i];
+            if (oldTask.id != newTask.id || oldTask.title != newTask.title ||
+                oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
+                oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
                 changed = true;
                 break;
             }

@@ -74,6 +74,10 @@ constexpr int kIdIdleQuote = 454;
 constexpr int kIdIdleQuoteBackground = 458;
 constexpr int kIdIdleQuoteBackgroundScope = 459;
 constexpr int kIdIdleCustomWelcome = 461;
+constexpr int kIdTickTickApiToken = 462;
+constexpr int kIdTickTickConnect = 463;
+constexpr int kIdTickTickRefresh = 464;
+constexpr int kIdTickTickDisconnect = 465;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -473,6 +477,40 @@ struct SettingsDialog::Impl {
         }
     }
 
+    void updateTickTickRows() {
+        if (auto* row = findRow(kIdTickTickApiToken)) {
+            row->hint = L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建并复制；"
+                        L"程序只将口令保存到 Windows 凭据管理器。";
+            row->controlText = state.tickTickApiTokenConfigured ? L"已配置" : L"未配置";
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
+        }
+        if (auto* row = findRow(kIdTickTickConnect)) {
+            row->controlText = state.tickTickConnecting
+                                   ? L"连接中…"
+                                   : state.tickTickConnected ? L"重新连接" : L"连接…";
+            row->hint = state.tickTickStatus.empty()
+                            ? (state.tickTickApiTokenConfigured
+                                   ? L"连接后，卡片会显示今天的未完成任务。"
+                                   : L"请先填写 API 口令。")
+                            : state.tickTickStatus;
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
+            row->enabled = state.tickTickApiTokenConfigured && !state.tickTickConnecting &&
+                           !state.tickTickSyncing;
+        }
+        if (auto* row = findRow(kIdTickTickRefresh)) {
+            row->enabled = state.tickTickConnected && !state.tickTickSyncing;
+            row->controlText = state.tickTickSyncing ? L"同步中…" : L"立即同步";
+        }
+        if (auto* row = findRow(kIdTickTickDisconnect)) {
+            row->enabled = state.tickTickApiTokenConfigured && !state.tickTickConnecting &&
+                           !state.tickTickSyncing;
+        }
+    }
+
     void updateIdleQuoteSourceRow() {
         if (auto* row = findRow(kIdIdleQuoteSource)) {
             const bool privacy = state.idleQuoteSource == 1;
@@ -670,6 +708,20 @@ struct SettingsDialog::Impl {
         idleApps.height = idleApps.minHeight;
         idleApps.enabled = state.idleEntryEnabled;
         updateIdleRowsEnabled();
+        addHeader(kIdlePage, L"滴答清单");
+        addButton(kIdlePage, kIdTickTickApiToken, L"API 口令",
+                  L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建后填写。",
+                  state.tickTickApiTokenConfigured ? L"已配置" : L"编辑…", kRowTallH);
+        addButton(kIdlePage, kIdTickTickConnect, L"连接滴答清单",
+                  L"验证普通用户 API 口令，并读取今天的未完成任务。",
+                  state.tickTickConnected ? L"重新连接" : L"连接…", kRowTallH);
+        addButton(kIdlePage, kIdTickTickRefresh, L"同步今日任务",
+                  L"从滴答清单读取今天的未完成任务，并刷新卡片内容。",
+                  state.tickTickSyncing ? L"同步中…" : L"立即同步", kRowH);
+        addButton(kIdlePage, kIdTickTickDisconnect, L"断开连接",
+                  L"删除本机保存的滴答清单 API 口令。",
+                  L"断开", kRowH);
+        updateTickTickRows();
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
             L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
@@ -2991,6 +3043,22 @@ struct SettingsDialog::Impl {
             if (actions.onEditIdleWelcome)
                 actions.onEditIdleWelcome();
             break;
+        case kIdTickTickApiToken:
+            if (actions.onEditTickTickApiToken)
+                actions.onEditTickTickApiToken();
+            break;
+        case kIdTickTickConnect:
+            if (actions.onTickTickConnect)
+                actions.onTickTickConnect();
+            break;
+        case kIdTickTickRefresh:
+            if (actions.onTickTickRefresh)
+                actions.onTickTickRefresh();
+            break;
+        case kIdTickTickDisconnect:
+            if (actions.onTickTickDisconnect)
+                actions.onTickTickDisconnect();
+            break;
         case kIdIdleQuoteSource:
             state.idleQuoteSource = row->selected;
             updateIdleQuoteSourceRow();
@@ -3272,6 +3340,7 @@ struct SettingsDialog::Impl {
             row->checked = s.idleAppNamesVisible;
         updateIdleQuoteSourceRow();
         updateIdleAppsRowHeight();
+        updateTickTickRows();
         const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongInfo)) {
             row->checked = vertical ? false : s.songInfoVisible;

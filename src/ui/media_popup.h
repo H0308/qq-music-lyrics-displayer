@@ -23,6 +23,8 @@ public:
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
+    // 面板完成一次隐藏到可见的打开时触发；悬浮和点击打开共用此回调。
+    void setPanelOpenedCallback(std::function<void()> cb);
     // 应用音量：图标+数值常驻显示；点击图标展开/收起卡内滑块，拖动经回调上报
     void setAppVolume(const AppVolumeState& state);
     void setAppVolumeCallback(std::function<void(int percent)> cb);
@@ -44,8 +46,9 @@ public:
     void beginPresentationUpdate();
     void endPresentationUpdate();
     // 展示类别与具体内容分开同步：scene 不为 Idle 时表示播放媒体；
-    // 悬浮控件样式下，播放中的弹窗允许临时切到“每日一言 + 快速启动”组合面板，关闭后回到媒体卡片。
-    // 内嵌控件展开时使用与无播放状态相同的“每日一言 + 快速启动”页面。
+    // 悬浮控件样式下，播放中的弹窗允许临时切到“每日一言 + 快捷启动与今日任务”
+    // 组合面板，关闭后回到媒体卡片。
+    // 内嵌控件展开时使用与无播放状态相同的组合页面。
     void setPresentationMode(DisplayScene scene, bool available, bool inlineControls);
     void setProgress(int64_t positionMs);
     void setAnchor(HWND anchor);

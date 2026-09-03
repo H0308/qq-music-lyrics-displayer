@@ -6067,6 +6067,10 @@ void TaskbarHost::setIdleAppOpenCallback(std::function<void(const std::wstring&)
     impl_->mediaPopup.setIdleAppOpenCallback(std::move(cb));
 }
 
+void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
+    impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
+}
+
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
     return impl_->lines;
 }

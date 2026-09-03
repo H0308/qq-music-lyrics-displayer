@@ -60,6 +60,22 @@ struct IdleAppInfo {
 
 constexpr std::size_t kMaxIdleApps = 10;
 
+enum class IdleTaskPriority : int {
+    None = 0,
+    Low = 1,
+    Medium = 3,
+    High = 5,
+};
+
+struct IdleTaskInfo {
+    std::wstring id;
+    std::wstring title;
+    std::wstring dueText;
+    bool completed = false;
+    bool overdue = false;
+    IdleTaskPriority priority = IdleTaskPriority::None;
+};
+
 struct IdlePresentation {
     std::wstring sentence;
     std::wstring source;
@@ -69,4 +85,8 @@ struct IdlePresentation {
     bool quickStartEnabled = true;
     bool showAppNames = true;
     std::vector<IdleAppInfo> apps;
+    std::vector<IdleTaskInfo> todayTasks;
+    bool todayTasksLoading = false;
+    bool todayTasksConnected = false;
+    std::wstring todayTasksStatus;
 };
