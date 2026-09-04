@@ -535,12 +535,17 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     if (lyricLayers_[0].surface && lyricLayers_[1].surface &&
         lyricLayers_[0].width == width0 && lyricLayers_[0].height == height0 &&
         lyricLayers_[1].width == width1 && lyricLayers_[1].height == height1) {
-        // 复用已有层：裁剪可能被上一次覆盖动画改过，统一重置边界和圆角。
+        // 复用已有层：裁剪、位移和透明度可能被上一次动画改过，统一恢复到
+        // 挂载初始状态，避免新一轮转场首帧继承旧动画的终点。
         for (int i = 0; i < 2; ++i) {
             auto& layer = lyricLayers_[i];
             if (FAILED(configureRectangleClip(layer.clip, 0.0f, 0.0f,
                                               static_cast<float>(widths[i]),
                                               static_cast<float>(heights[i]), cornerRadius)))
+                return false;
+            if (FAILED(layer.visual->SetOffsetX(0.0f)) ||
+                FAILED(layer.visual->SetOffsetY(0.0f)) ||
+                FAILED(layer.opacity->SetOpacity(0.0f)))
                 return false;
         }
         return true;
@@ -845,14 +850,20 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
 
 bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float fromY,
                                                float toY, float clipFromBottom,
-                                               float clipToBottom, float durationSec) {
+                                               float clipToBottom, float durationSec,
+                                               float fromOpacity, float toOpacity) {
     if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || !lyricLayers_[index].clip || durationSec <= 0.0f)
         return false;
 
     auto& layer = lyricLayers_[index];
     const double duration = static_cast<double>(durationSec);
-    HRESULT hr = layer.visual->SetOffsetX(offsetX);
+    IDCompositionAnimation* opacityAnim = nullptr;
+    // 显式写入动画起点。尤其是收起时，层通常刚从隐藏的挂载状态进入动画，
+    // 不能依赖上一批合成命令的基础透明度，否则 tab 可能在首帧短暂闪现。
+    HRESULT hr = layer.opacity->SetOpacity(fromOpacity);
+    if (SUCCEEDED(hr))
+        hr = layer.visual->SetOffsetX(offsetX);
     if (fromY == toY) {
         if (SUCCEEDED(hr))
             hr = layer.visual->SetOffsetY(toY);
@@ -893,8 +904,33 @@ bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float f
         if (clipAnim)
             clipAnim->Release();
     }
-    if (SUCCEEDED(hr))
-        hr = layer.opacity->SetOpacity(1.0f);
+    if (SUCCEEDED(hr)) {
+        if (fromOpacity == toOpacity) {
+            hr = layer.opacity->SetOpacity(toOpacity);
+        } else {
+            hr = dcomp_->CreateAnimation(&opacityAnim);
+            if (SUCCEEDED(hr)) {
+                if (fromOpacity > toOpacity) {
+                    // 收起时让旧内容贯穿整个转场平滑淡出，避免前段突然变透明，
+                    // 造成整张卡片像瞬间跳到折叠态。
+                    if (!addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity))
+                        hr = E_FAIL;
+                } else {
+                    if (!addSmoothStep(opacityAnim, 0.0, duration * 0.14,
+                                       fromOpacity, fromOpacity) ||
+                        !addSmoothStep(opacityAnim, duration * 0.14, duration,
+                                       fromOpacity, toOpacity))
+                        hr = E_FAIL;
+                }
+            }
+            if (SUCCEEDED(hr))
+                hr = opacityAnim->End(duration, toOpacity);
+            if (SUCCEEDED(hr))
+                hr = layer.opacity->SetOpacity(opacityAnim);
+        }
+    }
+    if (opacityAnim)
+        opacityAnim->Release();
     return SUCCEEDED(hr);
 }
 

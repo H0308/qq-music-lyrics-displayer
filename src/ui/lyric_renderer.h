@@ -110,10 +110,11 @@ public:
     // 两段提交的第二阶段：背景层从挂载时的 0 透明度转为可见。
     bool showLyricTransitionBackdrop();
     // 区域覆盖动画（快速打开展开/收起）：层固定在 (offsetX, fromY→toY)，
-    // 同时矩形裁剪底边从 clipFromBottom 动画到 clipToBottom（像素，层内坐标）。
+    // 同时矩形裁剪底边和层透明度分别从起点动画到终点（像素，层内坐标）。
     bool animateLyricLayerClipSlide(int index, float offsetX, float fromY, float toY,
                                     float clipFromBottom, float clipToBottom,
-                                    float durationSec);
+                                    float durationSec, float fromOpacity = 1.0f,
+                                    float toOpacity = 1.0f);
     void clearLyricTransitionLayers();
     // 弹出式宿主的根视觉动画：只改变合成器位移和透明度，不触发布局。
     bool animateRoot(float fromX, float toX, float fromY, float toY,

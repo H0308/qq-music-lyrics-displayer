@@ -45,7 +45,7 @@ constexpr float kCategoryTransitionMs = 240.0f;
 // 内容透明度完成，避免用户在过渡中只看到空白背景。
 constexpr float kCategoryTransitionTravelDip = 24.0f;
 constexpr float kInnerContentTransitionMs = 220.0f;
-constexpr float kIdleQuickExpandMs = 160.0f;
+constexpr float kIdleQuickExpandMs = 200.0f;
 // 根卡片位移由 DirectComposition 按显示器刷新率执行；只有长文本内容需要
 // 重绘，30fps 已足够平滑，也避免与任务栏歌词的高频提交长期争用 UI 线程。
 constexpr UINT kScrollTimerMs = 32;
@@ -2689,10 +2689,11 @@ struct MediaPopup::Impl {
     }
 
     // 快速打开展开/收起：把一言区（含分隔线）和展开态的快速打开区分别画进
-    // 两个 DComp 合成层。快速打开区整体上滑/下滑（OffsetY 动画），列表视口
-    // 高度收放（层内矩形裁剪底边动画——推导后可证该底边在层内坐标系中与
-    // 位移无关，直接按两个端点值插值）；一言区原地不动，由裁剪底边扫过
-    // 模拟被覆盖/显露。几何与 drawIdle 的逐帧版本在两个端点完全一致。
+    // 两个 DComp 合成层。展开时快速打开区整体上移，收起时整体下移并淡出；
+    // 展开时同步淡入。列表视口高度通过层内矩形裁剪底边收放（该底边在层内
+    // 坐标系中与位移无关，直接按两个端点值插值）。一言区原地不动，由裁剪
+    // 底边扫过模拟被覆盖/显露。
+    // 几何与 drawIdle 的逐帧版本在两个端点完全一致。
     bool startQuickExpandLayerTransition(float w) {
         if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0)
             return false;
@@ -2734,7 +2735,7 @@ struct MediaPopup::Impl {
             return false;
 
         // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
-        // 被隐藏/显露（与原逐帧版本的淡出/淡入近似，端点一致）。
+        // 被隐藏/显露。交换链只负责卡片底和箭头，目标页在转场收尾前再交接。
         if (auto* dc = renderer.beginLyricLayerDraw(0)) {
             drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                      D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
@@ -2755,10 +2756,12 @@ struct MediaPopup::Impl {
         }
 
         // 层 1：快速打开区，按展开态完整绘制（列表布局依赖展开进度，临时固定
-        // 为展开态；收起过程的收缩由合成层裁剪动画完成）。层原点 =
-        // 卡片 y=quickOriginY，用平移变换把卡片坐标映射进层内坐标。
+        // 为展开态）。展开时整层上移并淡入，收起时整层下移并淡出；层 0
+        // 负责逐步显露一言区，避免整卡片提前切换。
         if (auto* dc = renderer.beginLyricLayerDraw(1)) {
+            const bool savedExpanded = idleQuickExpanded;
             const float savedT = idleQuickExpandT;
+            idleQuickExpanded = true;
             idleQuickExpandT = 1.0f;
             // 保留 BeginDraw 的表面更新偏移，在其上叠加层原点平移
             D2D1_MATRIX_3X2_F baseTransform;
@@ -2767,6 +2770,7 @@ struct MediaPopup::Impl {
                              baseTransform);
             drawIdleQuickHeader(dc, w, expandedHeaderTop, idle, false);
             drawIdleQuickList(dc, w, expandedListTop, idle, false);
+            idleQuickExpanded = savedExpanded;
             idleQuickExpandT = savedT;
             if (!renderer.endLyricLayerDraw(1, dc))
                 return false;
@@ -2774,9 +2778,10 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 同页面转场：先提交 0 透明度的内容层，再和交换链的目标帧一起提交
-        // 动画状态，避免合成器在首次挂载子视觉时显示一帧空白底色。
+        // 同页面转场：先提交 0 透明度的内容层，并等待它进入合成树；再和交换链
+        // 的目标帧一起提交动画状态，确保标签从透明状态开始淡入，不会首帧闪现。
         renderer.commit();
+        renderer.waitForCommitCompletion();
 
         const float quoteBaseY = cardOriginDip * s;
         const float quickBaseY = (cardOriginDip + quickOriginY) * s;
@@ -2791,7 +2796,8 @@ struct MediaPopup::Impl {
                 1, 0.0f, opening ? quickBaseY + travelPx : quickBaseY,
                 opening ? quickBaseY : quickBaseY + travelPx,
                 (opening ? clipBottomCollapsed : clipBottomExpanded) * s,
-                (opening ? clipBottomExpanded : clipBottomCollapsed) * s, durationSec))
+                (opening ? clipBottomExpanded : clipBottomCollapsed) * s, durationSec,
+                opening ? 0.0f : 1.0f, opening ? 1.0f : 0.0f))
             return false;
         quickExpandLayersBuilt = true;
         return true;

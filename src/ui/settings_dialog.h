@@ -22,6 +22,8 @@ struct SettingsState {
     bool idleAppNamesVisible = true;
     std::vector<IdleAppInfo> idleApps;
     bool tickTickApiTokenConfigured = false;
+    std::wstring tickTickAppPath;
+    bool tickTickAppPathValid = false;
     bool tickTickConnected = false;
     bool tickTickConnecting = false;
     bool tickTickSyncing = false;
@@ -76,6 +78,8 @@ struct SettingsActions {
     std::function<void(int)> onIdleQuoteBackgroundScope;
     std::function<void()> onEditIdleWelcome;
     std::function<void()> onEditTickTickApiToken;
+    std::function<void()> onPickTickTickApp;
+    std::function<void()> onClearTickTickApp;
     std::function<void()> onTickTickConnect;
     std::function<void()> onTickTickRefresh;
     std::function<void()> onTickTickDisconnect;
