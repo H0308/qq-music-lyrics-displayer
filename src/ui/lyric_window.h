@@ -94,6 +94,8 @@ struct PresentationFrame {
 
     bool visible = false;
     bool animateTransition = true;
+    // 临时状态文字只滚动一轮；完成后由宿主通知上游切回普通空闲文案。
+    bool statusTextOneShot = false;
     // QQ 时长从未知补齐为有效值时，trackKey 会变化，但这不是换歌；
     // 宿主据此跳过整卡切换动画，即使封面或专辑字段也在同一帧更新。
     bool durationOnlyUpdate = false;

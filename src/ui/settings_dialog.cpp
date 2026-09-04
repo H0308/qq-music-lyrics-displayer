@@ -78,8 +78,6 @@ constexpr int kIdTickTickApiToken = 462;
 constexpr int kIdTickTickConnect = 463;
 constexpr int kIdTickTickRefresh = 464;
 constexpr int kIdTickTickDisconnect = 465;
-constexpr int kIdTickTickAppPath = 466;
-constexpr int kIdTickTickAppClear = 467;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -488,23 +486,6 @@ struct SettingsDialog::Impl {
             row->minHeight = kRowTallH;
             row->height = row->minHeight;
         }
-        if (auto* row = findRow(kIdTickTickAppPath)) {
-            row->controlText = state.tickTickAppPath.empty() ? L"选择…" : L"重新选择";
-            if (state.tickTickAppPath.empty()) {
-                row->hint = L"可选：网页任务详情无法打开时，尝试启动滴答清单 Windows 客户端。";
-            } else if (!state.tickTickAppPathValid) {
-                row->hint = L"已配置的客户端路径失效，请重新选择。";
-            } else {
-                row->hint = std::wstring(L"当前路径：") + state.tickTickAppPath;
-            }
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-            row->enabled = true;
-        }
-        if (auto* row = findRow(kIdTickTickAppClear)) {
-            row->enabled = !state.tickTickAppPath.empty();
-        }
         if (auto* row = findRow(kIdTickTickConnect)) {
             row->controlText = state.tickTickConnecting
                                    ? L"连接中…"
@@ -731,12 +712,6 @@ struct SettingsDialog::Impl {
         addButton(kIdlePage, kIdTickTickApiToken, L"API 口令",
                   L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建后填写。",
                   state.tickTickApiTokenConfigured ? L"已配置" : L"编辑…", kRowTallH);
-        addButton(kIdlePage, kIdTickTickAppPath, L"本地客户端",
-                  L"可选：网页任务详情无法打开时，尝试启动滴答清单 Windows 客户端。",
-                  state.tickTickAppPath.empty() ? L"选择…" : L"重新选择", kRowTallH);
-        addButton(kIdlePage, kIdTickTickAppClear, L"清除客户端路径",
-                  L"清除后，网页任务详情无法打开时不再尝试启动本地客户端。",
-                  L"清除", kRowH);
         addButton(kIdlePage, kIdTickTickConnect, L"连接滴答清单",
                   L"验证普通用户 API 口令，并读取今天的未完成任务。",
                   state.tickTickConnected ? L"重新连接" : L"连接…", kRowTallH);
@@ -3071,14 +3046,6 @@ struct SettingsDialog::Impl {
         case kIdTickTickApiToken:
             if (actions.onEditTickTickApiToken)
                 actions.onEditTickTickApiToken();
-            break;
-        case kIdTickTickAppPath:
-            if (actions.onPickTickTickApp)
-                actions.onPickTickTickApp();
-            break;
-        case kIdTickTickAppClear:
-            if (actions.onClearTickTickApp)
-                actions.onClearTickTickApp();
             break;
         case kIdTickTickConnect:
             if (actions.onTickTickConnect)

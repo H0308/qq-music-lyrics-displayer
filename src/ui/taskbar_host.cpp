@@ -55,6 +55,7 @@ constexpr float kVerticalControlsGap = 4.0f;
 constexpr float kVerticalLyricGap = 6.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
+constexpr ULONGLONG kOneShotStatusTextHoldMs = 1000; // 不足以滚动时保留完整文案的时长
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
 constexpr float kSceneTransitionMs = 240.0f; // 每日一言与歌词内容块上下翻页时长
 constexpr float kSongTransitionMs = 220.0f; // 切歌时新内容滑入时长
@@ -327,6 +328,10 @@ struct TaskbarHost::Impl {
     // 歌词状态
     std::vector<LyricLine> lines;
     std::wstring statusText = L"等待播放…";
+    std::function<void()> onStatusTextCycleCompleted_;
+    bool statusTextOneShot_ = false;
+    ULONGLONG statusTextOneShotStartMs_ = 0;
+    bool statusTextCycleCallbackPending_ = false;
     int currentLine = -1;
     int64_t positionMs_ = 0; // 播放进度（每帧更新），驱动逐字高亮
     DisplayScene scene_ = DisplayScene::NoPlayback;
@@ -1565,6 +1570,7 @@ struct TaskbarHost::Impl {
         const bool lyricsChanged = !sameLyrics(lines, frame.lyrics);
         const bool lineChanged = frame.currentLine != currentLine;
         const bool statusChanged = frame.statusText != statusText;
+        const bool statusOneShotChanged = frame.statusTextOneShot != statusTextOneShot_;
         const bool sceneChanged = frame.scene != scene_;
         const bool sceneWidthChanged = sceneWidthPolicyDiffers(scene_, frame.scene);
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
@@ -1653,6 +1659,12 @@ struct TaskbarHost::Impl {
         if (frame.actualPositionMs != positionMs_ && !media.playing)
             karaokeSettled_ = false; // 暂停中 seek：逐字高亮需要重新收敛
         positionMs_ = frame.actualPositionMs;
+        if (statusOneShotChanged || (statusChanged && frame.statusTextOneShot)) {
+            statusTextOneShot_ = frame.statusTextOneShot;
+            statusTextOneShotStartMs_ = statusTextOneShot_ ? monotonicNowMs() : 0;
+            lyricScrollOffset_ = 0.0f;
+            lastTickMs_ = 0;
+        }
         statusText = frame.statusText;
 
         // 只对已有曲目之间的切换做入场动画；首次显示、同曲刷新和会话关闭保持即时提交。
@@ -1693,7 +1705,7 @@ struct TaskbarHost::Impl {
             // 同一目标行的低频媒体/场景更新不应打断动画，但动画版本要跟随最新完整帧。
             lyricTransitionRevision_ = frame.frameRevision;
         }
-        if (statusChanged || sceneChanged) {
+        if (statusChanged || statusOneShotChanged || sceneChanged) {
             if (sceneTransitionInProgress && (!sceneChanged || continueSceneTransition)) {
                 sceneTransitionNeedsRelayout_ = true;
                 lyricTransitionRevision_ = frame.frameRevision;
@@ -1719,7 +1731,8 @@ struct TaskbarHost::Impl {
         syncMediaPopupEnabled();
 
         if (visible && (wasVisible != visible || trackChanged || mediaChanged || lyricsChanged ||
-                        lineChanged || statusChanged || sceneChanged || idleChanged))
+                        lineChanged || statusChanged || statusOneShotChanged || sceneChanged ||
+                        idleChanged))
             render();
     }
 
@@ -5486,6 +5499,44 @@ struct TaskbarHost::Impl {
                 offset += loopW;
             animating = true;
         };
+        auto finishOneShotStatus = [&]() {
+            statusTextOneShot_ = false;
+            statusTextOneShotStartMs_ = 0;
+            statusTextCycleCallbackPending_ = true;
+        };
+        auto oneShotMarquee = [&](float textW, float areaW, float speed, float& offset,
+                                  float loopGap) {
+            if (!statusTextOneShot_) {
+                marquee(textW, areaW, speed, offset, loopGap);
+                return false;
+            }
+            if (statusTextOneShotStartMs_ == 0)
+                statusTextOneShotStartMs_ = now;
+            if (!clientAnimations_ || textW <= areaW || areaW <= 0.0f) {
+                if (offset != 0.0f) {
+                    offset = 0.0f;
+                    animating = true;
+                }
+                if (now - statusTextOneShotStartMs_ >= kOneShotStatusTextHoldMs) {
+                    finishOneShotStatus();
+                    return true;
+                }
+                return false;
+            }
+
+            const float loopW = textW + loopGap;
+            const float advance = speed * std::max(dt, 0.0f);
+            const float previous = offset;
+            offset = std::fmod(offset + advance, loopW);
+            if (offset < 0.0f)
+                offset += loopW;
+            animating = true;
+            if (previous + advance >= loopW) {
+                finishOneShotStatus();
+                return true;
+            }
+            return false;
+        };
 
         int pxW = 0;
         int pxH = 0;
@@ -5540,9 +5591,17 @@ struct TaskbarHost::Impl {
                     animating = true;
                 }
             } else if ((lyricMarqueePlaying || idleMarquee) && !holdLyricScroll) {
-                marquee(verticalLyricExtent, lyricAreaH,
-                        idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_,
-                        kVerticalLyricGap);
+                if (statusTextOneShot_ && idleMarquee) {
+                    if (oneShotMarquee(verticalLyricExtent, lyricAreaH, kInfoScrollSpeed,
+                                       lyricScrollOffset_, kVerticalLyricGap)) {
+                        scrollAnimating_ = false;
+                        return;
+                    }
+                } else {
+                    marquee(verticalLyricExtent, lyricAreaH,
+                            idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_,
+                            lyricScrollOffset_, kVerticalLyricGap);
+                }
             }
             scrollAnimating_ = animating;
             return;
@@ -5609,8 +5668,16 @@ struct TaskbarHost::Impl {
                 animating = true;
             }
         } else if ((lyricMarqueePlaying || idleMarquee) && !holdLyricScroll) {
-            marquee(lyricWidth_, lyricAreaW,
-                    idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_);
+            if (statusTextOneShot_ && idleMarquee) {
+                if (oneShotMarquee(lyricWidth_, lyricAreaW, kInfoScrollSpeed,
+                                   lyricScrollOffset_, kTextPadding * 2.0f)) {
+                    scrollAnimating_ = false;
+                    return;
+                }
+            } else {
+                marquee(lyricWidth_, lyricAreaW,
+                        idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_);
+            }
         }
         if (lyricMarqueePlaying && !holdLyricScroll)
             marquee(secondaryWidth_, lyricAreaW, kLyricScrollSpeed, secondaryScrollOffset_);
@@ -5848,8 +5915,14 @@ struct TaskbarHost::Impl {
                 adjustPosition();
         }
         updateScroll();
+        const bool statusCycleCallbackHandled = statusTextCycleCallbackPending_;
+        if (statusTextCycleCallbackPending_) {
+            statusTextCycleCallbackPending_ = false;
+            if (onStatusTextCycleCompleted_)
+                onStatusTextCycleCompleted_();
+        }
         // 静止场景跳过整帧重绘：动画源全部停止且无脏状态时，画面保持上一帧内容
-        if (needsFrameRender())
+        if (!statusCycleCallbackHandled && needsFrameRender())
             render();
     }
 
@@ -6075,6 +6148,10 @@ void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
     impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
 }
 
+void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) {
+    impl_->onStatusTextCycleCompleted_ = std::move(cb);
+}
+
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
     return impl_->lines;
 }
@@ -6128,6 +6205,9 @@ void TaskbarHost::setPosition(int64_t positionMs) {
 
 void TaskbarHost::setStatusText(const std::wstring& text) {
     impl_->statusText = text;
+    impl_->statusTextOneShot_ = false;
+    impl_->statusTextOneShotStartMs_ = 0;
+    impl_->statusTextCycleCallbackPending_ = false;
     if (!text.empty() && impl_->lines.empty())
         impl_->scene_ = DisplayScene::Message;
     else if (text.empty() && !impl_->lines.empty())

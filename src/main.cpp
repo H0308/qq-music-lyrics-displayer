@@ -64,7 +64,6 @@ constexpr UINT kMsgIdleQuoteReady = WM_APP + 6;
 constexpr UINT kMsgIdleAppReady = WM_APP + 7;
 constexpr UINT kMsgHolidayReady = WM_APP + 8;
 constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
-constexpr UINT kMsgTickTickAppReady = WM_APP + 10;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -175,10 +174,6 @@ struct HolidayPayload {
 struct TickTickTasksPayload {
     uint64_t generation = 0;
     TickTickTasksResult result;
-};
-
-struct TickTickAppPayload {
-    std::wstring path;
 };
 
 std::string utf8Of(const std::wstring& w) {
@@ -651,13 +646,17 @@ struct App {
     // 凭据管理器；这里只保留连接状态和当前展示快照。
     TickTickService tickTickService_ = TickTickService::Dida365;
     std::wstring tickTickApiToken_;
-    std::wstring tickTickAppPath_;
     bool tickTickConnected_ = false;
     bool tickTickConnecting_ = false;
     bool tickTickTasksLoading_ = false;
     std::wstring tickTickStatus_ = L"请在设置中连接滴答清单";
     std::vector<IdleTaskInfo> todayTasks_;
     uint64_t tickTickRequestGeneration_ = 0;
+
+    // 每次进程启动只决策一次：首次任务同步完成前显示加载状态；数据成功且
+    // 没有媒体会话时播报一次任务概览，之后再回到普通空闲文案。
+    bool startupTaskSummaryPending_ = true;
+    bool startupTaskSummaryActive_ = false;
 
     // 当前年份节假日类型缓存：只在启动或缓存过期时请求全年数据，日常判断不访问网络。
     int holidayCalendarYear_ = 0;
@@ -739,7 +738,6 @@ struct App {
     std::wstring qqLocalLyricsPath_;
     bool qqLocalLyricsPickerOpen_ = false;
     bool idleAppPickerOpen_ = false;
-    bool tickTickAppPickerOpen_ = false;
 
     std::vector<ILyricHost*> hosts() {
         std::vector<ILyricHost*> v;
@@ -1490,6 +1488,60 @@ struct App {
         return presentation;
     }
 
+    std::wstring startupTaskSummaryText() const {
+        std::size_t remaining = 0;
+        std::size_t high = 0;
+        std::size_t medium = 0;
+        std::size_t low = 0;
+        std::size_t none = 0;
+        for (const auto& task : todayTasks_) {
+            if (task.completed)
+                continue;
+            ++remaining;
+            switch (task.priority) {
+            case IdleTaskPriority::High:
+                ++high;
+                break;
+            case IdleTaskPriority::Medium:
+                ++medium;
+                break;
+            case IdleTaskPriority::Low:
+                ++low;
+                break;
+            case IdleTaskPriority::None:
+            default:
+                ++none;
+                break;
+            }
+        }
+        if (remaining == 0)
+            return L"今日没有任务";
+
+        std::wstring summary = L"今日剩余 ";
+        summary += std::to_wstring(remaining);
+        summary += L" 个任务";
+
+        std::size_t emptyPriorityCount = 0;
+        const auto appendPriority = [&](const wchar_t* label, std::size_t count) {
+            if (count == 0) {
+                ++emptyPriorityCount;
+                return;
+            }
+            summary += L"，";
+            summary += label;
+            summary += L"有 ";
+            summary += std::to_wstring(count);
+            summary += L" 个";
+        };
+        appendPriority(L"高优先级", high);
+        appendPriority(L"中优先级", medium);
+        appendPriority(L"低优先级", low);
+        appendPriority(L"无优先级", none);
+        if (emptyPriorityCount > 0)
+            summary += L"，其余优先级没有任务";
+        return summary;
+    }
+
     void refreshIdleWelcome() {
         const SmtcSnapshot snap = monitor.snapshot();
         if (!idleEntryEnabled_ || idleQuoteEnabled_ || snap.sessionAlive ||
@@ -1899,7 +1951,19 @@ struct App {
         frame.currentLine = LyricProvider::findLine(frame.lyrics, frame.lineSelectionPositionMs);
         frame.visible = snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         frame.animateTransition = animateTransition;
-        if (frame.scene == DisplayScene::Idle)
+        const bool showStartupTaskSummary = startupTaskSummaryActive_ &&
+                                             !snap.sessionAlive &&
+                                             frame.scene == DisplayScene::Idle;
+        const bool showStartupTaskLoading = startupTaskSummaryPending_ &&
+                                             !tickTickApiToken_.empty() &&
+                                             !snap.sessionAlive &&
+                                             frame.scene == DisplayScene::Idle;
+        if (showStartupTaskSummary) {
+            frame.statusText = startupTaskSummaryText();
+            frame.statusTextOneShot = true;
+        } else if (showStartupTaskLoading) {
+            frame.statusText = L"正在同步今日任务…";
+        } else if (frame.scene == DisplayScene::Idle)
             frame.statusText = frame.idle.sentence;
         else if (!snap.sessionAlive)
             frame.statusText = notRunningStatus();
@@ -1929,7 +1993,19 @@ struct App {
             snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         currentFrame_.animateTransition = animateTransition;
         currentFrame_.durationOnlyUpdate = durationOnlyUpdate;
-        if (currentFrame_.scene == DisplayScene::Idle)
+        const bool showStartupTaskSummary = startupTaskSummaryActive_ &&
+                                             !snap.sessionAlive &&
+                                             currentFrame_.scene == DisplayScene::Idle;
+        const bool showStartupTaskLoading = startupTaskSummaryPending_ &&
+                                             !tickTickApiToken_.empty() &&
+                                             !snap.sessionAlive &&
+                                             currentFrame_.scene == DisplayScene::Idle;
+        currentFrame_.statusTextOneShot = showStartupTaskSummary;
+        if (showStartupTaskSummary)
+            currentFrame_.statusText = startupTaskSummaryText();
+        else if (showStartupTaskLoading)
+            currentFrame_.statusText = L"正在同步今日任务…";
+        else if (currentFrame_.scene == DisplayScene::Idle)
             currentFrame_.statusText = currentFrame_.idle.sentence;
         else if (!snap.sessionAlive)
             currentFrame_.statusText = notRunningStatus();
@@ -1995,6 +2071,9 @@ struct App {
             openTickTickTask(task);
         });
         host->setMediaPopupOpenedCallback([this] { refreshTickTickTasks(); });
+        host->setStatusTextCycleCompletedCallback([this] {
+            onStartupTaskSummaryCompleted();
+        });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)
@@ -2224,6 +2303,11 @@ struct App {
     void onSmtcChanged() {
         SmtcSnapshot snap = monitor.snapshot();
         syncAppVolumeTarget(snap);
+        if (snap.sessionAlive) {
+            // 媒体会话优先于启动任务播报；即使任务请求先返回，也不能覆盖已经在播放的歌词。
+            startupTaskSummaryPending_ = false;
+            startupTaskSummaryActive_ = false;
+        }
         if (!snap.sessionAlive) {
             if (spectrumSessionAlive_)
                 spectrum_.requestReconnect();
@@ -2452,6 +2536,12 @@ struct App {
     void onFrame() {
         syncTaskbarOrientation();
         SmtcSnapshot snap = monitor.snapshot();
+        if (snap.sessionAlive && (startupTaskSummaryPending_ || startupTaskSummaryActive_)) {
+            // 定时器也检查一次，避免媒体事件消息尚未出队时让启动播报多停留一帧。
+            startupTaskSummaryPending_ = false;
+            startupTaskSummaryActive_ = false;
+            publishPresentationFrame(snap, false, true);
+        }
         if (!snap.sessionAlive) return;
         if (!snapshotMatchesTrackKey(snap, currentKey))
             return;
@@ -2518,14 +2608,12 @@ struct App {
     void setAutoCheckOnStartup(bool enabled);
     void pickQqLocalLyricsPath();
     void applyQqLocalLyricsPath(const std::wstring& path);
-    void pickTickTickApp();
-    void applyTickTickAppPath(const std::wstring& path);
-    void clearTickTickAppPath();
     void editTickTickApiToken();
     void connectTickTick();
     void refreshTickTickTasks();
     void disconnectTickTick();
     void onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload);
+    void onStartupTaskSummaryCompleted();
     void openTickTickTask(const IdleTaskInfo& task);
     void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
                                bool persistOrder = false);
@@ -2564,6 +2652,8 @@ void App::editTickTickApiToken() {
             normalized.pop_back();
 
         ++tickTickRequestGeneration_;
+        startupTaskSummaryPending_ = false;
+        startupTaskSummaryActive_ = false;
         tickTickConnected_ = false;
         tickTickConnecting_ = false;
         tickTickTasksLoading_ = false;
@@ -2607,6 +2697,7 @@ void App::refreshTickTickTasks() {
     if (tickTickTasksLoading_)
         return;
     if (tickTickApiToken_.empty()) {
+        startupTaskSummaryPending_ = false;
         tickTickConnected_ = false;
         tickTickConnecting_ = false;
         tickTickStatus_ = L"请在设置中填写滴答清单 API 口令";
@@ -2645,6 +2736,8 @@ void App::disconnectTickTick() {
     tickTickTasksLoading_ = false;
     todayTasks_.clear();
     tickTickStatus_ = L"已断开滴答清单连接";
+    startupTaskSummaryPending_ = false;
+    startupTaskSummaryActive_ = false;
     if (settingsDialog)
         settingsDialog->updateState(currentSettingsState());
     publishPresentationFrame(monitor.snapshot(), false, true);
@@ -2668,9 +2761,26 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
         tickTickStatus_ = payload->result.error.empty() ? L"滴答清单任务同步失败"
                                                         : payload->result.error;
     }
+    const SmtcSnapshot snap = monitor.snapshot();
+    if (startupTaskSummaryPending_) {
+        startupTaskSummaryPending_ = false;
+        startupTaskSummaryActive_ = payload->result.ok && !snap.sessionAlive &&
+                                    idleEntryEnabled_;
+    } else if (startupTaskSummaryActive_ && !payload->result.ok) {
+        // 播报期间刷新失败时不继续播报一份已经清空的任务统计，直接回到普通空闲文案。
+        startupTaskSummaryActive_ = false;
+    }
     if (settingsDialog)
         settingsDialog->updateState(currentSettingsState());
-    publishPresentationFrame(monitor.snapshot(), false, true);
+    publishPresentationFrame(snap, false, true);
+}
+
+void App::onStartupTaskSummaryCompleted() {
+    if (!startupTaskSummaryActive_)
+        return;
+    startupTaskSummaryActive_ = false;
+    const SmtcSnapshot snap = monitor.snapshot();
+    publishPresentationFrame(snap, false, true);
 }
 
 void App::openTickTickTask(const IdleTaskInfo& task) {
@@ -2681,25 +2791,11 @@ void App::openTickTickTask(const IdleTaskInfo& task) {
         return;
     }
 
-    // 滴答清单网页版的任务链接由清单 ID 和任务 ID 唯一定位。官方公开的
-    // Windows URL Scheme 没有任务详情指令，不能把“ShellExecute 接受了 EXE”
-    // 当成客户端已经完成任务跳转，否则单实例客户端可能静默丢弃参数。
+    // 滴答清单网页版的任务链接由清单 ID 和任务 ID 唯一定位。
     const std::wstring taskPath = task.projectId + L"/tasks/" + task.id;
     const std::wstring webUrl = L"https://dida365.com/webapp/#p/" + taskPath;
-    bool opened = platform_icon::launchUri(webUrl);
+    const bool opened = platform_icon::launchUri(webUrl);
     const wchar_t* target = opened ? L"web" : L"failed";
-
-    // 本地客户端没有公开的任务详情深链接；仅在网页入口启动失败时，
-    // 使用用户配置的 EXE 打开客户端，至少保证用户可以继续处理任务。
-    if (!opened && !tickTickAppPath_.empty()) {
-        if (validExePath(tickTickAppPath_)) {
-            opened = platform_icon::launchConfiguredExe(tickTickAppPath_);
-            target = L"client-fallback";
-        } else {
-            runtime_log::writef(L"[action][ticktick] client-path-invalid path=%s",
-                                tickTickAppPath_.c_str());
-        }
-    }
 
     runtime_log::writef(L"[action][ticktick] open-task id=%s project=%s target=%s result=%s",
                         task.id.c_str(), task.projectId.c_str(),
@@ -2887,7 +2983,6 @@ void App::loadSettings() {
         idleQuoteBackgroundScope_ = idleQuoteBackgroundScopeFromConfig(
             j.value("idleQuoteBackgroundScope", std::string("daily-quote")));
         jinrishiciToken_ = wideOf(j.value("jinrishiciToken", std::string()));
-        tickTickAppPath_ = wideOf(j.value("tickTickAppPath", std::string()));
         idleApps_.clear();
         if (j.contains("idleApps") && j["idleApps"].is_array()) {
             for (const auto& value : j["idleApps"]) {
@@ -2988,7 +3083,7 @@ void App::saveSettings() {
         j["idleQuoteBackgroundScope"] =
             idleQuoteBackgroundScopeConfigName(idleQuoteBackgroundScope_);
         j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
-        j["tickTickAppPath"] = utf8Of(tickTickAppPath_);
+        j.erase("tickTickAppPath");
         j.erase("tickTickClientId");
         j["idleApps"] = nlohmann::json::array();
         for (const auto& app : idleApps_) {
@@ -3186,76 +3281,6 @@ void App::applyQqLocalLyricsPath(const std::wstring& selectedPath) {
         provider.setQqLocalLyricsConfig(true, qqLocalLyricsPath_);
         reloadCurrentQqLyrics();
     }
-}
-
-void App::pickTickTickApp() {
-    if (tickTickAppPickerOpen_)
-        return;
-
-    tickTickAppPickerOpen_ = true;
-    runtime_log::writef(L"[action][ticktick] choose-client start");
-    const DWORD mainThreadId = mainThread;
-    std::thread([mainThreadId] {
-        std::wstring selectedPath;
-        const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
-                                                       COINIT_DISABLE_OLE1DDE);
-        if (SUCCEEDED(init)) {
-            IFileOpenDialog* dialog = nullptr;
-            if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
-                                            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
-                const COMDLG_FILTERSPEC filters[] = {{L"应用程序 (*.exe)", L"*.exe"}};
-                DWORD options = 0;
-                if (SUCCEEDED(dialog->GetOptions(&options)))
-                    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST |
-                                       FOS_PATHMUSTEXIST);
-                dialog->SetFileTypes(_countof(filters), filters);
-                dialog->SetTitle(L"选择滴答清单 Windows 客户端");
-                if (SUCCEEDED(dialog->Show(nullptr))) {
-                    IShellItem* item = nullptr;
-                    if (SUCCEEDED(dialog->GetResult(&item)) && item) {
-                        PWSTR path = nullptr;
-                        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
-                            selectedPath = path;
-                            CoTaskMemFree(path);
-                        }
-                        item->Release();
-                    }
-                }
-                dialog->Release();
-            }
-            CoUninitialize();
-        }
-
-        runtime_log::writef(L"[action][ticktick] choose-client result=%s path=%s",
-                            selectedPath.empty() ? L"cancelled" : L"selected",
-                            selectedPath.c_str());
-        auto* payload = new TickTickAppPayload{std::move(selectedPath)};
-        if (!PostThreadMessageW(mainThreadId, kMsgTickTickAppReady, 0,
-                                reinterpret_cast<LPARAM>(payload)))
-            delete payload;
-    }).detach();
-}
-
-void App::applyTickTickAppPath(const std::wstring& selectedPath) {
-    if (selectedPath.empty() || !validExePath(selectedPath) ||
-        selectedPath == tickTickAppPath_)
-        return;
-    tickTickAppPath_ = selectedPath;
-    runtime_log::writef(L"[action][ticktick] client-path-changed path=%s",
-                        tickTickAppPath_.c_str());
-    saveSettings();
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
-}
-
-void App::clearTickTickAppPath() {
-    if (tickTickAppPath_.empty())
-        return;
-    runtime_log::writef(L"[action][ticktick] client-path-cleared");
-    tickTickAppPath_.clear();
-    saveSettings();
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
 }
 
 void App::reloadCurrentQqLyrics(bool forceOnline, bool forceLocal, bool persistOrder) {
@@ -3981,8 +4006,6 @@ SettingsState App::currentSettingsState() const {
     st.idleAppNamesVisible = idleAppNamesVisible_;
     st.idleApps = idleApps_;
     st.tickTickApiTokenConfigured = !tickTickApiToken_.empty();
-    st.tickTickAppPath = tickTickAppPath_;
-    st.tickTickAppPathValid = validExePath(tickTickAppPath_);
     st.tickTickConnected = tickTickConnected_;
     st.tickTickConnecting = tickTickConnecting_;
     st.tickTickSyncing = tickTickTasksLoading_;
@@ -4099,8 +4122,6 @@ SettingsActions App::buildSettingsActions() {
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
     act.onEditTickTickApiToken = [this] { editTickTickApiToken(); };
-    act.onPickTickTickApp = [this] { pickTickTickApp(); };
-    act.onClearTickTickApp = [this] { clearTickTickAppPath(); };
     act.onTickTickConnect = [this] { connectTickTick(); };
     act.onTickTickRefresh = [this] { refreshTickTickTasks(); };
     act.onTickTickDisconnect = [this] { disconnectTickTick(); };
@@ -4419,13 +4440,6 @@ int main() {
                 app.idleAppPickerOpen_ = false;
                 if (payload && !payload->path.empty())
                     app.addIdleApp(payload->path);
-            }
-            else if (msg.message == kMsgTickTickAppReady) {
-                auto payload = std::unique_ptr<TickTickAppPayload>(
-                    reinterpret_cast<TickTickAppPayload*>(msg.lParam));
-                app.tickTickAppPickerOpen_ = false;
-                if (payload)
-                    app.applyTickTickAppPath(payload->path);
             }
             else if (msg.message == kMsgIdleQuoteReady) {
                 app.onIdleQuoteReady(std::unique_ptr<IdleQuotePayload>(

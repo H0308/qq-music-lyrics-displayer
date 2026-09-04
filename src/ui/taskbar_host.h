@@ -89,6 +89,7 @@ public:
     void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
+    void setStatusTextCycleCompletedCallback(std::function<void()> cb);
 
     const std::vector<LyricLine>& lyrics() const override;
 
