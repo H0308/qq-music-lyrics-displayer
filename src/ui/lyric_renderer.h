@@ -100,9 +100,9 @@ public:
     // 按刷新率做 X 位移和透明度过渡；层定位在 (0, baseY)。
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
                             float fromOpacity, float toOpacity, float durationSec);
-    // 页面横向滑动转场的固定背景层。背景与内容层一起提交，避免转场期间
-    // 为了补圆角而重绘/提交根交换链。创建/复用时透明度为 0，由调用方在
-    // 动画提交阶段调 showLyricTransitionBackdrop() 转可见。
+    // 页面横向滑动和快速展开转场的固定背景层。背景与内容层一起提交，避免
+    // 转场期间重绘/提交根交换链。创建/复用时透明度为 0，由调用方在动画提交
+    // 阶段调 showLyricTransitionBackdrop() 转可见。
     bool ensureLyricTransitionBackdrop(int width, int height, float offsetY,
                                         float cornerRadius = 0.0f);
     ID2D1DeviceContext* beginLyricTransitionBackdropDraw();

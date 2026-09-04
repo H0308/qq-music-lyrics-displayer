@@ -2688,11 +2688,11 @@ struct MediaPopup::Impl {
         return true;
     }
 
-    // 快速打开展开/收起：把一言区（含分隔线）和展开态的快速打开区分别画进
-    // 两个 DComp 合成层。展开时快速打开区整体上移，收起时整体下移并淡出；
-    // 展开时同步淡入。列表视口高度通过层内矩形裁剪底边收放（该底边在层内
-    // 坐标系中与位移无关，直接按两个端点值插值）。一言区原地不动，由裁剪
-    // 底边扫过模拟被覆盖/显露。
+    // 快速打开展开/收起：把固定背景、一言区（含分隔线）和展开态的快速打开区
+    // 分别交给 DComp。固定背景覆盖根交换链，内容层只做合成器位移、裁剪和透明度；
+    // 展开时快速打开区整体上移并淡入，收起时整体下移并淡出。列表视口高度通过
+    // 层内矩形裁剪底边收放（该底边在层内坐标系中与位移无关，直接按两个端点值
+    // 插值）。一言区原地不动，由裁剪底边扫过模拟被覆盖/显露。
     // 几何与 drawIdle 的逐帧版本在两个端点完全一致。
     bool startQuickExpandLayerTransition(float w) {
         if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0)
@@ -2734,8 +2734,20 @@ struct MediaPopup::Impl {
         if (!renderer.ensureLyricTransitionLayers(layer0W, layer0H, layer1W, layer1H))
             return false;
 
+        const float baseY = cardOriginDip * s;
+        if (!renderer.ensureLyricTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
+                                                    kPopupCornerDip * s))
+            return false;
+        if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
+            drawCardBackground(dc, w, popupHeightDip(), PopupPage::Idle, false);
+            if (!renderer.endLyricTransitionBackdropDraw(dc))
+                return false;
+        } else {
+            return false;
+        }
+
         // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
-        // 被隐藏/显露。交换链只负责卡片底和箭头，目标页在转场收尾前再交接。
+        // 被隐藏/显露。固定背景层覆盖根交换链，目标页在转场收尾前再交接。
         if (auto* dc = renderer.beginLyricLayerDraw(0)) {
             drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                      D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
@@ -2778,12 +2790,14 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 同页面转场：先提交 0 透明度的内容层，并等待它进入合成树；再和交换链
-        // 的目标帧一起提交动画状态，确保标签从透明状态开始淡入，不会首帧闪现。
+        // 同页面转场：先提交 0 透明度的背景/内容层，并等待它们进入合成树；
+        // 再把背景转可见并提交动画。动画期间根交换链保持原帧，不再重绘背景。
         renderer.commit();
         renderer.waitForCommitCompletion();
+        if (!renderer.showLyricTransitionBackdrop())
+            return false;
 
-        const float quoteBaseY = cardOriginDip * s;
+        const float quoteBaseY = baseY;
         const float quickBaseY = (cardOriginDip + quickOriginY) * s;
         const float travelPx = delta * s;
         const float durationSec = kIdleQuickExpandMs / 1000.0f;
@@ -2800,6 +2814,7 @@ struct MediaPopup::Impl {
                 opening ? 0.0f : 1.0f, opening ? 1.0f : 0.0f))
             return false;
         quickExpandLayersBuilt = true;
+        renderer.commit();
         return true;
     }
 
@@ -2894,7 +2909,9 @@ struct MediaPopup::Impl {
         }
 
         const bool categoryLayersCoverCard = categoryTransitionActive && categoryLayersActive;
-        if (categoryLayersCoverCard)
+        const bool quickExpandLayersCoverCard =
+            quickExpandTransitionActive && quickExpandLayersBuilt;
+        if (categoryLayersCoverCard || quickExpandLayersCoverCard)
             return true;
 
         rt->BeginDraw();
