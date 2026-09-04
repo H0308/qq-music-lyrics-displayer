@@ -90,6 +90,7 @@ constexpr float kIdleQuickTitleLeftDip = 16.0f;
 constexpr float kIdleQuickTriggerHorizontalPaddingDip = 8.0f;
 constexpr float kIdleQuickTriggerVerticalPaddingDip = 4.0f;
 constexpr float kIdleQuickExpandButtonRightPaddingDip = 16.0f;
+constexpr float kIdleQuickPageArrowReserveDip = 44.0f;
 constexpr float kIdleQuickTabWidthDip = 112.0f;
 constexpr float kIdleQuickTabGapDip = 6.0f;
 constexpr float kIdleQuickTabHeightDip = 28.0f;
@@ -560,16 +561,27 @@ struct MediaPopup::Impl {
         return contentTop - idleQuickTabContentOffset(progress, content);
     }
 
-    D2D1_RECT_F idleQuickExpandLocalRect(float w, float headerTop) const {
+    D2D1_RECT_F idleQuickExpandLocalRect(float w, float headerTop,
+                                         const IdlePresentation& content) const {
+        // 收起时按钮仍贴右对齐；随着内容向上展开，再同步向左让出返回箭头
+        // 的槽位。页面转场期间沿用当前展开进度，避免旧页快照横向跳位。
+        const bool reservePageArrowSlot = idleReturnArrowVisible(content) ||
+                                          categoryTransitionActive;
+        const float reserveProgress = reservePageArrowSlot
+                                          ? idleQuickExpandProgress(content)
+                                          : 0.0f;
+        const float rightPadding = kIdleQuickExpandButtonRightPaddingDip +
+                                   kIdleQuickPageArrowReserveDip * reserveProgress;
         const float left = std::max(
             kIdleQuickTitleLeftDip,
-            w - kIdleQuickExpandButtonRightPaddingDip - 32.0f);
+            w - rightPadding - 32.0f);
         const float top = idleQuickExpandButtonTop(headerTop);
         return D2D1::RectF(left, top, left + 32.0f, top + 32.0f);
     }
 
-    D2D1_RECT_F idleQuickTriggerLocalRect(float w, float headerTop) const {
-        const D2D1_RECT_F button = idleQuickExpandLocalRect(w, headerTop);
+    D2D1_RECT_F idleQuickTriggerLocalRect(float w, float headerTop,
+                                          const IdlePresentation& content) const {
+        const D2D1_RECT_F button = idleQuickExpandLocalRect(w, headerTop, content);
         return D2D1::RectF(
             kIdleQuickTitleLeftDip - kIdleQuickTriggerHorizontalPaddingDip,
             button.top - kIdleQuickTriggerVerticalPaddingDip,
@@ -609,7 +621,7 @@ struct MediaPopup::Impl {
     void drawIdleQuickHeader(ID2D1DeviceContext* rt, float w, float headerTop,
                              const IdlePresentation& content, bool updateHitTest) {
         drawIdleQuickExpandButton(rt, w, headerTop, content, updateHitTest);
-        const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(w, headerTop);
+        const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(w, headerTop, content);
         const float headerRight =
             content.quickStartEnabled ? expandButton.left - 8.0f : w - 16.0f;
         drawText(rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
@@ -1821,8 +1833,8 @@ struct MediaPopup::Impl {
             return;
         }
 
-        const D2D1_RECT_F local = idleQuickExpandLocalRect(w, headerTop);
-        const D2D1_RECT_F trigger = idleQuickTriggerLocalRect(w, headerTop);
+        const D2D1_RECT_F local = idleQuickExpandLocalRect(w, headerTop, content);
+        const D2D1_RECT_F trigger = idleQuickTriggerLocalRect(w, headerTop, content);
         if (updateHitTest) {
             idleQuickExpandRect = D2D1::RectF(
                 trigger.left, cardOriginDip + trigger.top, trigger.right,
