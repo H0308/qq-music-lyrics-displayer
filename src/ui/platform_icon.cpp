@@ -187,6 +187,14 @@ bool executePath(const std::wstring& path) {
     return reinterpret_cast<INT_PTR>(result) > 32;
 }
 
+bool executeUri(const std::wstring& uri) {
+    if (uri.empty())
+        return false;
+    const HINSTANCE result = ShellExecuteW(nullptr, L"open", uri.c_str(), nullptr, nullptr,
+                                           SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
+}
+
 bool activateAppUserModelId(const std::wstring& appUserModelId) {
     if (appUserModelId.empty())
         return false;
@@ -563,6 +571,10 @@ bool launchConfiguredExe(const std::wstring& path) {
     if (processId != 0 && activateExistingWindow(processId))
         return true;
     return executePath(path);
+}
+
+bool launchUri(const std::wstring& uri) {
+    return executeUri(uri);
 }
 
 } // namespace platform_icon

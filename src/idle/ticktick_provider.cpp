@@ -445,6 +445,7 @@ TickTickTasksResult fetchTodayTasks(TickTickService service, const std::wstring&
             if (taskId.empty() || !seenTaskIds.insert(taskId).second)
                 continue;
             IdleTaskInfo item = makeTask(task, today);
+            item.projectId = toWide(projectId);
             if (boolField(task, "isAllDay"))
                 item.dueText = L"今天";
             if (!item.title.empty())

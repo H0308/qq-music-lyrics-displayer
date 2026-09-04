@@ -1984,6 +1984,9 @@ struct App {
                 publishPresentationFrame(monitor.snapshot(), false, true);
             }
         });
+        host->setIdleTaskOpenCallback([this](const IdleTaskInfo& task) {
+            openTickTickTask(task);
+        });
         host->setMediaPopupOpenedCallback([this] { refreshTickTickTasks(); });
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
@@ -2513,6 +2516,7 @@ struct App {
     void refreshTickTickTasks();
     void disconnectTickTick();
     void onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload);
+    void openTickTickTask(const IdleTaskInfo& task);
     void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
                                bool persistOrder = false);
     void applyFontAppearance();
@@ -2657,6 +2661,17 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
     if (settingsDialog)
         settingsDialog->updateState(currentSettingsState());
     publishPresentationFrame(monitor.snapshot(), false, true);
+}
+
+void App::openTickTickTask(const IdleTaskInfo& task) {
+    const std::wstring webUrl =
+        task.id.empty() || task.projectId.empty()
+            ? L"https://dida365.com/webapp/"
+            : L"https://dida365.com/webapp/#p/" + task.projectId + L"/tasks/" + task.id;
+    const bool opened = platform_icon::launchUri(webUrl);
+    runtime_log::writef(L"[action][ticktick] open-task id=%s project=%s target=web result=%s",
+                        task.id.c_str(), task.projectId.c_str(),
+                        opened ? L"ok" : L"failed");
 }
 
 void App::loadSettings() {

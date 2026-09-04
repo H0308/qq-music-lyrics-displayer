@@ -23,6 +23,7 @@ public:
     void setControlCallback(std::function<void(MediaControl)> cb);
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
+    void setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb);
     // 面板完成一次隐藏到可见的打开时触发；悬浮和点击打开共用此回调。
     void setPanelOpenedCallback(std::function<void()> cb);
     // 应用音量：图标+数值常驻显示；点击图标展开/收起卡内滑块，拖动经回调上报

@@ -69,6 +69,7 @@ enum class IdleTaskPriority : int {
 
 struct IdleTaskInfo {
     std::wstring id;
+    std::wstring projectId;
     std::wstring title;
     std::wstring dueText;
     bool completed = false;

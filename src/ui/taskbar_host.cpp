@@ -6067,6 +6067,10 @@ void TaskbarHost::setIdleAppOpenCallback(std::function<void(const std::wstring&)
     impl_->mediaPopup.setIdleAppOpenCallback(std::move(cb));
 }
 
+void TaskbarHost::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb) {
+    impl_->mediaPopup.setIdleTaskOpenCallback(std::move(cb));
+}
+
 void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
     impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
 }

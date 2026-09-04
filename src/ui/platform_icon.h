@@ -23,4 +23,7 @@ bool launchSourceApp(const std::wstring& sourceAppUserModelId);
 // 按配置的 EXE 路径激活已运行实例，未运行时启动该路径。
 bool launchConfiguredExe(const std::wstring& path);
 
+// 使用 Windows Shell 打开 URL 或已注册的自定义 URI 协议。
+bool launchUri(const std::wstring& uri);
+
 } // namespace platform_icon

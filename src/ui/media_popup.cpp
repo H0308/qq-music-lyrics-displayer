@@ -339,6 +339,7 @@ struct MediaPopup::Impl {
     std::function<void(MediaControl)> onControl;
     std::function<void(const std::wstring&)> onSourceOpen;
     std::function<void(const std::wstring&)> onIdleAppOpen;
+    std::function<void(const IdleTaskInfo&)> onIdleTaskOpen;
     std::function<void()> onPanelOpened;
 
     // 应用音量控件：图标+数值固定在右上角；点击图标从图标处向左过渡展开卡内滑块
@@ -365,6 +366,8 @@ struct MediaPopup::Impl {
     IdleQuickTab idleQuickTab = IdleQuickTab::QuickStart;
     int hoverIdleApp = -1;
     int pressedIdleApp = -1;
+    int hoverIdleTask = -1;
+    int pressedIdleTask = -1;
     int hoverIdleQuickTab = -1;
     int pressedIdleQuickTab = -1;
     bool hoverIdleQuickExpand = false;
@@ -1927,11 +1930,16 @@ struct MediaPopup::Impl {
             if (row.bottom < idleListRect.top || row.top > idleListRect.bottom)
                 continue;
 
-            rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), brushIdleCell);
+            const bool hovered = static_cast<int>(i) == hoverIdleTask;
+            const bool pressed = static_cast<int>(i) == pressedIdleTask;
+            rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f),
+                                     hovered ? brushIdleCellHover : brushIdleCell);
+            if (pressed)
+                drawAdaptiveControlSurface(rt, row, 8.0f, true, PopupPage::Idle);
             if (brushStroke) {
-                brushStroke->SetOpacity(0.45f);
+                brushStroke->SetOpacity(hovered || pressed ? 0.85f : 0.45f);
                 rt->DrawRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), brushStroke,
-                                         0.75f);
+                                         hovered || pressed ? 1.0f : 0.75f);
                 brushStroke->SetOpacity(1.0f);
             }
             ID2D1SolidColorBrush* priorityBrush = nullptr;
@@ -3159,6 +3167,8 @@ struct MediaPopup::Impl {
         copySucceeded = false;
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
+        hoverIdleTask = -1;
+        pressedIdleTask = -1;
         idleQuickExpandRect = {};
         hoverIdleQuickTab = -1;
         pressedIdleQuickTab = -1;
@@ -3286,6 +3296,26 @@ struct MediaPopup::Impl {
             !idle.apps[static_cast<size_t>(index)].pathValid)
             return -1;
         return index;
+    }
+
+    int hitIdleTask(float x, float y) const {
+        y -= cardOriginDip;
+        if (categoryTransitionActive || !idleMode ||
+            idleQuickTab != IdleQuickTab::TodayTasks || idle.todayTasks.empty() ||
+            !contains(idleListRect, x, y))
+            return -1;
+
+        const float contentY = y - idleListRect.top + idleScrollOffset;
+        const float rowPitch = kIdleTaskRowHeightDip + kIdleTaskRowGapDip;
+        const int rowIndex = static_cast<int>(contentY / rowPitch);
+        if (rowIndex < 0 || static_cast<size_t>(rowIndex) >= idle.todayTasks.size())
+            return -1;
+        const float rowOffset = std::fmod(contentY, rowPitch);
+        if (rowOffset < 0.0f || rowOffset >= kIdleTaskRowHeightDip)
+            return -1;
+
+        const auto& task = idle.todayTasks[static_cast<size_t>(rowIndex)];
+        return task.id.empty() || task.projectId.empty() ? -1 : rowIndex;
     }
 
     bool hitIdleScrollBar(float x, float y) const {
@@ -3612,6 +3642,8 @@ struct MediaPopup::Impl {
         pressedVolume = false;
         hoverIdleApp = -1;
         pressedIdleApp = -1;
+        hoverIdleTask = -1;
+        pressedIdleTask = -1;
         idleScrollDragging = false;
         resetPageInteractionState();
         idleQuickExpanded = false;
@@ -3640,7 +3672,8 @@ struct MediaPopup::Impl {
                      hitCopy(dip(point.x), dip(point.y)) ||
                      hitIdleQuickExpand(dip(point.x), dip(point.y)) ||
                      hitIdleQuickTab(dip(point.x), dip(point.y)) >= 0 ||
-                     hitIdleApp(dip(point.x), dip(point.y)) >= 0)) {
+                     hitIdleApp(dip(point.x), dip(point.y)) >= 0 ||
+                     hitIdleTask(dip(point.x), dip(point.y)) >= 0)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
                     return TRUE;
                 }
@@ -3656,14 +3689,17 @@ struct MediaPopup::Impl {
                     return 0;
                 }
                 const int idleApp = hitIdleApp(mx, my);
+                const int idleTask = hitIdleTask(mx, my);
                 const bool arrow = hitPageArrow(mx, my);
                 const bool copy = hitCopy(mx, my);
                 const bool quickExpand = hitIdleQuickExpand(mx, my);
                 const int quickTab = hitIdleQuickTab(mx, my);
-                if (idleApp != hoverIdleApp || arrow != hoverPageArrow || copy != hoverCopy ||
+                if (idleApp != hoverIdleApp || idleTask != hoverIdleTask ||
+                    arrow != hoverPageArrow || copy != hoverCopy ||
                     quickExpand != hoverIdleQuickExpand || quickTab != hoverIdleQuickTab ||
                     hoverVolume) {
                     hoverIdleApp = idleApp;
+                    hoverIdleTask = idleTask;
                     hoverPageArrow = arrow;
                     hoverCopy = copy;
                     hoverIdleQuickExpand = quickExpand;
@@ -3692,6 +3728,7 @@ struct MediaPopup::Impl {
             hoverButton = -1;
             hoverVolume = false;
             hoverIdleApp = -1;
+            hoverIdleTask = -1;
             hoverPageArrow = false;
             hoverCopy = false;
             hoverIdleQuickExpand = false;
@@ -3742,7 +3779,8 @@ struct MediaPopup::Impl {
                     return 0;
                 }
                 pressedIdleApp = hitIdleApp(x, y);
-                if (pressedIdleApp >= 0) {
+                pressedIdleTask = hitIdleTask(x, y);
+                if (pressedIdleApp >= 0 || pressedIdleTask >= 0) {
                     SetCapture(hwnd);
                     renderOrDefer();
                 }
@@ -3819,6 +3857,7 @@ struct MediaPopup::Impl {
                                                    : IdleQuickTab::TodayTasks;
                     idleScrollOffset = 0.0f;
                     hoverIdleApp = -1;
+                    hoverIdleTask = -1;
                     renderOrDefer();
                     return 0;
                 }
@@ -3831,6 +3870,9 @@ struct MediaPopup::Impl {
                 const int pressed = pressedIdleApp;
                 const int hit = hitIdleApp(x, y);
                 pressedIdleApp = -1;
+                const int pressedTask = pressedIdleTask;
+                const int hitTask = hitIdleTask(x, y);
+                pressedIdleTask = -1;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
                 renderOrDefer();
@@ -3841,6 +3883,13 @@ struct MediaPopup::Impl {
                     hideImmediate();
                     anchorHover = false;
                     onIdleAppOpen(path);
+                } else if (pressedTask >= 0 && pressedTask == hitTask &&
+                           static_cast<size_t>(pressedTask) < idle.todayTasks.size() &&
+                           onIdleTaskOpen) {
+                    const IdleTaskInfo task = idle.todayTasks[static_cast<size_t>(pressedTask)];
+                    hideImmediate();
+                    anchorHover = false;
+                    onIdleTaskOpen(task);
                 }
                 return 0;
             }
@@ -3922,6 +3971,7 @@ struct MediaPopup::Impl {
             pressedVolume = false;
             volumeDragging = false;
             pressedIdleApp = -1;
+            pressedIdleTask = -1;
             idleScrollDragging = false;
             pressedPageArrow = false;
             pressedCopy = false;
@@ -4149,6 +4199,10 @@ void MediaPopup::setIdleAppOpenCallback(std::function<void(const std::wstring&)>
     impl_->onIdleAppOpen = std::move(cb);
 }
 
+void MediaPopup::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb) {
+    impl_->onIdleTaskOpen = std::move(cb);
+}
+
 void MediaPopup::setPanelOpenedCallback(std::function<void()> cb) {
     impl_->onPanelOpened = std::move(cb);
 }
@@ -4347,7 +4401,8 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         for (size_t i = 0; i < content.todayTasks.size(); ++i) {
             const auto& oldTask = impl_->idle.todayTasks[i];
             const auto& newTask = content.todayTasks[i];
-            if (oldTask.id != newTask.id || oldTask.title != newTask.title ||
+            if (oldTask.id != newTask.id || oldTask.projectId != newTask.projectId ||
+                oldTask.title != newTask.title ||
                 oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
                 oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
                 changed = true;
