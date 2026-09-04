@@ -78,6 +78,7 @@ constexpr int kIdTickTickApiToken = 462;
 constexpr int kIdTickTickConnect = 463;
 constexpr int kIdTickTickRefresh = 464;
 constexpr int kIdTickTickDisconnect = 465;
+constexpr int kIdTickTickEnabled = 466;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -251,10 +252,10 @@ struct SettingsDialog::Impl {
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
         L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言与应用速启"};
+        L"每日一言与更多"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
         L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言与应用速启"};
+        L"每日一言与更多"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
@@ -478,6 +479,20 @@ struct SettingsDialog::Impl {
     }
 
     void updateTickTickRows() {
+        const bool hasToken = state.tickTickApiTokenConfigured;
+        const bool enabled = state.tickTickEnabled && hasToken;
+        if (auto* row = findRow(kIdTickTickEnabled)) {
+            row->checked = enabled;
+            row->enabled = true;
+            row->hint = hasToken
+                            ? (enabled
+                                   ? L"已开启自动同步，并在快捷启动卡片中显示今日任务。"
+                                   : L"已关闭自动同步和今日任务入口；API 口令仍保留在本机。")
+                            : L"未配置 API 口令，当前处于隐式关闭状态；开启时会先要求填写口令。";
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
+        }
         if (auto* row = findRow(kIdTickTickApiToken)) {
             row->hint = L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建并复制；"
                         L"程序只将口令保存到 Windows 凭据管理器。";
@@ -485,6 +500,7 @@ struct SettingsDialog::Impl {
             row->showHint = true;
             row->minHeight = kRowTallH;
             row->height = row->minHeight;
+            row->enabled = !hasToken || enabled;
         }
         if (auto* row = findRow(kIdTickTickConnect)) {
             row->controlText = state.tickTickConnecting
@@ -498,15 +514,15 @@ struct SettingsDialog::Impl {
             row->showHint = true;
             row->minHeight = kRowTallH;
             row->height = row->minHeight;
-            row->enabled = state.tickTickApiTokenConfigured && !state.tickTickConnecting &&
+            row->enabled = enabled && !state.tickTickConnecting &&
                            !state.tickTickSyncing;
         }
         if (auto* row = findRow(kIdTickTickRefresh)) {
-            row->enabled = state.tickTickConnected && !state.tickTickSyncing;
+            row->enabled = enabled && state.tickTickConnected && !state.tickTickSyncing;
             row->controlText = state.tickTickSyncing ? L"同步中…" : L"立即同步";
         }
         if (auto* row = findRow(kIdTickTickDisconnect)) {
-            row->enabled = state.tickTickApiTokenConfigured && !state.tickTickConnecting &&
+            row->enabled = hasToken && !state.tickTickConnecting &&
                            !state.tickTickSyncing;
         }
     }
@@ -709,6 +725,11 @@ struct SettingsDialog::Impl {
         idleApps.enabled = state.idleEntryEnabled;
         updateIdleRowsEnabled();
         addHeader(kIdlePage, L"滴答清单");
+        Row& tickTickEnabled = addRow(
+            kIdlePage, kIdTickTickEnabled, ControlKind::Toggle, L"启用滴答清单",
+            L"开启后自动同步今日任务，并在快捷启动卡片中显示今日任务入口。",
+            40.0f, kRowTallH);
+        tickTickEnabled.checked = state.tickTickEnabled;
         addButton(kIdlePage, kIdTickTickApiToken, L"API 口令",
                   L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建后填写。",
                   state.tickTickApiTokenConfigured ? L"已配置" : L"编辑…", kRowTallH);
@@ -3043,6 +3064,15 @@ struct SettingsDialog::Impl {
             if (actions.onEditIdleWelcome)
                 actions.onEditIdleWelcome();
             break;
+        case kIdTickTickEnabled: {
+            const bool requested = !row->checked;
+            state.tickTickEnabled = requested && state.tickTickApiTokenConfigured;
+            row->checked = state.tickTickEnabled;
+            updateTickTickRows();
+            if (actions.onTickTickEnabled)
+                actions.onTickTickEnabled(requested);
+            break;
+        }
         case kIdTickTickApiToken:
             if (actions.onEditTickTickApiToken)
                 actions.onEditTickTickApiToken();
@@ -3338,6 +3368,8 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.idleQuoteBackgroundScope, 0, 3);
         if (auto* row = findRow(kIdIdleApps))
             row->checked = s.idleAppNamesVisible;
+        if (auto* row = findRow(kIdTickTickEnabled))
+            row->checked = s.tickTickEnabled;
         updateIdleQuoteSourceRow();
         updateIdleAppsRowHeight();
         updateTickTickRows();

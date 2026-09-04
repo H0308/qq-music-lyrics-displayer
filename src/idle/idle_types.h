@@ -86,6 +86,7 @@ struct IdlePresentation {
     bool quickStartEnabled = true;
     bool showAppNames = true;
     std::vector<IdleAppInfo> apps;
+    bool todayTasksEnabled = false;
     std::vector<IdleTaskInfo> todayTasks;
     bool todayTasksLoading = false;
     bool todayTasksConnected = false;

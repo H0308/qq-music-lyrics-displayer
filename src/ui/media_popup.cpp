@@ -521,7 +521,7 @@ struct MediaPopup::Impl {
     }
 
     float idleQuickListContentHeight(const IdlePresentation& content) const {
-        return idleQuickTab == IdleQuickTab::TodayTasks
+        return content.todayTasksEnabled && idleQuickTab == IdleQuickTab::TodayTasks
                    ? idleQuickTaskContentHeight(content)
                    : idleQuickGridContentHeight(content);
     }
@@ -547,13 +547,17 @@ struct MediaPopup::Impl {
                         expandButtonTop + 32.0f + kIdleListGapDip);
     }
 
-    float idleQuickTabContentOffset(float progress) const {
+    float idleQuickTabContentOffset(float progress,
+                                    const IdlePresentation& content) const {
+        if (!content.todayTasksEnabled)
+            return 0.0f;
         return (kIdleQuickTabHeightDip + kIdleQuickTabContentGapDip) *
                std::clamp(progress, 0.0f, 1.0f);
     }
 
-    float idleQuickTabTop(float contentTop, float progress) const {
-        return contentTop - idleQuickTabContentOffset(progress);
+    float idleQuickTabTop(float contentTop, float progress,
+                          const IdlePresentation& content) const {
+        return contentTop - idleQuickTabContentOffset(progress, content);
     }
 
     D2D1_RECT_F idleQuickExpandLocalRect(float w, float headerTop) const {
@@ -596,11 +600,11 @@ struct MediaPopup::Impl {
         layout.expandButtonTop = idleQuickExpandButtonTop(layout.headerTop);
         const float progress = idleQuickExpandProgress(content);
         layout.tabTop = idleQuickListTop(layout.headerTop);
-        layout.listTop = layout.tabTop + idleQuickTabContentOffset(progress);
+        layout.listTop = layout.tabTop + idleQuickTabContentOffset(progress, content);
         return layout;
     }
 
-    // “快捷启动与今日任务”标题行：展开按钮 + 标题文本；活页、快照与展开层
+    // 快速启动标题行：任务功能开启时补充“今日任务”；活页、快照与展开层
     // 转场共用同一套几何。
     void drawIdleQuickHeader(ID2D1DeviceContext* rt, float w, float headerTop,
                              const IdlePresentation& content, bool updateHitTest) {
@@ -608,7 +612,8 @@ struct MediaPopup::Impl {
         const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(w, headerTop);
         const float headerRight =
             content.quickStartEnabled ? expandButton.left - 8.0f : w - 16.0f;
-        drawText(rt, L"快捷启动与今日任务", fmtIdleHeader,
+        drawText(rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
+                 fmtIdleHeader,
                  D2D1::RectF(16.0f, headerTop, headerRight,
                               headerTop + kIdleQuickHeaderHeightDip),
                  brushSecondary);
@@ -1842,10 +1847,10 @@ struct MediaPopup::Impl {
     }
 
     void drawIdleQuickTabs(ID2D1DeviceContext* rt, float w, float top, float progress,
-                           bool updateHitTest) {
+                           const IdlePresentation& content, bool updateHitTest) {
         if (!rt)
             return;
-        if (progress <= 0.01f) {
+        if (!content.todayTasksEnabled || progress <= 0.01f) {
             if (updateHitTest) {
                 idleQuickTabRects[0] = {};
                 idleQuickTabRects[1] = {};
@@ -2023,7 +2028,7 @@ struct MediaPopup::Impl {
                         idleListRect.right,
                         idleListRect.bottom + kIdleQuickVisualClipPaddingDip);
         rt->PushAxisAlignedClip(visualClip, D2D1_ANTIALIAS_MODE_ALIASED);
-        if (idleQuickTab == IdleQuickTab::TodayTasks) {
+        if (content.todayTasksEnabled && idleQuickTab == IdleQuickTab::TodayTasks) {
             drawIdleTodayTasks(rt, content);
         } else if (content.apps.empty()) {
             drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
@@ -2098,7 +2103,8 @@ struct MediaPopup::Impl {
             return;
         layoutIdleList(w, top, &content);
         const float progress = idleQuickExpandProgress(content);
-        drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress), progress, updateHitTest);
+        drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress, content), progress,
+                          content, updateHitTest);
         drawIdleQuickListContent(rt, w, content);
     }
 
@@ -2722,9 +2728,9 @@ struct MediaPopup::Impl {
         const float quickOriginY = expandedButtonTop;
 
         const float expandedListTop = idleQuickListTop(expandedHeaderTop) +
-                                      idleQuickTabContentOffset(1.0f);
+                                      idleQuickTabContentOffset(1.0f, idle);
         const float collapsedListTop = idleQuickListTop(collapsedHeaderTop) +
-                                       idleQuickTabContentOffset(0.0f);
+                                       idleQuickTabContentOffset(0.0f, idle);
         auto availableHeight = [&](float listTop) {
             return std::max(0.0f, kIdlePopupHeightDip - listTop -
                                       kIdleListBottomPaddingDip);
@@ -2738,7 +2744,7 @@ struct MediaPopup::Impl {
             (expandedListTop - quickOriginY) + expandedListHeight;
         const float clipBottomCollapsed =
             (expandedListTop - quickOriginY) + collapsedListHeight;
-        const float expandedTabTop = idleQuickTabTop(expandedListTop, 1.0f);
+        const float expandedTabTop = idleQuickTabTop(expandedListTop, 1.0f, idle);
 
         const int layer0W = cardWidthPx;
         const int layer0H = static_cast<int>(std::lround(collapsedButtonTop * s)) + 1;
@@ -2801,7 +2807,7 @@ struct MediaPopup::Impl {
             dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -quickOriginY) *
                              baseTransform);
             drawIdleQuickHeader(dc, w, expandedHeaderTop, idle, false);
-            drawIdleQuickTabs(dc, w, expandedTabTop, 1.0f, false);
+            drawIdleQuickTabs(dc, w, expandedTabTop, 1.0f, idle, false);
             idleQuickExpanded = savedExpanded;
             idleQuickExpandT = savedT;
             if (!renderer.endLyricLayerDraw(1, dc))
@@ -3373,7 +3379,8 @@ struct MediaPopup::Impl {
     int hitIdleQuickTab(float x, float y) const {
         y -= cardOriginDip;
         if (categoryTransitionActive || quickExpandTransitionActive || !idleMode ||
-            !idle.quickStartEnabled || !idleQuickExpanded || idleQuickExpandT < 0.99f)
+            !idle.quickStartEnabled || !idle.todayTasksEnabled || !idleQuickExpanded ||
+            idleQuickExpandT < 0.99f)
             return -1;
         for (int i = 0; i < 2; ++i) {
             if (contains(idleQuickTabRects[i], x, y))
@@ -3384,7 +3391,8 @@ struct MediaPopup::Impl {
 
     int hitIdleApp(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode || idleQuickTab != IdleQuickTab::QuickStart ||
+        if (categoryTransitionActive || !idleMode ||
+            (idle.todayTasksEnabled && idleQuickTab != IdleQuickTab::QuickStart) ||
             idle.apps.empty() ||
             !contains(idleListRect, x, y))
             return -1;
@@ -3419,7 +3427,7 @@ struct MediaPopup::Impl {
 
     int hitIdleTask(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode ||
+        if (categoryTransitionActive || !idleMode || !idle.todayTasksEnabled ||
             idleQuickTab != IdleQuickTab::TodayTasks || idle.todayTasks.empty() ||
             !contains(idleListRect, x, y))
             return -1;
@@ -4002,7 +4010,8 @@ struct MediaPopup::Impl {
                     hideImmediate();
                     anchorHover = false;
                     onIdleAppOpen(path);
-                } else if (pressedTask >= 0 && pressedTask == hitTask &&
+                } else if (idle.todayTasksEnabled && pressedTask >= 0 &&
+                           pressedTask == hitTask &&
                            static_cast<size_t>(pressedTask) < idle.todayTasks.size() &&
                            onIdleTaskOpen) {
                     const IdleTaskInfo task = idle.todayTasks[static_cast<size_t>(pressedTask)];
@@ -4514,6 +4523,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
 
     const bool taskListStateChanged =
+        content.todayTasksEnabled != impl_->idle.todayTasksEnabled ||
         content.todayTasks.size() != impl_->idle.todayTasks.size() ||
         content.todayTasksLoading != impl_->idle.todayTasksLoading ||
         content.todayTasksConnected != impl_->idle.todayTasksConnected ||
@@ -4557,6 +4567,17 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
     impl_->idle = content;
     impl_->available = available;
+    if (!content.todayTasksEnabled) {
+        impl_->idleQuickTab = IdleQuickTab::QuickStart;
+        impl_->hoverIdleQuickTab = -1;
+        impl_->pressedIdleQuickTab = -1;
+        impl_->idleQuickTabRects[0] = {};
+        impl_->idleQuickTabRects[1] = {};
+        impl_->hoverIdleTask = -1;
+        impl_->pressedIdleTask = -1;
+        impl_->idleScrollOffset = 0.0f;
+        impl_->idleScrollDragging = false;
+    }
     if (!content.quickStartEnabled) {
         impl_->idleQuickExpanded = false;
         impl_->idleQuickExpandOpening = false;

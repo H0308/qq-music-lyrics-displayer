@@ -646,6 +646,8 @@ struct App {
     // 凭据管理器；这里只保留连接状态和当前展示快照。
     TickTickService tickTickService_ = TickTickService::Dida365;
     std::wstring tickTickApiToken_;
+    bool tickTickEnabled_ = false;
+    bool tickTickEnableAfterTokenSave_ = false;
     bool tickTickConnected_ = false;
     bool tickTickConnecting_ = false;
     bool tickTickTasksLoading_ = false;
@@ -655,7 +657,7 @@ struct App {
 
     // 每次进程启动只决策一次：首次任务同步完成前显示加载状态；数据成功且
     // 没有媒体会话时播报一次任务概览，之后再回到普通空闲文案。
-    bool startupTaskSummaryPending_ = true;
+    bool startupTaskSummaryPending_ = false;
     bool startupTaskSummaryActive_ = false;
 
     // 当前年份节假日类型缓存：只在启动或缓存过期时请求全年数据，日常判断不访问网络。
@@ -1460,6 +1462,10 @@ struct App {
         }
     }
 
+    bool tickTickEffectiveEnabled() const {
+        return tickTickEnabled_ && !tickTickApiToken_.empty();
+    }
+
     IdlePresentation currentIdlePresentation() const {
         IdlePresentation presentation;
         presentation.showQuote = idleQuoteEnabled_;
@@ -1481,6 +1487,7 @@ struct App {
                                                                : idleCustomWelcome_;
         }
         presentation.apps = idleApps_;
+        presentation.todayTasksEnabled = tickTickEffectiveEnabled();
         presentation.todayTasks = todayTasks_;
         presentation.todayTasksLoading = tickTickTasksLoading_;
         presentation.todayTasksConnected = tickTickConnected_;
@@ -1955,7 +1962,7 @@ struct App {
                                              !snap.sessionAlive &&
                                              frame.scene == DisplayScene::Idle;
         const bool showStartupTaskLoading = startupTaskSummaryPending_ &&
-                                             !tickTickApiToken_.empty() &&
+                                             tickTickEffectiveEnabled() &&
                                              !snap.sessionAlive &&
                                              frame.scene == DisplayScene::Idle;
         if (showStartupTaskSummary) {
@@ -1997,7 +2004,7 @@ struct App {
                                              !snap.sessionAlive &&
                                              currentFrame_.scene == DisplayScene::Idle;
         const bool showStartupTaskLoading = startupTaskSummaryPending_ &&
-                                             !tickTickApiToken_.empty() &&
+                                             tickTickEffectiveEnabled() &&
                                              !snap.sessionAlive &&
                                              currentFrame_.scene == DisplayScene::Idle;
         currentFrame_.statusTextOneShot = showStartupTaskSummary;
@@ -2608,7 +2615,8 @@ struct App {
     void setAutoCheckOnStartup(bool enabled);
     void pickQqLocalLyricsPath();
     void applyQqLocalLyricsPath(const std::wstring& path);
-    void editTickTickApiToken();
+    void applyTickTickEnabled(bool enabled);
+    void editTickTickApiToken(bool enableAfterSave = false);
     void connectTickTick();
     void refreshTickTickTasks();
     void disconnectTickTick();
@@ -2630,21 +2638,62 @@ struct App {
     static LRESULT CALLBACK updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
 
-void App::editTickTickApiToken() {
+void App::applyTickTickEnabled(bool enabled) {
+    if (enabled) {
+        if (tickTickApiToken_.empty()) {
+            editTickTickApiToken(true);
+            return;
+        }
+        if (tickTickEnabled_)
+            return;
+        tickTickEnabled_ = true;
+        tickTickStatus_ = L"滴答清单已开启，正在同步今日任务…";
+        saveSettings();
+        if (settingsDialog)
+            settingsDialog->updateState(currentSettingsState());
+        publishPresentationFrame(monitor.snapshot(), false, true);
+        refreshTickTickTasks();
+        return;
+    }
+
+    ++tickTickRequestGeneration_;
+    tickTickEnabled_ = false;
+    tickTickEnableAfterTokenSave_ = false;
+    tickTickConnected_ = false;
+    tickTickConnecting_ = false;
+    tickTickTasksLoading_ = false;
+    todayTasks_.clear();
+    startupTaskSummaryPending_ = false;
+    startupTaskSummaryActive_ = false;
+    tickTickStatus_ = L"滴答清单已关闭";
+    saveSettings();
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
+}
+
+void App::editTickTickApiToken(bool enableAfterSave) {
     if (tickTickApiTokenDialog && tickTickApiTokenDialog->isOpen()) {
+        if (enableAfterSave)
+            tickTickEnableAfterTokenSave_ = true;
         SetForegroundWindow(tickTickApiTokenDialog->hwnd());
         return;
     }
     tickTickApiTokenDialog.reset();
+    tickTickEnableAfterTokenSave_ = enableAfterSave;
 
     auto dialog = std::make_unique<IdleAppNameDialog>();
     HWND parent = settingsDialog ? settingsDialog->hwnd() : trayHwnd;
     if (!dialog->create(GetModuleHandleW(nullptr), parent, std::wstring(),
                         L"设置滴答清单 API 口令",
                         L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建并复制；留空可清除",
-                        L"输入 API 口令", 256))
+                        L"输入 API 口令", 256)) {
+        tickTickEnableAfterTokenSave_ = false;
         return;
+    }
     dialog->setApplyCallback([this](const std::wstring& text) {
+        const bool enableAfterSave = tickTickEnableAfterTokenSave_;
+        tickTickEnableAfterTokenSave_ = false;
         std::wstring normalized = text;
         while (!normalized.empty() && iswspace(normalized.front()) != 0)
             normalized.erase(normalized.begin());
@@ -2658,19 +2707,28 @@ void App::editTickTickApiToken() {
         tickTickConnecting_ = false;
         tickTickTasksLoading_ = false;
         todayTasks_.clear();
+        bool shouldRefresh = false;
         if (normalized.empty()) {
             tickTickProvider_.clearApiToken(tickTickService_);
             tickTickApiToken_.clear();
+            tickTickEnabled_ = false;
             tickTickStatus_ = L"请在设置中填写 API 口令";
         } else if (!tickTickProvider_.saveApiToken(tickTickService_, normalized)) {
             tickTickStatus_ = L"无法保存滴答清单 API 口令";
         } else {
             tickTickApiToken_ = std::move(normalized);
-            tickTickStatus_ = L"API 口令已保存，请点击连接滴答清单";
+            if (enableAfterSave)
+                tickTickEnabled_ = true;
+            shouldRefresh = tickTickEffectiveEnabled();
+            tickTickStatus_ = shouldRefresh ? L"API 口令已保存，正在同步今日任务…"
+                                            : L"API 口令已保存，滴答清单已关闭";
         }
+        saveSettings();
         if (settingsDialog)
             settingsDialog->updateState(currentSettingsState());
         publishPresentationFrame(monitor.snapshot(), false, true);
+        if (shouldRefresh)
+            refreshTickTickTasks();
     });
     tickTickApiTokenDialog = std::move(dialog);
     tickTickApiTokenDialog->show();
@@ -2679,34 +2737,16 @@ void App::editTickTickApiToken() {
 void App::connectTickTick() {
     if (tickTickConnecting_ || tickTickTasksLoading_)
         return;
-    if (tickTickApiToken_.empty()) {
-        tickTickConnected_ = false;
-        tickTickStatus_ = L"请先填写滴答清单 API 口令";
-        todayTasks_.clear();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
-        publishPresentationFrame(monitor.snapshot(), false, true);
+    if (!tickTickEffectiveEnabled())
         return;
-    }
 
     tickTickConnecting_ = true;
     refreshTickTickTasks();
 }
 
 void App::refreshTickTickTasks() {
-    if (tickTickTasksLoading_)
+    if (!tickTickEffectiveEnabled() || tickTickTasksLoading_)
         return;
-    if (tickTickApiToken_.empty()) {
-        startupTaskSummaryPending_ = false;
-        tickTickConnected_ = false;
-        tickTickConnecting_ = false;
-        tickTickStatus_ = L"请在设置中填写滴答清单 API 口令";
-        todayTasks_.clear();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
-        publishPresentationFrame(monitor.snapshot(), false, true);
-        return;
-    }
 
     ++tickTickRequestGeneration_;
     const uint64_t generation = tickTickRequestGeneration_;
@@ -2731,6 +2771,8 @@ void App::disconnectTickTick() {
     ++tickTickRequestGeneration_;
     tickTickProvider_.clearApiToken(tickTickService_);
     tickTickApiToken_.clear();
+    tickTickEnabled_ = false;
+    tickTickEnableAfterTokenSave_ = false;
     tickTickConnected_ = false;
     tickTickConnecting_ = false;
     tickTickTasksLoading_ = false;
@@ -2738,13 +2780,15 @@ void App::disconnectTickTick() {
     tickTickStatus_ = L"已断开滴答清单连接";
     startupTaskSummaryPending_ = false;
     startupTaskSummaryActive_ = false;
+    saveSettings();
     if (settingsDialog)
         settingsDialog->updateState(currentSettingsState());
     publishPresentationFrame(monitor.snapshot(), false, true);
 }
 
 void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
-    if (!payload || payload->generation != tickTickRequestGeneration_)
+    if (!payload || payload->generation != tickTickRequestGeneration_ ||
+        !tickTickEffectiveEnabled())
         return;
     tickTickTasksLoading_ = false;
     tickTickConnecting_ = false;
@@ -2784,6 +2828,8 @@ void App::onStartupTaskSummaryCompleted() {
 }
 
 void App::openTickTickTask(const IdleTaskInfo& task) {
+    if (!tickTickEffectiveEnabled())
+        return;
     if (task.id.empty() || task.projectId.empty()) {
         const bool opened = platform_icon::launchUri(L"https://dida365.com/webapp/");
         runtime_log::writef(L"[action][ticktick] open-task missing-id target=web result=%s",
@@ -2809,6 +2855,11 @@ void App::loadSettings() {
         return;
     settingsPath_ = dir + L"\\settings.json";
     tickTickProvider_.loadApiToken(tickTickService_, tickTickApiToken_);
+    tickTickEnabled_ = !tickTickApiToken_.empty();
+    startupTaskSummaryPending_ = tickTickEffectiveEnabled();
+    tickTickStatus_ = tickTickEffectiveEnabled()
+                          ? L"API 口令已配置，正在同步今日任务…"
+                          : L"请在设置中填写 API 口令";
     logDirectory_ = runtime_log::RuntimeLogger::defaultDirectory();
     bool migrateLegacyLogDirectory = false;
     provider.setManualOverrideDir(dir + L"\\manual_lyrics");
@@ -2821,6 +2872,7 @@ void App::loadSettings() {
         auto j = nlohmann::json::parse(f, nullptr, false);
         if (j.is_discarded())
             return;
+        tickTickEnabled_ = j.value("tickTickEnabled", !tickTickApiToken_.empty());
         const std::wstring configuredLogDirectory =
             wideOf(j.value("logDirectory", utf8Of(logDirectory_)));
         if (configuredLogDirectory == runtime_log::RuntimeLogger::legacyDefaultDirectory())
@@ -3037,10 +3089,16 @@ void App::loadSettings() {
     tickTickConnected_ = false;
     tickTickConnecting_ = false;
     tickTickTasksLoading_ = false;
-    if (tickTickApiToken_.empty())
+    if (tickTickApiToken_.empty()) {
+        tickTickEnabled_ = false;
         tickTickStatus_ = L"请在设置中填写 API 口令";
-    else
+    } else if (!tickTickEnabled_) {
+        tickTickStatus_ = L"滴答清单已关闭";
+    } else {
         tickTickStatus_ = L"API 口令已配置，正在同步今日任务…";
+    }
+    startupTaskSummaryPending_ = tickTickEffectiveEnabled();
+    startupTaskSummaryActive_ = false;
     if (migrateLegacyLogDirectory)
         saveSettings();
 }
@@ -3083,6 +3141,7 @@ void App::saveSettings() {
         j["idleQuoteBackgroundScope"] =
             idleQuoteBackgroundScopeConfigName(idleQuoteBackgroundScope_);
         j["jinrishiciToken"] = utf8Of(jinrishiciToken_);
+        j["tickTickEnabled"] = tickTickEnabled_;
         j.erase("tickTickAppPath");
         j.erase("tickTickClientId");
         j["idleApps"] = nlohmann::json::array();
@@ -4005,6 +4064,7 @@ SettingsState App::currentSettingsState() const {
     st.idleQuoteBackgroundScope = idleQuoteBackgroundScopeIndex(idleQuoteBackgroundScope_);
     st.idleAppNamesVisible = idleAppNamesVisible_;
     st.idleApps = idleApps_;
+    st.tickTickEnabled = tickTickEffectiveEnabled();
     st.tickTickApiTokenConfigured = !tickTickApiToken_.empty();
     st.tickTickConnected = tickTickConnected_;
     st.tickTickConnecting = tickTickConnecting_;
@@ -4121,6 +4181,7 @@ SettingsActions App::buildSettingsActions() {
     act.onIdleQuoteAlignment = [this](int a) { applyIdleQuoteAlignment(a); };
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };
     act.onPreferRomanization = [this](bool on) { applyPreferRomanization(on); };
+    act.onTickTickEnabled = [this](bool on) { applyTickTickEnabled(on); };
     act.onEditTickTickApiToken = [this] { editTickTickApiToken(); };
     act.onTickTickConnect = [this] { connectTickTick(); };
     act.onTickTickRefresh = [this] { refreshTickTickTasks(); };
