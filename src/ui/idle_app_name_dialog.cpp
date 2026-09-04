@@ -5,6 +5,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -18,7 +19,44 @@ constexpr int kIdCancel = 505;
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 constexpr float kClientW = 360.0f;
-constexpr float kClientH = 188.0f;
+constexpr float kBaseClientH = 188.0f;
+constexpr float kSubtitleLineHeightDip = 20.0f;
+
+float measureSubtitleHeightDip(const std::wstring& text, float widthDip) {
+    if (text.empty())
+        return kSubtitleLineHeightDip;
+
+    IDWriteFactory* factory = nullptr;
+    if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&factory))) ||
+        !factory)
+        return kSubtitleLineHeightDip;
+
+    IDWriteTextFormat* format = nullptr;
+    const HRESULT formatResult = factory->CreateTextFormat(
+        fluent::uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.0f, L"zh-cn", &format);
+    if (FAILED(formatResult) || !format) {
+        factory->Release();
+        return kSubtitleLineHeightDip;
+    }
+    fluent::applyUiFontFallback(format);
+
+    IDWriteTextLayout* layout = nullptr;
+    const HRESULT layoutResult = factory->CreateTextLayout(
+        text.c_str(), static_cast<UINT32>(text.size()), format,
+        std::max(1.0f, widthDip), 1000.0f, &layout);
+    float height = kSubtitleLineHeightDip;
+    if (SUCCEEDED(layoutResult) && layout) {
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(layout->GetMetrics(&metrics)))
+            height = std::max(height, std::ceil(metrics.height));
+        layout->Release();
+    }
+    format->Release();
+    factory->Release();
+    return height;
+}
 
 } // namespace
 
@@ -37,7 +75,16 @@ struct IdleAppNameDialog::Impl {
     std::wstring subtitle;
     std::wstring placeholder;
     int maxLength = 0;
+    float subtitleHeightDipValue = kSubtitleLineHeightDip;
     ApplyCallback onApply;
+
+    float subtitleHeightDip() const {
+        return subtitleHeightDipValue;
+    }
+
+    float clientHeightDip() const {
+        return kBaseClientH + subtitleHeightDip() - kSubtitleLineHeightDip;
+    }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -85,7 +132,7 @@ struct IdleAppNameDialog::Impl {
         const int pad = px(fluent::metrics::pagePadding);
         const int gap = px(fluent::metrics::controlGap);
         const int titleH = px(28.0f);
-        const int subtitleH = px(20.0f);
+        const int subtitleH = px(subtitleHeightDip());
         const int editH = px(fluent::metrics::controlHeight);
         const int buttonH = px(fluent::metrics::controlHeight);
 
@@ -130,7 +177,8 @@ struct IdleAppNameDialog::Impl {
             return 0;
         case WM_GETMINMAXINFO:
             fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
-                                               kDialogStyle, kDialogExStyle, kClientW, kClientH);
+                                               kDialogStyle, kDialogExStyle, kClientW,
+                                               clientHeightDip());
             return 0;
         case WM_DPICHANGED: {
             auto* suggested = reinterpret_cast<RECT*>(lp);
@@ -186,6 +234,8 @@ bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& 
     impl_->subtitle = subtitle ? subtitle : L"";
     impl_->placeholder = placeholder ? placeholder : L"";
     impl_->maxLength = maxLength;
+    impl_->subtitleHeightDipValue = measureSubtitleHeightDip(
+        impl_->subtitle, kClientW - fluent::metrics::pagePadding * 2.0f);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -201,7 +251,7 @@ bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& 
         dpi = GetDpiForSystem();
     const float s = fluent::dipScale(dpi);
     RECT rc{0, 0, static_cast<LONG>(std::lround(kClientW * s)),
-            static_cast<LONG>(std::lround(kClientH * s))};
+            static_cast<LONG>(std::lround(impl_->clientHeightDip() * s))};
     AdjustWindowRectExForDpi(&rc, kDialogStyle, FALSE, kDialogExStyle, dpi);
     const int w = rc.right - rc.left;
     const int h = rc.bottom - rc.top;
