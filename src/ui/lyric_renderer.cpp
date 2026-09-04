@@ -527,17 +527,51 @@ void DCompRenderer::releaseLyricTransitionLayers() {
 }
 
 bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
-                                                int height1, float cornerRadius) {
+                                                 int height1, float cornerRadius) {
+    return ensureLyricTransitionLayers(width0, height0, width1, height1, 0, 0, 0, 0,
+                                       cornerRadius);
+}
+
+bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+                                                 int height1, int width2, int height2,
+                                                 float cornerRadius) {
+    return ensureLyricTransitionLayers(width0, height0, width1, height1, width2, height2,
+                                       0, 0, cornerRadius);
+}
+
+bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+                                                 int height1, int width2, int height2,
+                                                 int width3, int height3, float cornerRadius) {
     if (!dcomp_ || !visual_ || width0 <= 0 || height0 <= 0 || width1 <= 0 || height1 <= 0)
         return false;
-    const int widths[2] = {width0, width1};
-    const int heights[2] = {height0, height1};
-    if (lyricLayers_[0].surface && lyricLayers_[1].surface &&
-        lyricLayers_[0].width == width0 && lyricLayers_[0].height == height0 &&
-        lyricLayers_[1].width == width1 && lyricLayers_[1].height == height1) {
+
+    const auto validOptionalLayer = [](int width, int height) {
+        return (width == 0 && height == 0) || (width > 0 && height > 0);
+    };
+    if (!validOptionalLayer(width2, height2) || !validOptionalLayer(width3, height3))
+        return false;
+    const bool hasThirdLayer = width2 > 0 && height2 > 0;
+    const bool hasFourthLayer = width3 > 0 && height3 > 0;
+    if (hasFourthLayer && !hasThirdLayer)
+        return false;
+
+    const int widths[4] = {width0, width1, width2, width3};
+    const int heights[4] = {height0, height1, height2, height3};
+    const int layerCount = hasFourthLayer ? 4 : hasThirdLayer ? 3 : 2;
+    bool reusable = true;
+    for (int i = 0; i < 4; ++i) {
+        if (i < layerCount) {
+            reusable = reusable && lyricLayers_[i].surface &&
+                       lyricLayers_[i].width == widths[i] &&
+                       lyricLayers_[i].height == heights[i];
+        } else {
+            reusable = reusable && !lyricLayers_[i].surface;
+        }
+    }
+    if (reusable) {
         // 复用已有层：裁剪、位移和透明度可能被上一次动画改过，统一恢复到
         // 挂载初始状态，避免新一轮转场首帧继承旧动画的终点。
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < layerCount; ++i) {
             auto& layer = lyricLayers_[i];
             if (FAILED(configureRectangleClip(layer.clip, 0.0f, 0.0f,
                                               static_cast<float>(widths[i]),
@@ -552,7 +586,7 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     }
 
     releaseLyricTransitionLayers();
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < layerCount; ++i) {
         auto& layer = lyricLayers_[i];
         HRESULT hr = dcomp_->CreateVisual(&layer.visual);
         if (SUCCEEDED(hr))
@@ -663,13 +697,16 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
         hr = transitionBackdrop_.visual->SetOffsetX(0.0f);
     if (SUCCEEDED(hr))
         hr = transitionBackdrop_.visual->SetOffsetY(offsetY);
-    // 内容层以 AddVisual(TRUE, nullptr) 逐个插到所有兄弟层的最底部，因此
-    // 两个内容层中 lyricLayers_[1] 才是 z 序最底的一层。固定背景必须以它为
-    // 参考插到它后面（insertAbove=FALSE），才能只覆盖根交换链、而不盖住
-    // 两页正在移动的内容；以 lyricLayers_[0] 为参考会把背景压在新页内容层
-    // 之上，整场转场新页都被不透明的背景层挡住，收尾撤层时整体弹出。
-    if (SUCCEEDED(hr))
-        hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, lyricLayers_[1].visual);
+    // 内容层以 AddVisual(TRUE, nullptr) 逐个插到所有兄弟层的最底部，因此当前
+    // 活动内容层中索引最高的一层才是 z 序最底的一层。固定背景必须以它为参考
+    // 插到它后面（insertAbove=FALSE），才能只覆盖根交换链、而不盖住转场内容；
+    // 以顶部内容层为参考会把背景压在部分内容之上，收尾时就会出现内容弹出。
+    if (SUCCEEDED(hr)) {
+        IDCompositionVisual* bottomContent = lyricLayers_[3].visual
+                                                  ? lyricLayers_[3].visual
+                                                  : lyricLayers_[1].visual;
+        hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, bottomContent);
+    }
     if (FAILED(hr)) {
         releaseBackdrop();
         return false;
@@ -714,7 +751,7 @@ bool DCompRenderer::endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc) {
 }
 
 ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
-    if (index < 0 || index >= 2 || !lyricLayers_[index].surface)
+    if (index < 0 || index >= 4 || !lyricLayers_[index].surface)
         return nullptr;
     POINT offset{};
     ID2D1DeviceContext* dc = nullptr;
@@ -734,7 +771,7 @@ ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
 }
 
 bool DCompRenderer::endLyricLayerDraw(int index, ID2D1DeviceContext* dc) {
-    if (index < 0 || index >= 2 || !lyricLayers_[index].surface || !dc)
+    if (index < 0 || index >= 4 || !lyricLayers_[index].surface || !dc)
         return false;
     HRESULT hr = lyricLayers_[index].surface->EndDraw();
     dc->Release();
@@ -763,7 +800,7 @@ bool DCompRenderer::addSmoothStep(IDCompositionAnimation* animation, double begi
 
 bool DCompRenderer::animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
                                       float toOpacity, float durationSec) {
-    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || durationSec <= 0.0f)
         return false;
 
@@ -814,7 +851,7 @@ void DCompRenderer::clearLyricTransitionLayers() {
 bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float baseY,
                                        float fromOpacity, float toOpacity,
                                        float durationSec) {
-    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || durationSec <= 0.0f)
         return false;
 
@@ -852,7 +889,7 @@ bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float f
                                                float toY, float clipFromBottom,
                                                float clipToBottom, float durationSec,
                                                float fromOpacity, float toOpacity) {
-    if (index < 0 || index >= 2 || !dcomp_ || !lyricLayers_[index].visual ||
+    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || !lyricLayers_[index].clip || durationSec <= 0.0f)
         return false;
 
@@ -910,18 +947,11 @@ bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float f
         } else {
             hr = dcomp_->CreateAnimation(&opacityAnim);
             if (SUCCEEDED(hr)) {
-                if (fromOpacity > toOpacity) {
-                    // 收起时让旧内容贯穿整个转场平滑淡出，避免前段突然变透明，
-                    // 造成整张卡片像瞬间跳到折叠态。
-                    if (!addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity))
-                        hr = E_FAIL;
-                } else {
-                    if (!addSmoothStep(opacityAnim, 0.0, duration * 0.14,
-                                       fromOpacity, fromOpacity) ||
-                        !addSmoothStep(opacityAnim, duration * 0.14, duration,
-                                       fromOpacity, toOpacity))
-                        hr = E_FAIL;
-                }
+                // 展开和收起使用同一条透明度曲线，并与位移、裁剪贯穿相同的
+                // 动画时长。这样内容不会在展开时延迟出现，也不会在收起时提前消失，
+                // 视觉上的淡入淡出速度保持一致。
+                if (!addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity))
+                    hr = E_FAIL;
             }
             if (SUCCEEDED(hr))
                 hr = opacityAnim->End(duration, toOpacity);

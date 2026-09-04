@@ -305,8 +305,9 @@ struct MediaPopup::Impl {
     // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
     // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
     bool categoryLayersActive = false;
-    // 快速打开展开/收起是否正由 DComp 合成层呈现（一言区 + 快速打开区两层，
-    // 位移与裁剪由合成器执行）；进行中交换链不再绘制空闲页内容。
+    // 快速打开展开/收起是否正由 DComp 合成层呈现（一言区、展开态标题/Tab、
+    // 收起态标题和列表主体四层，位移与裁剪由合成器执行）；进行中交换链不再
+    // 绘制空闲页内容。
     bool quickExpandTransitionActive = false;
     bool quickExpandLayersBuilt = false;
     // 卡片高度变化时，旧卡片和新卡片的屏幕位置可能不同。这个区域只用于
@@ -802,8 +803,8 @@ struct MediaPopup::Impl {
 
     // 结束 DComp 层转场（页面互切或快速打开展开/收起）：撤掉合成层并停掉
     // 收尾定时器。多次调用安全；调用方负责在必要时把最终交换链帧提交后，
-    // 再提交层的移除。两个转场共用同一对合成层，不会同时激活（切换按钮在
-    // 页面互切期间禁点，setPage 也会先停掉另一个转场）。
+    // 再提交层的移除。两个转场共用同一组临时合成层，不会同时激活（切换按钮
+    // 在页面互切期间禁点，setPage 也会先停掉另一个转场）。
     void stopLayerTransition(bool& transitionActive, bool& layersActive, UINT_PTR timer) {
         transitionActive = false;
         deferredPositionMs = -1;
@@ -1288,11 +1289,6 @@ struct MediaPopup::Impl {
     void decodeIdleIcons() {
         if (!idleIconsDirty)
             return;
-        idleIconsDirty = false;
-        for (auto*& bitmap : idleIconBitmaps)
-            releaseBitmap(bitmap);
-        idleIconBitmaps.clear();
-
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
@@ -1300,7 +1296,11 @@ struct MediaPopup::Impl {
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
                               D2D1_ALPHA_MODE_PREMULTIPLIED),
             static_cast<float>(dpi), static_cast<float>(dpi));
-        idleIconBitmaps.reserve(idle.apps.size());
+        // 先在临时数组中完成整批位图创建，最后再整体替换。不能先清空正在
+        // 使用的数组，否则任务数据刷新恰好落在绘制交接处时，图标会短暂变成
+        // 空白，表现为图标区域像被刷新了一次。
+        std::vector<ID2D1Bitmap*> nextBitmaps;
+        nextBitmaps.reserve(idle.apps.size());
         for (const auto& app : idle.apps) {
             ID2D1Bitmap* bitmap = nullptr;
             if (app.iconPixels && !app.iconPixels->empty() && app.iconWidth > 0 &&
@@ -1308,11 +1308,15 @@ struct MediaPopup::Impl {
                 SUCCEEDED(rt->CreateBitmap(
                     D2D1::SizeU(app.iconWidth, app.iconHeight), app.iconPixels->data(),
                     app.iconWidth * 4, &props, &bitmap))) {
-                idleIconBitmaps.push_back(bitmap);
+                nextBitmaps.push_back(bitmap);
             } else {
-                idleIconBitmaps.push_back(nullptr);
+                nextBitmaps.push_back(nullptr);
             }
         }
+        for (auto*& bitmap : idleIconBitmaps)
+            releaseBitmap(bitmap);
+        idleIconBitmaps = std::move(nextBitmaps);
+        idleIconsDirty = false;
     }
 
     void layoutIdleList(float w, float top, const IdlePresentation* content = nullptr) {
@@ -2007,13 +2011,10 @@ struct MediaPopup::Impl {
         }
     }
 
-    void drawIdleQuickList(ID2D1DeviceContext* rt, float w, float top,
-                           const IdlePresentation& content, bool updateHitTest) {
+    void drawIdleQuickListContent(ID2D1DeviceContext* rt, float w,
+                                  const IdlePresentation& content) {
         if (!rt)
             return;
-        layoutIdleList(w, top, &content);
-        const float progress = idleQuickExpandProgress(content);
-        drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress), progress, updateHitTest);
         // 方块边框以几何边界为中心绘制；给可视裁剪区留出 1 DIP，避免首行
         // 的上边框被裁掉，同时不改变列表的布局和命中区域。
         const D2D1_RECT_F visualClip =
@@ -2089,6 +2090,16 @@ struct MediaPopup::Impl {
             rt->FillRoundedRectangle(
                 D2D1::RoundedRect(idleScrollThumbRect, 1.5f, 1.5f), brushSecondary);
         }
+    }
+
+    void drawIdleQuickList(ID2D1DeviceContext* rt, float w, float top,
+                           const IdlePresentation& content, bool updateHitTest) {
+        if (!rt)
+            return;
+        layoutIdleList(w, top, &content);
+        const float progress = idleQuickExpandProgress(content);
+        drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress), progress, updateHitTest);
+        drawIdleQuickListContent(rt, w, content);
     }
 
     void drawIdle(ID2D1DeviceContext* rt, float w, bool updateHitTest) {
@@ -2616,7 +2627,7 @@ struct MediaPopup::Impl {
         // 重绘或提交透明底，UI 线程不再逐帧刷新主卡片。
         if (categoryTransitionActive)
             return;
-        // 快速打开展开/收起期间，一言区与快速打开区承载在两个 DComp 合成层上，
+        // 快速打开展开/收起期间，一言区、标题/Tab、列表主体承载在 DComp 合成层上，
         // 交换链只画卡片底与返回箭头，不重复绘制空闲页内容。
         if (quickExpandTransitionActive && currentPage() == PopupPage::Idle) {
             drawPageArrow(rt, w, PopupPage::Idle, false);
@@ -2688,11 +2699,12 @@ struct MediaPopup::Impl {
         return true;
     }
 
-    // 快速打开展开/收起：把固定背景、一言区（含分隔线）和展开态的快速打开区
-    // 分别交给 DComp。固定背景覆盖根交换链，内容层只做合成器位移、裁剪和透明度；
-    // 展开时快速打开区整体上移并淡入，收起时整体下移并淡出。列表视口高度通过
-    // 层内矩形裁剪底边收放（该底边在层内坐标系中与位移无关，直接按两个端点值
-    // 插值）。一言区原地不动，由裁剪底边扫过模拟被覆盖/显露。
+    // 快速打开展开/收起：render() 先把只包含卡片背景和返回按钮的基准帧绘制到
+    // 当前交换链后备缓冲，再把固定背景、一言区（含分隔线）和展开态的快速打开区
+    // 交给 DComp。固定背景覆盖交换链，避免背景随 Present 交接单独闪烁；内容层只
+    // 做合成器位移、裁剪和透明度。展开时快速打开区整体上移并淡入，收起时整体下移
+    // 并淡出。列表视口高度通过层内矩形裁剪底边收放（该底边在层内坐标系中与位移
+    // 无关，直接按两个端点值插值）。一言区原地不动，由裁剪底边扫过模拟被覆盖/显露。
     // 几何与 drawIdle 的逐帧版本在两个端点完全一致。
     bool startQuickExpandLayerTransition(float w) {
         if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0)
@@ -2726,20 +2738,28 @@ struct MediaPopup::Impl {
             (expandedListTop - quickOriginY) + expandedListHeight;
         const float clipBottomCollapsed =
             (expandedListTop - quickOriginY) + collapsedListHeight;
+        const float expandedTabTop = idleQuickTabTop(expandedListTop, 1.0f);
 
         const int layer0W = cardWidthPx;
         const int layer0H = static_cast<int>(std::lround(collapsedButtonTop * s)) + 1;
         const int layer1W = cardWidthPx;
         const int layer1H = static_cast<int>(std::lround(clipBottomExpanded * s)) + 1;
-        if (!renderer.ensureLyricTransitionLayers(layer0W, layer0H, layer1W, layer1H))
+        const int layer2W = cardWidthPx;
+        const int layer2H = static_cast<int>(std::lround(32.0f * s)) + 1;
+        const int layer3W = cardWidthPx;
+        const int layer3H = static_cast<int>(std::lround(expandedListHeight * s)) + 1;
+        if (!renderer.ensureLyricTransitionLayers(layer0W, layer0H, layer1W, layer1H,
+                                                  layer2W, layer2H, layer3W, layer3H))
             return false;
-
         const float baseY = cardOriginDip * s;
         if (!renderer.ensureLyricTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
                                                     kPopupCornerDip * s))
             return false;
         if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
             drawCardBackground(dc, w, popupHeightDip(), PopupPage::Idle, false);
+            // 固定背景层位于交换链之上，因此把快速展开期间仍需可见的页面
+            // 返回箭头一并画进稳定层，避免它被整卡片背景覆盖。
+            drawPageArrow(dc, w, PopupPage::Idle, false);
             if (!renderer.endLyricTransitionBackdropDraw(dc))
                 return false;
         } else {
@@ -2747,7 +2767,7 @@ struct MediaPopup::Impl {
         }
 
         // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
-        // 被隐藏/显露。固定背景层覆盖根交换链，目标页在转场收尾前再交接。
+        // 被隐藏/显露。当前交换链后备缓冲已经绘制成无内容基准帧，不会与旧内容重影。
         if (auto* dc = renderer.beginLyricLayerDraw(0)) {
             drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                      D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
@@ -2767,9 +2787,9 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 层 1：快速打开区，按展开态完整绘制（列表布局依赖展开进度，临时固定
-        // 为展开态）。展开时整层上移并淡入，收起时整层下移并淡出；层 0
-        // 负责逐步显露一言区，避免整卡片提前切换。
+        // 层 1：快速打开区的标题和 Tab，按展开态绘制。展开时上移并淡入，
+        // 收起时下移并淡出；列表主体单独放在层 3，避免图标跟随整层透明度
+        // 在转场首尾闪烁。
         if (auto* dc = renderer.beginLyricLayerDraw(1)) {
             const bool savedExpanded = idleQuickExpanded;
             const float savedT = idleQuickExpandT;
@@ -2781,7 +2801,7 @@ struct MediaPopup::Impl {
             dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -quickOriginY) *
                              baseTransform);
             drawIdleQuickHeader(dc, w, expandedHeaderTop, idle, false);
-            drawIdleQuickList(dc, w, expandedListTop, idle, false);
+            drawIdleQuickTabs(dc, w, expandedTabTop, 1.0f, false);
             idleQuickExpanded = savedExpanded;
             idleQuickExpandT = savedT;
             if (!renderer.endLyricLayerDraw(1, dc))
@@ -2790,8 +2810,60 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 同页面转场：先提交 0 透明度的背景/内容层，并等待它们进入合成树；
-        // 再把背景转可见并提交动画。动画期间根交换链保持原帧，不再重绘背景。
+        // 层 2：收起态标题/按钮。它与层 1 使用相同的垂直轨迹，但反向交叉淡入，
+        // 使收起动画的最后一帧已经包含最终静态态的标题和按钮，避免撤层时补画闪烁。
+        if (auto* dc = renderer.beginLyricLayerDraw(2)) {
+            const bool savedExpanded = idleQuickExpanded;
+            const float savedT = idleQuickExpandT;
+            idleQuickExpanded = false;
+            idleQuickExpandT = 0.0f;
+            D2D1_MATRIX_3X2_F baseTransform;
+            dc->GetTransform(&baseTransform);
+            dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -collapsedButtonTop) *
+                             baseTransform);
+            drawIdleQuickHeader(dc, w, collapsedHeaderTop, idle, false);
+            idleQuickExpanded = savedExpanded;
+            idleQuickExpandT = savedT;
+            if (!renderer.endLyricLayerDraw(2, dc))
+                return false;
+        } else {
+            return false;
+        }
+
+        // 层 3：列表主体（应用图标/任务行）。只绘制展开态主体，但把它的局部
+        // 原点放在列表顶部，因此视觉层可以从收起态列表顶平滑移动到展开态列表顶，
+        // 且整个过程保持不透明，避免图标在交换链清空或层淡出时短暂消失。
+        if (auto* dc = renderer.beginLyricLayerDraw(3)) {
+            const bool savedExpanded = idleQuickExpanded;
+            const float savedT = idleQuickExpandT;
+            const D2D1_RECT_F savedListRect = idleListRect;
+            const D2D1_RECT_F savedScrollTrackRect = idleScrollTrackRect;
+            const D2D1_RECT_F savedScrollThumbRect = idleScrollThumbRect;
+            const float savedScrollMax = idleScrollMax;
+            const float savedScrollOffset = idleScrollOffset;
+            idleQuickExpanded = true;
+            idleQuickExpandT = 1.0f;
+            layoutIdleList(w, expandedListTop, &idle);
+            D2D1_MATRIX_3X2_F baseTransform;
+            dc->GetTransform(&baseTransform);
+            dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -expandedListTop) *
+                             baseTransform);
+            drawIdleQuickListContent(dc, w, idle);
+            idleQuickExpanded = savedExpanded;
+            idleQuickExpandT = savedT;
+            idleListRect = savedListRect;
+            idleScrollTrackRect = savedScrollTrackRect;
+            idleScrollThumbRect = savedScrollThumbRect;
+            idleScrollMax = savedScrollMax;
+            idleScrollOffset = savedScrollOffset;
+            if (!renderer.endLyricLayerDraw(3, dc))
+                return false;
+        } else {
+            return false;
+        }
+
+        // 先挂载透明的背景/内容层并等待表面进入合成树，再转可见并设置动画。
+        // 这样下面交换链的基准帧无论何时 Present，背景都已经由固定层覆盖。
         renderer.commit();
         renderer.waitForCommitCompletion();
         if (!renderer.showLyricTransitionBackdrop())
@@ -2799,6 +2871,10 @@ struct MediaPopup::Impl {
 
         const float quoteBaseY = baseY;
         const float quickBaseY = (cardOriginDip + quickOriginY) * s;
+        const float collapsedHeaderY = (cardOriginDip + collapsedButtonTop) * s;
+        const float expandedHeaderY = (cardOriginDip + expandedButtonTop) * s;
+        const float collapsedBodyY = (cardOriginDip + collapsedListTop) * s;
+        const float expandedBodyY = (cardOriginDip + expandedListTop) * s;
         const float travelPx = delta * s;
         const float durationSec = kIdleQuickExpandMs / 1000.0f;
         if (!renderer.animateLyricLayerClipSlide(
@@ -2812,6 +2888,18 @@ struct MediaPopup::Impl {
                 (opening ? clipBottomCollapsed : clipBottomExpanded) * s,
                 (opening ? clipBottomExpanded : clipBottomCollapsed) * s, durationSec,
                 opening ? 0.0f : 1.0f, opening ? 1.0f : 0.0f))
+            return false;
+        if (!renderer.animateLyricLayerClipSlide(
+                2, 0.0f, opening ? collapsedHeaderY : expandedHeaderY,
+                opening ? expandedHeaderY : collapsedHeaderY, static_cast<float>(layer2H),
+                static_cast<float>(layer2H), durationSec, opening ? 1.0f : 0.0f,
+                opening ? 0.0f : 1.0f))
+            return false;
+        if (!renderer.animateLyricLayerClipSlide(
+                3, 0.0f, opening ? collapsedBodyY : expandedBodyY,
+                opening ? expandedBodyY : collapsedBodyY,
+                (opening ? collapsedListHeight : expandedListHeight) * s,
+                (opening ? expandedListHeight : collapsedListHeight) * s, durationSec))
             return false;
         quickExpandLayersBuilt = true;
         renderer.commit();
@@ -2902,12 +2990,6 @@ struct MediaPopup::Impl {
             !startCategoryLayerTransition(w)) {
             stopCategoryTransition();
         }
-        // 快速打开展开/收起：同理，装层失败则本帧直接呈现目标状态。
-        if (quickExpandTransitionActive && !quickExpandLayersBuilt &&
-            !startQuickExpandLayerTransition(w)) {
-            stopQuickExpandTransition();
-        }
-
         const bool categoryLayersCoverCard = categoryTransitionActive && categoryLayersActive;
         const bool quickExpandLayersCoverCard =
             quickExpandTransitionActive && quickExpandLayersBuilt;
@@ -2939,6 +3021,15 @@ struct MediaPopup::Impl {
                                       kSongTransitionMs / 1000.0f))
                 renderer.resetRoot();
         }
+
+        // 快速展开的固定背景和内容层已在 startQuickExpandLayerTransition() 中完成
+        // 两段提交并等待表面进入合成树；这里直接 Present 基准帧，避免再插入一批
+        // 背景/内容交接命令。
+        if (quickExpandTransitionActive && !quickExpandLayersBuilt &&
+            !startQuickExpandLayerTransition(w)) {
+            stopQuickExpandTransition();
+            return render();
+        }
         if (!renderer.present()) {
             releaseDrawingResources();
             return false;
@@ -2968,9 +3059,8 @@ struct MediaPopup::Impl {
         render();
     }
 
-    // 层转场收尾（页面互切与快速打开展开/收起共用）：先在转场层仍覆盖着
-    // 交换链时提交最终页面，并等待该批命令被合成器处理；随后再提交撤层，
-    // 确保撤层时交换链已经是最终页面。
+    // 层转场收尾（页面互切与快速打开展开/收起共用）：先保留终点层并把最终页面
+    // 送入交换链，等待目标帧进入合成器后再撤层，避免撤层与交换链帧交接时闪烁。
     void finishLayerTransition(bool& transitionActive, bool& layersActive, UINT_PTR timer) {
         if (!transitionActive)
             return;
@@ -2979,14 +3069,20 @@ struct MediaPopup::Impl {
         const int64_t pendingPosition = deferredPositionMs;
         const bool canPrimeTarget = popupVisible && !entering && !closing;
         if (canPrimeTarget) {
+            // 先保留终点层，只结束“转场中”状态，让 render() 把最终卡片画到
+            // 交换链。转场层仍在合成树中时，Present/Commit 的交接不会露出空白
+            // 的图标区域；等待目标帧真正进入合成器后再撤层。
             transitionActive = false;
-            // 目标页先正常送入交换链并提交，但转场层仍覆盖在上面；等待这一批
-            // 被合成器处理完后再撤层，避免撤层先于目标交换链帧进入可见合成帧。
-            render();
-            renderer.waitForCommitCompletion();
+            if (render())
+                renderer.waitForCommitCompletion();
+            else
+                renderer.commit();
+            stopLayerTransition(transitionActive, layersActive, timer);
+            renderer.commit();
+        } else {
+            stopLayerTransition(transitionActive, layersActive, timer);
+            renderer.commit();
         }
-        stopLayerTransition(transitionActive, layersActive, timer);
-        renderer.commit();
         if (pendingPosition >= 0 && positionMs != pendingPosition) {
             positionMs = pendingPosition;
             renderOrDefer();
@@ -4399,40 +4495,43 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
                               content.showQuote != impl_->idle.showQuote ||
                               content.copyEnabled != impl_->idle.copyEnabled ||
                               content.quickStartEnabled != impl_->idle.quickStartEnabled;
-    bool changed = quoteChanged ||
-                   content.showAppNames != impl_->idle.showAppNames ||
-                   content.apps.size() != impl_->idle.apps.size() ||
-                   content.todayTasks.size() != impl_->idle.todayTasks.size() ||
-                   content.todayTasksLoading != impl_->idle.todayTasksLoading ||
-                   content.todayTasksConnected != impl_->idle.todayTasksConnected ||
-                   content.todayTasksStatus != impl_->idle.todayTasksStatus;
-    if (!changed) {
-        for (size_t i = 0; i < content.apps.size(); ++i) {
-            const auto& oldApp = impl_->idle.apps[i];
-            const auto& newApp = content.apps[i];
-            if (oldApp.path != newApp.path || oldApp.customName != newApp.customName ||
-                oldApp.name != newApp.name ||
-                oldApp.iconPixels != newApp.iconPixels ||
-                oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
-                oldApp.pathValid != newApp.pathValid) {
-                changed = true;
-                break;
-            }
+    const bool appCountChanged = content.apps.size() != impl_->idle.apps.size();
+    bool appsChanged = content.showAppNames != impl_->idle.showAppNames || appCountChanged;
+    bool appIconsChanged = appCountChanged;
+    const size_t appCount = std::min(content.apps.size(), impl_->idle.apps.size());
+    for (size_t i = 0; i < appCount; ++i) {
+        const auto& oldApp = impl_->idle.apps[i];
+        const auto& newApp = content.apps[i];
+        if (oldApp.path != newApp.path || oldApp.customName != newApp.customName ||
+            oldApp.name != newApp.name || oldApp.pathValid != newApp.pathValid) {
+            appsChanged = true;
+        }
+        if (oldApp.path != newApp.path || oldApp.iconPixels != newApp.iconPixels ||
+            oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
+            oldApp.pathValid != newApp.pathValid) {
+            appIconsChanged = true;
         }
     }
-    if (!changed) {
-        for (size_t i = 0; i < content.todayTasks.size(); ++i) {
-            const auto& oldTask = impl_->idle.todayTasks[i];
-            const auto& newTask = content.todayTasks[i];
-            if (oldTask.id != newTask.id || oldTask.projectId != newTask.projectId ||
-                oldTask.title != newTask.title ||
-                oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
-                oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
-                changed = true;
-                break;
-            }
+
+    const bool taskListStateChanged =
+        content.todayTasks.size() != impl_->idle.todayTasks.size() ||
+        content.todayTasksLoading != impl_->idle.todayTasksLoading ||
+        content.todayTasksConnected != impl_->idle.todayTasksConnected ||
+        content.todayTasksStatus != impl_->idle.todayTasksStatus;
+    bool tasksChanged = taskListStateChanged;
+    const size_t taskCount = std::min(content.todayTasks.size(), impl_->idle.todayTasks.size());
+    for (size_t i = 0; i < taskCount; ++i) {
+        const auto& oldTask = impl_->idle.todayTasks[i];
+        const auto& newTask = content.todayTasks[i];
+        if (oldTask.id != newTask.id || oldTask.projectId != newTask.projectId ||
+            oldTask.title != newTask.title ||
+            oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
+            oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
+            tasksChanged = true;
         }
     }
+
+    const bool changed = quoteChanged || appsChanged || appIconsChanged || tasksChanged;
 
     if (quoteContentChanged || !content.showQuote || !content.copyEnabled ||
         content.loading || content.sentence.empty()) {
@@ -4469,8 +4568,10 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
             impl_->idleQuoteScrollOffset = 0.0f;
             impl_->scrollTickMs = 0;
         }
-        impl_->idleTextDirty = true;
-        impl_->idleIconsDirty = true;
+        if (quoteContentChanged)
+            impl_->idleTextDirty = true;
+        if (appIconsChanged)
+            impl_->idleIconsDirty = true;
         if (impl_->popupVisible && impl_->idleMode)
             impl_->reposition();
     }

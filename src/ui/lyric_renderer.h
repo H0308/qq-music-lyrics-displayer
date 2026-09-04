@@ -87,10 +87,15 @@ public:
     // 设备丢失：释放设备链全部对象，下次 bind() 惰性重建；保留工厂。
     void discard();
 
-    // 单行歌词转场用的两个临时合成层（旧行/新行），内容只在转场开始时绘制一次，
-    // 位移和透明度由 DirectComposition 按刷新率执行。两层可指定不同尺寸。
-    // cornerRadius 为物理像素；默认为 0，保留歌词行/快速展开层的矩形边界。
+    // 临时合成层（页面歌词转场使用两层，快速展开使用四层），内容只在转场开始
+    // 时绘制一次，位移和透明度由 DirectComposition 按刷新率执行。各层可指定不同
+    // 尺寸。cornerRadius 为物理像素；默认为 0，保留歌词行/快速展开层的矩形边界。
     bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1,
+                                     float cornerRadius = 0.0f);
+    bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1,
+                                     int width2, int height2, float cornerRadius = 0.0f);
+    bool ensureLyricTransitionLayers(int width0, int height0, int width1, int height1,
+                                     int width2, int height2, int width3, int height3,
                                      float cornerRadius = 0.0f);
     ID2D1DeviceContext* beginLyricLayerDraw(int index);
     bool endLyricLayerDraw(int index, ID2D1DeviceContext* dc);
@@ -100,9 +105,9 @@ public:
     // 按刷新率做 X 位移和透明度过渡；层定位在 (0, baseY)。
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
                             float fromOpacity, float toOpacity, float durationSec);
-    // 页面横向滑动和快速展开转场的固定背景层。背景与内容层一起提交，避免
-    // 转场期间重绘/提交根交换链。创建/复用时透明度为 0，由调用方在动画提交
-    // 阶段调 showLyricTransitionBackdrop() 转可见。
+    // 页面横向滑动转场的固定背景层。背景与内容层一起提交，避免转场期间
+    // 重绘/提交根交换链。创建/复用时透明度为 0，由调用方在动画提交阶段
+    // 调 showLyricTransitionBackdrop() 转可见。
     bool ensureLyricTransitionBackdrop(int width, int height, float offsetY,
                                         float cornerRadius = 0.0f);
     ID2D1DeviceContext* beginLyricTransitionBackdropDraw();
@@ -162,7 +167,7 @@ private:
     IDCompositionRectangleClip* rootClip_ = nullptr;
     IDCompositionEffectGroup* rootOpacity_ = nullptr;
     LyricLayer transitionBackdrop_;
-    LyricLayer lyricLayers_[2];
+    LyricLayer lyricLayers_[4];
     ID2D1Bitmap1* backBmp_ = nullptr;
     HWND hwnd_ = nullptr;
     int width_ = 0;
