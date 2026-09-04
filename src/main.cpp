@@ -64,6 +64,7 @@ constexpr UINT kMsgIdleQuoteReady = WM_APP + 6;
 constexpr UINT kMsgIdleAppReady = WM_APP + 7;
 constexpr UINT kMsgHolidayReady = WM_APP + 8;
 constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
+constexpr UINT kMsgTickTickTaskCompleteReady = WM_APP + 10;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -174,6 +175,12 @@ struct HolidayPayload {
 struct TickTickTasksPayload {
     uint64_t generation = 0;
     TickTickTasksResult result;
+};
+
+struct TickTickTaskCompletePayload {
+    uint64_t generation = 0;
+    std::wstring taskId;
+    TickTickTaskMutationResult result;
 };
 
 std::string utf8Of(const std::wstring& w) {
@@ -654,6 +661,7 @@ struct App {
     std::wstring tickTickStatus_ = L"请在设置中连接滴答清单";
     std::vector<IdleTaskInfo> todayTasks_;
     uint64_t tickTickRequestGeneration_ = 0;
+    std::wstring tickTickCompletingTaskId_;
 
     // 每次进程启动只决策一次：首次任务同步完成前显示加载状态；数据成功且
     // 没有媒体会话时播报一次任务概览，之后再回到普通空闲文案。
@@ -2077,6 +2085,9 @@ struct App {
         host->setIdleTaskOpenCallback([this](const IdleTaskInfo& task) {
             openTickTickTask(task);
         });
+        host->setIdleTaskCompleteCallback([this](const IdleTaskInfo& task) {
+            completeTickTickTask(task);
+        });
         host->setMediaPopupOpenedCallback([this] { refreshTickTickTasks(); });
         host->setStatusTextCycleCompletedCallback([this] {
             onStartupTaskSummaryCompleted();
@@ -2619,8 +2630,11 @@ struct App {
     void editTickTickApiToken(bool enableAfterSave = false);
     void connectTickTick();
     void refreshTickTickTasks();
+    void completeTickTickTask(const IdleTaskInfo& task);
     void disconnectTickTick();
     void onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload);
+    void onTickTickTaskCompleteReady(
+        std::unique_ptr<TickTickTaskCompletePayload> payload);
     void onStartupTaskSummaryCompleted();
     void openTickTickTask(const IdleTaskInfo& task);
     void reloadCurrentQqLyrics(bool forceOnline = false, bool forceLocal = false,
@@ -2662,6 +2676,7 @@ void App::applyTickTickEnabled(bool enabled) {
     tickTickConnected_ = false;
     tickTickConnecting_ = false;
     tickTickTasksLoading_ = false;
+    tickTickCompletingTaskId_.clear();
     todayTasks_.clear();
     startupTaskSummaryPending_ = false;
     startupTaskSummaryActive_ = false;
@@ -2706,6 +2721,7 @@ void App::editTickTickApiToken(bool enableAfterSave) {
         tickTickConnected_ = false;
         tickTickConnecting_ = false;
         tickTickTasksLoading_ = false;
+        tickTickCompletingTaskId_.clear();
         todayTasks_.clear();
         bool shouldRefresh = false;
         if (normalized.empty()) {
@@ -2735,7 +2751,8 @@ void App::editTickTickApiToken(bool enableAfterSave) {
 }
 
 void App::connectTickTick() {
-    if (tickTickConnecting_ || tickTickTasksLoading_)
+    if (tickTickConnecting_ || tickTickTasksLoading_ ||
+        !tickTickCompletingTaskId_.empty())
         return;
     if (!tickTickEffectiveEnabled())
         return;
@@ -2745,7 +2762,8 @@ void App::connectTickTick() {
 }
 
 void App::refreshTickTickTasks() {
-    if (!tickTickEffectiveEnabled() || tickTickTasksLoading_)
+    if (!tickTickEffectiveEnabled() || tickTickTasksLoading_ ||
+        !tickTickCompletingTaskId_.empty())
         return;
 
     ++tickTickRequestGeneration_;
@@ -2767,6 +2785,35 @@ void App::refreshTickTickTasks() {
         });
 }
 
+void App::completeTickTickTask(const IdleTaskInfo& task) {
+    if (!tickTickEffectiveEnabled() || task.id.empty() || task.projectId.empty() ||
+        !tickTickCompletingTaskId_.empty())
+        return;
+
+    const auto it = std::find_if(
+        todayTasks_.begin(), todayTasks_.end(),
+        [&task](const IdleTaskInfo& item) { return item.id == task.id; });
+    if (it == todayTasks_.end())
+        return;
+
+    ++tickTickRequestGeneration_;
+    const uint64_t generation = tickTickRequestGeneration_;
+    tickTickCompletingTaskId_ = task.id;
+    tickTickStatus_ = L"正在完成任务…";
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
+    tickTickProvider_.completeTaskAsync(
+        tickTickService_, tickTickApiToken_, task.projectId, task.id,
+        [this, generation, taskId = task.id](TickTickTaskMutationResult result) {
+            auto* payload = new TickTickTaskCompletePayload{
+                generation, taskId, std::move(result)};
+            if (!PostThreadMessageW(mainThread, kMsgTickTickTaskCompleteReady, 0,
+                                    reinterpret_cast<LPARAM>(payload)))
+                delete payload;
+        });
+}
+
 void App::disconnectTickTick() {
     ++tickTickRequestGeneration_;
     tickTickProvider_.clearApiToken(tickTickService_);
@@ -2776,6 +2823,7 @@ void App::disconnectTickTick() {
     tickTickConnected_ = false;
     tickTickConnecting_ = false;
     tickTickTasksLoading_ = false;
+    tickTickCompletingTaskId_.clear();
     todayTasks_.clear();
     tickTickStatus_ = L"已断开滴答清单连接";
     startupTaskSummaryPending_ = false;
@@ -2817,6 +2865,36 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
     if (settingsDialog)
         settingsDialog->updateState(currentSettingsState());
     publishPresentationFrame(snap, false, true);
+}
+
+void App::onTickTickTaskCompleteReady(
+    std::unique_ptr<TickTickTaskCompletePayload> payload) {
+    if (!payload || payload->generation != tickTickRequestGeneration_ ||
+        !tickTickEffectiveEnabled() ||
+        payload->taskId != tickTickCompletingTaskId_)
+        return;
+
+    tickTickCompletingTaskId_.clear();
+    if (payload->result.ok) {
+        const std::wstring completedId = payload->taskId;
+        std::erase_if(todayTasks_, [&completedId](const IdleTaskInfo& item) {
+            return item.id == completedId;
+        });
+        tickTickConnected_ = true;
+        tickTickStatus_ = todayTasks_.empty()
+                              ? L"已连接，今天没有待办任务"
+                              : std::wstring(L"已连接 · ") +
+                                    std::to_wstring(todayTasks_.size()) + L" 项今日任务";
+    } else {
+        tickTickStatus_ = payload->result.error.empty()
+                              ? L"滴答清单任务完成失败"
+                              : payload->result.error;
+        if (payload->result.authRequired)
+            tickTickConnected_ = false;
+    }
+    if (settingsDialog)
+        settingsDialog->updateState(currentSettingsState());
+    publishPresentationFrame(monitor.snapshot(), false, true);
 }
 
 void App::onStartupTaskSummaryCompleted() {
@@ -4068,7 +4146,7 @@ SettingsState App::currentSettingsState() const {
     st.tickTickApiTokenConfigured = !tickTickApiToken_.empty();
     st.tickTickConnected = tickTickConnected_;
     st.tickTickConnecting = tickTickConnecting_;
-    st.tickTickSyncing = tickTickTasksLoading_;
+    st.tickTickSyncing = tickTickTasksLoading_ || !tickTickCompletingTaskId_.empty();
     st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
@@ -4513,6 +4591,11 @@ int main() {
             else if (msg.message == kMsgTickTickTasksReady) {
                 app.onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload>(
                     reinterpret_cast<TickTickTasksPayload*>(msg.lParam)));
+            }
+            else if (msg.message == kMsgTickTickTaskCompleteReady) {
+                app.onTickTickTaskCompleteReady(
+                    std::unique_ptr<TickTickTaskCompletePayload>(
+                        reinterpret_cast<TickTickTaskCompletePayload*>(msg.lParam)));
             }
             continue;
         }

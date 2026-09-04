@@ -78,7 +78,8 @@ struct HttpResponse {
 };
 
 bool performHttp(const std::string& url, const std::vector<std::string>& requestHeaders,
-                 std::atomic<bool>& shutdown, HttpResponse& response) {
+                 std::atomic<bool>& shutdown, HttpResponse& response,
+                 const char* customMethod = nullptr) {
     CURL* curl = curl_easy_init();
     if (!curl)
         return false;
@@ -100,6 +101,12 @@ bool performHttp(const std::string& url, const std::vector<std::string>& request
     curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
     curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, curlXferAbort);
     curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &context);
+    if (customMethod) {
+        curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, customMethod);
+        curl_easy_setopt(curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, "");
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 0L);
+    }
 
     response.curlResult = curl_easy_perform(curl);
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response.statusCode);
@@ -213,6 +220,27 @@ bool requestApiJson(const std::wstring& apiToken, const std::string& url,
     if (status == 401)
         authRequired = true;
     return false;
+}
+
+bool completeTask(const std::wstring& apiToken, const std::wstring& projectId,
+                  const std::wstring& taskId, std::atomic<bool>& shutdown,
+                  bool& authRequired) {
+    if (apiToken.empty() || projectId.empty() || taskId.empty()) {
+        authRequired = true;
+        return false;
+    }
+
+    const std::vector<std::string> headers = {
+        "Accept: application/json", "Authorization: Bearer " + toUtf8(apiToken)};
+    HttpResponse response;
+    const std::string url = std::string(kDidaApiBaseUrl) + "/project/" +
+                            percentEncode(toUtf8(projectId)) + "/task/" +
+                            percentEncode(toUtf8(taskId)) + "/complete";
+    if (!performHttp(url, headers, shutdown, response, "POST"))
+        return false;
+    if (response.statusCode == 401)
+        authRequired = true;
+    return response.statusCode >= 200 && response.statusCode < 300;
 }
 
 std::string stringField(const json& object, const char* name) {
@@ -530,6 +558,43 @@ void TickTickProvider::requestTodayTasksAsync(TickTickService service,
         runtime_log::writef(L"[ticktick] tasks result=%s count=%llu",
                             result.ok ? L"success" : L"failed",
                             static_cast<unsigned long long>(result.tasks.size()));
+        if (!impl->shutdown.load() && cb)
+            cb(std::move(result));
+    });
+
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
+}
+
+void TickTickProvider::completeTaskAsync(TickTickService service,
+                                         const std::wstring& apiToken,
+                                         const std::wstring& projectId,
+                                         const std::wstring& taskId,
+                                         TaskMutationCallback cb) {
+    Impl* impl = impl_.get();
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread([impl, service, apiToken, projectId, taskId,
+                                 cb = std::move(cb), done]() mutable {
+        struct DoneFlag {
+            std::shared_ptr<std::atomic<bool>> value;
+            ~DoneFlag() { value->store(true); }
+        } doneFlag{done};
+
+        TickTickTaskMutationResult result;
+        bool authRequired = false;
+        try {
+            result.ok = completeTask(apiToken, projectId, taskId, impl->shutdown, authRequired);
+            result.authRequired = authRequired;
+            if (!result.ok)
+                result.error = authRequired ? L"滴答清单 API 口令无效，请重新填写"
+                                            : L"滴答清单任务完成失败";
+        } catch (...) {
+            result.error = L"滴答清单任务完成失败";
+        }
+        runtime_log::writef(L"[ticktick] complete-task result=%s",
+                            result.ok ? L"success" : L"failed");
         if (!impl->shutdown.load() && cb)
             cb(std::move(result));
     });

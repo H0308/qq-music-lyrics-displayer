@@ -19,9 +19,16 @@ struct TickTickTasksResult {
     std::vector<IdleTaskInfo> tasks;
 };
 
+struct TickTickTaskMutationResult {
+    bool ok = false;
+    bool authRequired = false;
+    std::wstring error;
+};
+
 class TickTickProvider {
 public:
     using TasksReadyCallback = std::function<void(TickTickTasksResult)>;
+    using TaskMutationCallback = std::function<void(TickTickTaskMutationResult)>;
 
     TickTickProvider();
     ~TickTickProvider();
@@ -31,6 +38,9 @@ public:
 
     void requestTodayTasksAsync(TickTickService service, const std::wstring& apiToken,
                                 TasksReadyCallback cb);
+    void completeTaskAsync(TickTickService service, const std::wstring& apiToken,
+                           const std::wstring& projectId, const std::wstring& taskId,
+                           TaskMutationCallback cb);
 
     bool loadApiToken(TickTickService service, std::wstring& apiToken) const;
     bool saveApiToken(TickTickService service, const std::wstring& apiToken);

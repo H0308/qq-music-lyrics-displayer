@@ -342,6 +342,7 @@ struct MediaPopup::Impl {
     std::function<void(const std::wstring&)> onSourceOpen;
     std::function<void(const std::wstring&)> onIdleAppOpen;
     std::function<void(const IdleTaskInfo&)> onIdleTaskOpen;
+    std::function<void(const IdleTaskInfo&)> onIdleTaskComplete;
     std::function<void()> onPanelOpened;
 
     // 应用音量控件：图标+数值固定在右上角；点击图标从图标处向左过渡展开卡内滑块
@@ -369,7 +370,9 @@ struct MediaPopup::Impl {
     int hoverIdleApp = -1;
     int pressedIdleApp = -1;
     int hoverIdleTask = -1;
+    int hoverIdleTaskCheckbox = -1;
     int pressedIdleTask = -1;
+    int pressedIdleTaskCheckbox = -1;
     int hoverIdleQuickTab = -1;
     int pressedIdleQuickTab = -1;
     bool hoverIdleQuickExpand = false;
@@ -1952,7 +1955,9 @@ struct MediaPopup::Impl {
                 continue;
 
             const bool hovered = static_cast<int>(i) == hoverIdleTask;
+            const bool checkboxHovered = static_cast<int>(i) == hoverIdleTaskCheckbox;
             const bool pressed = static_cast<int>(i) == pressedIdleTask;
+            const bool checkboxPressed = static_cast<int>(i) == pressedIdleTaskCheckbox;
             rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f),
                                      hovered ? brushIdleCellHover : brushIdleCell);
             if (pressed)
@@ -1994,6 +1999,9 @@ struct MediaPopup::Impl {
             const D2D1_RECT_F checkbox =
                 D2D1::RectF(row.left + 12.0f, row.top + 7.0f, row.left + 26.0f,
                             row.top + 21.0f);
+            if ((checkboxHovered || checkboxPressed) && !task.completed)
+                drawAdaptiveControlSurface(rt, checkbox, 4.0f, checkboxPressed,
+                                           PopupPage::Idle);
             if (task.completed && brushAccent) {
                 rt->FillRoundedRectangle(D2D1::RoundedRect(checkbox, 4.0f, 4.0f),
                                          brushAccent);
@@ -3305,7 +3313,9 @@ struct MediaPopup::Impl {
         hoverIdleQuickExpand = false;
         pressedIdleQuickExpand = false;
         hoverIdleTask = -1;
+        hoverIdleTaskCheckbox = -1;
         pressedIdleTask = -1;
+        pressedIdleTaskCheckbox = -1;
         idleQuickExpandRect = {};
         hoverIdleQuickTab = -1;
         pressedIdleQuickTab = -1;
@@ -3455,6 +3465,23 @@ struct MediaPopup::Impl {
 
         const auto& task = idle.todayTasks[static_cast<size_t>(rowIndex)];
         return task.id.empty() || task.projectId.empty() ? -1 : rowIndex;
+    }
+
+    int hitIdleTaskCheckbox(float x, float y) const {
+        const int rowIndex = hitIdleTask(x, y);
+        if (rowIndex < 0)
+            return -1;
+
+        const float localY = y - cardOriginDip;
+        const float rowTop = idleListRect.top +
+                             static_cast<float>(rowIndex) *
+                                 (kIdleTaskRowHeightDip + kIdleTaskRowGapDip) -
+                             idleScrollOffset;
+        // 可点击区域比视觉复选框稍大，降低精确点击成本，但仍限制在任务行左侧。
+        const D2D1_RECT_F checkboxHit =
+            D2D1::RectF(idleListRect.left + 6.0f, rowTop + 3.0f,
+                        idleListRect.left + 32.0f, rowTop + 25.0f);
+        return contains(checkboxHit, x, localY) ? rowIndex : -1;
     }
 
     bool hitIdleScrollBar(float x, float y) const {
@@ -3782,6 +3809,7 @@ struct MediaPopup::Impl {
         hoverIdleApp = -1;
         pressedIdleApp = -1;
         hoverIdleTask = -1;
+        hoverIdleTaskCheckbox = -1;
         pressedIdleTask = -1;
         idleScrollDragging = false;
         resetPageInteractionState();
@@ -3829,16 +3857,19 @@ struct MediaPopup::Impl {
                 }
                 const int idleApp = hitIdleApp(mx, my);
                 const int idleTask = hitIdleTask(mx, my);
+                const int idleTaskCheckbox = hitIdleTaskCheckbox(mx, my);
                 const bool arrow = hitPageArrow(mx, my);
                 const bool copy = hitCopy(mx, my);
                 const bool quickExpand = hitIdleQuickExpand(mx, my);
                 const int quickTab = hitIdleQuickTab(mx, my);
                 if (idleApp != hoverIdleApp || idleTask != hoverIdleTask ||
+                    idleTaskCheckbox != hoverIdleTaskCheckbox ||
                     arrow != hoverPageArrow || copy != hoverCopy ||
                     quickExpand != hoverIdleQuickExpand || quickTab != hoverIdleQuickTab ||
                     hoverVolume) {
                     hoverIdleApp = idleApp;
                     hoverIdleTask = idleTask;
+                    hoverIdleTaskCheckbox = idleTaskCheckbox;
                     hoverPageArrow = arrow;
                     hoverCopy = copy;
                     hoverIdleQuickExpand = quickExpand;
@@ -3868,6 +3899,7 @@ struct MediaPopup::Impl {
             hoverVolume = false;
             hoverIdleApp = -1;
             hoverIdleTask = -1;
+            hoverIdleTaskCheckbox = -1;
             hoverPageArrow = false;
             hoverCopy = false;
             hoverIdleQuickExpand = false;
@@ -3919,6 +3951,7 @@ struct MediaPopup::Impl {
                 }
                 pressedIdleApp = hitIdleApp(x, y);
                 pressedIdleTask = hitIdleTask(x, y);
+                pressedIdleTaskCheckbox = hitIdleTaskCheckbox(x, y);
                 if (pressedIdleApp >= 0 || pressedIdleTask >= 0) {
                     SetCapture(hwnd);
                     renderOrDefer();
@@ -3997,6 +4030,7 @@ struct MediaPopup::Impl {
                     idleScrollOffset = 0.0f;
                     hoverIdleApp = -1;
                     hoverIdleTask = -1;
+                    hoverIdleTaskCheckbox = -1;
                     renderOrDefer();
                     return 0;
                 }
@@ -4012,6 +4046,9 @@ struct MediaPopup::Impl {
                 const int pressedTask = pressedIdleTask;
                 const int hitTask = hitIdleTask(x, y);
                 pressedIdleTask = -1;
+                const int pressedTaskCheckbox = pressedIdleTaskCheckbox;
+                const int hitTaskCheckbox = hitIdleTaskCheckbox(x, y);
+                pressedIdleTaskCheckbox = -1;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
                 renderOrDefer();
@@ -4022,7 +4059,15 @@ struct MediaPopup::Impl {
                     hideImmediate();
                     anchorHover = false;
                     onIdleAppOpen(path);
-                } else if (idle.todayTasksEnabled && pressedTask >= 0 &&
+                } else if (idle.todayTasksEnabled && pressedTaskCheckbox >= 0 &&
+                           pressedTaskCheckbox == hitTaskCheckbox &&
+                           static_cast<size_t>(pressedTaskCheckbox) < idle.todayTasks.size() &&
+                           onIdleTaskComplete) {
+                    const IdleTaskInfo task =
+                        idle.todayTasks[static_cast<size_t>(pressedTaskCheckbox)];
+                    onIdleTaskComplete(task);
+                } else if (pressedTaskCheckbox < 0 && idle.todayTasksEnabled &&
+                           pressedTask >= 0 &&
                            pressedTask == hitTask &&
                            static_cast<size_t>(pressedTask) < idle.todayTasks.size() &&
                            onIdleTaskOpen) {
@@ -4112,6 +4157,7 @@ struct MediaPopup::Impl {
             volumeDragging = false;
             pressedIdleApp = -1;
             pressedIdleTask = -1;
+            pressedIdleTaskCheckbox = -1;
             idleScrollDragging = false;
             pressedPageArrow = false;
             pressedCopy = false;
@@ -4341,6 +4387,11 @@ void MediaPopup::setIdleAppOpenCallback(std::function<void(const std::wstring&)>
 
 void MediaPopup::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb) {
     impl_->onIdleTaskOpen = std::move(cb);
+}
+
+void MediaPopup::setIdleTaskCompleteCallback(
+    std::function<void(const IdleTaskInfo&)> cb) {
+    impl_->onIdleTaskComplete = std::move(cb);
 }
 
 void MediaPopup::setPanelOpenedCallback(std::function<void()> cb) {
@@ -4586,7 +4637,9 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         impl_->idleQuickTabRects[0] = {};
         impl_->idleQuickTabRects[1] = {};
         impl_->hoverIdleTask = -1;
+        impl_->hoverIdleTaskCheckbox = -1;
         impl_->pressedIdleTask = -1;
+        impl_->pressedIdleTaskCheckbox = -1;
         impl_->idleScrollOffset = 0.0f;
         impl_->idleScrollDragging = false;
     }
