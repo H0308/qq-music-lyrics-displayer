@@ -1327,7 +1327,7 @@ bool FontPickerDialog::create(HINSTANCE inst, HWND parent, const std::wstring& f
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_DBLCLKS;
+    wc.style = CS_DBLCLKS | CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricFontPicker";

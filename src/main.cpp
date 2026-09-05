@@ -3508,6 +3508,7 @@ void App::showUpdatePrompt(const std::wstring& latestVersion) {
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = App::updatePromptWndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = L"QQMusicLyricUpdatePrompt";

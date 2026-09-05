@@ -174,6 +174,7 @@ struct IdleAppNameDialog::Impl {
             return 0;
         case WM_SIZE:
             layout();
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return 0;
         case WM_GETMINMAXINFO:
             fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
@@ -239,6 +240,7 @@ bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& 
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricIdleAppNameDialog";

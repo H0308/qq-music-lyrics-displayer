@@ -749,6 +749,7 @@ bool RuntimeLogDialog::create(HINSTANCE inst, HWND parent, runtime_log::RuntimeL
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricRuntimeLogDialog";

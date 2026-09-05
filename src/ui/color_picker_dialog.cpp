@@ -92,6 +92,7 @@ bool parseHex(const std::wstring& t, COLORREF& out) {
 class ColorCanvas : public fluent::LayeredChild {
 public:
     static constexpr float kSvSize = 232.0f;
+    static constexpr float kMaxSvSize = 420.0f;
     static constexpr float kHueW = 18.0f;
     static constexpr float kGap = 12.0f;
     static constexpr float kSwatchH = 28.0f;
@@ -116,13 +117,20 @@ public:
         old_ = c;
     }
 
+    void setSvSize(float size) {
+        svSize_ = std::clamp(size, kSvSize, kMaxSvSize);
+    }
+
+    float widthDip() const { return svSize_ + kGap + kHueW; }
+    float heightDip() const { return svSize_ + kGap + kSwatchH; }
+
     COLORREF color() const { return hsvToColorRef(hue_, sat_, val_); }
 
 private:
-    // 布局（DIP）：SV [0, kSvSize]，色相 [kSvSize+kGap, +kHueW]，对比条 [0, kSvSize+kGap+kHueW] 底部
-    D2D1_RECT_F svRect() const { return D2D1::RectF(0, 0, kSvSize, kSvSize); }
+    // 布局（DIP）：SV [0, svSize_]，色相 [svSize_+kGap, +kHueW]，对比条底部铺满。
+    D2D1_RECT_F svRect() const { return D2D1::RectF(0, 0, svSize_, svSize_); }
     D2D1_RECT_F hueRect() const {
-        return D2D1::RectF(kSvSize + kGap, 0, kSvSize + kGap + kHueW, kSvSize);
+        return D2D1::RectF(svSize_ + kGap, 0, svSize_ + kGap + kHueW, svSize_);
     }
 
     void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override {
@@ -140,7 +148,8 @@ private:
         rt->CreateGradientStopCollection(gs1, 2, &stops);
         if (stops) {
             rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(kSvSize, 0)),
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0),
+                                                    D2D1::Point2F(svSize_, 0)),
                 stops, &g1);
             stops->Release();
             stops = nullptr;
@@ -154,7 +163,8 @@ private:
         ID2D1LinearGradientBrush* g2 = nullptr;
         if (stops) {
             rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0), D2D1::Point2F(0, kSvSize)),
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0, 0),
+                                                    D2D1::Point2F(0, svSize_)),
                 stops, &g2);
             stops->Release();
         }
@@ -187,23 +197,23 @@ private:
         }
 
         // SV 十字准星
-        float px = sat_ * kSvSize;
-        float py = (1.0f - val_) * kSvSize;
+        float px = sat_ * svSize_;
+        float py = (1.0f - val_) * svSize_;
         br->SetColor(D2D1::ColorF(0, 0, 0, 0.7f));
         rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(px, py), 7.5f, 7.5f), br, 2.5f);
         br->SetColor(D2D1::ColorF(1, 1, 1, 1.0f));
         rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(px, py), 6.0f, 6.0f), br, 1.5f);
 
         // 色相指示条
-        float hy = hue_ / 360.0f * kSvSize;
+        float hy = hue_ / 360.0f * svSize_;
         br->SetColor(D2D1::ColorF(1, 1, 1, 1.0f));
         rt->DrawRectangle(D2D1::RectF(hrct.left - 2.0f, hy - 2.0f, hrct.right + 2.0f, hy + 2.0f),
                           br, 1.5f);
 
         // 底部：旧色 | 新色 对比
-        float swY = kSvSize + kGap;
-        D2D1_RECT_F oldR = D2D1::RectF(0, swY, kSvSize / 2.0f, swY + kSwatchH);
-        D2D1_RECT_F newR = D2D1::RectF(kSvSize / 2.0f, swY, kSvSize + kGap + kHueW, swY + kSwatchH);
+        float swY = svSize_ + kGap;
+        D2D1_RECT_F oldR = D2D1::RectF(0, swY, svSize_ / 2.0f, swY + kSwatchH);
+        D2D1_RECT_F newR = D2D1::RectF(svSize_ / 2.0f, swY, wDip, swY + kSwatchH);
         br->SetColor(fluent::toD2D(old_));
         rt->FillRoundedRectangle(D2D1::RoundedRect(oldR, 4.0f, 4.0f), br);
         br->SetColor(fluent::toD2D(color()));
@@ -238,9 +248,9 @@ private:
         if (msg == WM_LBUTTONDOWN) {
             SetFocus(hwnd_);
             SetCapture(hwnd_);
-            if (x >= hueRect().left - 4 && x <= hueRect().right + 4 && y >= 0 && y <= kSvSize)
+            if (x >= hueRect().left - 4 && x <= hueRect().right + 4 && y >= 0 && y <= svSize_)
                 dragTarget_ = 2;
-            else if (x >= 0 && x <= kSvSize && y >= 0 && y <= kSvSize)
+            else if (x >= 0 && x <= svSize_ && y >= 0 && y <= svSize_)
                 dragTarget_ = 1;
             else
                 dragTarget_ = 0;
@@ -253,10 +263,10 @@ private:
             return;
         }
         if (dragTarget_ == 1) {
-            sat_ = std::clamp(x / kSvSize, 0.0f, 1.0f);
-            val_ = std::clamp(1.0f - y / kSvSize, 0.0f, 1.0f);
+            sat_ = std::clamp(x / svSize_, 0.0f, 1.0f);
+            val_ = std::clamp(1.0f - y / svSize_, 0.0f, 1.0f);
         } else {
-            hue_ = std::clamp(y / kSvSize, 0.0f, 1.0f) * 360.0f;
+            hue_ = std::clamp(y / svSize_, 0.0f, 1.0f) * 360.0f;
         }
         renderNow();
         if (onChanged)
@@ -309,6 +319,7 @@ private:
     }
 
     float hue_ = 0, sat_ = 0, val_ = 1;
+    float svSize_ = kSvSize;
     COLORREF old_ = 0;
     int dragTarget_ = 0; // 1=SV, 2=Hue
     bool focused_ = false;
@@ -379,7 +390,18 @@ struct ColorPickerDialog::Impl {
             return 0;
         case WM_SIZE:
             layout();
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return 0;
+        case WM_DPICHANGED: {
+            auto* suggested = reinterpret_cast<RECT*>(lp);
+            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left,
+                         suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            layout();
+            RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+            return 0;
+        }
         case WM_GETMINMAXINFO:
             fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
                                                kDialogStyle, kDialogExStyle,
@@ -454,21 +476,43 @@ struct ColorPickerDialog::Impl {
         RECT rc;
         GetClientRect(hwnd, &rc);
         float s = fluent::dipScale(GetDpiForWindow(hwnd));
-        auto px = [&](float dip) { return static_cast<int>(dip * s); };
+        auto px = [&](float dip) { return static_cast<int>(std::lround(dip * s)); };
         int w = rc.right - rc.left;
         int h = rc.bottom - rc.top;
-        int pad = px(fluent::metrics::pagePadding);
-        int gap = px(fluent::metrics::controlGap);
+        const float widthDip = static_cast<float>(w) / s;
+        const float heightDip = static_cast<float>(h) / s;
+        const float padDip = fluent::metrics::pagePadding;
+        const float gapDip = fluent::metrics::controlGap;
+        int pad = px(padDip);
+        int gap = px(gapDip);
 
         int titleH = px(28.0f);
         int subtitleH = px(20.0f);
         titleLabel.move(pad, pad, w - pad * 2, titleH);
         subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
 
-        int canvasW = px(ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kHueW);
-        int canvasH = px(ColorCanvas::kSvSize + ColorCanvas::kGap + ColorCanvas::kSwatchH);
-        int canvasY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
-        canvas.move(pad, canvasY, canvasW, canvasH);
+        const float canvasYDip = padDip + 28.0f + 20.0f + fluent::metrics::sectionGap;
+        const float buttonHDip = fluent::metrics::controlHeight;
+        const float buttonYDip = heightDip - padDip - buttonHDip;
+        // 取色板、HEX 输入和底部按钮按垂直流式布局排列。取色板在窗口变大时
+        // 等比放大，直到达到可操作的上限；按钮和输入框始终保留明确的间距。
+        const float maxHexYDip = buttonYDip - gapDip - buttonHDip;
+        const float maxSvByWidth = widthDip - padDip * 2.0f - ColorCanvas::kGap -
+                                   ColorCanvas::kHueW;
+        const float maxSvByHeight = maxHexYDip - canvasYDip - 2.0f * gapDip -
+                                    ColorCanvas::kSwatchH;
+        const float svSize = std::clamp(std::min(maxSvByWidth, maxSvByHeight),
+                                        ColorCanvas::kSvSize, ColorCanvas::kMaxSvSize);
+        canvas.setSvSize(svSize);
+        const float canvasWDip = canvas.widthDip();
+        const float canvasHDip = canvas.heightDip();
+        const float canvasXDip = padDip +
+                                 std::max(0.0f, (widthDip - padDip * 2.0f - canvasWDip) * 0.5f);
+        int canvasX = px(canvasXDip);
+        int canvasY = px(canvasYDip);
+        int canvasW = px(canvasWDip);
+        int canvasH = px(canvasHDip);
+        canvas.move(canvasX, canvasY, canvasW, canvasH);
 
         int hexY = canvasY + canvasH + gap;
         int labelW = px(36);
@@ -523,6 +567,7 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricColorPicker";

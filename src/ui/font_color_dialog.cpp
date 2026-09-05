@@ -981,6 +981,7 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricFontColor";

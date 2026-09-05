@@ -311,13 +311,15 @@ bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     applyRoundCorners(hwnd, false);
     const bool dark = isDarkMode(ThemeTarget::Window);
     applyDarkCaption(hwnd, dark);
-    // Mica 会随窗口暗色属性切换，但 Acrylic（transient）不会：深色下或窗口主题与
-    // 系统主题不一致时，Acrylic 仍渲染为浅色（显示后重设暗色属性也不可靠）。
-    // 这两种情况下 transient 窗口关闭材质，改用 paintDialogBackground 的自绘回退
-    // 底色（与 windowBg 同色）保持一致；浅色且主题一致时 Acrylic 表现正常，保留。
+    // 可调大小的自绘窗口必须使用不透明的应用背景。透明的 DWM 重定向表面在客户区
+    // 改变尺寸时可能保留旧表面的范围，新增区域会露出黑色；同时也会让父背景和分层
+    // 子控件不在同一帧更新。固定尺寸窗口仍保留系统材质，只有这里的窗口走确定性的
+    // paintDialogBackground()/Palette::windowBg 路径。
+    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+    const bool resizable = (style & WS_THICKFRAME) != 0;
     const bool themeMismatch = dark != detectSystemDarkMode();
     bool applied = false;
-    if (!(transientWindow && (dark || themeMismatch)))
+    if (!resizable && !(transientWindow && (dark || themeMismatch)))
         applied = applyBackdrop(hwnd, transientWindow);
 
     if (!applied)
