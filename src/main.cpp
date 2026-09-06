@@ -71,11 +71,17 @@ constexpr UINT_PTR kTimerLyricDebounce = 3;
 // 切歌弹窗等待封面的超时：SMTC 把封面拆在切歌事件批的后续事件里投递，
 // 短暂等待可以带封面弹出；超时则按无封面弹出，不再干等。
 constexpr UINT_PTR kTimerSongToastCover = 4;
-    // 每日一言只按本地周期检查；命中同一周期时不会重复请求网络。
+// 每日一言只按本地周期检查；命中同一周期时不会重复请求网络。
 constexpr UINT_PTR kTimerIdleQuote = 5;
+// 开机自启时网络或滴答清单服务可能尚未就绪；启动同步失败后按递增间隔补试，
+// 避免一次瞬时网络失败让今日任务在本次运行中一直缺席。
+constexpr UINT_PTR kTimerTickTickStartupRetry = 6;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kIdleQuoteCheckMs = 60 * 1000;
+constexpr int kTickTickStartupMaxRetries = 3;
+constexpr UINT kTickTickStartupRetryDelaysMs[kTickTickStartupMaxRetries] = {
+    5 * 1000, 15 * 1000, 30 * 1000};
 constexpr int64_t kHolidayCacheMaxAgeSec = 7 * 24 * 60 * 60;
 constexpr UINT kTrayMsg = WM_APP + 200;
 constexpr UINT kTrayIconId = 1;
@@ -662,6 +668,7 @@ struct App {
     std::vector<IdleTaskInfo> todayTasks_;
     uint64_t tickTickRequestGeneration_ = 0;
     std::wstring tickTickCompletingTaskId_;
+    int tickTickStartupRetryAttempt_ = 0;
 
     // 每次进程启动只决策一次：首次任务同步完成前显示加载状态；数据成功且
     // 没有媒体会话时播报一次任务概览，之后再回到普通空闲文案。
@@ -2325,6 +2332,7 @@ struct App {
             // 媒体会话优先于启动任务播报；即使任务请求先返回，也不能覆盖已经在播放的歌词。
             startupTaskSummaryPending_ = false;
             startupTaskSummaryActive_ = false;
+            resetTickTickStartupRetry();
         }
         if (!snap.sessionAlive) {
             if (spectrumSessionAlive_)
@@ -2558,6 +2566,7 @@ struct App {
             // 定时器也检查一次，避免媒体事件消息尚未出队时让启动播报多停留一帧。
             startupTaskSummaryPending_ = false;
             startupTaskSummaryActive_ = false;
+            resetTickTickStartupRetry();
             publishPresentationFrame(snap, false, true);
         }
         if (!snap.sessionAlive) return;
@@ -2630,6 +2639,9 @@ struct App {
     void editTickTickApiToken(bool enableAfterSave = false);
     void connectTickTick();
     void refreshTickTickTasks();
+    void cancelTickTickStartupRetry();
+    void resetTickTickStartupRetry();
+    bool scheduleTickTickStartupRetry();
     void completeTickTickTask(const IdleTaskInfo& task);
     void disconnectTickTick();
     void onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload);
@@ -2660,6 +2672,7 @@ void App::applyTickTickEnabled(bool enabled) {
         }
         if (tickTickEnabled_)
             return;
+        resetTickTickStartupRetry();
         tickTickEnabled_ = true;
         tickTickStatus_ = L"滴答清单已开启，正在同步今日任务…";
         saveSettings();
@@ -2671,6 +2684,7 @@ void App::applyTickTickEnabled(bool enabled) {
     }
 
     ++tickTickRequestGeneration_;
+    resetTickTickStartupRetry();
     tickTickEnabled_ = false;
     tickTickEnableAfterTokenSave_ = false;
     tickTickConnected_ = false;
@@ -2716,6 +2730,7 @@ void App::editTickTickApiToken(bool enableAfterSave) {
             normalized.pop_back();
 
         ++tickTickRequestGeneration_;
+        resetTickTickStartupRetry();
         startupTaskSummaryPending_ = false;
         startupTaskSummaryActive_ = false;
         tickTickConnected_ = false;
@@ -2761,7 +2776,36 @@ void App::connectTickTick() {
     refreshTickTickTasks();
 }
 
+void App::cancelTickTickStartupRetry() {
+    if (trayHwnd)
+        KillTimer(trayHwnd, kTimerTickTickStartupRetry);
+}
+
+void App::resetTickTickStartupRetry() {
+    cancelTickTickStartupRetry();
+    tickTickStartupRetryAttempt_ = 0;
+}
+
+bool App::scheduleTickTickStartupRetry() {
+    if (!trayHwnd || !startupTaskSummaryPending_ || !tickTickEffectiveEnabled() ||
+        tickTickStartupRetryAttempt_ >= kTickTickStartupMaxRetries)
+        return false;
+
+    const int retryIndex = tickTickStartupRetryAttempt_++;
+    const UINT delayMs = kTickTickStartupRetryDelaysMs[retryIndex];
+    if (!SetTimer(trayHwnd, kTimerTickTickStartupRetry, delayMs, nullptr)) {
+        runtime_log::writef(L"[ticktick] startup retry timer failed attempt=%d delay-ms=%u",
+                            retryIndex + 1, delayMs);
+        return false;
+    }
+    runtime_log::writef(L"[ticktick] startup retry scheduled attempt=%d delay-ms=%u",
+                        retryIndex + 1, delayMs);
+    return true;
+}
+
 void App::refreshTickTickTasks() {
+    // 用户打开任务面板或手动点击刷新时，立即接管启动补试，不让旧的延迟消息再触发一次请求。
+    cancelTickTickStartupRetry();
     if (!tickTickEffectiveEnabled() || tickTickTasksLoading_ ||
         !tickTickCompletingTaskId_.empty())
         return;
@@ -2816,6 +2860,7 @@ void App::completeTickTickTask(const IdleTaskInfo& task) {
 
 void App::disconnectTickTick() {
     ++tickTickRequestGeneration_;
+    resetTickTickStartupRetry();
     tickTickProvider_.clearApiToken(tickTickService_);
     tickTickApiToken_.clear();
     tickTickEnabled_ = false;
@@ -2840,7 +2885,9 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
         return;
     tickTickTasksLoading_ = false;
     tickTickConnecting_ = false;
+    const SmtcSnapshot snap = monitor.snapshot();
     if (payload->result.ok) {
+        resetTickTickStartupRetry();
         tickTickConnected_ = true;
         todayTasks_ = std::move(payload->result.tasks);
         tickTickStatus_ = todayTasks_.empty()
@@ -2853,11 +2900,20 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
         tickTickStatus_ = payload->result.error.empty() ? L"滴答清单任务同步失败"
                                                         : payload->result.error;
     }
-    const SmtcSnapshot snap = monitor.snapshot();
     if (startupTaskSummaryPending_) {
-        startupTaskSummaryPending_ = false;
-        startupTaskSummaryActive_ = payload->result.ok && !snap.sessionAlive &&
-                                    idleEntryEnabled_;
+        if (payload->result.ok) {
+            startupTaskSummaryPending_ = false;
+            startupTaskSummaryActive_ = !snap.sessionAlive && idleEntryEnabled_;
+        } else if (!payload->result.authRequired && !snap.sessionAlive &&
+                   scheduleTickTickStartupRetry()) {
+            // 保持 loading 状态，直到补试成功或达到上限；任务面板会同时显示可读的失败状态。
+            startupTaskSummaryActive_ = false;
+            tickTickStatus_ = L"同步失败，稍后自动重试今日任务…";
+        } else {
+            startupTaskSummaryPending_ = false;
+            startupTaskSummaryActive_ = false;
+            resetTickTickStartupRetry();
+        }
     } else if (startupTaskSummaryActive_ && !payload->result.ok) {
         // 播报期间刷新失败时不继续播报一份已经清空的任务统计，直接回到普通空闲文案。
         startupTaskSummaryActive_ = false;
@@ -2934,6 +2990,7 @@ void App::loadSettings() {
     settingsPath_ = dir + L"\\settings.json";
     tickTickProvider_.loadApiToken(tickTickService_, tickTickApiToken_);
     tickTickEnabled_ = !tickTickApiToken_.empty();
+    resetTickTickStartupRetry();
     startupTaskSummaryPending_ = tickTickEffectiveEnabled();
     tickTickStatus_ = tickTickEffectiveEnabled()
                           ? L"API 口令已配置，正在同步今日任务…"
@@ -3462,6 +3519,8 @@ void App::destroyTray() {
         HWND hwnd = trayHwnd;
         trayHwnd = nullptr;
         KillTimer(hwnd, kTimerIdleQuote);
+        KillTimer(hwnd, kTimerTickTickStartupRetry);
+        tickTickStartupRetryAttempt_ = 0;
         // 先关闭可能打开的 Fluent 菜单（其窗口由托盘窗口所有）
         fluent::FluentMenu::dismiss();
         NOTIFYICONDATAW nid{};
@@ -4416,6 +4475,12 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->refreshHolidayCalendar(false);
         app->refreshIdleQuote(false);
         app->refreshIdleWelcome();
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kTimerTickTickStartupRetry) {
+        KillTimer(h, kTimerTickTickStartupRetry);
+        if (app->startupTaskSummaryPending_)
+            app->refreshTickTickTasks();
         return 0;
     }
     if (msg == kMsgDialogClosed) {

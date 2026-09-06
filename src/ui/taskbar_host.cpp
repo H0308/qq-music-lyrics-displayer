@@ -55,7 +55,8 @@ constexpr float kVerticalControlsGap = 4.0f;
 constexpr float kVerticalLyricGap = 6.0f;
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
-constexpr ULONGLONG kOneShotStatusTextHoldMs = 1000; // 不足以滚动时保留完整文案的时长
+constexpr ULONGLONG kOneShotStatusTextHoldMs = 5000; // 不足以滚动时保留完整文案的时长
+constexpr int kOneShotStatusTextRounds = 3; // 启动任务概览超长文案完整滚动三轮后结束
 constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
 constexpr float kSceneTransitionMs = 240.0f; // 每日一言与歌词内容块上下翻页时长
 constexpr float kSongTransitionMs = 220.0f; // 切歌时新内容滑入时长
@@ -331,6 +332,7 @@ struct TaskbarHost::Impl {
     std::function<void()> onStatusTextCycleCompleted_;
     bool statusTextOneShot_ = false;
     ULONGLONG statusTextOneShotStartMs_ = 0;
+    int statusTextOneShotRounds_ = 0;
     bool statusTextCycleCallbackPending_ = false;
     int currentLine = -1;
     int64_t positionMs_ = 0; // 播放进度（每帧更新），驱动逐字高亮
@@ -1662,6 +1664,7 @@ struct TaskbarHost::Impl {
         if (statusOneShotChanged || (statusChanged && frame.statusTextOneShot)) {
             statusTextOneShot_ = frame.statusTextOneShot;
             statusTextOneShotStartMs_ = statusTextOneShot_ ? monotonicNowMs() : 0;
+            statusTextOneShotRounds_ = 0;
             lyricScrollOffset_ = 0.0f;
             lastTickMs_ = 0;
         }
@@ -5502,6 +5505,7 @@ struct TaskbarHost::Impl {
         auto finishOneShotStatus = [&]() {
             statusTextOneShot_ = false;
             statusTextOneShotStartMs_ = 0;
+            statusTextOneShotRounds_ = 0;
             statusTextCycleCallbackPending_ = true;
         };
         auto oneShotMarquee = [&](float textW, float areaW, float speed, float& offset,
@@ -5527,11 +5531,16 @@ struct TaskbarHost::Impl {
             const float loopW = textW + loopGap;
             const float advance = speed * std::max(dt, 0.0f);
             const float previous = offset;
-            offset = std::fmod(offset + advance, loopW);
+            const float total = previous + advance;
+            const int completedRounds = static_cast<int>(total / loopW);
+            offset = std::fmod(total, loopW);
             if (offset < 0.0f)
                 offset += loopW;
             animating = true;
-            if (previous + advance >= loopW) {
+            if (completedRounds > 0) {
+                statusTextOneShotRounds_ += completedRounds;
+            }
+            if (statusTextOneShotRounds_ >= kOneShotStatusTextRounds) {
                 finishOneShotStatus();
                 return true;
             }
@@ -6212,6 +6221,7 @@ void TaskbarHost::setStatusText(const std::wstring& text) {
     impl_->statusText = text;
     impl_->statusTextOneShot_ = false;
     impl_->statusTextOneShotStartMs_ = 0;
+    impl_->statusTextOneShotRounds_ = 0;
     impl_->statusTextCycleCallbackPending_ = false;
     if (!text.empty() && impl_->lines.empty())
         impl_->scene_ = DisplayScene::Message;
