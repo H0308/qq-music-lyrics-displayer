@@ -1519,10 +1519,9 @@ struct ManualSearchDialog::Impl {
             surface.invalidate();
             return 0;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kMinClientWidthDip,
+                                         kMinClientHeightDip);
             layout();
             surface.invalidate();
             return 0;
@@ -1806,8 +1805,11 @@ bool ManualSearchDialog::create(HINSTANCE inst, HWND parent, LyricProvider* prov
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricManualSearch", L"手动搜索歌词",
                                   kDialogStyle, x, y, width, height, nullptr, nullptr, inst,
                                   impl_.get());
-    if (impl_->hwnd)
+    if (impl_->hwnd) {
+        fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
+                                         kMinClientWidthDip, kMinClientHeightDip);
         app_icon::applyWindowIcon(impl_->hwnd);
+    }
     return impl_->hwnd != nullptr;
 }
 

@@ -54,6 +54,68 @@ void setDialogMinimumTrackSize(HWND hwnd, MINMAXINFO* info, DWORD style, DWORD e
     info->ptMinTrackSize.y = std::max(info->ptMinTrackSize.y, rc.bottom - rc.top);
 }
 
+void applyDialogDpiChange(HWND hwnd, WPARAM dpiMessage, const RECT* suggestedRect, DWORD style,
+                          DWORD exStyle, float minClientWidthDip, float minClientHeightDip) {
+    if (!hwnd || !suggestedRect)
+        return;
+
+    UINT dpi = LOWORD(dpiMessage);
+    if (!dpi)
+        dpi = GetDpiForWindow(hwnd);
+    if (!dpi)
+        dpi = GetDpiForSystem();
+
+    LONG minWidth = 0;
+    LONG minHeight = 0;
+    if (minClientWidthDip > 0.0f && minClientHeightDip > 0.0f) {
+        const float scale = dipScale(dpi);
+        RECT minRect{0, 0, static_cast<LONG>(std::lround(minClientWidthDip * scale)),
+                     static_cast<LONG>(std::lround(minClientHeightDip * scale))};
+        if (AdjustWindowRectExForDpi(&minRect, style, FALSE, exStyle, dpi)) {
+            minWidth = std::max(1L, minRect.right - minRect.left);
+            minHeight = std::max(1L, minRect.bottom - minRect.top);
+        }
+    }
+
+    const LONG suggestedWidth = std::max(1L, suggestedRect->right - suggestedRect->left);
+    const LONG suggestedHeight = std::max(1L, suggestedRect->bottom - suggestedRect->top);
+    const LONG width = std::max(suggestedWidth, minWidth);
+    const LONG height = std::max(suggestedHeight, minHeight);
+    SetWindowPos(hwnd, nullptr, suggestedRect->left, suggestedRect->top, width, height,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void ensureDialogMinimumSize(HWND hwnd, DWORD style, DWORD exStyle, float minClientWidthDip,
+                             float minClientHeightDip) {
+    if (!hwnd || minClientWidthDip <= 0.0f || minClientHeightDip <= 0.0f)
+        return;
+
+    UINT dpi = GetDpiForWindow(hwnd);
+    if (!dpi)
+        dpi = GetDpiForSystem();
+    const float scale = dipScale(dpi);
+    RECT minRect{0, 0, static_cast<LONG>(std::lround(minClientWidthDip * scale)),
+                 static_cast<LONG>(std::lround(minClientHeightDip * scale))};
+    if (!AdjustWindowRectExForDpi(&minRect, style, FALSE, exStyle, dpi))
+        return;
+
+    RECT current{};
+    if (!GetWindowRect(hwnd, &current))
+        return;
+
+    const LONG currentWidth = current.right - current.left;
+    const LONG currentHeight = current.bottom - current.top;
+    const LONG minWidth = minRect.right - minRect.left;
+    const LONG minHeight = minRect.bottom - minRect.top;
+    const LONG width = std::max(currentWidth, minWidth);
+    const LONG height = std::max(currentHeight, minHeight);
+    if (width == currentWidth && height == currentHeight)
+        return;
+
+    SetWindowPos(hwnd, nullptr, current.left, current.top, width, height,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* proposedRect,
                                      float minClientAspectRatio) {
     if (!hwnd || !proposedRect || minClientAspectRatio <= 0.0f)

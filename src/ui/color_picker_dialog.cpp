@@ -393,11 +393,9 @@ struct ColorPickerDialog::Impl {
             RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return 0;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kMinClientWidthDip,
+                                         kMinClientHeightDip);
             layout();
             RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
             return 0;
@@ -599,6 +597,8 @@ bool ColorPickerDialog::create(HINSTANCE inst, HWND parent, COLORREF initial,
                                   nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
+                                     kMinClientWidthDip, kMinClientHeightDip);
     app_icon::applyWindowIcon(impl_->hwnd);
     return true;
 }

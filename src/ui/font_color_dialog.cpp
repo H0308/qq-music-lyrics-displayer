@@ -657,11 +657,9 @@ struct FontColorDialog::Impl {
                                                      kMinClientAspectRatio);
             return TRUE;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kMinClientWidthDip,
+                                         kMinClientHeightDip);
             surface.initialize(hwnd, backdrop);
             layout();
             surface.invalidate();
@@ -1006,8 +1004,11 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontColor",
                                   L"歌词字体颜色与效果", kDialogStyle, x, y, w, h,
                                   nullptr, nullptr, inst, impl_.get());
-    if (impl_->hwnd)
+    if (impl_->hwnd) {
+        fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
+                                         kMinClientWidthDip, kMinClientHeightDip);
         app_icon::applyWindowIcon(impl_->hwnd);
+    }
     return impl_->hwnd != nullptr;
 }
 

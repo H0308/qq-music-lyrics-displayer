@@ -182,11 +182,8 @@ struct IdleAppNameDialog::Impl {
                                                clientHeightDip());
             return 0;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left,
-                         suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kClientW, clientHeightDip());
             layout();
             return 0;
         }
@@ -271,6 +268,8 @@ bool IdleAppNameDialog::create(HINSTANCE inst, HWND parent, const std::wstring& 
                                   x, y, w, h, parent, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle, kClientW,
+                                     impl_->clientHeightDip());
     app_icon::applyWindowIcon(impl_->hwnd);
     return true;
 }

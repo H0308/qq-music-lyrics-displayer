@@ -17,6 +17,16 @@ namespace fluent {
 void setDialogMinimumTrackSize(HWND hwnd, MINMAXINFO* info, DWORD style, DWORD exStyle,
                                float minClientWidthDip, float minClientHeightDip);
 
+// 应用 WM_DPICHANGED 的建议外框，同时按新 DPI 钳制最小客户区尺寸。
+// SetWindowPos 不会自动执行 WM_GETMINMAXINFO，因此不能直接使用 suggestedRect。
+void applyDialogDpiChange(HWND hwnd, WPARAM dpiMessage, const RECT* suggestedRect, DWORD style,
+                          DWORD exStyle, float minClientWidthDip, float minClientHeightDip);
+
+// 对话框创建后按实际所在显示器 DPI 校正最小外框尺寸。
+// 这会覆盖创建时 GetDpiForSystem() 取到的过期尺寸，但不会缩小用户指定的更大尺寸。
+void ensureDialogMinimumSize(HWND hwnd, DWORD style, DWORD exStyle, float minClientWidthDip,
+                             float minClientHeightDip);
+
 // 在 WM_SIZING 中保持客户区不低于指定的宽高比，避免可调整窗口被拉成长条。
 void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* proposedRect,
                                      float minClientAspectRatio);

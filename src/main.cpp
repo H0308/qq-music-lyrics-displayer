@@ -3594,6 +3594,7 @@ void App::showUpdatePrompt(const std::wstring& latestVersion) {
         updatePromptLatestVersion_.clear();
         return;
     }
+    fluent::ensureDialogMinimumSize(hwnd, style, exStyle, 500.0f, 280.0f);
     app_icon::applyWindowIcon(hwnd);
 
     ShowWindow(hwnd, SW_SHOWNORMAL);
@@ -3782,10 +3783,9 @@ LRESULT CALLBACK App::updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp
         app->updatePromptSurface_.invalidate();
         return 0;
     case WM_DPICHANGED: {
-        auto* suggested = reinterpret_cast<RECT*>(lp);
-        SetWindowPos(h, nullptr, suggested->left, suggested->top,
-                     suggested->right - suggested->left, suggested->bottom - suggested->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        fluent::applyDialogDpiChange(
+            h, wp, reinterpret_cast<RECT*>(lp), WS_CAPTION | WS_SYSMENU,
+            WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE, 500.0f, 280.0f);
         app->layoutUpdatePrompt();
         app->updatePromptSurface_.invalidate();
         return 0;

@@ -1597,10 +1597,9 @@ struct AboutDialog::Impl {
                                                      kMinClientAspectRatio);
             return TRUE;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kMinClientWidthDip,
+                                         kMinClientHeightDip);
             layout();
             surface.invalidate();
             return 0;
@@ -2076,6 +2075,8 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
                                   kDialogStyle, x, y, w, h, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
+                                     kMinClientWidthDip, kMinClientHeightDip);
     app_icon::applyWindowIcon(impl_->hwnd);
 
     // 启动检查受设置控制；AboutDialog::show() 不受此设置影响。

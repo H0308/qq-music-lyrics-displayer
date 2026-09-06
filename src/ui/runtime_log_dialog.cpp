@@ -597,10 +597,9 @@ struct RuntimeLogDialog::Impl {
                                                      kMinClientAspectRatio);
             return TRUE;
         case WM_DPICHANGED: {
-            auto* suggested = reinterpret_cast<RECT*>(lp);
-            SetWindowPos(hwnd, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+            fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
+                                         kDialogExStyle, kMinClientWidthDip,
+                                         kMinClientHeightDip);
             layout();
             surface.invalidate();
             return 0;
@@ -770,8 +769,11 @@ bool RuntimeLogDialog::create(HINSTANCE inst, HWND parent, runtime_log::RuntimeL
     const int y = work.top + ((work.bottom - work.top) - height) / 2;
     impl_->hwnd = CreateWindowExW(kDialogExStyle, wc.lpszClassName, L"运行日志", kDialogStyle,
                                   x, y, width, height, nullptr, nullptr, inst, impl_.get());
-    if (impl_->hwnd)
+    if (impl_->hwnd) {
+        fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
+                                         kMinClientWidthDip, kMinClientHeightDip);
         app_icon::applyWindowIcon(impl_->hwnd);
+    }
     return impl_->hwnd != nullptr;
 }
 
