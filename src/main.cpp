@@ -335,15 +335,21 @@ int idleQuoteBackgroundScopeIndex(IdleQuoteBackgroundScope scope) {
 }
 
 const wchar_t* idleQuoteSourceLabel(IdleQuoteSource source) {
-    return source == IdleQuoteSource::Jinrishici ? L"今日诗词" : L"一言";
+    return source == IdleQuoteSource::Jinrishici ? L"今日诗词"
+           : source == IdleQuoteSource::Netease  ? L"网易云热评"
+                                                 : L"一言";
 }
 
 const char* idleQuoteSourceConfigName(IdleQuoteSource source) {
-    return source == IdleQuoteSource::Jinrishici ? "jinrishici" : "hitokoto";
+    return source == IdleQuoteSource::Jinrishici ? "jinrishici"
+           : source == IdleQuoteSource::Netease  ? "netease"
+                                                 : "hitokoto";
 }
 
 IdleQuoteSource idleQuoteSourceFromConfig(const std::string& value) {
-    return value == "jinrishici" ? IdleQuoteSource::Jinrishici : IdleQuoteSource::Hitokoto;
+    return value == "jinrishici" ? IdleQuoteSource::Jinrishici
+           : value == "netease"  ? IdleQuoteSource::Netease
+                                 : IdleQuoteSource::Hitokoto;
 }
 
 constexpr size_t kIdleCustomWelcomeMaxLen = 20;
@@ -1697,8 +1703,9 @@ struct App {
     }
 
     void applyIdleQuoteSource(int source) {
-        const IdleQuoteSource next = source == 1 ? IdleQuoteSource::Jinrishici
-                                                  : IdleQuoteSource::Hitokoto;
+        const IdleQuoteSource next = source == 1   ? IdleQuoteSource::Jinrishici
+                                     : source == 2 ? IdleQuoteSource::Netease
+                                                   : IdleQuoteSource::Hitokoto;
         if (idleQuoteSource_ == next)
             return;
         idleQuoteSource_ = next;
@@ -4193,7 +4200,9 @@ SettingsState App::currentSettingsState() const {
     const bool vertical = taskbarVertical_;
     st.idleEntryEnabled = idleEntryEnabled_;
     st.idleQuoteEnabled = idleQuoteEnabled_;
-    st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1 : 0;
+    st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1
+                         : idleQuoteSource_ == IdleQuoteSource::Netease  ? 2
+                                                                         : 0;
     st.idleQuoteRefreshInterval =
         idleQuoteRefreshInterval_ == IdleQuoteRefreshInterval::Hourly
             ? 2

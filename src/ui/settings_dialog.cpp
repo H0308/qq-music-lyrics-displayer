@@ -192,6 +192,14 @@ std::wstring colorText(COLORREF color) {
 constexpr const wchar_t* kFontSettingNotice =
     L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息";
 
+const wchar_t* idleQuoteSourceHint(int source) {
+    if (source == 1)
+        return L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。";
+    if (source == 2)
+        return L"通过一言的网易云分类获取每日一句";
+    return L"默认使用一言获取每日一言。";
+}
+
 } // namespace
 
 struct SettingsDialog::Impl {
@@ -529,10 +537,7 @@ struct SettingsDialog::Impl {
 
     void updateIdleQuoteSourceRow() {
         if (auto* row = findRow(kIdIdleQuoteSource)) {
-            const bool privacy = state.idleQuoteSource == 1;
-            row->hint = privacy
-                            ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
-                            : L"默认使用一言获取每日一言。";
+            row->hint = idleQuoteSourceHint(state.idleQuoteSource);
             row->showHint = true;
             row->minHeight = kRowTallH;
             row->height = kRowTallH;
@@ -702,11 +707,9 @@ struct SettingsDialog::Impl {
                   L"关闭每日一言后始终显示自定义内容，最多 20 个字符且不能为纯空格；留空则恢复按时间和日期类型生成的默认欢迎语。",
                   L"编辑…", kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
-                 state.idleQuoteSource == 1
-                     ? L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。"
-                     : L"默认使用一言获取每日一言。",
-                 {L"一言", L"今日诗词"}, state.idleQuoteSource, state.idleQuoteEnabled,
-                 kRowTallH);
+                 idleQuoteSourceHint(state.idleQuoteSource),
+                 {L"一言", L"今日诗词", L"网易云热评"}, state.idleQuoteSource,
+                 state.idleQuoteEnabled, kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteRefreshInterval, L"每日一言更新频率", nullptr,
                  {L"每天", L"每 12 小时", L"每小时"}, state.idleQuoteRefreshInterval,
                  state.idleQuoteEnabled, kRowTallH);
@@ -3357,7 +3360,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleQuote))
             row->checked = s.idleQuoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteSource))
-            row->selected = std::clamp(s.idleQuoteSource, 0, 1);
+            row->selected = std::clamp(s.idleQuoteSource, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
             row->selected = std::clamp(s.idleQuoteRefreshInterval, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteAlignment))

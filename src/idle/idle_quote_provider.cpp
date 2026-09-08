@@ -98,6 +98,12 @@ bool getJson(const std::string& url, const std::string& token, std::atomic<bool>
     return !result.is_discarded() && result.is_object();
 }
 
+// 一言接口的字段可能为 null，value() 遇 null 会抛 type_error，需先判断类型。
+std::string jsonString(const json& data, const char* key) {
+    const auto it = data.find(key);
+    return it != data.end() && it->is_string() ? it->get<std::string>() : std::string();
+}
+
 std::wstring jrsOrigin(const json& data) {
     if (!data.contains("origin"))
         return {};
@@ -123,17 +129,29 @@ std::wstring jrsOrigin(const json& data) {
 IdleQuoteResult requestQuote(IdleQuoteSource source, const std::wstring& token,
                              std::atomic<bool>& shutdown) {
     IdleQuoteResult result;
-    if (source == IdleQuoteSource::Hitokoto) {
+    if (source == IdleQuoteSource::Hitokoto || source == IdleQuoteSource::Netease) {
         json data;
-        if (!getJson("https://v1.hitokoto.cn/?encode=json", {}, shutdown, data))
+        const char* url = source == IdleQuoteSource::Netease
+                              ? "https://v1.hitokoto.cn/?c=j&encode=json"
+                              : "https://v1.hitokoto.cn/?encode=json";
+        if (!getJson(url, {}, shutdown, data))
             return result;
-        const std::string content = data.value("hitokoto", std::string());
+        const std::string content = jsonString(data, "hitokoto");
         if (content.empty())
             return result;
         result.ok = true;
         result.content = toWide(content);
-        result.origin = toWide(data.value("from", std::string()));
-        result.uuid = toWide(data.value("uuid", std::string()));
+        result.origin = toWide(jsonString(data, "from"));
+        if (source == IdleQuoteSource::Netease) {
+            // 网易云分类的 from 多为“网易云音乐”，作者信息在 from_who。
+            const std::wstring fromWho = toWide(jsonString(data, "from_who"));
+            if (!fromWho.empty()) {
+                if (!result.origin.empty())
+                    result.origin += L" · ";
+                result.origin += fromWho;
+            }
+        }
+        result.uuid = toWide(jsonString(data, "uuid"));
         return result;
     }
 
@@ -283,8 +301,10 @@ void IdleQuoteProvider::requestAsync(IdleQuoteSource source, const std::wstring&
         } doneFlag{done};
 
         IdleQuoteResult result = requestQuote(source, token, impl->shutdown);
-        runtime_log::writef(L"[idle-quote] source=%s result=%s",
-                            source == IdleQuoteSource::Hitokoto ? L"hitokoto" : L"jinrishici",
+        const wchar_t* sourceName = source == IdleQuoteSource::Jinrishici ? L"jinrishici"
+                                    : source == IdleQuoteSource::Netease   ? L"netease"
+                                                                           : L"hitokoto";
+        runtime_log::writef(L"[idle-quote] source=%s result=%s", sourceName,
                             result.ok ? L"success" : L"failed");
         if (!impl->shutdown.load() && cb)
             cb(std::move(result));

@@ -11,6 +11,7 @@
 enum class IdleQuoteSource {
     Hitokoto,
     Jinrishici,
+    Netease,
 };
 
 enum class IdleQuoteRefreshInterval {

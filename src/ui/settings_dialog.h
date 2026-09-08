@@ -14,7 +14,7 @@
 struct SettingsState {
     bool idleEntryEnabled = true;
     bool idleQuoteEnabled = true;
-    int idleQuoteSource = 0; // 0 一言 1 今日诗词
+    int idleQuoteSource = 0; // 0 一言 1 今日诗词 2 网易云热评
     int idleQuoteRefreshInterval = 0; // 0 每天 1 每 12 小时 2 每小时
     int idleQuoteAlignment = 0; // 0 左对齐 1 居中 2 右对齐
     int idleQuoteBackground = 0; // 0 无 1 落叶 2 闪烁星星 3 二进制 4 流光粒子
