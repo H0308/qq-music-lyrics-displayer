@@ -131,3 +131,15 @@ target_link_libraries(QQMusicLyric PRIVATE
     winmm
     version
 )
+
+# CMake owns the deployable application layout. Packaging tools consume this
+# staging tree instead of reaching into a generator-specific build directory.
+install(TARGETS QQMusicLyric
+    RUNTIME_DEPENDENCIES
+        PRE_EXCLUDE_REGEXES
+            "api-ms-.*"
+            "ext-ms-.*"
+        POST_EXCLUDE_REGEXES
+            ".*[\\\\/][Ss]ystem32[\\\\/].*"
+    RUNTIME DESTINATION .)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION .)

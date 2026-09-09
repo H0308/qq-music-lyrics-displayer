@@ -141,6 +141,29 @@ jobs:
             throw "Release verification failed with exit code $($process.ExitCode)."
           }
 
+      - name: Install staging tree
+        shell: pwsh
+        run: cmake --install build/windows-msvc-release --prefix dist/package --config Release
+
+      - name: Verify staging tree
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            'dist/package/QQMusicLyric.exe',
+            'dist/package/libcurl.dll',
+            'dist/package/z.dll',
+            'dist/package/LICENSE'
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file -PathType Leaf)) {
+              throw "Required staged file was not installed: $file"
+            }
+          }
+          $process = Start-Process 'dist/package/QQMusicLyric.exe' -ArgumentList '--verify-release' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Staged Release verification failed with exit code $($process.ExitCode)."
+          }
+
       - name: Bundle Visual C++ runtime
         shell: pwsh
         run: |

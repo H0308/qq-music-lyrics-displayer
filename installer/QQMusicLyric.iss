@@ -12,7 +12,9 @@
 #ifndef ChineseMessagesFile
 #define ChineseMessagesFile "compiler:Languages\ChineseSimplified.isl"
 #endif
-#define BuildDir "..\build\windows-msvc-release"
+#ifndef BuildDir
+#define BuildDir "..\dist\package"
+#endif
 #define BuildDirPath AddBackslash(SourcePath) + BuildDir
 #define BuildExe BuildDirPath + "\QQMusicLyric.exe"
 
@@ -21,12 +23,12 @@
 #endif
 
 #if FileExists(BuildExe) == 0
-#error "Release executable not found: build\windows-msvc-release\QQMusicLyric.exe"
+#error "Staged Release executable not found; run cmake --install before packaging."
 #endif
 
 ; Compile-time guard: --verify-release returns 0 only for a Release build.
 #if Exec(BuildExe, "--verify-release", BuildDirPath, 1, 0) != 0
-#error "QQMusicLyric.exe is not a Release build; rebuild the windows-msvc-release preset before packaging."
+#error "Staged QQMusicLyric.exe is not a Release build."
 #endif
 
 [Setup]
@@ -59,10 +61,7 @@ VersionInfoProductName=QQMusicLyric
 Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Files]
-Source: "{#BuildDir}\QQMusicLyric.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\libcurl.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\z.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}"
+Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 #ifexist "prereq\vc_redist.x64.exe"
 Source: "prereq\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
