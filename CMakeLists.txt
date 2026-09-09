@@ -1,4 +1,35 @@
 cmake_minimum_required(VERSION 3.25)
+
+# CMake Presets 会在首次 configure 时提供 vcpkg toolchain。对于未选择
+# preset 的 IDE profile（例如 CLion 直接执行 cmake -S/-B），也在第一个
+# project() 之前从 VCPKG_ROOT 加载同一 toolchain。vcpkg manifest mode 会
+# 随后读取 vcpkg.json，并在 configure 阶段自动安装/更新依赖。
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE AND
+   DEFINED ENV{VCPKG_ROOT} AND
+   NOT "$ENV{VCPKG_ROOT}" STREQUAL "")
+    set(_vcpkg_toolchain "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+    cmake_path(NORMAL_PATH _vcpkg_toolchain)
+
+    if(NOT EXISTS "${_vcpkg_toolchain}")
+        message(FATAL_ERROR
+            "VCPKG_ROOT is set to '$ENV{VCPKG_ROOT}', but the vcpkg CMake "
+            "toolchain does not exist at '${_vcpkg_toolchain}'.")
+    endif()
+
+    set(CMAKE_TOOLCHAIN_FILE "${_vcpkg_toolchain}" CACHE FILEPATH
+        "vcpkg toolchain loaded before project()")
+    unset(_vcpkg_toolchain)
+endif()
+
+if(DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING
+        "vcpkg target triplet")
+    set(VCPKG_MANIFEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}" CACHE PATH
+        "Directory containing vcpkg.json")
+    set(VCPKG_INSTALLED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vcpkg_installed" CACHE PATH
+        "Shared vcpkg manifest installation directory")
+endif()
+
 project(QQMusicLyric LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)

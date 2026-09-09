@@ -3,10 +3,14 @@
 ; 如果该文件不存在，脚本仍可编译，但生成的安装包要求目标系统已有
 ; Visual C++ x64 Redistributable；正式发布前应补齐该前置依赖。
 
-#define AppVersion "2.4.0"
-#define BuildDir "..\build\x64-Release"
-#define ProjectDir ExtractFileDir(ExtractFileDir(AddBackslash(SourcePath) + "QQMusicLyric.iss"))
-#define BuildDirPath AddBackslash(ProjectDir) + "build\x64-Release"
+#ifndef AppVersion
+#define AppVersion "2.4.1"
+#endif
+#ifndef AppVersionNumeric
+#define AppVersionNumeric AppVersion + ".0"
+#endif
+#define BuildDir "..\build\windows-msvc-release"
+#define BuildDirPath AddBackslash(SourcePath) + BuildDir
 #define BuildExe BuildDirPath + "\QQMusicLyric.exe"
 
 #ifnexist "prereq\vc_redist.x64.exe"
@@ -14,12 +18,12 @@
 #endif
 
 #if FileExists(BuildExe) == 0
-#error "Release executable not found: build\x64-Release\QQMusicLyric.exe"
+#error "Release executable not found: build\windows-msvc-release\QQMusicLyric.exe"
 #endif
 
 ; Compile-time guard: --verify-release returns 0 only for a Release build.
 #if Exec(BuildExe, "--verify-release", BuildDirPath, 1, 0) != 0
-#error "QQMusicLyric.exe is not a Release build; rebuild the x64-Release configuration before packaging."
+#error "QQMusicLyric.exe is not a Release build; rebuild the windows-msvc-release preset before packaging."
 #endif
 
 [Setup]
@@ -43,7 +47,7 @@ CloseApplications=no
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-VersionInfoVersion={#AppVersion}.0
+VersionInfoVersion={#AppVersionNumeric}
 VersionInfoCompany=H0308
 VersionInfoDescription=QQMusicLyric 安装程序
 VersionInfoProductName=QQMusicLyric

@@ -2,6 +2,7 @@ build/
 .vs/
 smtc-probe
 CMakeSettings.json
+CMakeUserPresets.json
 out/
 vcpkg_installed/
 *.user 
@@ -9,3 +10,4 @@ vcpkg_installed/
 Thumbs.db 
 dist/
 installer/prereq/
+.idea
