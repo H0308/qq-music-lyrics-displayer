@@ -91,11 +91,11 @@ GitHub Actions 会在提交到 `main` 或向 `main` 提交 Pull Request 时执�
 创建 GitHub Release 时，先同步修改 `src/app_info.h` 与 `installer/QQMusicLyric.iss` 中的版本号，然后推送同版本标签：
 
 ```powershell
-git tag v2.4.1
-git push origin v2.4.1
+git tag v2.4.0
+git push origin v2.4.0
 ```
 
-标签中的核心版本必须与源码版本一致。带后缀的标签（例如 `v2.4.1-fork.1`）会自动发布为 prerelease，适合在 fork 仓库验证；不带后缀的标签会发布为正式版本。也可以在 Actions 页面手动运行 **Build and Release**，选择是否发布；手动发布未填写标签时会自动使用唯一的 `v<版本>-fork.<运行编号>` 预发布标签。
+标签中的核心版本必须与源码版本一致。带后缀的标签（例如 `v2.4.0-fork.1`）会自动发布为 prerelease，适合在 fork 仓库验证；不带后缀的标签会发布为正式版本。也可以在 Actions 页面手动运行 **Build and Release**，选择是否发布；手动发布未填写标签时会自动使用唯一的 `v<版本>-fork.<运行编号>` 预发布标签。
 
 ## 安装包
 
