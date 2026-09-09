@@ -82,7 +82,7 @@
    cmake --build --preset local-windows-msvc-debug
    ```
 
-CMake 在 configure 阶段会通过 `vcpkg.json` 自动检查并安装缺失依赖，无需单独执行 `vcpkg install`。manifest 中的 `builtin-baseline` 固定依赖版本；需要升级依赖时可执行 `vcpkg x-update-baseline` 并提交审查后的 baseline 变更。`cmake --install` 会在 `dist/package` 生成包含主程序、运行时 DLL 和许可证的完整发布目录，Inno Setup 仅负责将该目录封装为安装包。首次切换 preset 或 toolchain 时，可在 configure 命令中添加 `--fresh` 以清除旧的 CMake cache。
+CMake 在 configure 阶段会通过 `vcpkg.json` 自动检查并安装缺失依赖，无需单独执行 `vcpkg install`。`cmake --install` 会在 `dist/package` 生成包含主程序、运行时 DLL 和许可证的完整发布目录，Inno Setup 仅负责将该目录封装为安装包。首次切换 preset 或 toolchain 时，可在 configure 命令中添加 `--fresh` 以清除旧的 CMake cache。
 
 ## CI/CD 与发布
 
