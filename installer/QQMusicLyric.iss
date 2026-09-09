@@ -9,6 +9,9 @@
 #ifndef AppVersionNumeric
 #define AppVersionNumeric AppVersion + ".0"
 #endif
+#ifndef ChineseMessagesFile
+#define ChineseMessagesFile "compiler:Languages\ChineseSimplified.isl"
+#endif
 #define BuildDir "..\build\windows-msvc-release"
 #define BuildDirPath AddBackslash(SourcePath) + BuildDir
 #define BuildExe BuildDirPath + "\QQMusicLyric.exe"
@@ -53,7 +56,7 @@ VersionInfoDescription=QQMusicLyric 安装程序
 VersionInfoProductName=QQMusicLyric
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Files]
 Source: "{#BuildDir}\QQMusicLyric.exe"; DestDir: "{app}"; Flags: ignoreversion
