@@ -4,7 +4,7 @@
 ; Visual C++ x64 Redistributable；正式发布前应补齐该前置依赖。
 
 #ifndef AppVersion
-#define AppVersion "2.4.0"
+#define AppVersion "2.4.1"
 #endif
 #ifndef AppVersionNumeric
 #define AppVersionNumeric AppVersion + ".0"

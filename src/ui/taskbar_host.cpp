@@ -440,6 +440,7 @@ struct TaskbarHost::Impl {
     IDWriteTextLayout* outgoingVerticalLyricLayout_ = nullptr;
     IDWriteTextLayout* outgoingSecondaryLayout_ = nullptr;
     IDWriteTextLayout* outgoingNextLyricLayout_ = nullptr;
+    bool lyricLayoutDoubleLine_ = false;
     float outgoingLyricWidth_ = 0.0f;
     float outgoingLyricHeight_ = 0.0f;
     float verticalLyricWidth_ = 0.0f;
@@ -518,7 +519,6 @@ struct TaskbarHost::Impl {
     LyricAlignment idleQuoteAlignment_ = LyricAlignment::Left;
     IdleQuoteBackground idleQuoteBackground_ = IdleQuoteBackground::None;
     IdleQuoteBackgroundScope idleQuoteBackgroundScope_ = IdleQuoteBackgroundScope::DailyQuote;
-    bool secondaryContentAvailable_ = false;
     bool songInfoVisible_ = true;
     bool albumCoverVisible_ = true;
     bool platformIconVisible_ = false;
@@ -1204,7 +1204,6 @@ struct TaskbarHost::Impl {
             return;
         translationEnabled_ = translation;
         romanizationEnabled_ = romanization;
-        refreshSecondaryContent();
         resetLyricTransition();
         textDirty_ = true;
         render();
@@ -1214,8 +1213,7 @@ struct TaskbarHost::Impl {
         if (doubleLineLyricsEnabled_ == on)
             return;
         doubleLineLyricsEnabled_ = on;
-        if (!secondaryContentAvailable_)
-            resetLyricTransition();
+        resetLyricTransition();
         textDirty_ = true;
         render();
     }
@@ -1633,7 +1631,7 @@ struct TaskbarHost::Impl {
                 resetLyricTransition();
                 if (shouldAnimateScene) {
                     outgoingScene_ = scene_;
-                    outgoingDoubleLine_ = useDoubleLineLyrics();
+                    outgoingDoubleLine_ = lyricLayoutDoubleLine_;
                     sceneTransitionFromPxW_ = lastLogicalPxW_;
                     sceneTransitionFromPxH_ = lastLogicalPxH_;
                     lyricTransitionKind_ = LyricTransitionKind::Scene;
@@ -1680,7 +1678,6 @@ struct TaskbarHost::Impl {
             (lyricTransitionPending_ || lyricTransitionActive_);
         if (trackChanged || lyricsChanged) {
             lines = frame.lyrics;
-            refreshSecondaryContent();
             currentLine = frame.currentLine;
             if (!sceneTransitionInProgress) {
                 resetLyricTransition();
@@ -2756,21 +2753,6 @@ struct TaskbarHost::Impl {
         platformIconBmp = decoded;
     }
 
-    void refreshSecondaryContent() {
-        secondaryContentAvailable_ = false;
-        for (const auto& line : lines) {
-            if ((translationEnabled_ && !line.translation.empty()) ||
-                (romanizationEnabled_ && !line.romanization.empty())) {
-                secondaryContentAvailable_ = true;
-                return;
-            }
-        }
-    }
-
-    bool useDoubleLineLyrics() const {
-        return doubleLineLyricsEnabled_ && !secondaryContentAvailable_;
-    }
-
     int displayLyricLine() const {
         if (scene_ == DisplayScene::NoPlayback || scene_ == DisplayScene::Idle ||
             scene_ == DisplayScene::Searching ||
@@ -2787,6 +2769,18 @@ struct TaskbarHost::Impl {
         if (romanizationEnabled_)
             return line.romanization;
         return {};
+    }
+
+    bool useDoubleLineLyricsForLine(int lineIndex) const {
+        return doubleLineLyricsEnabled_ && lineIndex >= 0 &&
+               static_cast<size_t>(lineIndex) < lines.size() &&
+               selectedSecondary(lines[static_cast<size_t>(lineIndex)]).empty();
+    }
+
+    bool useDoubleLineLyrics() const {
+        if (lyricTransitionActive_ && lyricLayout_)
+            return lyricLayoutDoubleLine_;
+        return useDoubleLineLyricsForLine(displayLyricLine());
     }
 
     // ---------- 行过渡状态 ----------
@@ -3384,16 +3378,16 @@ struct TaskbarHost::Impl {
         karaokeGeometryLine_ = -1;
         karaokeGeometryLayout_ = nullptr;
 
-        const bool doubleLineLyrics = useDoubleLineLyrics();
+        const bool doubleLineLyrics = useDoubleLineLyricsForLine(displayLyricLine());
         // 准备阶段：先把当前布局移交为旧行，目标行布局构建完成后才记录动画起点，
         // 避免“新布局已替换但动画初始位置还没准备好”导致的文字瞬移。
         bool preparedTransition = false;
-        const bool sceneTransition = lyricTransitionKind_ == LyricTransitionKind::Scene;
         if (lyricTransitionPending_ && lyricLayout_) {
             // 保留旧行离场前的滚动位置。新布局后面会把 lyricScrollOffset_ 重置为 0，
             // 不能让旧的超长歌词因此在转场第一帧跳回开头。
             const float outgoingLyricOffset = lyricScrollOffset_;
             const float outgoingSecondaryOffset = secondaryScrollOffset_;
+            const bool outgoingDoubleLine = lyricLayoutDoubleLine_;
             if (outgoingLyricLayout_)
                 outgoingLyricLayout_->Release();
             outgoingLyricLayout_ = lyricLayout_;
@@ -3410,52 +3404,43 @@ struct TaskbarHost::Impl {
             outgoingVerticalLyricHeight_ = verticalLyricHeight_;
             outgoingVerticalLyricRotated_ = verticalLyricRotated_;
             outgoingLyricScrollOffset_ = outgoingLyricOffset;
-            if (sceneTransition) {
-                // 场景转场需要保留旧场景的完整文本块。这里的 next 布局属于
-                // 旧歌词场景，不能等下面清理 nextLyricLayout_ 时一起释放。
-                if (outgoingNextLyricLayout_)
-                    outgoingNextLyricLayout_->Release();
+            if (outgoingSecondaryLayout_)
+                outgoingSecondaryLayout_->Release();
+            if (outgoingNextLyricLayout_)
+                outgoingNextLyricLayout_->Release();
+            outgoingSecondaryLayout_ = nullptr;
+            outgoingNextLyricLayout_ = nullptr;
+            outgoingSecondaryWidth_ = 0.0f;
+            outgoingSecondaryHeight_ = 0.0f;
+            outgoingNextLyricWidth_ = 0.0f;
+            outgoingNextLyricHeight_ = 0.0f;
+            outgoingDoubleLine_ = outgoingDoubleLine;
+            if (outgoingDoubleLine) {
+                // 双行模式的旧层需要保留下一句预览，才能在切到辅助歌词时
+                // 继续绘制完整的离场块。
                 outgoingNextLyricLayout_ = nextLyricLayout_;
                 nextLyricLayout_ = nullptr;
                 outgoingNextLyricWidth_ = nextLyricWidth_;
                 outgoingNextLyricHeight_ = nextLyricHeight_;
-            } else {
-                outgoingLyricBlockHeight_ =
-                    doubleLineLyrics
-                        ? lyricHeight_ + kLyricPreviewGap +
-                              (nextLyricLayout_ ? nextLyricHeight_ : 0.0f)
-                        : 0.0f;
-            }
-            if (outgoingSecondaryLayout_)
-                outgoingSecondaryLayout_->Release();
-            if (sceneTransition) {
-                // 场景转场的旧层必须按旧场景实际拥有的附属文本保存，不能用
-                // 目标场景的 doubleLineLyrics 结果覆盖它。
-                outgoingSecondaryLayout_ = secondaryLayout_;
-                secondaryLayout_ = nullptr;
-                outgoingSecondaryWidth_ = secondaryWidth_;
-                outgoingSecondaryHeight_ = secondaryHeight_;
-                outgoingSecondaryScrollOffset_ = outgoingSecondaryOffset;
-                const bool outgoingHasNext = outgoingDoubleLine_ && outgoingNextLyricLayout_;
-                const float outgoingPreviewH =
-                    outgoingHasNext
-                        ? kLyricPreviewGap + outgoingNextLyricHeight_
-                        : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
-                outgoingLyricBlockHeight_ = outgoingLyricHeight_ + outgoingPreviewH;
-            } else if (doubleLineLyrics) {
-                outgoingSecondaryLayout_ = nullptr;
                 if (secondaryLayout_)
                     secondaryLayout_->Release();
                 secondaryLayout_ = nullptr;
-                outgoingSecondaryWidth_ = 0.0f;
-                outgoingSecondaryHeight_ = 0.0f;
             } else {
+                if (nextLyricLayout_)
+                    nextLyricLayout_->Release();
+                nextLyricLayout_ = nullptr;
                 outgoingSecondaryLayout_ = secondaryLayout_;
                 secondaryLayout_ = nullptr;
                 outgoingSecondaryWidth_ = secondaryWidth_;
                 outgoingSecondaryHeight_ = secondaryHeight_;
                 outgoingSecondaryScrollOffset_ = outgoingSecondaryOffset;
             }
+            const float outgoingPreviewH =
+                outgoingDoubleLine
+                    ? outgoingNextLyricLayout_ ? kLyricPreviewGap + outgoingNextLyricHeight_
+                                                : 0.0f
+                    : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
+            outgoingLyricBlockHeight_ = outgoingLyricHeight_ + outgoingPreviewH;
             preparedTransition = true;
         } else {
             resetLyricTransition();
@@ -3559,6 +3544,7 @@ struct TaskbarHost::Impl {
         } else {
             buildKaraokeGeometry(displayLine);
         }
+        lyricLayoutDoubleLine_ = doubleLineLyrics;
         if (preparedTransition) {
             if (lyricLayout_) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
@@ -4671,6 +4657,13 @@ struct TaskbarHost::Impl {
                                    outgoingLyricScrollOffset_, coreBrush,
                                    effectOutline, effectGlow, nullptr, 0.0f,
                                    1.0f - transition.fadeOut);
+            if (!outgoingDoubleLine_ && outgoingSecondaryLayout_)
+                drawLyricScrollingText(
+                    outgoingSecondaryLayout_, outgoingSecondaryWidth_, outgoingSecondaryHeight_,
+                    lyricAreaW, lyricAreaX,
+                    outgoingY + outgoingLyricHeight_ + 1.0f + oldShift,
+                    outgoingSecondaryScrollOffset_, brushDim_, nullptr, nullptr, nullptr, 0.0f,
+                    1.0f - transition.fadeOut);
             drawScaledScrollingText(
                 lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, scaledIncomingY,
                 lyricScrollOffset_, incomingBrush,
@@ -4919,7 +4912,8 @@ struct TaskbarHost::Impl {
 
     bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
                                      float lyricBlockH) {
-        if (isVerticalTaskbar() || useDoubleLineLyrics() || !lyricTransitionActive_ ||
+        if (isVerticalTaskbar() || useDoubleLineLyrics() || outgoingDoubleLine_ ||
+            !lyricTransitionActive_ ||
             !outgoingLyricLayout_ ||
             !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
@@ -4976,6 +4970,7 @@ struct TaskbarHost::Impl {
         // 更新填充边界，因此逐字歌词转场保留 D2D 路径，普通歌词仍使用合成器动画。
         if (lyricTransitionKind_ != LyricTransitionKind::Scene &&
             !lyricTransitionDCompActive_ && lyricTransitionActive_ && !useDoubleLineLyrics() &&
+            !outgoingDoubleLine_ &&
             !karaokeLine() && outgoingLyricLayout_ && lyricLayout_) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
                 renderer.clearLyricTransitionLayers();
@@ -5360,9 +5355,16 @@ struct TaskbarHost::Impl {
                                         : primaryBrush;
                     const float incomingProgX =
                         incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
-                    float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
-                    float outgoingBlockH = outgoingLyricHeight_ + outgoingGap +
-                                           outgoingSecondaryHeight_;
+                    const float outgoingPreviewH =
+                        outgoingDoubleLine_ && outgoingNextLyricLayout_
+                            ? kLyricPreviewGap + outgoingNextLyricHeight_
+                            : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
+                    float outgoingGap = outgoingDoubleLine_ && outgoingNextLyricLayout_
+                                            ? kLyricPreviewGap
+                                            : outgoingSecondaryLayout_ ? 1.0f : 0.0f;
+                    float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
+                                               ? outgoingLyricBlockHeight_
+                                               : outgoingLyricHeight_ + outgoingPreviewH;
                     float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
                     float travel = std::max(lyricBlockH, outgoingBlockH);
                     float oldShift = -static_cast<float>(lyricTransitionDirection_) * travel *
@@ -5377,7 +5379,17 @@ struct TaskbarHost::Impl {
                         lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr,
                         nullptr, 0.0f,
                         1.0f - transition.fadeOut);
-                    if (outgoingSecondaryLayout_)
+                    if (outgoingDoubleLine_ && outgoingNextLyricLayout_) {
+                        ID2D1Brush* previewBrush =
+                            brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
+                                           : static_cast<ID2D1Brush*>(brushDim_);
+                        drawLyricScrollingText(
+                            outgoingNextLyricLayout_, outgoingNextLyricWidth_,
+                            outgoingNextLyricHeight_, lyricAreaW, lyricAreaX,
+                            outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f,
+                            previewBrush, nullptr, nullptr, nullptr, 0.0f,
+                            kLyricPreviewOpacity * (1.0f - transition.fadeOut));
+                    } else if (outgoingSecondaryLayout_)
                         drawLyricScrollingText(outgoingSecondaryLayout_, outgoingSecondaryWidth_,
                                                outgoingSecondaryHeight_, lyricAreaW, lyricAreaX,
                                                outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
@@ -6193,7 +6205,6 @@ void TaskbarHost::hide() {
 void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
     impl_->lines = lines;
     impl_->scene_ = lines.empty() ? DisplayScene::Message : DisplayScene::Lyrics;
-    impl_->refreshSecondaryContent();
     impl_->currentLine = -1;
     impl_->resetLyricTransition();
     if (impl_->nextLyricLayout_) {
