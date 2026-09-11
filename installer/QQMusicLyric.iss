@@ -3,10 +3,19 @@
 ; 如果该文件不存在，脚本仍可编译，但生成的安装包要求目标系统已有
 ; Visual C++ x64 Redistributable；正式发布前应补齐该前置依赖。
 
+#ifndef AppVersion
 #define AppVersion "2.4.1"
-#define BuildDir "..\build\x64-Release"
-#define ProjectDir ExtractFileDir(ExtractFileDir(AddBackslash(SourcePath) + "QQMusicLyric.iss"))
-#define BuildDirPath AddBackslash(ProjectDir) + "build\x64-Release"
+#endif
+#ifndef AppVersionNumeric
+#define AppVersionNumeric AppVersion + ".0"
+#endif
+#ifndef ChineseMessagesFile
+#define ChineseMessagesFile "compiler:Languages\ChineseSimplified.isl"
+#endif
+#ifndef BuildDir
+#define BuildDir "..\dist\package"
+#endif
+#define BuildDirPath AddBackslash(SourcePath) + BuildDir
 #define BuildExe BuildDirPath + "\QQMusicLyric.exe"
 
 #ifnexist "prereq\vc_redist.x64.exe"
@@ -14,12 +23,12 @@
 #endif
 
 #if FileExists(BuildExe) == 0
-#error "Release executable not found: build\x64-Release\QQMusicLyric.exe"
+#error "Staged Release executable not found; run cmake --install before packaging."
 #endif
 
 ; Compile-time guard: --verify-release returns 0 only for a Release build.
 #if Exec(BuildExe, "--verify-release", BuildDirPath, 1, 0) != 0
-#error "QQMusicLyric.exe is not a Release build; rebuild the x64-Release configuration before packaging."
+#error "Staged QQMusicLyric.exe is not a Release build."
 #endif
 
 [Setup]
@@ -43,19 +52,16 @@ CloseApplications=no
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-VersionInfoVersion={#AppVersion}.0
+VersionInfoVersion={#AppVersionNumeric}
 VersionInfoCompany=H0308
 VersionInfoDescription=QQMusicLyric 安装程序
 VersionInfoProductName=QQMusicLyric
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+Name: "chinesesimplified"; MessagesFile: "{#ChineseMessagesFile}"
 
 [Files]
-Source: "{#BuildDir}\QQMusicLyric.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\libcurl.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BuildDir}\z.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\LICENSE"; DestDir: "{app}"
+Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 #ifexist "prereq\vc_redist.x64.exe"
 Source: "prereq\vc_redist.x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall

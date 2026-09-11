@@ -58,19 +58,44 @@
 
 ## 构建
 
-1. 准备环境：Visual Studio 2022（MSVC + Windows SDK）、[vcpkg](https://github.com/microsoft/vcpkg)、CMake ≥ 3.25、Ninja
-2. 安装依赖（vcpkg，triplet `x64-windows`）：
-   ```bash
-   vcpkg install curl nlohmann-json zlib
+### 安装构建工具 (Windows 10/11)
+- Visual Studio 2022（MSVC + Windows SDK）
+- [vcpkg](https://github.com/microsoft/vcpkg)
+- CMake ≥ 3.25
+- Ninja (Generator)
+
+### 使用 CMake 构建
+
+1. 复制本机 CMake preset，并将其中的 `VCPKG_ROOT` 修改为本机 vcpkg 根目录，比如 `D:/vcpkg`
+   ```powershell
+   Copy-Item CMakeUserPresets.example.json CMakeUserPresets.json
    ```
-3. 命令行构建（Ninja）：
-   ```bash
-   cmake -S . -B build -G Ninja ^
-     -DCMAKE_TOOLCHAIN_FILE=<vcpkg 根目录>/scripts/buildsystems/vcpkg.cmake ^
-     -DVCPKG_TARGET_TRIPLET=x64-windows -DCMAKE_BUILD_TYPE=Release
-   cmake --build build
+2. 配置并构建 Release：
+   ```powershell
+   cmake --preset local-windows-msvc-release
+   cmake --build --preset local-windows-msvc-release
+   cmake --install build/local-windows-msvc-release --prefix dist/package --config Release
    ```
-   也可以用 Visual Studio 2022 直接「打开本地文件夹」，在 CMake 设置中指定 `CMAKE_TOOLCHAIN_FILE` 和 `VCPKG_TARGET_TRIPLET=x64-windows` 后构建。
+3. 如需构建 Debug：
+   ```powershell
+   cmake --preset local-windows-msvc-debug
+   cmake --build --preset local-windows-msvc-debug
+   ```
+
+CMake 在 configure 阶段会通过 `vcpkg.json` 自动检查并安装缺失依赖，无需单独执行 `vcpkg install`。`cmake --install` 会在 `dist/package` 生成包含主程序、运行时 DLL 和许可证的完整发布目录，Inno Setup 仅负责将该目录封装为安装包。首次切换 preset 或 toolchain 时，可在 configure 命令中添加 `--fresh` 以清除旧的 CMake cache。
+
+## CI/CD 与发布
+
+GitHub Actions 会在提交到 `main` 或向 `main` 提交 Pull Request 时执行 Windows x64 Release 构建、运行发布构建校验并生成安装包。构建产物可在对应的 Actions 运行记录中下载。
+
+创建 GitHub Release 时，先同步修改 `src/app_info.h` 与 `installer/QQMusicLyric.iss` 中的版本号，然后推送同版本标签：
+
+```powershell
+git tag v2.4.0
+git push origin v2.4.0
+```
+
+标签中的核心版本必须与源码版本一致。带后缀的标签（例如 `v2.4.0-fork.1`）会自动发布为 prerelease，适合在 fork 仓库验证；不带后缀的标签会发布为正式版本。也可以在 Actions 页面手动运行 **Build and Release**，选择是否发布；手动发布未填写标签时会自动使用唯一的 `v<版本>-fork.<运行编号>` 预发布标签。
 
 ## 安装包
 

@@ -1,0 +1,275 @@
+name: Build and Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Create a GitHub Release after a successful build
+        required: true
+        type: boolean
+        default: false
+      release_tag:
+        description: Optional tag; defaults to v<version>-fork.<run number>
+        required: false
+        type: string
+      prerelease:
+        description: Mark a manually published release as a prerelease
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: build-release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+jobs:
+  build:
+    name: Build Windows x64 installer
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    outputs:
+      installer_version: ${{ steps.metadata.outputs.installer_version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      publish_release: ${{ steps.metadata.outputs.publish_release }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Resolve and validate release metadata
+        id: metadata
+        shell: pwsh
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+          INPUT_PUBLISH_RELEASE: ${{ inputs.publish_release }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $appInfo = Get-Content -Raw 'src/app_info.h'
+          $installer = Get-Content -Raw 'installer/QQMusicLyric.iss'
+          $appMatch = [regex]::Match($appInfo, 'kVersion\[\]\s*=\s*L"(?<version>\d+\.\d+\.\d+)"')
+          $installerMatch = [regex]::Match($installer, '#define AppVersion\s+"(?<version>\d+\.\d+\.\d+)"')
+
+          if (-not $appMatch.Success -or -not $installerMatch.Success) {
+            throw 'Unable to read the application version from app_info.h or QQMusicLyric.iss.'
+          }
+
+          $version = $appMatch.Groups['version'].Value
+          if ($version -ne $installerMatch.Groups['version'].Value) {
+            throw "Version mismatch: app_info.h is $version, installer script is $($installerMatch.Groups['version'].Value)."
+          }
+
+          $isTagBuild = $env:GITHUB_REF_TYPE -eq 'tag'
+          $isManualBuild = $env:GITHUB_EVENT_NAME -eq 'workflow_dispatch'
+          $publishRelease = $isTagBuild -or ($isManualBuild -and $env:INPUT_PUBLISH_RELEASE -eq 'true')
+
+          if ($isTagBuild) {
+            $releaseTag = $env:GITHUB_REF_NAME
+          } elseif ($isManualBuild -and -not [string]::IsNullOrWhiteSpace($env:INPUT_RELEASE_TAG)) {
+            $releaseTag = $env:INPUT_RELEASE_TAG.Trim()
+          } elseif ($publishRelease) {
+            $releaseTag = "v$version-fork.$env:GITHUB_RUN_NUMBER"
+          } else {
+            $releaseTag = "v$version"
+          }
+
+          $tagPattern = '^v' + [regex]::Escape($version) + '(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$'
+          if ($releaseTag -notmatch $tagPattern) {
+            throw "Release tag '$releaseTag' must use source version $version (for example v$version or v$version-fork.1)."
+          }
+
+          $hasSuffix = $releaseTag -ne "v$version"
+          $isPrerelease = if ($isTagBuild) { $hasSuffix } elseif ($isManualBuild) {
+            $env:INPUT_PRERELEASE -eq 'true' -or $hasSuffix
+          } else { $false }
+
+          "installer_version=$($releaseTag.Substring(1))" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_tag=$releaseTag" >> $env:GITHUB_OUTPUT
+          "prerelease=$($isPrerelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "publish_release=$($publishRelease.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - name: Cache vcpkg dependencies
+        uses: actions/cache@v5
+        with:
+          path: vcpkg_installed
+          key: vcpkg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Configure MSVC environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vsPath) {
+            throw 'A Visual Studio installation with the x64 C++ toolchain was not found.'
+          }
+
+          Import-Module "$vsPath\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vsPath -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          "VS_INSTALL_PATH=$vsPath" >> $env:GITHUB_ENV
+          "PATH=$env:PATH" >> $env:GITHUB_ENV
+          "INCLUDE=$env:INCLUDE" >> $env:GITHUB_ENV
+          "LIB=$env:LIB" >> $env:GITHUB_ENV
+          "LIBPATH=$env:LIBPATH" >> $env:GITHUB_ENV
+
+      - name: Configure
+        shell: pwsh
+        run: cmake --preset windows-msvc-release
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build --preset windows-msvc-release
+
+      - name: Verify Release executable
+        shell: pwsh
+        run: |
+          $process = Start-Process 'build/windows-msvc-release/QQMusicLyric.exe' -ArgumentList '--verify-release' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Release verification failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Install staging tree
+        shell: pwsh
+        run: cmake --install build/windows-msvc-release --prefix dist/package --config Release
+
+      - name: Verify staging tree
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            'dist/package/QQMusicLyric.exe',
+            'dist/package/libcurl.dll',
+            'dist/package/z.dll',
+            'dist/package/LICENSE'
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path $file -PathType Leaf)) {
+              throw "Required staged file was not installed: $file"
+            }
+          }
+          $process = Start-Process 'dist/package/QQMusicLyric.exe' -ArgumentList '--verify-release' -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Staged Release verification failed with exit code $($process.ExitCode)."
+          }
+
+      - name: Bundle Visual C++ runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $redist = Get-ChildItem "$env:VS_INSTALL_PATH\VC\Redist\MSVC" -Recurse -Filter 'vc_redist.x64.exe' |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $redist) {
+            throw 'vc_redist.x64.exe was not found in the Visual Studio installation.'
+          }
+          New-Item -ItemType Directory -Force 'installer/prereq' | Out-Null
+          Copy-Item $redist.FullName 'installer/prereq/vc_redist.x64.exe'
+
+      - name: Build installer
+        shell: pwsh
+        env:
+          APPLICATION_VERSION: ${{ steps.metadata.outputs.version }}
+          INSTALLER_VERSION: ${{ steps.metadata.outputs.installer_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = (Get-Command 'iscc.exe' -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          if (-not (Test-Path $iscc)) {
+            throw 'Inno Setup compiler was not found on the runner.'
+          }
+
+          $languageFile = 'installer/ChineseSimplified.isl'
+          $translationUrl = 'https://raw.githubusercontent.com/jrsoftware/issrc/6ef32198ef1f7b7b375cd4b6b90896c2a58eb4c2/Files/Languages/ChineseSimplified.isl'
+          $expectedTranslationHash = 'e0b0b350e2245f3c5e65586dfe43d574f6e7f06f2261149aba284954b3fc9a8d'
+          Invoke-WebRequest -Uri $translationUrl -OutFile $languageFile
+          $translationHash = (Get-FileHash $languageFile -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($translationHash -ne $expectedTranslationHash) {
+            throw "ChineseSimplified.isl checksum mismatch: $translationHash"
+          }
+
+          & $iscc "/DAppVersion=$env:INSTALLER_VERSION" "/DAppVersionNumeric=$env:APPLICATION_VERSION.0" '/DChineseMessagesFile=ChineseSimplified.isl' 'installer/QQMusicLyric.iss'
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE."
+          }
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        env:
+          INSTALLER_VERSION: ${{ steps.metadata.outputs.installer_version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = "dist/QQMusicLyric-$env:INSTALLER_VERSION-Setup.exe"
+          if (-not (Test-Path $installer)) {
+            throw "Expected installer was not produced: $installer"
+          }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $([IO.Path]::GetFileName($installer))" |
+            Set-Content "$installer.sha256" -NoNewline -Encoding ascii
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: QQMusicLyric-${{ steps.metadata.outputs.installer_version }}-windows-x64
+          path: |
+            dist/QQMusicLyric-${{ steps.metadata.outputs.installer_version }}-Setup.exe
+            dist/QQMusicLyric-${{ steps.metadata.outputs.installer_version }}-Setup.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: needs.build.outputs.publish_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: QQMusicLyric-${{ needs.build.outputs.installer_version }}-windows-x64
+          path: dist
+
+      - name: Create GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INSTALLER_VERSION: ${{ needs.build.outputs.installer_version }}
+          IS_PRERELEASE: ${{ needs.build.outputs.prerelease }}
+          RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          installer="dist/QQMusicLyric-${INSTALLER_VERSION}-Setup.exe"
+          checksum="${installer}.sha256"
+          args=(release create "$RELEASE_TAG" "$installer" "$checksum"
+                --repo "$GITHUB_REPOSITORY"
+                --title "QQMusicLyric $RELEASE_TAG"
+                --generate-notes)
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            args+=(--verify-tag)
+          else
+            args+=(--target "$GITHUB_SHA")
+          fi
+
+          if [[ "$IS_PRERELEASE" == "true" ]]; then
+            args+=(--prerelease --latest=false)
+          fi
+
+          gh "${args[@]}"
