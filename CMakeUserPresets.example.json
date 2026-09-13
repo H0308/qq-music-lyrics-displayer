@@ -1,0 +1,35 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "local-windows-msvc-debug",
+      "displayName": "Local Windows MSVC Debug",
+      "inherits": "windows-msvc-debug",
+      "environment": {
+        "VCPKG_ROOT": "C:/path/to/vcpkg"
+      }
+    },
+    {
+      "name": "local-windows-msvc-release",
+      "displayName": "Local Windows MSVC Release",
+      "inherits": "windows-msvc-release",
+      "environment": {
+        "VCPKG_ROOT": "C:/path/to/vcpkg"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "local-windows-msvc-debug",
+      "displayName": "Build Local Windows MSVC Debug",
+      "configurePreset": "local-windows-msvc-debug",
+      "configuration": "Debug"
+    },
+    {
+      "name": "local-windows-msvc-release",
+      "displayName": "Build Local Windows MSVC Release",
+      "configurePreset": "local-windows-msvc-release",
+      "configuration": "Release"
+    }
+  ]
+}
