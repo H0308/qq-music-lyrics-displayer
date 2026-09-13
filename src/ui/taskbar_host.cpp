@@ -45,6 +45,8 @@ constexpr float kMaxWidthDip = 280.0f;
 constexpr float kLeftRatio = 0.38f;
 constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
+// 滚动文本左缘（滚出侧）的渐隐宽度
+constexpr float kLyricEdgeFadeDip = 18.0f;
 constexpr float kSongInfoLyricGap = 0.0f; // 歌曲信息与歌词之间的左侧间距
 constexpr float kCornerRadius = 8.0f;
 constexpr float kVerticalMinLengthDip = 220.0f;
@@ -558,6 +560,13 @@ struct TaskbarHost::Impl {
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1EllipseGeometry* vinylCoverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
+    // 滚动歌词左缘渐隐：固定两停止点，渐变轴每帧按滚动偏移更新
+    ID2D1LinearGradientBrush* lyricEdgeFadeBrush_ = nullptr;
+    ID2D1Layer* lyricEdgeFadeLayer_ = nullptr;
+    // 右缘渐隐带：完全位于歌词区右缘之外的留白（到频谱/窗口边缘的间隙），
+    // 不遮挡可读区域内的文字
+    ID2D1LinearGradientBrush* lyricRightFadeBrush_ = nullptr;
+    ID2D1Layer* lyricRightFadeLayer_ = nullptr;
     media_control::Geometry controlGeometry;
     bool textDirty_ = true;
     bool songInfoDirty_ = true; // 标题/歌手布局独立重建，换行不触碰歌曲信息
@@ -1077,6 +1086,8 @@ struct TaskbarHost::Impl {
                                       &brushIdleAccent_);
         }
         rt->CreateLayer(&coverLayer_);
+        rt->CreateLayer(&lyricEdgeFadeLayer_);
+        rt->CreateLayer(&lyricRightFadeLayer_);
         recreateFormats();
     }
 
@@ -2509,6 +2520,10 @@ struct TaskbarHost::Impl {
         r(coverClip_);
         r(vinylCoverClip_);
         r(coverLayer_);
+        r(lyricEdgeFadeBrush_);
+        r(lyricEdgeFadeLayer_);
+        r(lyricRightFadeBrush_);
+        r(lyricRightFadeLayer_);
         media_control::release(controlGeometry);
         if (coverBmp) {
             coverBmp->Release();
@@ -4153,13 +4168,79 @@ struct TaskbarHost::Impl {
         return bmp;
     }
 
+    // 滚动文本左缘渐隐画笔：固定两停止点（透明 → 不透明），创建一次终身复用，
+    // 几何完全由每帧移动渐变轴实现
+    ID2D1LinearGradientBrush* ensureLyricEdgeFadeBrush() {
+        if (lyricEdgeFadeBrush_)
+            return lyricEdgeFadeBrush_;
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return nullptr;
+        const D2D1_GRADIENT_STOP stops[2] = {
+            {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+            {1.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f)},
+        };
+        ID2D1GradientStopCollection* stopCollection = nullptr;
+        if (FAILED(rt->CreateGradientStopCollection(stops, 2, &stopCollection)))
+            return nullptr;
+        const HRESULT hr = rt->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                D2D1::Point2F(1.0f, 0.0f)),
+            D2D1::BrushProperties(), stopCollection, &lyricEdgeFadeBrush_);
+        stopCollection->Release();
+        return FAILED(hr) ? nullptr : lyricEdgeFadeBrush_;
+    }
+
+    // 区域内左缘渐隐：渐隐带宽度随滚出量从 0 长到 fadeW，且左缘处透明度恒为 0。
+    // 若让整个渐隐带按滚出量淡入，则滚出不足 fadeW 时左缘仍有残余不透明度，
+    // 半截字符会在边界硬裁剪处留下一条竖线
+    ID2D1LinearGradientBrush* lyricEdgeFadeBrush(float x, float fadeW, float offset) {
+        ID2D1LinearGradientBrush* brush = ensureLyricEdgeFadeBrush();
+        if (!brush || fadeW <= 0.0f)
+            return nullptr;
+        const float band = std::min(offset, fadeW);
+        if (band <= 0.0f)
+            return nullptr;
+        brush->SetStartPoint(D2D1::Point2F(x, 0.0f));
+        brush->SetEndPoint(D2D1::Point2F(x + band, 0.0f));
+        return brush;
+    }
+
+    // 右缘渐隐带画笔：渐隐带完全位于可视区右缘之外（rightEdge 起 extend 宽），
+    // 可读区域内文字始终全不透明，只有越过边界的部分向外渐隐
+    ID2D1LinearGradientBrush* lyricRightFadeBrush(float rightEdge, float extend) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || extend <= 0.0f)
+            return nullptr;
+        if (!lyricRightFadeBrush_) {
+            const D2D1_GRADIENT_STOP stops[2] = {
+                {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f)},
+                {1.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+            };
+            ID2D1GradientStopCollection* stopCollection = nullptr;
+            if (FAILED(rt->CreateGradientStopCollection(stops, 2, &stopCollection)))
+                return nullptr;
+            const HRESULT hr = rt->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                    D2D1::Point2F(1.0f, 0.0f)),
+                D2D1::BrushProperties(), stopCollection, &lyricRightFadeBrush_);
+            stopCollection->Release();
+            if (FAILED(hr))
+                return nullptr;
+        }
+        lyricRightFadeBrush_->SetStartPoint(D2D1::Point2F(rightEdge, 0.0f));
+        lyricRightFadeBrush_->SetEndPoint(D2D1::Point2F(rightEdge + extend, 0.0f));
+        return lyricRightFadeBrush_;
+    }
+
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
                            float x, float y, float offset, ID2D1Brush* brush,
                            ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
                            ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f,
                            float opacity = 1.0f,
                            LyricAlignment alignment = LyricAlignment::Center,
-                           bool singleCopy = false) {
+                           bool singleCopy = false, float rightExtend = 0.0f,
+                           bool constantEdgeFade = false, float leftFadeDip = 0.0f) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
@@ -4188,8 +4269,39 @@ struct TaskbarHost::Impl {
             candidate->SetOpacity(previousOpacity[changedCount] * opacity);
             changed[changedCount++] = candidate;
         }
-        D2D1_RECT_F clip{x, y, x + areaW, y + textH};
-        rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        // 右缘（滚入侧）渐隐带借用到可视区之外的留白，可读区域内文字保持清晰
+        ID2D1LinearGradientBrush* rightFade =
+            (textW > areaW && rightExtend > 0.0f && lyricRightFadeLayer_)
+                ? lyricRightFadeBrush(x + areaW, rightExtend)
+                : nullptr;
+        // 左缘（滚出侧）在区域内渐隐，文字不会越过区域边界：歌词渐隐带随滚出量
+        // 从 0 建立（新行贴边界时不渐隐，与第二行左缘严格对齐）；歌曲信息是
+        // 无限循环跑马灯，是否滚动在内容确定时就已知，渐隐恒定保持，
+        // 避免每轮循环绕回时渐隐消失再出现。leftFadeDip > 0 时覆盖默认渐隐宽度
+        const float fadeDip = leftFadeDip > 0.0f ? leftFadeDip : kLyricEdgeFadeDip;
+        const float leftFadeW = std::min(fadeDip, areaW * 0.25f);
+        const float leftScrolled = constantEdgeFade ? leftFadeW : offset;
+        ID2D1LinearGradientBrush* fadeBrush =
+            (textW > areaW && leftScrolled > 0.0f && lyricEdgeFadeLayer_)
+                ? lyricEdgeFadeBrush(x, leftFadeW, leftScrolled)
+                : nullptr;
+        D2D1_RECT_F clip{x, y, x + areaW + (rightFade ? rightExtend : 0.0f), y + textH};
+        if (rightFade) {
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                 rightFade),
+                          lyricRightFadeLayer_);
+        }
+        if (fadeBrush) {
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                 fadeBrush),
+                          lyricEdgeFadeLayer_);
+        } else {
+            rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+        }
         static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
                                               {0.7071f, 0.7071f},
                                               {0.0f, 1.0f},
@@ -4259,7 +4371,12 @@ struct TaskbarHost::Impl {
             rt->DrawTextLayout(D2D1::Point2F(bases[0], y), layout, karaokeBrush);
             rt->PopAxisAlignedClip();
         }
-        rt->PopAxisAlignedClip();
+        if (fadeBrush)
+            rt->PopLayer();
+        else
+            rt->PopAxisAlignedClip();
+        if (rightFade)
+            rt->PopLayer();
         for (int i = 0; i < changedCount; ++i)
             changed[i]->SetOpacity(previousOpacity[i]);
         if (fxBmp)
@@ -4560,8 +4677,13 @@ struct TaskbarHost::Impl {
         float offset, ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow,
         ID2D1Brush* karaokeBrush, float karaokeX, float opacity, LyricAlignment alignment,
         bool singleCopy = false) {
+        // 左缘渐隐宽度分场景：歌曲信息可见时用与交界处一致的 8 dip，且渐隐始终在
+        // 歌词区域内，文字不会画进信息区；信息区隐藏时用默认宽度
+        const float leftFadeDip =
+            songInfoVisible_ && scene_ != DisplayScene::Idle ? kTextPadding : 0.0f;
         drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
-                          karaokeBrush, karaokeX, opacity, alignment, singleCopy);
+                          karaokeBrush, karaokeX, opacity, alignment, singleCopy,
+                          kTextPadding, false, leftFadeDip);
     }
 
     void drawLyricScrollingText(IDWriteTextLayout* layout, float textW, float textH,
@@ -4579,7 +4701,8 @@ struct TaskbarHost::Impl {
                                  float opacity, float scale, ID2D1Brush* outline = nullptr,
                                  ID2D1Brush* glow = nullptr,
                                  ID2D1Brush* karaokeBrush = nullptr,
-                                 float karaokeX = 0.0f, bool singleCopy = false) {
+                                 float karaokeX = 0.0f, bool singleCopy = false,
+                                 float visibleW = 0.0f) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || areaW <= 0.0f)
             return;
@@ -4595,10 +4718,13 @@ struct TaskbarHost::Impl {
         else if (activeLyricAlignment() == LyricAlignment::Right)
             anchorX = x + areaW;
         const D2D1_POINT_2F anchor = D2D1::Point2F(anchorX, y + textH * 0.5f);
+        // visibleW 是转场期间随进度收敛的可见右边界（文本坐标）；锚点始终用
+        // 最终可视宽 areaW，避免边界动画影响缩放中心
+        const float drawW = visibleW > 0.0f ? visibleW : areaW;
         D2D1_MATRIX_3X2_F previous{};
         rt->GetTransform(&previous);
         rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor) * previous);
-        drawLyricScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
+        drawLyricScrollingText(layout, textW, textH, drawW, x, y, offset, brush, outline, glow,
                                 karaokeBrush, karaokeX, opacity, singleCopy);
         rt->SetTransform(previous);
     }
@@ -4651,6 +4777,17 @@ struct TaskbarHost::Impl {
             float scaledIncomingY =
                 incomingY - lyricHeight_ * (1.0f - incomingScale) * 0.5f;
 
+            // 超出部分的消失与第二行上移同步：转场起点取预览期实际可见的右边界
+            // （预览放得下=整行可见；放不下=预览渐隐位置，均换算到核心行文本坐标），
+            // 随转场进度收敛到核心行可视宽，避免动画第一帧尾部瞬间消失。
+            float incomingVisibleW = 0.0f;
+            if (lyricWidth_ > lyricAreaW) {
+                const float previewRightW =
+                    std::min(lyricWidth_, lyricAreaW / kLyricPreviewScale);
+                incomingVisibleW =
+                    previewRightW + (lyricAreaW - previewRightW) * movementT;
+            }
+
             // 下一行在转场前已经位于核心行下方；转场从这个位置接入核心，避免跳变。
             drawLyricScrollingText(outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_,
                                    lyricAreaW, lyricAreaX, outgoingY + oldShift,
@@ -4671,7 +4808,7 @@ struct TaskbarHost::Impl {
                 incomingScale,
                 effectOutline, effectGlow,
                 incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
-                incomingProgX, true);
+                incomingProgX, true, incomingVisibleW);
             return;
         }
 
@@ -5315,15 +5452,19 @@ struct TaskbarHost::Impl {
 
         if (songInfoVisible_ && !idleScene) {
             // 左侧歌曲信息（封面显示时位于封面右侧，整体垂直居中，超长自动滚动）
+            // 右缘渐隐带借用到与歌词区之间的留白（kTextPadding），交界处视觉连续
             float infoX = infoStartX();
             float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
             float infoGap = 2.0f;
             float totalInfoH = titleHeight_ + infoGap + artistHeight_;
             float infoY = (h - totalInfoH) * 0.5f;
             drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
-                              titleScrollOffset_, brushText_);
+                              titleScrollOffset_, brushText_, nullptr, nullptr, nullptr, 0.0f,
+                              1.0f, LyricAlignment::Center, false, kTextPadding, true);
             drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
-                              infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_);
+                              infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_,
+                              nullptr, nullptr, nullptr, 0.0f, 1.0f, LyricAlignment::Center,
+                              false, kTextPadding, true);
         }
 
         if (showControls) {
