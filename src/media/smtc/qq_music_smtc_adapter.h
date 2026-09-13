@@ -25,6 +25,14 @@ private:
                                int64_t newAnchorMs, PlaybackStatus status,
                                int64_t eventNowMs) const;
 
+    // 在 isStaleTimelineUpdate 之上加持续性判断：QQ 的过期/量化时间线噪声是
+    // 偶发的，丢弃一次后下条更新即恢复正常；而卡顿恢复后的回退修正是持续的，
+    // 后续每条更新都落后相同的量。连续出现的回退第二次起放行，避免歌词在
+    // 卡顿后永久领先。
+    bool shouldDropStale(const SmtcSnapshot& snapshot, int64_t newPosMs,
+                         int64_t newAnchorMs, PlaybackStatus status,
+                         int64_t eventNowMs) const;
+
     // 切歌后的短暂窗口内，QQ 会补发携带上一首歌时间线的迟到事件（Position 仍停在
     // 旧歌播放点附近），refreshAll 重读媒体属性时也会把这份残留时间线重新写回快照。
     // 切歌时记录被丢弃的残留位置并进入 awaitingTimeline_ 状态：窗口内到达且位置仍
@@ -42,6 +50,7 @@ private:
     mutable int64_t residualPosMs_ = -1; // 最近一次切歌丢弃的旧时间线位置（-1 无残留）
     mutable int64_t residualAtMs_ = 0;   // 残留记录时刻（超出窗口后失效）
     int64_t lastStatusChangeMs_ = 0;
+    mutable int consecutiveStaleDrops_ = 0; // 连续被丢弃的回退更新次数
 };
 
 } // namespace smtc

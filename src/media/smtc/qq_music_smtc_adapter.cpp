@@ -61,6 +61,7 @@ void QqMusicSmtcAdapter::prepareInitialSnapshot(SmtcSnapshot& snapshot) const {
         residualPosMs_ = snapshot.positionMs; // 记录残留位置，供识别旧时间线
         residualAtMs_ = now;
         awaitingTimeline_ = true;
+        consecutiveStaleDrops_ = 0; // 换歌后重新累计回退判定
     }
     if (awaitingTimeline_) {
         if (isResidualTimeline(snapshot.positionMs, now)) {
@@ -87,6 +88,23 @@ bool QqMusicSmtcAdapter::isStaleTimelineUpdate(
                        std::max<int64_t>(0, eventNowMs - newAnchorMs);
     int64_t backward = current - incoming;
     return backward > 250 && backward < 2000;
+}
+
+bool QqMusicSmtcAdapter::shouldDropStale(
+    const SmtcSnapshot& snapshot, int64_t newPosMs, int64_t newAnchorMs,
+    PlaybackStatus status, int64_t eventNowMs) const {
+    if (!isStaleTimelineUpdate(snapshot, newPosMs, newAnchorMs, status,
+                               eventNowMs)) {
+        consecutiveStaleDrops_ = 0;
+        return false;
+    }
+    // 偶发噪声丢弃一次即可；连续出现的回退是卡顿恢复后的真实修正，放行。
+    if (consecutiveStaleDrops_ > 0) {
+        consecutiveStaleDrops_ = 0;
+        return false;
+    }
+    ++consecutiveStaleDrops_;
+    return true;
 }
 
 void QqMusicSmtcAdapter::refreshTimeline(const Session& session,
@@ -135,8 +153,8 @@ void QqMusicSmtcAdapter::refreshTimeline(const Session& session,
     bool dropResidual = snapshot.status == PlaybackStatus::Playing &&
                         statusAge >= 0 && statusAge < 2000 && backwardMs > 250;
     if (!dropResidual &&
-        !isStaleTimelineUpdate(snapshot, newPos, newAnchor, snapshot.status,
-                               eventNowMs)) {
+        !shouldDropStale(snapshot, newPos, newAnchor, snapshot.status,
+                         eventNowMs)) {
         snapshot.positionMs = newPos;
         snapshot.anchorUtcMs = newAnchor;
     }
@@ -159,7 +177,6 @@ void QqMusicSmtcAdapter::refreshPlayback(const Session& session,
     // 播放状态独立于时间线；时间线暂时为空时也必须提交暂停状态，
     // 否则 snapshot() 会继续按 Playing 插值。
     snapshot.status = newStatus;
-    bool staleUpdate = false;
     bool smoothUsed = false;
     int64_t newPos = 0;
     auto timeline = session.GetTimelineProperties();
@@ -190,9 +207,8 @@ void QqMusicSmtcAdapter::refreshPlayback(const Session& session,
                 snapshot.positionMs = snapshot.durationMs;
             snapshot.anchorUtcMs = eventNowMs;
         } else {
-            staleUpdate = isStaleTimelineUpdate(snapshot, newPos, newAnchor,
-                                                previousStatus, eventNowMs);
-            if (!staleUpdate) {
+            if (!shouldDropStale(snapshot, newPos, newAnchor,
+                                 previousStatus, eventNowMs)) {
                 snapshot.positionMs = newPos;
                 snapshot.anchorUtcMs = newAnchor;
             }
@@ -295,6 +311,7 @@ void QqMusicSmtcAdapter::reset() {
     residualPosMs_ = -1;
     residualAtMs_ = 0;
     lastStatusChangeMs_ = 0;
+    consecutiveStaleDrops_ = 0;
 }
 
 } // namespace smtc
