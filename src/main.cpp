@@ -2106,6 +2106,9 @@ struct App {
         host->setStatusTextCycleCompletedCallback([this] {
             onStartupTaskSummaryCompleted();
         });
+        // 先设置渲染模式，再同步当前帧。完全停止模式下新宿主必须从创建开始就保持隐藏，
+        // 否则 syncHost() 会按默认正常模式先显示一帧，随后才被 setRenderMode() 隐藏。
+        host->setRenderMode(renderMode_);
         taskbarHost = std::move(host);
         syncHost(taskbarHost.get());
         if (hasUserFont_)
@@ -2120,7 +2123,6 @@ struct App {
         taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
         taskbarHost->setPlatformIconVisible(platformIconVisible_);
         taskbarHost->setPositionMode(taskbarPosition_);
-        taskbarHost->setRenderMode(renderMode_);
         syncTaskbarOrientation();
         applyEffectiveTaskbarSettings();
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
