@@ -24,9 +24,11 @@
 #include <cstdlib>
 #include <cwchar>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -206,6 +208,102 @@ HWND findTrafficMonitorWnd(HWND taskbar) {
     return nullptr;
 }
 
+// 酷狗官方任务栏歌词可能是酷狗进程创建的任务栏子窗口，也可能是叠在任务栏上的独立窗口。
+// 不能依赖固定窗口类名：不同版本的酷狗客户端可能使用不同的 UI 框架和类名；这里按进程
+// 镜像名识别，再只保留与当前任务栏相交的可见窗口。所有调用都在探测工作线程执行。
+struct KugouWindowProbeContext {
+    RECT taskbarRect{};
+    std::vector<RECT>* out = nullptr;
+    std::unordered_map<DWORD, bool> processCache;
+};
+
+bool isKugouProcess(DWORD processId, std::unordered_map<DWORD, bool>& cache) {
+    const auto cached = cache.find(processId);
+    if (cached != cache.end())
+        return cached->second;
+
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process) {
+        cache.emplace(processId, false);
+        return false;
+    }
+
+    wchar_t path[32768]{};
+    DWORD length = static_cast<DWORD>(std::size(path));
+    const bool queried = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
+    CloseHandle(process);
+    if (!queried) {
+        cache.emplace(processId, false);
+        return false;
+    }
+
+    const wchar_t* fileName = wcsrchr(path, L'\\');
+    fileName = fileName ? fileName + 1 : path;
+    const bool match = _wcsicmp(fileName, L"KuGou.exe") == 0;
+    cache.emplace(processId, match);
+    return match;
+}
+
+void collectKugouTaskbarWindow(HWND window, KugouWindowProbeContext& context) {
+    if (!window || !IsWindowVisible(window))
+        return;
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (!isKugouProcess(processId, context.processCache))
+        return;
+
+    RECT windowRect{};
+    RECT intersection{};
+    if (GetWindowRect(window, &windowRect) &&
+        IntersectRect(&intersection, &windowRect, &context.taskbarRect))
+        context.out->push_back(intersection);
+}
+
+BOOL CALLBACK collectKugouTopLevelWindow(HWND window, LPARAM parameter) {
+    auto* context = reinterpret_cast<KugouWindowProbeContext*>(parameter);
+    if (context)
+        collectKugouTaskbarWindow(window, *context);
+    return TRUE;
+}
+
+BOOL CALLBACK collectKugouTaskbarChildWindow(HWND window, LPARAM parameter) {
+    auto* context = reinterpret_cast<KugouWindowProbeContext*>(parameter);
+    if (context)
+        collectKugouTaskbarWindow(window, *context);
+    return TRUE;
+}
+
+void queryKugouTaskbarWindows(HWND taskbar, std::vector<RECT>& out) {
+    out.clear();
+    if (!taskbar)
+        return;
+
+    KugouWindowProbeContext context;
+    if (!GetWindowRect(taskbar, &context.taskbarRect))
+        return;
+    context.out = &out;
+
+    // 顶层枚举覆盖独立置顶/覆盖窗口；任务栏子树枚举覆盖被 Explorer 承载的嵌入窗口。
+    EnumWindows(collectKugouTopLevelWindow, reinterpret_cast<LPARAM>(&context));
+    EnumChildWindows(taskbar, collectKugouTaskbarChildWindow,
+                     reinterpret_cast<LPARAM>(&context));
+
+    std::sort(out.begin(), out.end(), [](const RECT& a, const RECT& b) {
+        if (a.left != b.left)
+            return a.left < b.left;
+        if (a.top != b.top)
+            return a.top < b.top;
+        if (a.right != b.right)
+            return a.right < b.right;
+        return a.bottom < b.bottom;
+    });
+    out.erase(std::unique(out.begin(), out.end(), [](const RECT& a, const RECT& b) {
+                  return EqualRect(&a, &b) != FALSE;
+              }),
+              out.end());
+}
+
 // 通过 UI Automation 取任务栏 XAML 部件（开始/搜索/任务视图/小组件/固定与运行中的
 // 应用图标）的屏幕包围矩形。这些按钮是 XAML 元素而非窗口，HWND 枚举看不到，
 // 但 UIA 的 TaskbarFrame 子树完整暴露；小组件等后续新增的按钮同样作为其子元素出现。
@@ -309,8 +407,10 @@ struct TaskbarHost::Impl {
     RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
     // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）。
-    // 以上两项由探测工作线程产出、UI 线程拾取（见 probeOut_）
+    // 以上探测数据由工作线程产出、UI 线程拾取（见 probeOut_）
     std::vector<RECT> uiaButtons_;
+    // 酷狗进程中与任务栏相交的可见窗口（屏幕坐标）。
+    std::vector<RECT> kugouTaskbarWindows_;
     UINT dpi_ = 96;
     bool centerAlign_ = true;
     UINT taskbarEdge_ = ABE_BOTTOM;
@@ -322,6 +422,7 @@ struct TaskbarHost::Impl {
     struct ProbeResult {
         RECT rcTm{};
         std::vector<RECT> buttons;
+        std::vector<RECT> kugouWindows;
     };
     std::thread probeThread_;
     std::atomic<bool> probeStop_{false};
@@ -805,7 +906,7 @@ struct TaskbarHost::Impl {
     }
 
     // 任务栏主轴上的占用区间（屏幕坐标，已合并）：横向任务栏取 [left, right)，
-    // 纵向任务栏取 [top, bottom)。来源为 UIA 按钮 + 通知区 + TrafficMonitor。
+    // 纵向任务栏取 [top, bottom)。来源为 UIA 按钮 + 通知区 + TrafficMonitor + 酷狗窗口。
     // 开始按钮的 HWND 矩形与 UIA StartButton 重复，合并后无害，留着可在 UIA
     // 不可用时兜底。
     std::vector<std::pair<int, int>> occupiedIntervals() const {
@@ -824,6 +925,8 @@ struct TaskbarHost::Impl {
         if (start_)
             add(rcStart_);
         add(rcTrafficMonitor_);
+        for (const RECT& r : kugouTaskbarWindows_)
+            add(r);
         std::sort(v.begin(), v.end());
         std::vector<std::pair<int, int>> merged;
         for (const auto& p : v) {
@@ -1000,7 +1103,7 @@ struct TaskbarHost::Impl {
         if (start_)
             GetWindowRect(start_, &rcStart);
 
-        // TrafficMonitor / UIA 按钮矩形由探测工作线程提供（pickProbeResult），
+        // TrafficMonitor / 酷狗 / UIA 按钮矩形由探测工作线程提供（pickProbeResult），
         // 这里只做非阻塞检查，UI 线程不允许出现阻塞型跨进程调用
         bool changed = dpi != dpi_ || center != centerAlign_ || edgeChanged ||
                        themeChanged ||
@@ -2564,7 +2667,7 @@ struct TaskbarHost::Impl {
 
     // ---------- 避让探测工作线程 ----------
 
-    // 每 3 秒探测一次：TrafficMonitor 窗口矩形 + UIA 任务栏按钮矩形。
+    // 每 3 秒探测一次：TrafficMonitor、酷狗窗口矩形 + UIA 任务栏按钮矩形。
     // UIA 属性查询由 explorer 的 UI 线程执行，探测越频繁对任务栏的周期性
     // 打扰越明显；3 秒是避让响应速度与 explorer 负担的折中。
     // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
@@ -2579,6 +2682,7 @@ struct TaskbarHost::Impl {
                 if (HWND tm = findTrafficMonitorWnd(tb))
                     GetWindowRect(tm, &p->rcTm);
                 queryTaskbarButtonsUia(uia, tb, p->buttons);
+                queryKugouTaskbarWindows(tb, p->kugouWindows);
                 delete probeOut_.exchange(p); // 上一份未被拾取则丢弃
             }
             for (int t = 0; t < 30 && !probeStop_.load(); ++t)
@@ -2621,9 +2725,22 @@ struct TaskbarHost::Impl {
                 }
             }
         }
+        if (!changed) {
+            if (p->kugouWindows.size() != kugouTaskbarWindows_.size()) {
+                changed = true;
+            } else {
+                for (size_t i = 0; i < p->kugouWindows.size(); ++i) {
+                    if (!EqualRect(&p->kugouWindows[i], &kugouTaskbarWindows_[i])) {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
         if (changed) {
             rcTrafficMonitor_ = p->rcTm;
             uiaButtons_ = std::move(p->buttons);
+            kugouTaskbarWindows_ = std::move(p->kugouWindows);
         }
         return changed;
     }
