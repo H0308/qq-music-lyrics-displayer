@@ -64,6 +64,7 @@ constexpr float kPopupCornerDip = 12.0f;
 constexpr float kCoverSizeDip = 80.0f;
 constexpr float kPopupTextLeftDip = 112.0f;
 constexpr float kPopupTextRightPaddingDip = 16.0f;
+constexpr float kPopupTextEdgeFadeDip = 8.0f;
 constexpr float kPopupTextPaddingDip = 8.0f;
 constexpr float kPopupInfoScrollSpeed = 10.0f;
 constexpr std::size_t kIdleQuickColumnCount = 5;
@@ -302,6 +303,7 @@ struct MediaPopup::Impl {
     float categoryTransitionTitleScrollOffset = 0.0f;
     float categoryTransitionArtistScrollOffset = 0.0f;
     float categoryTransitionIdleQuoteScrollOffset = 0.0f;
+    float categoryTransitionIdleQuoteSourceScrollOffset = 0.0f;
     int categoryTransitionDirection = 1;
     // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
     // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
@@ -409,6 +411,9 @@ struct MediaPopup::Impl {
     ID2D1SolidColorBrush* brushTaskPriorityNone = nullptr;
     ID2D1LinearGradientBrush* brushDynamicGradient = nullptr;
     ID2D1RadialGradientBrush* brushDynamicGlow = nullptr;
+    ID2D1LinearGradientBrush* brushMediaTextEdgeFade = nullptr;
+    ID2D1LinearGradientBrush* brushIdleTextEdgeFade = nullptr;
+    ID2D1Layer* textEdgeFadeLayer = nullptr;
 
     IDWriteTextFormat* fmtSource = nullptr;
     IDWriteTextFormat* fmtTimeRight = nullptr;
@@ -423,8 +428,11 @@ struct MediaPopup::Impl {
     IDWriteTextLayout* titleLayout = nullptr;
     IDWriteTextLayout* artistLayout = nullptr;
     IDWriteTextLayout* idleQuoteLayout = nullptr;
+    IDWriteTextLayout* idleQuoteSourceLayout = nullptr;
     float idleQuoteWidth = 0.0f;
     float idleQuoteHeight = 0.0f;
+    float idleQuoteSourceWidth = 0.0f;
+    float idleQuoteSourceHeight = 0.0f;
     float titleWidth = 0.0f;
     float titleHeight = 0.0f;
     float artistWidth = 0.0f;
@@ -432,6 +440,7 @@ struct MediaPopup::Impl {
     float titleScrollOffset = 0.0f;
     float artistScrollOffset = 0.0f;
     float idleQuoteScrollOffset = 0.0f;
+    float idleQuoteSourceScrollOffset = 0.0f;
     ULONGLONG scrollTickMs = 0;
     ID2D1Bitmap* coverBmp = nullptr;
     ID2D1Bitmap* sourceIconBmp = nullptr;
@@ -899,6 +908,9 @@ struct MediaPopup::Impl {
         releaseBrush(brushTaskPriorityMedium);
         releaseBrush(brushTaskPriorityLow);
         releaseBrush(brushTaskPriorityNone);
+        releaseCom(brushMediaTextEdgeFade);
+        releaseCom(brushIdleTextEdgeFade);
+        releaseCom(textEdgeFadeLayer);
         releaseDynamicBackgroundResources();
         releaseFormat(fmtSource);
         releaseFormat(fmtTimeRight);
@@ -913,13 +925,17 @@ struct MediaPopup::Impl {
         releaseCom(titleLayout);
         releaseCom(artistLayout);
         releaseCom(idleQuoteLayout);
+        releaseCom(idleQuoteSourceLayout);
         titleWidth = 0.0f;
         titleHeight = 0.0f;
         artistWidth = 0.0f;
         artistHeight = 0.0f;
         idleQuoteWidth = 0.0f;
         idleQuoteHeight = 0.0f;
+        idleQuoteSourceWidth = 0.0f;
+        idleQuoteSourceHeight = 0.0f;
         idleQuoteScrollOffset = 0.0f;
+        idleQuoteSourceScrollOffset = 0.0f;
         textDirty = true;
         idleTextDirty = true;
         releaseCom(coverClip);
@@ -1032,6 +1048,43 @@ struct MediaPopup::Impl {
             !media_control::create(factory, controlGeometry)) {
             releaseDrawingResources();
             return false;
+        }
+
+        // 歌曲标题、艺术家和每日一言滚动时，左右各 8 DIP 逐渐淡出；
+        // 使用图层透明度遮罩，不会用固定颜色覆盖磨砂背景。两类文本的区域宽度不同，
+        // 因此分别创建渐变画刷，避免每日一言使用歌曲信息的渐变比例。
+        auto createTextEdgeFade = [&](float left, float right,
+                                      ID2D1LinearGradientBrush** out) {
+            if (!out)
+                return false;
+            *out = nullptr;
+            const float textAreaWidth = std::max(1.0f, right - left);
+            const float fadeStop = std::min(0.5f, kPopupTextEdgeFadeDip / textAreaWidth);
+            const D2D1_GRADIENT_STOP fadeStops[] = {
+                {0.0f, D2D1::ColorF(D2D1::ColorF::White, 0.0f)},
+                {fadeStop, D2D1::ColorF(D2D1::ColorF::White, 1.0f)},
+                {1.0f - fadeStop, D2D1::ColorF(D2D1::ColorF::White, 1.0f)},
+                {1.0f, D2D1::ColorF(D2D1::ColorF::White, 0.0f)},
+            };
+            ID2D1GradientStopCollection* collection = nullptr;
+            if (FAILED(rt->CreateGradientStopCollection(fadeStops, _countof(fadeStops),
+                                                        &collection)) ||
+                !collection)
+                return false;
+            const auto gradient = D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(left, 0.0f), D2D1::Point2F(right, 0.0f));
+            const HRESULT hr = rt->CreateLinearGradientBrush(gradient, collection, out);
+            collection->Release();
+            return SUCCEEDED(hr) && *out;
+        };
+        const bool mediaFadeReady = createTextEdgeFade(
+            kPopupTextLeftDip, kPopupWidthDip - kPopupTextRightPaddingDip,
+            &brushMediaTextEdgeFade);
+        const bool idleFadeReady = createTextEdgeFade(
+            16.0f, kPopupWidthDip - 16.0f, &brushIdleTextEdgeFade);
+        if ((mediaFadeReady || idleFadeReady) && FAILED(rt->CreateLayer(&textEdgeFadeLayer))) {
+            releaseCom(brushMediaTextEdgeFade);
+            releaseCom(brushIdleTextEdgeFade);
         }
 
         // 画笔按调色板重建后，如果背景快照仍然有效，沿用之前采样的亮度恢复
@@ -1231,6 +1284,7 @@ struct MediaPopup::Impl {
             titleScrollOffset = 0.0f;
             artistScrollOffset = 0.0f;
             idleQuoteScrollOffset = 0.0f;
+            idleQuoteSourceScrollOffset = 0.0f;
             scrollTickMs = 0;
             stopCategoryTransition();
             categoryHoverEnvelopeActive = false;
@@ -1295,15 +1349,25 @@ struct MediaPopup::Impl {
             return;
         idleTextDirty = false;
         releaseCom(idleQuoteLayout);
+        releaseCom(idleQuoteSourceLayout);
         idleQuoteWidth = 0.0f;
         idleQuoteHeight = 0.0f;
-        if (!renderer.dwrite() || !fmtIdleQuote || idle.sentence.empty())
+        idleQuoteSourceWidth = 0.0f;
+        idleQuoteSourceHeight = 0.0f;
+        if (!renderer.dwrite())
             return;
 
-        if (!createMeasuredTextLayout(idle.sentence, fmtIdleQuote, 42.0f, &idleQuoteLayout,
-                                      idleQuoteWidth, idleQuoteHeight))
-            return;
-        idleQuoteHeight = std::min(42.0f, idleQuoteHeight);
+        if (fmtIdleQuote && !idle.sentence.empty() &&
+            createMeasuredTextLayout(idle.sentence, fmtIdleQuote, 42.0f, &idleQuoteLayout,
+                                     idleQuoteWidth, idleQuoteHeight)) {
+            idleQuoteHeight = std::min(42.0f, idleQuoteHeight);
+        }
+        if (fmtIdleSource && !idle.source.empty()) {
+            createMeasuredTextLayout(idle.source, fmtIdleSource, 18.0f,
+                                     &idleQuoteSourceLayout, idleQuoteSourceWidth,
+                                     idleQuoteSourceHeight);
+            idleQuoteSourceHeight = std::min(18.0f, idleQuoteSourceHeight);
+        }
     }
 
     void decodeIdleIcons() {
@@ -1386,7 +1450,9 @@ struct MediaPopup::Impl {
 
     void updateScrollTimer(float areaWidth) {
         const float idleAreaWidth = idleQuoteAreaWidth();
-        const bool idleOverflow = idleQuoteWidth > idleAreaWidth;
+        const bool idleQuoteOverflow = idleQuoteWidth > idleAreaWidth;
+        const bool idleSourceOverflow = idleQuoteSourceWidth > idleAreaWidth;
+        const bool idleOverflow = idleQuoteOverflow || idleSourceOverflow;
         const bool mediaOverflow = titleWidth > areaWidth || artistWidth > areaWidth;
         const bool transitionDriving = idleContentTransitionActive;
         const bool shouldRun = popupVisible && !entering && !closing && enabled &&
@@ -1416,6 +1482,8 @@ struct MediaPopup::Impl {
         }
         if (!idleMode || !idleOverflow || !clientAnimations)
             idleQuoteScrollOffset = 0.0f;
+        if (!idleMode || !idleOverflow || !clientAnimations)
+            idleQuoteSourceScrollOffset = 0.0f;
         if (idleMode || !mediaOverflow || !clientAnimations || !media.playing) {
             titleScrollOffset = 0.0f;
             artistScrollOffset = 0.0f;
@@ -1449,6 +1517,7 @@ struct MediaPopup::Impl {
         };
         if (scrollingIdleQuote) {
             marquee(idleQuoteWidth, idleAreaWidth, idleQuoteScrollOffset);
+            marquee(idleQuoteSourceWidth, idleAreaWidth, idleQuoteSourceScrollOffset);
         } else {
             marquee(titleWidth, mediaAreaWidth, titleScrollOffset);
             marquee(artistWidth, mediaAreaWidth, artistScrollOffset);
@@ -1570,7 +1639,7 @@ struct MediaPopup::Impl {
 
     void drawScrollingText(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textWidth,
                            float textHeight, const D2D1_RECT_F& rect, float offset,
-                           ID2D1Brush* brush) {
+                           ID2D1Brush* brush, ID2D1Brush* edgeFadeBrush) {
         if (!rt || !layout || !brush)
             return;
         const float areaWidth = std::max(0.0f, rect.right - rect.left);
@@ -1581,12 +1650,22 @@ struct MediaPopup::Impl {
         const float bases[2] = {rect.left - offset, rect.left - offset + loopWidth};
         const int count = scrolling ? 2 : 1;
 
+        const bool useEdgeFade = scrolling && edgeFadeBrush && textEdgeFadeLayer;
+        if (useEdgeFade) {
+            rt->PushLayer(
+                D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr,
+                                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                        D2D1::Matrix3x2F::Identity(), 1.0f, edgeFadeBrush),
+                textEdgeFadeLayer);
+        }
         rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
         for (int i = 0; i < count; ++i) {
             const float x = scrolling ? bases[i] : rect.left;
             rt->DrawTextLayout(D2D1::Point2F(x, y), layout, brush);
         }
         rt->PopAxisAlignedClip();
+        if (useEdgeFade)
+            rt->PopLayer();
     }
 
     void drawChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
@@ -1739,7 +1818,9 @@ struct MediaPopup::Impl {
 
     void drawIdleQuoteText(ID2D1DeviceContext* rt, float w, const IdlePresentation& content,
                            float quoteHeight, IDWriteTextLayout* layout, float textWidth,
-                           float textHeight, float scrollOffset) {
+                           float textHeight, float scrollOffset,
+                           IDWriteTextLayout* sourceLayout, float sourceWidth,
+                           float sourceHeight, float sourceScrollOffset) {
         if (!rt)
             return;
         const float quoteTop = kIdleQuoteTopDip;
@@ -1747,7 +1828,7 @@ struct MediaPopup::Impl {
             D2D1::RectF(16.0f, quoteTop, w - 16.0f, quoteTop + quoteHeight);
         if (layout && !content.sentence.empty()) {
             drawScrollingText(rt, layout, textWidth, textHeight, quoteRect, scrollOffset,
-                              brushText);
+                              brushText, brushIdleTextEdgeFade);
         } else if (!content.sentence.empty()) {
             drawText(rt, content.sentence, fmtIdleQuote, quoteRect,
                      content.loading ? brushSecondary : brushText);
@@ -1758,22 +1839,32 @@ struct MediaPopup::Impl {
         }
 
         const float sourceTop = quoteTop + quoteHeight + kIdleQuoteSourceGapDip;
-        if (!content.source.empty())
-            drawText(rt, content.source, fmtIdleSource,
-                     D2D1::RectF(16.0f, sourceTop, w - 16.0f, sourceTop + 18.0f),
-                     brushSecondary);
+        const D2D1_RECT_F sourceRect =
+            D2D1::RectF(16.0f, sourceTop, w - 16.0f, sourceTop + 18.0f);
+        if (sourceLayout && !content.source.empty()) {
+            drawScrollingText(rt, sourceLayout, sourceWidth, sourceHeight, sourceRect,
+                              sourceScrollOffset, brushSecondary, brushIdleTextEdgeFade);
+        } else if (!content.source.empty()) {
+            drawText(rt, content.source, fmtIdleSource, sourceRect, brushSecondary);
+        }
     }
 
     void drawIdleQuoteUnit(ID2D1DeviceContext* rt, float w, const IdlePresentation& content,
                            bool current) {
         const float quoteHeight = idleUnitHeight(content, current);
-        const bool useCurrentLayout =
+        const bool useCurrentQuoteLayout =
             current && idleQuoteLayout && content.sentence == idle.sentence;
+        const bool useCurrentSourceLayout =
+            current && idleQuoteSourceLayout && content.source == idle.source;
         drawIdleQuoteText(rt, w, content, quoteHeight,
-                          useCurrentLayout ? idleQuoteLayout : nullptr,
-                          useCurrentLayout ? idleQuoteWidth : 0.0f,
-                          useCurrentLayout ? idleQuoteHeight : 0.0f,
-                          useCurrentLayout ? idleQuoteScrollOffset : 0.0f);
+                          useCurrentQuoteLayout ? idleQuoteLayout : nullptr,
+                          useCurrentQuoteLayout ? idleQuoteWidth : 0.0f,
+                          useCurrentQuoteLayout ? idleQuoteHeight : 0.0f,
+                          useCurrentQuoteLayout ? idleQuoteScrollOffset : 0.0f,
+                          useCurrentSourceLayout ? idleQuoteSourceLayout : nullptr,
+                          useCurrentSourceLayout ? idleQuoteSourceWidth : 0.0f,
+                          useCurrentSourceLayout ? idleQuoteSourceHeight : 0.0f,
+                          useCurrentSourceLayout ? idleQuoteSourceScrollOffset : 0.0f);
     }
 
     bool idleCopyAvailable(const IdlePresentation& content) const {
@@ -2193,11 +2284,11 @@ struct MediaPopup::Impl {
         drawScrollingText(rt, title, titleW, titleH,
                           D2D1::RectF(kPopupTextLeftDip, kMediaTitleTopDip,
                                       w - kPopupTextRightPaddingDip, kMediaTitleBottomDip),
-                          titleOffset, brushText);
+                          titleOffset, brushText, brushMediaTextEdgeFade);
         drawScrollingText(rt, artist, artistW, artistH,
                           D2D1::RectF(kPopupTextLeftDip, kMediaArtistTopDip,
                                       w - kPopupTextRightPaddingDip, kMediaArtistBottomDip),
-                          artistOffset, brushSecondary);
+                          artistOffset, brushSecondary, brushMediaTextEdgeFade);
     }
 
     void drawMediaContent(ID2D1DeviceContext* rt, float w, bool useCachedLayers) {
@@ -2529,11 +2620,17 @@ struct MediaPopup::Impl {
 
     void drawIdleSnapshot(ID2D1DeviceContext* rt, float w, const IdlePresentation& content) {
         IDWriteTextLayout* snapshotQuoteLayout = nullptr;
+        IDWriteTextLayout* snapshotSourceLayout = nullptr;
         float snapshotQuoteWidth = 0.0f;
         float snapshotQuoteHeight = 0.0f;
+        float snapshotSourceWidth = 0.0f;
+        float snapshotSourceHeight = 0.0f;
         createMeasuredTextLayout(content.sentence, fmtIdleQuote, 42.0f, &snapshotQuoteLayout,
                                  snapshotQuoteWidth, snapshotQuoteHeight);
         snapshotQuoteHeight = std::min(42.0f, snapshotQuoteHeight);
+        createMeasuredTextLayout(content.source, fmtIdleSource, 18.0f, &snapshotSourceLayout,
+                                 snapshotSourceWidth, snapshotSourceHeight);
+        snapshotSourceHeight = std::min(18.0f, snapshotSourceHeight);
         const float quoteHeight = snapshotQuoteLayout
                                        ? std::max(18.0f, snapshotQuoteHeight)
                                        : 18.0f;
@@ -2546,7 +2643,9 @@ struct MediaPopup::Impl {
                  brushText);
         drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout,
                           snapshotQuoteWidth, snapshotQuoteHeight,
-                          categoryTransitionIdleQuoteScrollOffset);
+                          categoryTransitionIdleQuoteScrollOffset, snapshotSourceLayout,
+                          snapshotSourceWidth, snapshotSourceHeight,
+                          categoryTransitionIdleQuoteSourceScrollOffset);
         drawIdleCopyButton(rt, w, content, false);
         rt->PopAxisAlignedClip();
 
@@ -2554,6 +2653,7 @@ struct MediaPopup::Impl {
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
         drawIdleQuickList(rt, w, layout.listTop, content, false);
         releaseCom(snapshotQuoteLayout);
+        releaseCom(snapshotSourceLayout);
     }
 
     void drawPageContent(ID2D1DeviceContext* rt, float w, PopupPage page, bool oldLayer,
@@ -3353,11 +3453,13 @@ struct MediaPopup::Impl {
             categoryTransitionTitleScrollOffset = titleScrollOffset;
             categoryTransitionArtistScrollOffset = artistScrollOffset;
             categoryTransitionIdleQuoteScrollOffset = idleQuoteScrollOffset;
+            categoryTransitionIdleQuoteSourceScrollOffset = idleQuoteSourceScrollOffset;
             categoryTransitionDirection = categoryDirection(from, target);
         }
         idleContentTransitionActive = false;
         idleScrollOffset = 0.0f;
         idleQuoteScrollOffset = 0.0f;
+        idleQuoteSourceScrollOffset = 0.0f;
         scrollTickMs = 0;
         // 类别转场优先于歌曲横向转场；后续完整帧仍会按最新歌曲状态继续更新。
         songTransitionPending = false;
@@ -4652,6 +4754,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     if (changed) {
         if (quoteChanged) {
             impl_->idleQuoteScrollOffset = 0.0f;
+            impl_->idleQuoteSourceScrollOffset = 0.0f;
             impl_->scrollTickMs = 0;
         }
         if (quoteContentChanged)
