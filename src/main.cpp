@@ -598,7 +598,10 @@ struct App {
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     bool taskbarAllowOverlap_ = false;
     bool taskbarNoSpaceClosePending_ = false;
+    // 任务栏空间不足时自动隐藏；宿主本身继续保留并后台探测空间变化。
     bool taskbarAutoClosedForNoSpace_ = false;
+    bool taskbarSpectrumSuppressedForNoSpace_ = false;
+    bool taskbarSpectrumRestoring_ = false;
     bool taskbarAutoRestorePending_ = false;
     bool taskbarManualOpenPending_ = false;
     // 完全停止模式只是临时隐藏任务栏歌词；退出时按进入前的用户开启状态恢复。
@@ -939,6 +942,8 @@ struct App {
 
     void applySpectrumOn(bool on) {
         spectrumOn_ = taskbarVertical_ ? false : on;
+        if (spectrumOn_)
+            taskbarSpectrumSuppressedForNoSpace_ = false;
         syncSpectrumWithMode();
         logSettingBool(L"spectrum", spectrumOn_);
         saveSettings();
@@ -1066,7 +1071,7 @@ struct App {
     // 低渲染/完全停止/极简模式及竖向任务栏都强制暂停捕获线程。
     void syncSpectrumWithMode() {
         const bool active = spectrumOn_ && !taskbarVertical_ && isNormalRenderMode() &&
-                            taskbarHost != nullptr;
+                            taskbarHost != nullptr && !taskbarSpectrumSuppressedForNoSpace_;
         if (active) {
             SmtcSnapshot snap = monitor.snapshot();
             const wchar_t* processName = spectrumProcessName(snap.player);
@@ -1079,6 +1084,19 @@ struct App {
             if (taskbarHost)
                 taskbarHost->setSpectrumVisible(false);
         }
+    }
+
+    void tryRestoreSpectrumAfterNoSpace() {
+        if (!taskbarSpectrumSuppressedForNoSpace_ || taskbarSpectrumRestoring_ ||
+            !spectrumOn_ || taskbarVertical_ || !isNormalRenderMode() || !taskbarHost)
+            return;
+
+        // 频谱本身会扩大任务栏歌词窗口；恢复空间时先试着恢复用户设置，
+        // 如果再次判定无空间，状态回调会重新保留抑制标记并关闭频谱。
+        taskbarSpectrumRestoring_ = true;
+        taskbarSpectrumSuppressedForNoSpace_ = false;
+        syncSpectrumWithMode();
+        taskbarSpectrumRestoring_ = false;
     }
 
     void syncTaskbarOrientation() {
@@ -2165,12 +2183,33 @@ struct App {
             cancelTaskbarAutoRestore();
             runtime_log::writef(L"[taskbar] auto-restore result=failed");
         }
-        // NoSpace 会在 createTaskbar() 内重新保持定时器，继续等待空间释放。
+        // NoSpace 会保留宿主，由 TaskbarHost 的低频避让探测继续等待空间释放。
     }
 
     TaskbarCreateResult createTaskbar(HINSTANCE inst, bool allowOverlap = false) {
-        if (taskbarHost)
+        if (taskbarHost) {
+            if (!allowOverlap)
+                return TaskbarCreateResult::Created;
+
+            // 空间不足时保留现有宿主和探测线程；用户确认强制开启时，
+            // 直接把同一个宿主切到允许重叠，避免重新创建窗口和等待首次探测。
+            taskbarAllowOverlap_ = true;
+            taskbarAutoClosedForNoSpace_ = false;
+            taskbarSpectrumSuppressedForNoSpace_ = false;
+            cancelTaskbarAutoRestore();
+            taskbarHost->setAllowOverlap(true);
+            const TaskbarPlacementStatus status = taskbarHost->refreshPlacement();
+            if (status == TaskbarPlacementStatus::Unavailable) {
+                taskbarAllowOverlap_ = false;
+                runtime_log::writef(L"[taskbar] forced-open result=unavailable");
+                return TaskbarCreateResult::Failed;
+            }
+            taskbarHost->show();
+            taskbarHost->applyPresentationFrame(currentFrame_);
+            syncSpectrumWithMode();
+            updateTrayIcon();
             return TaskbarCreateResult::Created;
+        }
         auto host = std::make_unique<TaskbarHost>();
         host->setVisibilitySuppressed(true);
         if (!host->create(inst)) {
@@ -2223,6 +2262,7 @@ struct App {
         // 否则 syncHost() 会按默认正常模式先显示一帧，随后才被 setRenderMode() 隐藏。
         host->setRenderMode(renderMode_);
         taskbarHost = std::move(host);
+        taskbarAllowOverlap_ = allowOverlap;
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
@@ -2240,13 +2280,28 @@ struct App {
         applyEffectiveTaskbarSettings();
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
+        taskbarHost->setPlacementStatusCallback(
+            [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
         const TaskbarPlacementStatus placementStatus = taskbarHost->refreshPlacement();
         if (placementStatus == TaskbarPlacementStatus::NoSpace) {
             taskbarAutoClosedForNoSpace_ = true;
-            runtime_log::writef(L"[taskbar] auto-close reason=no-space");
-            destroyTaskbar();
-            if (!allowOverlap)
-                armTaskbarAutoRestore();
+            taskbarSpectrumSuppressedForNoSpace_ = true;
+            spectrum_.stop();
+            const bool wasRestoringSpectrum = taskbarSpectrumRestoring_;
+            taskbarSpectrumRestoring_ = true;
+            taskbarHost->setSpectrumVisible(false);
+            taskbarSpectrumRestoring_ = wasRestoringSpectrum;
+            if (taskbarHost->placementStatus() != TaskbarPlacementStatus::NoSpace) {
+                // 释放频谱占用后已有足够空间，继续保留宿主但不需要进入无空间状态。
+                taskbarAutoClosedForNoSpace_ = false;
+                taskbarSpectrumSuppressedForNoSpace_ = false;
+                cancelTaskbarAutoRestore();
+                updateTrayIcon();
+                return TaskbarCreateResult::Created;
+            }
+            cancelTaskbarAutoRestore();
+            runtime_log::writef(L"[taskbar] auto-hide reason=no-space");
+            updateTrayIcon();
             return TaskbarCreateResult::NoSpace;
         }
         if (placementStatus == TaskbarPlacementStatus::Unavailable) {
@@ -2254,15 +2309,14 @@ struct App {
             destroyTaskbar();
             return TaskbarCreateResult::Failed;
         }
-        taskbarAllowOverlap_ = allowOverlap;
         taskbarAutoClosedForNoSpace_ = false;
         cancelTaskbarAutoRestore();
-        taskbarHost->setPlacementStatusCallback(
-            [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
         // 宿主会在首次避让探测完成后自行解除显示抑制；强制开启仍重新提交当前帧，
         // 确保“开启”选项立即生效而不必等待下一次媒体事件。
-        if (allowOverlap)
+        if (allowOverlap) {
+            taskbarHost->show();
             taskbarHost->applyPresentationFrame(currentFrame_);
+        }
         updateTrayIcon();
         return TaskbarCreateResult::Created;
     }
@@ -2270,6 +2324,8 @@ struct App {
     void destroyTaskbar() {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
         taskbarAllowOverlap_ = false;
+        taskbarSpectrumSuppressedForNoSpace_ = false;
+        taskbarSpectrumRestoring_ = false;
         taskbarNoSpaceClosePending_ = false;
         // 任何销毁路径都结束一次“手动开启待确认”请求，避免旧请求在后续
         // 的自动探测消息中误把自动关闭当成手动开启失败并弹框。
@@ -2321,17 +2377,16 @@ struct App {
                  (!taskbarHost && taskbarAutoClosedForNoSpace_ &&
                   taskbarAutoRestorePending_));
             if (noSpaceAlreadyKnown) {
-                // 无空间状态已经由当前宿主确认，不能再销毁后重新异步探测，
-                // 否则用户刚点击“开启”时提示会被推迟到下一轮探测。
+                // 无空间状态已经由当前宿主确认，保留宿主直接提示；用户确认后
+                // 由 createTaskbar(..., true) 把同一个宿主切换为允许重叠。
                 taskbarAutoClosedForNoSpace_ = true;
-                destroyTaskbar();
-                armTaskbarAutoRestore();
+                cancelTaskbarAutoRestore();
                 showTaskbarSpacePrompt();
                 runtime_log::writef(L"[action][taskbar] toggle result=no-space-prompt");
                 return;
             }
-            // 空间探测刚判定无空间时，宿主会先隐藏，再由托盘消息异步销毁。
-            // 此时菜单已经显示“开启”，先清掉这个残留宿主，再走正常的手动开启流程。
+            // 仅在宿主不是“已确认无空间”的状态下才重建；无空间宿主会保留
+            // 后台探测线程，不走销毁/重建路径。
             if (taskbarHost)
                 destroyTaskbar();
             if (isRenderMode(RenderMode::Stopped)) {
@@ -3756,17 +3811,37 @@ void App::onTaskbarPlacementStatus(TaskbarPlacementStatus status) {
     if (status != TaskbarPlacementStatus::NoSpace) {
         taskbarNoSpaceClosePending_ = false;
         taskbarManualOpenPending_ = false;
+        if (status != TaskbarPlacementStatus::Unavailable) {
+            taskbarAutoClosedForNoSpace_ = false;
+            if (!taskbarSpectrumRestoring_) {
+                if (taskbarSpectrumSuppressedForNoSpace_) {
+                    if (spectrumOn_ && !taskbarVertical_ && isNormalRenderMode())
+                        tryRestoreSpectrumAfterNoSpace();
+                    else
+                        // 频谱因用户设置、竖向任务栏或性能模式关闭时，
+                        // 无需继续保留“空间不足抑制”状态；回到正常模式时
+                        // 由普通同步逻辑按用户设置重新决定是否开启。
+                        taskbarSpectrumSuppressedForNoSpace_ = false;
+                } else if (taskbarHost && !isRenderMode(RenderMode::Stopped))
+                    syncSpectrumWithMode();
+            }
+        }
         return;
     }
     if (!taskbarHost || taskbarAllowOverlap_ || taskbarNoSpaceClosePending_)
         return;
 
-    // TaskbarHost 的状态回调可能来自它自己的 WM_TIMER；延迟到托盘窗口消息中再
-    // 销毁宿主，避免在探测/重排调用栈内释放窗口及其工作线程资源。
+    taskbarAutoClosedForNoSpace_ = true;
+    // 空间不足时只隐藏宿主；后台探测线程继续运行，空间恢复后可直接复用窗口和
+    // 渲染资源。频谱停止和提示处理延迟到托盘消息，避免在探测回调内 join 捕获线程。
+    taskbarSpectrumSuppressedForNoSpace_ = true;
+
+    // 状态回调可能来自 TaskbarHost 的 WM_TIMER；延迟到托盘窗口消息中处理手动
+    // 开启提示，避免在探测/重排调用栈内直接创建模态窗口。
     taskbarNoSpaceClosePending_ = true;
     if (!trayHwnd || !PostMessageW(trayHwnd, kMsgTaskbarNoSpace, 0, 0)) {
         taskbarNoSpaceClosePending_ = false;
-        runtime_log::writef(L"[taskbar] failed to schedule auto-close reason=no-space");
+        runtime_log::writef(L"[taskbar] failed to schedule no-space state handling");
     }
 }
 
@@ -3780,9 +3855,20 @@ void App::handleTaskbarNoSpace() {
         return;
 
     taskbarAutoClosedForNoSpace_ = true;
-    runtime_log::writef(L"[taskbar] auto-close reason=no-space");
-    destroyTaskbar();
-    armTaskbarAutoRestore();
+    spectrum_.stop();
+    const bool wasRestoringSpectrum = taskbarSpectrumRestoring_;
+    taskbarSpectrumRestoring_ = true;
+    taskbarHost->setSpectrumVisible(false);
+    taskbarSpectrumRestoring_ = wasRestoringSpectrum;
+    // 关闭频谱本身可能已经释放了占用空间；此时不再进入无空间处理，
+    // 避免把刚恢复的宿主再次标记为自动隐藏。
+    if (taskbarHost->placementStatus() != TaskbarPlacementStatus::NoSpace) {
+        taskbarAutoClosedForNoSpace_ = false;
+        taskbarSpectrumSuppressedForNoSpace_ = false;
+        return;
+    }
+    cancelTaskbarAutoRestore();
+    runtime_log::writef(L"[taskbar] auto-hide reason=no-space");
     if (shouldPrompt)
         showTaskbarSpacePrompt();
 }

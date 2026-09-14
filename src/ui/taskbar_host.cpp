@@ -39,6 +39,10 @@ constexpr UINT kTimerMs = 16;         // 活动帧最大间隔：60Hz 基准
 constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~125Hz，避免过度唤醒
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr UINT kTaskbarAttachRetryMs = 250;
+constexpr UINT_PTR kPlacementTimerId = 4;
+constexpr UINT kPlacementTimerMs = 500; // 隐藏时只拾取避让结果，不运行完整渲染帧
+constexpr UINT kProbeIntervalMs = 3000;
+constexpr UINT kNoSpaceProbeIntervalMs = 1000;
 constexpr int kSlowTickInterval = 15; // 慢速分支（任务栏位置跟踪等）每 15 帧一次，约 250ms
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 
@@ -396,6 +400,7 @@ struct TaskbarHost::Impl {
     bool visible = false;
     bool timerRunning_ = false;
     UINT timerMs_ = 0; // 当前定时器实际间隔（活动/暂停档位切换用）
+    bool placementTimerRunning_ = false;
     UINT displayRefreshHz_ = 60;
     bool allowOverlap_ = false;
     bool visibilitySuppressed_ = false;
@@ -432,6 +437,7 @@ struct TaskbarHost::Impl {
     };
     std::thread probeThread_;
     std::atomic<bool> probeStop_{false};
+    std::atomic<bool> probeFast_{false};
     std::atomic<ProbeResult*> probeOut_{nullptr};
     std::atomic<HWND> taskbarAtomic_{nullptr}; // taskbar_ 的线程安全副本（探测线程读）
 
@@ -909,7 +915,7 @@ struct TaskbarHost::Impl {
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         if (visibilitySuppressed_ && renderMode_ != static_cast<int>(RenderMode::Stopped))
-            startFrameTimer();
+            startPlacementTimer();
         return true;
     }
 
@@ -946,17 +952,64 @@ struct TaskbarHost::Impl {
         return merged;
     }
 
+    void startPlacementTimer() {
+        if (placementTimerRunning_ || !hwnd ||
+            renderMode_ == static_cast<int>(RenderMode::Stopped))
+            return;
+        if (SetTimer(hwnd, kPlacementTimerId, kPlacementTimerMs, nullptr))
+            placementTimerRunning_ = true;
+    }
+
+    void stopPlacementTimer() {
+        if (placementTimerRunning_ && hwnd)
+            KillTimer(hwnd, kPlacementTimerId);
+        placementTimerRunning_ = false;
+    }
+
+    void resumeAfterPlacementAvailable() {
+        if ((!probeReady_ && !allowOverlap_) ||
+            placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+            placementStatus_ == TaskbarPlacementStatus::Unavailable)
+            return;
+
+        visibilitySuppressed_ = false;
+        probeFast_ = false;
+        stopPlacementTimer();
+        if (sessionVisible_ && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
+            // 隐藏期间不运行完整帧定时器；恢复前补一次播放进度/当前行，
+            // 避免窗口重新出现时先显示旧歌词，等下一帧才追上。
+            if (tick)
+                tick();
+            if (!visible) {
+                visible = true;
+                if (hwnd)
+                    ShowWindow(hwnd, SW_SHOWNA);
+            }
+            startFrameTimer();
+            render();
+        } else if (!visible) {
+            stopFrameTimer();
+        }
+    }
+
     TaskbarPlacementStatus setPlacementStatus(TaskbarPlacementStatus status) {
         if (placementStatus_ == status)
             return status;
+        const TaskbarPlacementStatus previous = placementStatus_;
         placementStatus_ = status;
-        if (status == TaskbarPlacementStatus::NoSpace) {
+        if (status == TaskbarPlacementStatus::NoSpace ||
+            status == TaskbarPlacementStatus::Unavailable) {
+            probeFast_ = status == TaskbarPlacementStatus::NoSpace;
+            startPlacementTimer();
             if (visible) {
                 visible = false;
                 if (hwnd)
                     ShowWindow(hwnd, SW_HIDE);
             }
             stopFrameTimer();
+        } else if (previous == TaskbarPlacementStatus::NoSpace ||
+                   previous == TaskbarPlacementStatus::Unavailable) {
+            resumeAfterPlacementAvailable();
         }
         if (onPlacementStatusChanged_)
             onPlacementStatusChanged_(status);
@@ -964,21 +1017,20 @@ struct TaskbarHost::Impl {
     }
 
     void releaseVisibilitySuppression() {
-        if (!visibilitySuppressed_ || !probeReady_ ||
-            placementStatus_ == TaskbarPlacementStatus::NoSpace ||
-            placementStatus_ == TaskbarPlacementStatus::Unavailable)
+        if (!visibilitySuppressed_ || !probeReady_)
             return;
 
-        visibilitySuppressed_ = false;
-        if (sessionVisible_ && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
-            visible = true;
-            if (hwnd)
-                ShowWindow(hwnd, SW_SHOWNA);
-            startFrameTimer();
-            render();
-        } else if (!visible) {
-            stopFrameTimer();
+        if (placementStatus_ == TaskbarPlacementStatus::NoSpace) {
+            // 首次真实探测已经完成：解除“等待首次结果”的抑制，但仍保持隐藏，
+            // 后续由低频避让计时器等待空间恢复。
+            visibilitySuppressed_ = false;
+            probeFast_ = true;
+            startPlacementTimer();
+            return;
         }
+        if (placementStatus_ == TaskbarPlacementStatus::Unavailable)
+            return;
+        resumeAfterPlacementAvailable();
     }
 
     void setVisibilitySuppressed(bool on) {
@@ -991,7 +1043,7 @@ struct TaskbarHost::Impl {
                     ShowWindow(hwnd, SW_HIDE);
             }
             if (hwnd && renderMode_ != static_cast<int>(RenderMode::Stopped))
-                startFrameTimer();
+                startPlacementTimer();
             return;
         }
 
@@ -1932,6 +1984,10 @@ struct TaskbarHost::Impl {
         }
 
         sessionVisible_ = frame.visible;
+        if (sessionVisible_ && placementStatus_ == TaskbarPlacementStatus::NoSpace)
+            startPlacementTimer();
+        else if (!sessionVisible_)
+            stopPlacementTimer();
         if (frame.visible && renderMode_ != static_cast<int>(RenderMode::Stopped) &&
             !visibilitySuppressed_ &&
             placementStatus_ != TaskbarPlacementStatus::NoSpace &&
@@ -2780,9 +2836,9 @@ struct TaskbarHost::Impl {
 
     // ---------- 避让探测工作线程 ----------
 
-    // 每 3 秒探测一次：TrafficMonitor、酷狗窗口矩形 + UIA 任务栏按钮矩形。
-    // UIA 属性查询由 explorer 的 UI 线程执行，探测越频繁对任务栏的周期性
-    // 打扰越明显；3 秒是避让响应速度与 explorer 负担的折中。
+    // 正常每 3 秒探测一次：TrafficMonitor、酷狗窗口矩形 + UIA 任务栏按钮矩形；
+    // 空间不足隐藏时缩短到 1 秒，尽快发现可恢复空间。UIA 属性查询由 explorer
+    // 的 UI 线程执行，不能跟随歌词帧率高频调用。
     // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
     void probeMain() {
         CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -2798,8 +2854,15 @@ struct TaskbarHost::Impl {
                 queryKugouTaskbarWindows(tb, p->kugouWindows);
                 delete probeOut_.exchange(p); // 上一份未被拾取则丢弃
             }
-            for (int t = 0; t < 30 && !probeStop_.load(); ++t)
+            int elapsed = 0;
+            while (!probeStop_.load()) {
+                const UINT interval = probeFast_.load() ? kNoSpaceProbeIntervalMs
+                                                        : kProbeIntervalMs;
+                if (elapsed >= static_cast<int>(interval))
+                    break;
                 Sleep(100);
+                elapsed += 100;
+            }
         }
         if (uia)
             uia->Release();
@@ -2815,6 +2878,7 @@ struct TaskbarHost::Impl {
 
     void stopProbe() {
         probeStop_ = true;
+        probeFast_ = false;
         if (probeThread_.joinable())
             probeThread_.join();
         delete probeOut_.exchange(nullptr);
@@ -6361,6 +6425,7 @@ struct TaskbarHost::Impl {
             delete probeOut_.exchange(nullptr);
             visible = false;
             stopFrameTimer();
+            stopPlacementTimer();
             if (hwnd)
                 ShowWindow(hwnd, SW_HIDE);
         }
@@ -6409,6 +6474,7 @@ struct TaskbarHost::Impl {
                 if (hwnd)
                     ShowWindow(hwnd, SW_HIDE);
             }
+            stopPlacementTimer();
             releaseAll();
             return;
         }
@@ -6421,7 +6487,7 @@ struct TaskbarHost::Impl {
             }
         }
         if (visibilitySuppressed_ && !timerRunning_)
-            startFrameTimer();
+            startPlacementTimer();
         // 从完全停止恢复：按最近会话可见性立即还原窗口；设备链由 render() 惰性重建
         if (sessionVisible_ && !visible &&
             !visibilitySuppressed_ &&
@@ -6470,6 +6536,24 @@ struct TaskbarHost::Impl {
         return false;
     }
 
+    void processPlacementProbe() {
+        updateDisplayRefresh();
+        const bool probeWasReady = probeReady_;
+        bool changed = detectChanges();
+        if (pickProbeResult())
+            changed = true;
+        if (changed)
+            adjustPosition();
+        if (!probeWasReady && probeReady_) {
+            // 首次真实探测结果到达后再决定是否显示；否则创建期间可能先按
+            // 空占用区显示一帧，随后被 UIA/窗口探测结果立即隐藏而产生闪烁。
+            if (onPlacementStatusChanged_)
+                onPlacementStatusChanged_(placementStatus_);
+        }
+        if (probeReady_)
+            releaseVisibilitySuppression();
+    }
+
     void onTimer() {
         if (tick)
             tick();
@@ -6486,21 +6570,7 @@ struct TaskbarHost::Impl {
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
-            updateDisplayRefresh();
-            const bool probeWasReady = probeReady_;
-            bool changed = detectChanges();
-            if (pickProbeResult())
-                changed = true;
-            if (changed)
-                adjustPosition();
-            if (!probeWasReady && probeReady_) {
-                // 首次真实探测结果到达后再决定是否显示；否则创建期间可能先按
-                // 空占用区显示一帧，随后被 UIA/窗口探测结果立即隐藏而产生闪烁。
-                if (onPlacementStatusChanged_)
-                    onPlacementStatusChanged_(placementStatus_);
-            }
-            if (probeReady_)
-                releaseVisibilitySuppression();
+            processPlacementProbe();
         }
         updateScroll();
         const bool statusCycleCallbackHandled = statusTextCycleCallbackPending_;
@@ -6512,6 +6582,12 @@ struct TaskbarHost::Impl {
         // 静止场景跳过整帧重绘：动画源全部停止且无脏状态时，画面保持上一帧内容
         if (!statusCycleCallbackHandled && needsFrameRender())
             render();
+    }
+
+    void onPlacementTimer() {
+        if (renderMode_ == static_cast<int>(RenderMode::Stopped) || !hwnd)
+            return;
+        processPlacementProbe();
     }
 
     void trackMouseLeave() {
@@ -6534,6 +6610,8 @@ struct TaskbarHost::Impl {
         case WM_TIMER:
             if (wp == kTimerId)
                 onTimer();
+            else if (wp == kPlacementTimerId)
+                onPlacementTimer();
             else if (wp == kTaskbarAttachTimerId)
                 retryTaskbarAttach();
             return 0;
@@ -6621,6 +6699,7 @@ struct TaskbarHost::Impl {
             KillTimer(hwnd, kTaskbarAttachTimerId);
             taskbarEmbedded_ = false;
             stopFrameTimer();
+            stopPlacementTimer();
             stopProbe();
             volumePopup_.destroy();
             mediaPopup.destroy();
@@ -6776,11 +6855,17 @@ const std::vector<LyricLine>& TaskbarHost::lyrics() const {
 }
 
 void TaskbarHost::show() {
-    if (impl_->visibilitySuppressed_)
+    if (impl_->visibilitySuppressed_ && !impl_->allowOverlap_)
         return;
-    if (impl_->placementStatus_ == TaskbarPlacementStatus::NoSpace ||
-        impl_->placementStatus_ == TaskbarPlacementStatus::Unavailable)
+    if ((impl_->placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+         impl_->placementStatus_ == TaskbarPlacementStatus::Unavailable) &&
+        !impl_->allowOverlap_)
         return;
+    if (impl_->allowOverlap_) {
+        impl_->visibilitySuppressed_ = false;
+        impl_->probeFast_ = false;
+        impl_->stopPlacementTimer();
+    }
     if (!impl_->visible) {
         impl_->visible = true;
         ShowWindow(impl_->hwnd, SW_SHOWNA);
