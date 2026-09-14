@@ -2160,6 +2160,12 @@ struct App {
         if (taskbarHost) {
             destroyTaskbar();
         } else {
+            if (isRenderMode(RenderMode::Stopped)) {
+                MessageBoxW(
+                    trayHwnd,
+                    L"当前已开启性能-完全停止模式，如果要显示任务栏歌词，可以在性能设置中选择其他模式",
+                    L"任务栏歌词提示", MB_OK | MB_ICONINFORMATION);
+            }
             createTaskbar(GetModuleHandleW(nullptr));
         }
         runtime_log::writef(L"[action][taskbar] toggle result=%s",
