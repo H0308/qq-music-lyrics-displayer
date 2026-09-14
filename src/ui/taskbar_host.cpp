@@ -4208,29 +4208,82 @@ struct TaskbarHost::Impl {
 
     // 右缘渐隐带画笔：渐隐带完全位于可视区右缘之外（rightEdge 起 extend 宽），
     // 可读区域内文字始终全不透明，只有越过边界的部分向外渐隐
-    ID2D1LinearGradientBrush* lyricRightFadeBrush(float rightEdge, float extend) {
+    ID2D1LinearGradientBrush* ensureLyricRightFadeBrush() {
+        if (lyricRightFadeBrush_)
+            return lyricRightFadeBrush_;
         auto* rt = renderer.renderTarget();
-        if (!rt || extend <= 0.0f)
+        if (!rt)
             return nullptr;
-        if (!lyricRightFadeBrush_) {
-            const D2D1_GRADIENT_STOP stops[2] = {
-                {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f)},
-                {1.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
-            };
-            ID2D1GradientStopCollection* stopCollection = nullptr;
-            if (FAILED(rt->CreateGradientStopCollection(stops, 2, &stopCollection)))
-                return nullptr;
-            const HRESULT hr = rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
-                                                    D2D1::Point2F(1.0f, 0.0f)),
-                D2D1::BrushProperties(), stopCollection, &lyricRightFadeBrush_);
-            stopCollection->Release();
-            if (FAILED(hr))
-                return nullptr;
-        }
-        lyricRightFadeBrush_->SetStartPoint(D2D1::Point2F(rightEdge, 0.0f));
-        lyricRightFadeBrush_->SetEndPoint(D2D1::Point2F(rightEdge + extend, 0.0f));
-        return lyricRightFadeBrush_;
+        const D2D1_GRADIENT_STOP stops[2] = {
+            {0.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f)},
+            {1.0f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f)},
+        };
+        ID2D1GradientStopCollection* stopCollection = nullptr;
+        if (FAILED(rt->CreateGradientStopCollection(stops, 2, &stopCollection)))
+            return nullptr;
+        const HRESULT hr = rt->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                D2D1::Point2F(1.0f, 0.0f)),
+            D2D1::BrushProperties(), stopCollection, &lyricRightFadeBrush_);
+        stopCollection->Release();
+        return FAILED(hr) ? nullptr : lyricRightFadeBrush_;
+    }
+
+    ID2D1LinearGradientBrush* lyricRightFadeBrush(float rightEdge, float extend) {
+        ID2D1LinearGradientBrush* brush = ensureLyricRightFadeBrush();
+        if (!brush || extend <= 0.0f)
+            return nullptr;
+        brush->SetStartPoint(D2D1::Point2F(rightEdge, 0.0f));
+        brush->SetEndPoint(D2D1::Point2F(rightEdge + extend, 0.0f));
+        return brush;
+    }
+
+    // 竖排滚动文本的两侧渐隐几何。竖排跑马灯向下滚动（offset > 0）：内容从底部
+    // 滚出、顶部滚入；逐字跟随向上回收（offset < 0）：从顶部滚出、底部滚入。
+    // 与横向同一套语义：滚出侧在区域内渐隐（带宽随滚出量从 0 建立；每日一言这类
+    // 内容确定的无限循环跑马灯恒定保持，避免绕回时渐隐消失再出现），滚入侧借位
+    // 到可视区外渐隐，可读区域内文字始终全不透明
+    struct VerticalEdgeFades {
+        float outBand = 0.0f;   // 滚出侧区域内渐隐带宽，0 表示不渐隐
+        bool outAtTop = false;  // 滚出侧是否在可视区顶部
+        bool borrow = false;    // 滚入侧是否启用借位渐隐
+        bool borrowAtTop = false; // 滚入侧是否在可视区顶部
+    };
+
+    VerticalEdgeFades verticalEdgeFades(float offset, float contentH, float areaH,
+                                        bool karaoke, bool constantEdgeFade) const {
+        VerticalEdgeFades fades;
+        if (contentH <= areaH || areaH <= 0.0f)
+            return fades;
+        const float fadeH = std::min(kLyricEdgeFadeDip, areaH * 0.25f);
+        fades.outAtTop = offset < 0.0f;
+        fades.outBand =
+            constantEdgeFade ? fadeH : std::min(std::fabs(offset), fadeH);
+        fades.borrow = true;
+        fades.borrowAtTop = !karaoke && offset >= 0.0f;
+        return fades;
+    }
+
+    // 竖排滚出侧渐隐画笔：复用横向左缘画笔（停止点 0=透明 1=不透明），
+    // 每帧改设竖向渐变轴；边界处透明度恒为 0，半截字符不会在边界留下亮线
+    ID2D1LinearGradientBrush* verticalOutFadeBrush(float edgeY, float band, bool atTop) {
+        ID2D1LinearGradientBrush* brush = ensureLyricEdgeFadeBrush();
+        if (!brush || band <= 0.0f)
+            return nullptr;
+        brush->SetStartPoint(D2D1::Point2F(0.0f, edgeY));
+        brush->SetEndPoint(D2D1::Point2F(0.0f, atTop ? edgeY + band : edgeY - band));
+        return brush;
+    }
+
+    // 竖排滚入侧借位渐隐画笔：复用横向右缘画笔（停止点 0=不透明 1=透明），
+    // 渐隐带完全位于可视区之外（edgeY 起向外 extend 宽）
+    ID2D1LinearGradientBrush* verticalBorrowFadeBrush(float edgeY, float extend, bool atTop) {
+        ID2D1LinearGradientBrush* brush = ensureLyricRightFadeBrush();
+        if (!brush || extend <= 0.0f)
+            return nullptr;
+        brush->SetStartPoint(D2D1::Point2F(0.0f, edgeY));
+        brush->SetEndPoint(D2D1::Point2F(0.0f, atTop ? edgeY - extend : edgeY + extend));
+        return brush;
     }
 
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
@@ -4389,7 +4442,8 @@ struct TaskbarHost::Impl {
         ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
         float karaokeX = 0.0f, float opacity = 1.0f,
         LyricAlignment alignment = LyricAlignment::Center, bool singleCopy = false,
-        bool rotated = false) {
+        bool rotated = false, float topExtend = 0.0f, float bottomExtend = 0.0f,
+        bool constantEdgeFade = false, bool skipSlotClip = false, float slotY = -1.0f) {
         auto* rt = renderer.renderTarget();
         if (!rt || !layout || textW <= 0.0f || textH <= 0.0f || areaH <= 0.0f)
             return;
@@ -4423,8 +4477,54 @@ struct TaskbarHost::Impl {
             changed[changedCount++] = candidate;
         }
 
-        rt->PushAxisAlignedClip(D2D1::RectF(x, y, x + textW, y + areaH),
-                                D2D1_ANTIALIAS_MODE_ALIASED);
+        // 两侧渐隐：滚出侧在区域内按滚出量建立渐隐带，滚入侧借位到可视区外。
+        // skipSlotClip 时由调用方（多段竖排歌词）统一裁剪与渐隐。
+        // 裁剪与渐隐锚定歌词槽（slotY，转场期间文字随 oldY/newY 移动但槽不动），
+        // 避免滑出/滑入的文字飘到封面等区域
+        const float slotTop = slotY >= 0.0f ? slotY : y;
+        const VerticalEdgeFades fades =
+            skipSlotClip ? VerticalEdgeFades{}
+                         : verticalEdgeFades(offset, textH, areaH, karaokeBrush != nullptr,
+                                             constantEdgeFade);
+        const float topExt = fades.borrow && fades.borrowAtTop ? topExtend : 0.0f;
+        const float bottomExt = fades.borrow && !fades.borrowAtTop ? bottomExtend : 0.0f;
+        ID2D1LinearGradientBrush* borrowFade =
+            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_
+                ? verticalBorrowFadeBrush(fades.borrowAtTop ? slotTop : slotTop + areaH,
+                                          fades.borrowAtTop ? topExt : bottomExt,
+                                          fades.borrowAtTop)
+                : nullptr;
+        ID2D1LinearGradientBrush* outFade =
+            fades.outBand > 0.0f && lyricEdgeFadeLayer_
+                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH,
+                                       fades.outBand, fades.outAtTop)
+                : nullptr;
+        const D2D1_RECT_F clip{x, slotTop - topExt, x + textW, slotTop + areaH + bottomExt};
+        enum class ClipMode { kNone, kClip, kOutLayer, kBorrowLayer, kBothLayers };
+        ClipMode clipMode = ClipMode::kNone;
+        if (!skipSlotClip) {
+            if (borrowFade) {
+                rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                     borrowFade),
+                              lyricRightFadeLayer_);
+                clipMode = ClipMode::kBorrowLayer;
+            }
+            if (outFade) {
+                rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                     outFade),
+                              lyricEdgeFadeLayer_);
+                clipMode = clipMode == ClipMode::kBorrowLayer ? ClipMode::kBothLayers
+                                                              : ClipMode::kOutLayer;
+            }
+            if (clipMode == ClipMode::kNone) {
+                rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+                clipMode = ClipMode::kClip;
+            }
+        }
         // 两侧统一从上向下滚动。第二份副本放在前一份上方，确保内容离开底部
         // 后从顶部无缝接回，而不会因为右侧任务栏的文字顺序而反向上跑。
         const float base = y + offset;
@@ -4520,7 +4620,12 @@ struct TaskbarHost::Impl {
                 rt->PopAxisAlignedClip();
             }
         }
-        rt->PopAxisAlignedClip();
+        if (clipMode == ClipMode::kOutLayer || clipMode == ClipMode::kBothLayers)
+            rt->PopLayer();
+        if (clipMode == ClipMode::kBorrowLayer || clipMode == ClipMode::kBothLayers)
+            rt->PopLayer();
+        if (clipMode == ClipMode::kClip)
+            rt->PopAxisAlignedClip();
         for (int i = 0; i < changedCount; ++i)
             changed[i]->SetOpacity(previousOpacity[i]);
         if (fxBmp)
@@ -4533,9 +4638,56 @@ struct TaskbarHost::Impl {
                                 ID2D1Brush* glow = nullptr,
                                 ID2D1Brush* karaokeBrush = nullptr,
                                 float karaokeProgress = 0.0f, float opacity = 1.0f,
-                                bool singleCopy = false) {
-        if (!renderer.renderTarget() || parts.empty() || blockH <= 0.0f || areaH <= 0.0f)
+                                bool singleCopy = false, float topExtend = 0.0f,
+                                float bottomExtend = 0.0f, bool constantEdgeFade = false,
+                                float slotY = -1.0f) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || parts.empty() || blockH <= 0.0f || areaH <= 0.0f)
             return;
+
+        // 多段布局的两侧渐隐在整组内容上统一施加，避免每个分段各自渐隐；
+        // 分段内部不再单独裁剪，裁剪由此处的图层/裁剪范围承担。
+        // 裁剪与渐隐锚定歌词槽（slotY），转场期间文字随动画移动但槽不动
+        const float slotTop = slotY >= 0.0f ? slotY : y;
+        const VerticalEdgeFades fades =
+            verticalEdgeFades(offset, blockH, areaH, karaokeBrush != nullptr, constantEdgeFade);
+        const float topExt = fades.borrow && fades.borrowAtTop ? topExtend : 0.0f;
+        const float bottomExt = fades.borrow && !fades.borrowAtTop ? bottomExtend : 0.0f;
+        ID2D1LinearGradientBrush* borrowFade =
+            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_
+                ? verticalBorrowFadeBrush(fades.borrowAtTop ? slotTop : slotTop + areaH,
+                                          fades.borrowAtTop ? topExt : bottomExt,
+                                          fades.borrowAtTop)
+                : nullptr;
+        ID2D1LinearGradientBrush* outFade =
+            fades.outBand > 0.0f && lyricEdgeFadeLayer_
+                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH,
+                                       fades.outBand, fades.outAtTop)
+                : nullptr;
+        const D2D1_RECT_F clip{0.0f, slotTop - topExt, railW, slotTop + areaH + bottomExt};
+        bool pushedBorrow = false;
+        bool pushedOut = false;
+        bool pushedClip = false;
+        if (borrowFade) {
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                 borrowFade),
+                          lyricRightFadeLayer_);
+            pushedBorrow = true;
+        }
+        if (outFade) {
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
+                                                 outFade),
+                          lyricEdgeFadeLayer_);
+            pushedOut = true;
+        }
+        if (!pushedBorrow && !pushedOut) {
+            rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            pushedClip = true;
+        }
 
         const float progress = std::clamp(karaokeProgress, 0.0f, 1.0f);
         const float sungExtent = blockH * progress;
@@ -4560,11 +4712,18 @@ struct TaskbarHost::Impl {
                 drawVerticalScrollingText(
                     part.layout, part.width, part.height, areaH, partX, partTop, 0.0f, brush,
                     outline, glow, partKaraoke, partProgress, opacity, LyricAlignment::Center,
-                    true, part.rotated);
+                    true, part.rotated, 0.0f, 0.0f, false, true);
                 partTop += part.height;
                 partOffset += part.height;
             }
         }
+
+        if (pushedOut)
+            rt->PopLayer();
+        if (pushedBorrow)
+            rt->PopLayer();
+        if (pushedClip)
+            rt->PopAxisAlignedClip();
     }
 
     void drawVerticalLyrics(const VerticalLayout& layout) {
@@ -4601,10 +4760,15 @@ struct TaskbarHost::Impl {
                             float textH, float y, float offset, ID2D1Brush* brush, float opacity,
                             bool singleCopy, bool rotated, ID2D1Brush* outline,
                             ID2D1Brush* glow, ID2D1Brush* karaokeBrush,
-                            float karaokeProgress) {
+                            float karaokeProgress, bool constantFade) {
+            // 滚入侧借位宽度：与竖排各区间距一致（封面与歌词间、歌词与底部/控件间
+            // 均为 6 dip 或窗口边缘内边距），渐隐带不外溢到封面/控件上。
+            // slotY 始终传歌词槽顶：转场期间 y 随动画移动，但裁剪/渐隐锚定歌词槽
             if (parts && !parts->empty()) {
                 drawVerticalLyricParts(*parts, textH, areaH, layout.w, y, offset, brush, outline,
-                                       glow, karaokeBrush, karaokeProgress, opacity, singleCopy);
+                                       glow, karaokeBrush, karaokeProgress, opacity, singleCopy,
+                                       kVerticalLyricGap, kVerticalLyricGap, constantFade,
+                                       layout.lyricY);
                 return;
             }
             // 旋转英文的实际横向宽度通常小于任务栏槽宽，单独居中，避免整句贴在
@@ -4612,7 +4776,8 @@ struct TaskbarHost::Impl {
             const float textX = rotated ? (layout.w - textW) * 0.5f : 0.0f;
             drawVerticalScrollingText(textLayout, textW, textH, areaH, textX, y, offset, brush,
                                       outline, glow, karaokeBrush, karaokeProgress, opacity,
-                                      alignment, singleCopy, rotated);
+                                      alignment, singleCopy, rotated, kVerticalLyricGap,
+                                      kVerticalLyricGap, constantFade, false, layout.lyricY);
         };
 
         auto verticalKaraokeProgress = [&](float karaokeX) {
@@ -4621,8 +4786,8 @@ struct TaskbarHost::Impl {
                        : 0.0f;
         };
 
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, layout.lyricY, layout.w, layout.lyricBottom),
-                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        // 不再使用整段统一裁剪：各绘制路径自带裁剪/渐隐图层，滚入侧借位内容
+        // 需要画出可视槽之外才能形成渐隐带
         if (lyricTransitionActive_ &&
             (outgoingVerticalLyricLayout_ || !outgoingVerticalLyricParts_.empty())) {
             const LyricTransitionSample transition = lyricTransitionSample();
@@ -4636,7 +4801,7 @@ struct TaskbarHost::Impl {
                      outgoingVerticalLyricHeight_, oldY, outgoingLyricScrollOffset_,
                      outgoingBrush, 1.0f - transition.fadeOut, true,
                      outgoingVerticalLyricRotated_, outgoingOutline, outgoingGlow, nullptr,
-                     0.0f);
+                     0.0f, outgoingIdleScene);
 
             const LyricLine* incomingLine = !idleScene ? karaokeLine() : nullptr;
             const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
@@ -4648,7 +4813,7 @@ struct TaskbarHost::Impl {
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
                      transition.fadeIn, true, verticalLyricRotated_, effectOutline, effectGlow,
                      incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
-                     verticalKaraokeProgress(incomingKaraokeX));
+                     verticalKaraokeProgress(incomingKaraokeX), idleScene);
         } else if (verticalLyricLayout_ || !verticalLyricParts_.empty()) {
             const LyricLine* currentLine = !idleScene ? karaokeLine() : nullptr;
             const bool karaoke = currentLine && brushLyric_ && brushLyricDim_;
@@ -4659,9 +4824,8 @@ struct TaskbarHost::Impl {
                      karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
                      1.0f, false, verticalLyricRotated_, effectOutline, effectGlow,
                      karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
-                     verticalKaraokeProgress(karaokeX));
+                     verticalKaraokeProgress(karaokeX), idleScene);
         }
-        rt->PopAxisAlignedClip();
     }
 
     LyricAlignment activeLyricAlignment() const {
