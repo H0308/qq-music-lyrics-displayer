@@ -36,6 +36,7 @@ constexpr float kCoverLeftDip = 8.0f;
 constexpr float kCoverTopDip = 8.0f;
 constexpr float kTextLeftDip = 50.0f;
 constexpr float kTextRightPaddingDip = 16.0f;
+constexpr float kTextEdgeFadeDip = 8.0f;
 constexpr float kTextGapDip = 2.0f;
 // 封面右下角的来源应用角标：跨出封面边缘 2px，固定显示不提供开关
 constexpr float kBadgeSizeDip = 14.0f;
@@ -144,6 +145,8 @@ struct SongToast::Impl {
     ID2D1SolidColorBrush* brushText = nullptr;
     ID2D1SolidColorBrush* brushSecondary = nullptr;
     ID2D1SolidColorBrush* brushControl = nullptr;
+    ID2D1LinearGradientBrush* brushTextEdgeFade = nullptr;
+    ID2D1Layer* textEdgeFadeLayer = nullptr;
 
     IDWriteTextFormat* fmtTitle = nullptr;
     IDWriteTextFormat* fmtArtist = nullptr;
@@ -292,6 +295,8 @@ struct SongToast::Impl {
         releaseCom(brushText);
         releaseCom(brushSecondary);
         releaseCom(brushControl);
+        releaseCom(brushTextEdgeFade);
+        releaseCom(textEdgeFadeLayer);
         releaseCom(titleLayout);
         releaseCom(artistLayout);
         titleWidth = 0.0f;
@@ -358,6 +363,33 @@ struct SongToast::Impl {
             FAILED(rt->CreateLayer(&coverLayer))) {
             releaseDrawingResources();
             return false;
+        }
+
+        // 歌曲信息滚动时，左右各 8 DIP 逐渐淡出；使用图层透明度遮罩，
+        // 不会把动态背景覆盖成固定颜色。短文本不滚动时不启用该遮罩。
+        const float textAreaWidth =
+            std::max(1.0f, kToastWidthDip - kTextLeftDip - kTextRightPaddingDip);
+        const float fadeStop = std::min(0.5f, kTextEdgeFadeDip / textAreaWidth);
+        const D2D1_GRADIENT_STOP fadeStops[] = {
+            {0.0f, D2D1::ColorF(D2D1::ColorF::White, 0.0f)},
+            {fadeStop, D2D1::ColorF(D2D1::ColorF::White, 1.0f)},
+            {1.0f - fadeStop, D2D1::ColorF(D2D1::ColorF::White, 1.0f)},
+            {1.0f, D2D1::ColorF(D2D1::ColorF::White, 0.0f)},
+        };
+        ID2D1GradientStopCollection* fadeCollection = nullptr;
+        if (SUCCEEDED(rt->CreateGradientStopCollection(fadeStops, _countof(fadeStops),
+                                                        &fadeCollection)) &&
+            fadeCollection) {
+            const auto gradient = D2D1::LinearGradientBrushProperties(
+                D2D1::Point2F(kTextLeftDip, 0.0f),
+                D2D1::Point2F(kToastWidthDip - kTextRightPaddingDip, 0.0f));
+            if (FAILED(rt->CreateLinearGradientBrush(gradient, fadeCollection,
+                                                     &brushTextEdgeFade)) ||
+                FAILED(rt->CreateLayer(&textEdgeFadeLayer))) {
+                releaseCom(brushTextEdgeFade);
+                releaseCom(textEdgeFadeLayer);
+            }
+            fadeCollection->Release();
         }
 
         themeDirty = false;
@@ -669,12 +701,22 @@ struct SongToast::Impl {
         const float bases[2] = {rect.left - offset, rect.left - offset + loopWidth};
         const int count = scrolling ? 2 : 1;
 
+        const bool useEdgeFade = scrolling && brushTextEdgeFade && textEdgeFadeLayer;
+        if (useEdgeFade) {
+            rt->PushLayer(
+                D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr,
+                                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                        D2D1::Matrix3x2F::Identity(), 1.0f, brushTextEdgeFade),
+                textEdgeFadeLayer);
+        }
         rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
         for (int i = 0; i < count; ++i) {
             const float x = scrolling ? bases[i] : rect.left;
             rt->DrawTextLayout(D2D1::Point2F(x, y), layout, brush);
         }
         rt->PopAxisAlignedClip();
+        if (useEdgeFade)
+            rt->PopLayer();
     }
 
     bool render() {
