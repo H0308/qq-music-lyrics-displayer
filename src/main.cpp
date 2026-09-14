@@ -95,8 +95,8 @@ constexpr UINT kCmdTaskbarPosLeft = 110;
 constexpr UINT kCmdSpectrum = 111;
 constexpr UINT kCmdAutoStart = 112;
 constexpr UINT kCmdFollowAlbum = 113;
-constexpr UINT kCmdSecondaryLyric = 114;
-constexpr UINT kCmdSwitchSecondaryLyric = 115;
+constexpr UINT kCmdSecondaryTranslation = 114;
+constexpr UINT kCmdSecondaryRomanization = 115;
 constexpr UINT kCmdSongInfo = 116;
 constexpr UINT kCmdAlbumCover = 117;
 constexpr UINT kCmdAlbumCoverEffectDefault = 118;
@@ -115,6 +115,7 @@ constexpr UINT kCmdRenderModeNormal = 130;
 constexpr UINT kCmdRenderModeLow = 131;
 constexpr UINT kCmdRenderModeStopped = 132;
 constexpr UINT kCmdRenderModeMinimal = 133;
+constexpr UINT kCmdSecondaryOff = 134;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
@@ -128,8 +129,8 @@ const wchar_t* trayCommandName(int command) {
     case kCmdSpectrum: return L"spectrum";
     case kCmdAutoStart: return L"autostart";
     case kCmdFollowAlbum: return L"follow-album";
-    case kCmdSecondaryLyric: return L"secondary-lyric";
-    case kCmdSwitchSecondaryLyric: return L"switch-secondary-lyric";
+    case kCmdSecondaryTranslation: return L"secondary-translation";
+    case kCmdSecondaryRomanization: return L"secondary-romanization";
     case kCmdSongInfo: return L"song-info";
     case kCmdAlbumCover: return L"album-cover";
     case kCmdAlbumCoverEffectDefault: return L"album-cover-effect-default";
@@ -148,6 +149,7 @@ const wchar_t* trayCommandName(int command) {
     case kCmdRenderModeLow: return L"render-mode-low";
     case kCmdRenderModeStopped: return L"render-mode-stopped";
     case kCmdRenderModeMinimal: return L"render-mode-minimal";
+    case kCmdSecondaryOff: return L"secondary-off";
     case kCmdPickFont: return L"pick-font";
     case kCmdFontColorEffect: return L"font-color-effect";
     case kCmdManualSearch: return L"manual-search";
@@ -1365,6 +1367,8 @@ struct App {
     void applySecondaryEnabled(bool on) {
         secondaryLyricEnabled_ = on;
         applySecondaryLyricMode();
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
         logSettingBool(L"secondary-lyrics", on);
         saveSettings();
     }
@@ -1372,7 +1376,21 @@ struct App {
     void applyPreferRomanization(bool on) {
         preferRomanization_ = on;
         applySecondaryLyricMode();
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
         logSettingBool(L"prefer-romanization", on);
+        saveSettings();
+    }
+
+    void applySecondaryChoice(bool romanization) {
+        // 从右键菜单选择具体类型同时代表开启辅助歌词，避免关闭后菜单只能停留在关闭状态。
+        secondaryLyricEnabled_ = true;
+        preferRomanization_ = romanization;
+        applySecondaryLyricMode();
+        if (settingsDialog && settingsDialog->isOpen())
+            settingsDialog->updateState(currentSettingsState());
+        logSettingBool(L"secondary-lyrics", true);
+        logSettingBool(L"prefer-romanization", romanization);
         saveSettings();
     }
 
@@ -3976,6 +3994,28 @@ void App::showTrayMenu() {
         addItem(kCmdSwitchLyricSource,
                 currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词");
     }
+    if (currentHasTranslation_ || currentHasRomanization_) {
+        fluent::FluentMenuItem secondary;
+        secondary.text = L"辅助歌词";
+        fluent::FluentMenuItem translation;
+        translation.id = kCmdSecondaryTranslation;
+        translation.text = L"翻译";
+        translation.checked = secondaryLyricEnabled_ && !preferRomanization_;
+        secondary.submenu.push_back(std::move(translation));
+
+        fluent::FluentMenuItem romanization;
+        romanization.id = kCmdSecondaryRomanization;
+        romanization.text = L"罗马音";
+        romanization.checked = secondaryLyricEnabled_ && preferRomanization_;
+        secondary.submenu.push_back(std::move(romanization));
+
+        fluent::FluentMenuItem secondaryOff;
+        secondaryOff.id = kCmdSecondaryOff;
+        secondaryOff.text = L"关闭显示辅助歌词";
+        secondaryOff.checked = !secondaryLyricEnabled_;
+        secondary.submenu.push_back(std::move(secondaryOff));
+        items.push_back(std::move(secondary));
+    }
     addSeparator();
     addItem(kCmdRuntimeLog, L"运行日志");
     // 其余设置项集中到设置页
@@ -4045,8 +4085,11 @@ void App::onMenuCommand(int cmd) {
     case kCmdRuntimeLog:
         showRuntimeLog();
         break;
-    case kCmdSecondaryLyric:
-        applySecondaryEnabled(!secondaryLyricEnabled_);
+    case kCmdSecondaryTranslation:
+        applySecondaryChoice(false);
+        break;
+    case kCmdSecondaryOff:
+        applySecondaryEnabled(false);
         break;
     case kCmdDoubleLineLyrics:
         applyDoubleLineLyrics(!doubleLineLyricsEnabled_);
@@ -4069,8 +4112,8 @@ void App::onMenuCommand(int cmd) {
     case kCmdAlbumCoverEffectVinyl:
         applyCoverEffect(cmd == kCmdAlbumCoverEffectVinyl);
         break;
-    case kCmdSwitchSecondaryLyric:
-        applyPreferRomanization(!preferRomanization_);
+    case kCmdSecondaryRomanization:
+        applySecondaryChoice(true);
         break;
     case kCmdSettings:
         showSettings();
