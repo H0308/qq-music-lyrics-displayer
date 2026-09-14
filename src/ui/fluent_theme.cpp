@@ -30,8 +30,6 @@ namespace {
 constexpr int kDwmWcpRound = 2;      // DWMWCP_ROUND
 constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
 constexpr int kDwmsbtNone = 1;       // DWMSBT_NONE
-constexpr int kDwmsbtMainWindow = 2;      // DWMSBT_MAINWINDOW (Mica)
-constexpr int kDwmsbtTransientWindow = 3; // DWMSBT_TRANSIENTWINDOW (Acrylic)
 
 ThemeMode gTaskbarThemeMode = ThemeMode::FollowSystem;
 ThemeMode gWindowThemeMode = ThemeMode::FollowApp;
@@ -162,7 +160,7 @@ Palette makeLight() {
     p.text = toD2D(RGB(26, 26, 26));
     p.textSecondary = toD2D(RGB(96, 96, 96));
     p.disabled = toD2D(RGB(160, 160, 160));
-    // 提高表面层级对比，让 Mica 背景、卡片和控件在桌面窗口中清晰分层。
+    // 提高表面层级对比，让窗口底色、卡片和控件在桌面窗口中清晰分层。
     p.cardFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.78f);
     p.cardStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f);
     p.windowBg = toD2D(RGB(243, 243, 243));
@@ -281,12 +279,6 @@ void applyRoundCorners(HWND hwnd, bool smallCorners) {
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
 }
 
-bool applyBackdrop(HWND hwnd, bool transientWindow) {
-    int type = transientWindow ? kDwmsbtTransientWindow : kDwmsbtMainWindow;
-    return SUCCEEDED(
-        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type)));
-}
-
 void clearBackdrop(HWND hwnd) {
     int type = kDwmsbtNone;
     DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type));
@@ -308,36 +300,20 @@ void suppressBorder(HWND hwnd) {
 }
 
 bool styleDialogWindow(HWND hwnd, bool transientWindow) {
+    (void)transientWindow;
     applyRoundCorners(hwnd, false);
     const bool dark = isDarkMode(ThemeTarget::Window);
     applyDarkCaption(hwnd, dark);
-    // 可调大小的自绘窗口必须使用不透明的应用背景。透明的 DWM 重定向表面在客户区
-    // 改变尺寸时可能保留旧表面的范围，新增区域会露出黑色；同时也会让父背景和分层
-    // 子控件不在同一帧更新。固定尺寸窗口仍保留系统材质，只有这里的窗口走确定性的
-    // paintDialogBackground()/Palette::windowBg 路径。
-    const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
-    const bool resizable = (style & WS_THICKFRAME) != 0;
-    const bool themeMismatch = dark != detectSystemDarkMode();
-    bool applied = false;
-    if (!resizable && !(transientWindow && (dark || themeMismatch)))
-        applied = applyBackdrop(hwnd, transientWindow);
-
-    if (!applied)
-        clearBackdrop(hwnd);
-
-    InvalidateRect(hwnd, nullptr, applied ? FALSE : TRUE);
-    return applied;
+    // 所有普通对话框统一使用当前主题的实色客户区，避免 DWM 材质在重绘、DPI
+    // 切换或分层子控件更新时产生透明残留和背景不同步。
+    clearBackdrop(hwnd);
+    InvalidateRect(hwnd, nullptr, TRUE);
+    return false;
 }
 
 bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow) {
-    bool applied = styleDialogWindow(hwnd, transientWindow);
-    // 从不透明自绘切换到 DWM 材质：GDI 画过的像素不会因不再绘制而消失，
-    // 隐藏再显示让 DWM 重建透明表面，材质才能透出。
-    if (applied && !oldBackdrop && IsWindowVisible(hwnd)) {
-        ShowWindow(hwnd, SW_HIDE);
-        ShowWindow(hwnd, SW_SHOW);
-    }
-    return applied;
+    (void)oldBackdrop;
+    return styleDialogWindow(hwnd, transientWindow);
 }
 
 COLORREF fallbackBgColor() {
@@ -345,10 +321,7 @@ COLORREF fallbackBgColor() {
 }
 
 void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop) {
-    // 只要系统材质已应用，就不能用 GDI 纯色覆盖 DWM 背景；
-    // 无材质时才绘制首帧回退底色。
-    if (backdrop)
-        return;
+    (void)backdrop;
 
     RECT rc{};
     GetClientRect(hwnd, &rc);

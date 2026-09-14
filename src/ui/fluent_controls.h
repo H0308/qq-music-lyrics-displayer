@@ -11,7 +11,7 @@
 #include <vector>
 
 // Win11 Fluent 风格的自绘控件，全部为 WS_EX_LAYERED 子窗口，
-// 用 D2D 渲染并逐像素透明叠加在 Mica/亚克力背景上。
+// 用 D2D 渲染并逐像素叠加在对话框实色背景上。
 namespace fluent {
 
 // 分层子窗口基座：窗口创建、D2D 帧管理（beginFrame/endFrame）
@@ -169,7 +169,7 @@ private:
     bool tipArmed_ = false; // 悬浮计时中（尚未弹出）
 };
 
-// 非交互的半透明卡片表面，用于把一组相关设置从 Mica 背景中分离出来。
+// 非交互的卡片表面，用于把一组相关设置从窗口底色中分离出来。
 class FluentCard : public LayeredChild {
 public:
     bool create(HWND parent, int id);
@@ -179,7 +179,7 @@ private:
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
 
-// 透明文本标签，直接绘制在 Mica 背景上
+// 文本标签，直接绘制在窗口背景上
 class FluentLabel : public LayeredChild {
 public:
     bool create(HWND parent, int id, const wchar_t* text, bool secondary = false,

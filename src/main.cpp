@@ -16,6 +16,7 @@
 #include "ui/song_toast.h"
 #include "ui/runtime_log_dialog.h"
 #include "ui/dialog_notify.h"
+#include "ui/message_dialog.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_menu.h"
 #include "ui/fluent_theme.h"
@@ -2311,10 +2312,10 @@ struct App {
             if (taskbarHost)
                 destroyTaskbar();
             if (isRenderMode(RenderMode::Stopped)) {
-                MessageBoxW(
-                    trayHwnd,
+                message_dialog::showModal(
+                    GetModuleHandleW(nullptr), trayHwnd, L"任务栏歌词提示",
                     L"当前已开启性能-完全停止模式，如果要显示任务栏歌词，可以在性能设置中选择其他模式",
-                    L"任务栏歌词提示", MB_OK | MB_ICONINFORMATION);
+                    L"确定");
                 runtime_log::writef(L"[action][taskbar] toggle result=stopped");
                 return;
             }
@@ -3824,12 +3825,12 @@ void App::showTaskbarSpacePrompt() {
     // 系统模态框自带标准按钮和关闭行为；显示期间暂停自动恢复定时器，
     // 避免用户尚未选择时后台又创建宿主并改变当前状态。
     cancelTaskbarAutoRestore();
-    const int result = MessageBoxW(
-        trayHwnd,
+    const message_dialog::Result result = message_dialog::showModal(
+        GetModuleHandleW(nullptr), trayHwnd, L"任务栏歌词提示",
         L"当前任务栏可用空间不足，开启任务栏歌词可能遮挡任务栏按钮并影响正常使用。\n\n"
         L"是否仍要开启任务栏歌词？",
-        L"任务栏歌词提示", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2 | MB_SETFOREGROUND);
-    if (result == IDYES) {
+        L"开启", L"取消开启", false);
+    if (result == message_dialog::Result::Primary) {
         const TaskbarCreateResult createResult = createTaskbar(GetModuleHandleW(nullptr), true);
         if (createResult == TaskbarCreateResult::Failed)
             runtime_log::writef(L"[action][taskbar] forced-open result=failed");
@@ -4843,8 +4844,9 @@ int main() {
     HANDLE singleInstance = CreateMutexW(nullptr, TRUE,
         L"Local\\QQMusicLyric.SingleInstance.{7E3A9C41-2B5D-4F1E-9A6C-0D8B3E5F2A74}");
     if (singleInstance && GetLastError() == ERROR_ALREADY_EXISTS) {
-        MessageBoxW(nullptr, L"QQ 音乐任务栏歌词已在运行中，请勿重复启动。",
-            L"QQ 音乐任务栏歌词", MB_OK | MB_ICONINFORMATION);
+        message_dialog::showModal(GetModuleHandleW(nullptr), nullptr,
+                                  L"QQ 音乐任务栏歌词",
+                                  L"QQ 音乐任务栏歌词已在运行中，请勿重复启动。", L"确定");
         CloseHandle(singleInstance);
         return 0;
     }

@@ -7,7 +7,7 @@
 #include <string>
 
 // Win11 Fluent 风格主题支持：
-// 系统深/浅色检测、DWM 圆角/Mica/深色标题栏、统一调色板与字体。
+// 系统深/浅色检测、DWM 圆角/深色标题栏、统一调色板与字体。
 namespace fluent {
 
 // 主题跟随来源：系统模式读取 SystemUsesLightTheme，应用模式读取
@@ -54,10 +54,10 @@ struct Palette {
     D2D1_COLOR_F text;           // 主文字
     D2D1_COLOR_F textSecondary;  // 次要文字（提示/状态）
     D2D1_COLOR_F disabled;       // 禁用文字
-    D2D1_COLOR_F cardFill;       // 输入框/卡片填充（半透明，叠在 Mica 上）
+    D2D1_COLOR_F cardFill;       // 输入框/卡片填充
     D2D1_COLOR_F cardStroke;     // 卡片描边
-    D2D1_COLOR_F windowBg;       // Mica 底色近似（不透明，用于非分层控件铺底）
-    D2D1_COLOR_F cardFillSolid;  // cardFill 叠在 Mica 底色后的等效不透明色
+    D2D1_COLOR_F windowBg;       // 对话框窗口底色（不透明，用于根表面铺底）
+    D2D1_COLOR_F cardFillSolid;  // cardFill 的等效不透明色
     D2D1_COLOR_F controlFill;    // 普通按钮填充
     D2D1_COLOR_F controlHover;   // 普通按钮悬停
     D2D1_COLOR_F controlPressed; // 普通按钮按下
@@ -77,18 +77,15 @@ const Palette& palette(ThemeTarget target);
 
 // ---- DWM Win11 窗口元素 ----
 void applyRoundCorners(HWND hwnd, bool smallCorners = false);
-bool applyBackdrop(HWND hwnd, bool transientWindow); // Mica / 亚克力；返回是否应用成功
 void clearBackdrop(HWND hwnd); // 关闭背景材质（恢复不透明客户区）
 void applyDarkCaption(HWND hwnd, bool dark);
 void applyBorderColor(HWND hwnd, COLORREF color);
 // 不绘制窗口边框（用于弹出菜单等无边框窗口）
 void suppressBorder(HWND hwnd);
-// 普通窗口一键套用：圆角 + 背景材质 + 标题栏配色；返回背景材质是否生效。
-// 普通窗口默认使用 Mica，短暂的取色弹窗等场景传 true 使用 Acrylic。
+// 普通窗口一键套用：圆角 + 实色客户区 + 标题栏配色；返回值保留为 false，
+// 用于兼容各对话框现有的表面生命周期。
 bool styleDialogWindow(HWND hwnd, bool transientWindow = false);
-// 主题变化时重新套用窗口样式，oldBackdrop 传调用方保存的 styleDialogWindow 旧返回值。
-// 旧状态在客户区画过不透明底色（oldBackdrop=false）而新状态启用了 DWM 材质时，
-// 残留像素会盖住材质（深色→浅色切换后背景残留深色），通过隐藏再显示强制 DWM 丢弃旧表面。
+// 主题变化时重新套用实色窗口样式；oldBackdrop/transientWindow 仅为兼容现有调用方保留。
 bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow = false);
 // 背景材质未生效时的实心回退背景色
 COLORREF fallbackBgColor();

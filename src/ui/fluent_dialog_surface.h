@@ -103,7 +103,6 @@ public:
 private:
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
-    bool alphaRedirection_ = false;
     bool hasPainted_ = false;
     LyricRenderer renderer_;
 };

@@ -1,13 +1,7 @@
 #include "fluent_dialog_surface.h"
 
-#include <dwmapi.h>
-
 #include <algorithm>
 #include <cmath>
-
-#ifndef DWMWA_REDIRECTIONBITMAP_ALPHA
-#define DWMWA_REDIRECTIONBITMAP_ALPHA 39
-#endif
 
 namespace fluent {
 
@@ -324,23 +318,13 @@ bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop) {
     dpi_ = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
     if (dpi_ == 0)
         dpi_ = 96;
-    alphaRedirection_ = false;
+    (void)backdrop;
     hasPainted_ = false;
-    if (hwnd_) {
-        BOOL enabled = backdrop ? TRUE : FALSE;
-        alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
-            hwnd_, DWMWA_REDIRECTIONBITMAP_ALPHA, &enabled, sizeof(enabled)));
-    }
     return hwnd_ != nullptr;
 }
 
 void FluentDialogSurface::setBackdrop(bool backdrop) {
-    if (!hwnd_)
-        return;
-
-    BOOL enabled = backdrop ? TRUE : FALSE;
-    alphaRedirection_ = backdrop && SUCCEEDED(DwmSetWindowAttribute(
-        hwnd_, DWMWA_REDIRECTIONBITMAP_ALPHA, &enabled, sizeof(enabled)));
+    (void)backdrop;
     hasPainted_ = false;
 }
 
@@ -352,6 +336,7 @@ void FluentDialogSurface::eraseBackground(HDC hdc, bool backdrop) {
 bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& callback) {
     if (!hwnd_ || !hdc)
         return false;
+    (void)backdrop;
 
     RECT client{};
     GetClientRect(hwnd_, &client);
@@ -370,20 +355,17 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     if (!target)
         return false;
 
-    // 对话框表面使用当前 WM_PAINT 的 DC，保留 DWM 材质和 Fluent 颜色的原有合成路径。
+    // 对话框表面使用当前 WM_PAINT 的 DC，在实色窗口底色上绘制 Fluent 内容。
     // 父窗口本身带 WS_CLIPCHILDREN，且额外排除可见子窗口，原生控件由系统单独绘制。
     RECT renderRect{0, 0, width, height};
     excludeVisibleChildren(hwnd_, hdc);
     if (FAILED(target->BindDC(hdc, &renderRect)))
         return false;
 
-    // 根背景由 D2D 在当前 WM_PAINT 内统一绘制；支持重定向 Alpha 时让 Mica 透出。
+    // 根背景由 D2D 在当前 WM_PAINT 内统一绘制，不向 DWM 提交透明像素。
     target->BeginDraw();
     target->SetTransform(D2D1::Matrix3x2F::Identity());
-    if (backdrop && alphaRedirection_)
-        target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-    else
-        target->Clear(fluent::palette().windowBg);
+    target->Clear(fluent::palette().windowBg);
     Painter painter(target, renderer_.dwrite());
     if (callback)
         callback(painter, static_cast<float>(width) / dipScale(),
