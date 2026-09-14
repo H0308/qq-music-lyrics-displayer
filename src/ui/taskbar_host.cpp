@@ -4681,9 +4681,11 @@ struct TaskbarHost::Impl {
         // 歌词区域内，文字不会画进信息区；信息区隐藏时用默认宽度
         const float leftFadeDip =
             songInfoVisible_ && scene_ != DisplayScene::Idle ? kTextPadding : 0.0f;
+        // 每日一言与歌曲信息同属内容确定的无限循环跑马灯，是否滚动在内容确定时
+        // 已知，渐隐恒定保持，避免每轮循环绕回时左缘渐隐消失再出现
         drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
                           karaokeBrush, karaokeX, opacity, alignment, singleCopy,
-                          kTextPadding, false, leftFadeDip);
+                          kTextPadding, scene_ == DisplayScene::Idle, leftFadeDip);
     }
 
     void drawLyricScrollingText(IDWriteTextLayout* layout, float textW, float textH,
