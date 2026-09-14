@@ -601,6 +601,8 @@ struct App {
     bool taskbarAutoClosedForNoSpace_ = false;
     bool taskbarAutoRestorePending_ = false;
     bool taskbarManualOpenPending_ = false;
+    // 完全停止模式只是临时隐藏任务栏歌词；退出时按进入前的用户开启状态恢复。
+    bool taskbarEnabledBeforeStopped_ = false;
     std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
@@ -1109,11 +1111,32 @@ struct App {
     }
 
     void applyRenderMode(int mode) {
-        renderMode_ = std::clamp(mode, 0, 3);
+        const int nextMode = std::clamp(mode, 0, 3);
+        const bool enteringStopped =
+            !isRenderMode(RenderMode::Stopped) && nextMode == static_cast<int>(RenderMode::Stopped);
+        const bool leavingStopped =
+            isRenderMode(RenderMode::Stopped) && nextMode != static_cast<int>(RenderMode::Stopped);
+        if (enteringStopped)
+            taskbarEnabledBeforeStopped_ = taskbarEnabledForUserAction();
+
+        renderMode_ = nextMode;
         if (taskbarHost) {
             taskbarHost->setRenderMode(renderMode_);
             applyEffectiveTaskbarSettings();
         }
+        if (leavingStopped && taskbarEnabledBeforeStopped_) {
+            if (taskbarHost) {
+                // 切换期间可能没有新的 SMTC 帧，补交当前帧以保留进入停止模式
+                // 前的会话可见性；实际显示仍等待宿主完成最新空间探测。
+                taskbarHost->applyPresentationFrame(currentFrame_);
+            } else {
+                // 宿主可能在完全停止期间因任务栏重建或菜单操作被销毁，退出时
+                // 按原先的开启状态静默重建，不走“手动开启”的提示流程。
+                createTaskbar(GetModuleHandleW(nullptr));
+            }
+        }
+        if (leavingStopped)
+            taskbarEnabledBeforeStopped_ = false;
         syncSpectrumWithMode();
         if (isMinimalRenderMode()) {
             cancelSongToastCoverWait();
@@ -2262,7 +2285,7 @@ struct App {
         const TaskbarPlacementStatus status = taskbarHost->placementStatus();
         return status != TaskbarPlacementStatus::NoSpace &&
                status != TaskbarPlacementStatus::Unavailable &&
-               (isRenderMode(RenderMode::Stopped) || taskbarHost->isDisplayed());
+               taskbarHost->isDisplayed();
     }
 
     void requestQuit() {
