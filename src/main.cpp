@@ -111,6 +111,10 @@ constexpr UINT kCmdHoverPlaybackControls = 126;
 constexpr UINT kCmdSettings = 127;
 constexpr UINT kCmdSwitchLyricSource = 128;
 constexpr UINT kCmdRuntimeLog = 129;
+constexpr UINT kCmdRenderModeNormal = 130;
+constexpr UINT kCmdRenderModeLow = 131;
+constexpr UINT kCmdRenderModeStopped = 132;
+constexpr UINT kCmdRenderModeMinimal = 133;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
@@ -140,6 +144,10 @@ const wchar_t* trayCommandName(int command) {
     case kCmdSettings: return L"settings";
     case kCmdSwitchLyricSource: return L"switch-lyric-source";
     case kCmdRuntimeLog: return L"runtime-log";
+    case kCmdRenderModeNormal: return L"render-mode-normal";
+    case kCmdRenderModeLow: return L"render-mode-low";
+    case kCmdRenderModeStopped: return L"render-mode-stopped";
+    case kCmdRenderModeMinimal: return L"render-mode-minimal";
     case kCmdPickFont: return L"pick-font";
     case kCmdFontColorEffect: return L"font-color-effect";
     case kCmdManualSearch: return L"manual-search";
@@ -3930,6 +3938,20 @@ void App::showTrayMenu() {
     };
 
     addItem(kCmdToggleTaskbar, taskbarHost ? L"关闭任务栏歌词" : L"开启任务栏歌词");
+    fluent::FluentMenuItem performance;
+    performance.text = L"性能模式";
+    auto addRenderMode = [this, &performance](int id, const wchar_t* text, RenderMode mode) {
+        fluent::FluentMenuItem it;
+        it.id = id;
+        it.text = text;
+        it.checked = isRenderMode(mode);
+        performance.submenu.push_back(std::move(it));
+    };
+    addRenderMode(kCmdRenderModeNormal, L"正常", RenderMode::Normal);
+    addRenderMode(kCmdRenderModeLow, L"低渲染", RenderMode::Low);
+    addRenderMode(kCmdRenderModeStopped, L"完全停止", RenderMode::Stopped);
+    addRenderMode(kCmdRenderModeMinimal, L"极简", RenderMode::Minimal);
+    items.push_back(std::move(performance));
     if (taskbarHost) {
         fluent::FluentMenuItem pos;
         pos.text = L"任务栏位置";
@@ -3975,6 +3997,18 @@ void App::onMenuCommand(int cmd) {
     case kCmdToggleTaskbar:
         toggleTaskbar();
         saveSettings();
+        break;
+    case kCmdRenderModeNormal:
+        applyRenderMode(static_cast<int>(RenderMode::Normal));
+        break;
+    case kCmdRenderModeLow:
+        applyRenderMode(static_cast<int>(RenderMode::Low));
+        break;
+    case kCmdRenderModeStopped:
+        applyRenderMode(static_cast<int>(RenderMode::Stopped));
+        break;
+    case kCmdRenderModeMinimal:
+        applyRenderMode(static_cast<int>(RenderMode::Minimal));
         break;
     case kCmdTaskbarPosNotify:
     case kCmdTaskbarPosLeft:
