@@ -1,7 +1,10 @@
 <div align="center">
-  <img src="asset/logo-dark.png" width="96" alt="logo">
-  <h1>QQ 音乐/网易云任务栏歌词</h1>
-  <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏——滚动歌词、每日一言、逐字高亮、播放控制、音频频谱，支持Windows 11任务栏上、下、左、右四边布局，程序本体为 C++ 原生实现，无 Electron。</p>
+   <img src="asset/logo-dark.png" width="96" alt="logo">
+   <h1>QQ 音乐/网易云任务栏歌词</h1>
+   <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏——滚动歌词、每日一言、逐字高亮、播放控制、音频频谱，支持Windows 11任务栏上、下、左、右四边布局，程序本体为 C++ 原生实现，无 Electron。</p>
+   <p align="center">
+      <img src="asset/social-preview.png" width="100%" alt="QQ 音乐/网易云任务栏歌词界面预览">
+   </p>
 </div>
 
 ## 项目核心功能
