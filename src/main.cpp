@@ -65,6 +65,7 @@ constexpr UINT kMsgIdleAppReady = WM_APP + 7;
 constexpr UINT kMsgHolidayReady = WM_APP + 8;
 constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
 constexpr UINT kMsgTickTickTaskCompleteReady = WM_APP + 10;
+constexpr UINT kMsgTaskbarNoSpace = WM_APP + 11;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -76,6 +77,8 @@ constexpr UINT_PTR kTimerIdleQuote = 5;
 // 开机自启时网络或滴答清单服务可能尚未就绪；启动同步失败后按递增间隔补试，
 // 避免一次瞬时网络失败让今日任务在本次运行中一直缺席。
 constexpr UINT_PTR kTimerTickTickStartupRetry = 6;
+constexpr UINT_PTR kTimerTaskbarAutoRestore = 7;
+constexpr UINT kTaskbarAutoRestoreMs = 1000;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kIdleQuoteCheckMs = 60 * 1000;
@@ -120,6 +123,11 @@ constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示�
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
 constexpr int kUpdatePromptAbout = 3;
+enum class TaskbarCreateResult {
+    Created,
+    NoSpace,
+    Failed,
+};
 
 const wchar_t* trayCommandName(int command) {
     switch (command) {
@@ -587,6 +595,11 @@ struct App {
     AppVolumeController appVolume_;   // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;   // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
+    bool taskbarAllowOverlap_ = false;
+    bool taskbarNoSpaceClosePending_ = false;
+    bool taskbarAutoClosedForNoSpace_ = false;
+    bool taskbarAutoRestorePending_ = false;
+    bool taskbarManualOpenPending_ = false;
     std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
@@ -1109,6 +1122,10 @@ struct App {
         } else if (songToast_) {
             songToast_->setEnabled(songToastEnabled_);
         }
+        if (isRenderMode(RenderMode::Stopped))
+            cancelTaskbarAutoRestore();
+        else if (taskbarAutoClosedForNoSpace_ && !taskbarHost)
+            armTaskbarAutoRestore();
         if (settingsDialog && settingsDialog->isOpen())
             settingsDialog->updateState(currentSettingsState());
         logSettingInt(L"render-mode", renderMode_);
@@ -2084,13 +2101,59 @@ struct App {
         }
     }
 
-    bool createTaskbar(HINSTANCE inst) {
-        if (taskbarHost) return true;
+    void armTaskbarAutoRestore() {
+        if (shutdownRequested_ || isRenderMode(RenderMode::Stopped) || taskbarHost)
+            return;
+        taskbarAutoRestorePending_ = true;
+        if (trayHwnd && !SetTimer(trayHwnd, kTimerTaskbarAutoRestore,
+                                  kTaskbarAutoRestoreMs, nullptr)) {
+            runtime_log::writef(L"[taskbar] failed to schedule auto-restore");
+        }
+    }
+
+    void cancelTaskbarAutoRestore() {
+        taskbarAutoRestorePending_ = false;
+        if (trayHwnd)
+            KillTimer(trayHwnd, kTimerTaskbarAutoRestore);
+    }
+
+    void tryRestoreTaskbarAfterNoSpace() {
+        if (!taskbarAutoRestorePending_)
+            return;
+        if (shutdownRequested_ || isRenderMode(RenderMode::Stopped)) {
+            cancelTaskbarAutoRestore();
+            return;
+        }
+        if (taskbarHost) {
+            cancelTaskbarAutoRestore();
+            return;
+        }
+
+        const TaskbarCreateResult result = createTaskbar(GetModuleHandleW(nullptr));
+        if (result == TaskbarCreateResult::Created) {
+            cancelTaskbarAutoRestore();
+            // 不要仅凭宿主创建成功就关闭提示。此时首次真实的空间探测可能
+            // 尚未完成，必须等 onTaskbarPlacementStatus() 确认有可用空间后再关。
+            runtime_log::writef(L"[taskbar] auto-restore result=created, awaiting-placement");
+        } else if (result == TaskbarCreateResult::Failed) {
+            // 真正的宿主创建失败不弹出“空间不足”提示；等待 Explorer 的
+            // TaskbarCreated 广播重新触发一次恢复探测。
+            cancelTaskbarAutoRestore();
+            runtime_log::writef(L"[taskbar] auto-restore result=failed");
+        }
+        // NoSpace 会在 createTaskbar() 内重新保持定时器，继续等待空间释放。
+    }
+
+    TaskbarCreateResult createTaskbar(HINSTANCE inst, bool allowOverlap = false) {
+        if (taskbarHost)
+            return TaskbarCreateResult::Created;
         auto host = std::make_unique<TaskbarHost>();
+        host->setVisibilitySuppressed(true);
         if (!host->create(inst)) {
             runtime_log::writef(L"failed to create taskbar host");
-            return false;
+            return TaskbarCreateResult::Failed;
         }
+        host->setAllowOverlap(allowOverlap);
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setAppVolumeCallback([this](int percent) {
@@ -2153,15 +2216,52 @@ struct App {
         applyEffectiveTaskbarSettings();
         taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
+        const TaskbarPlacementStatus placementStatus = taskbarHost->refreshPlacement();
+        if (placementStatus == TaskbarPlacementStatus::NoSpace) {
+            taskbarAutoClosedForNoSpace_ = true;
+            runtime_log::writef(L"[taskbar] auto-close reason=no-space");
+            destroyTaskbar();
+            if (!allowOverlap)
+                armTaskbarAutoRestore();
+            return TaskbarCreateResult::NoSpace;
+        }
+        if (placementStatus == TaskbarPlacementStatus::Unavailable) {
+            runtime_log::writef(L"[taskbar] placement unavailable after creation");
+            destroyTaskbar();
+            return TaskbarCreateResult::Failed;
+        }
+        taskbarAllowOverlap_ = allowOverlap;
+        taskbarAutoClosedForNoSpace_ = false;
+        cancelTaskbarAutoRestore();
+        taskbarHost->setPlacementStatusCallback(
+            [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
+        // 宿主会在首次避让探测完成后自行解除显示抑制；强制开启仍重新提交当前帧，
+        // 确保“开启”选项立即生效而不必等待下一次媒体事件。
+        if (allowOverlap)
+            taskbarHost->applyPresentationFrame(currentFrame_);
         updateTrayIcon();
-        return true;
+        return TaskbarCreateResult::Created;
     }
 
     void destroyTaskbar() {
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
+        taskbarAllowOverlap_ = false;
+        taskbarNoSpaceClosePending_ = false;
+        // 任何销毁路径都结束一次“手动开启待确认”请求，避免旧请求在后续
+        // 的自动探测消息中误把自动关闭当成手动开启失败并弹框。
+        taskbarManualOpenPending_ = false;
         auto host = std::move(taskbarHost);
         host.reset();
         updateTrayIcon();
+    }
+
+    bool taskbarEnabledForUserAction() const {
+        if (!taskbarHost)
+            return false;
+        const TaskbarPlacementStatus status = taskbarHost->placementStatus();
+        return status != TaskbarPlacementStatus::NoSpace &&
+               status != TaskbarPlacementStatus::Unavailable &&
+               (isRenderMode(RenderMode::Stopped) || taskbarHost->isDisplayed());
     }
 
     void requestQuit() {
@@ -2174,6 +2274,7 @@ struct App {
         // 先销毁仍由 Explorer 承载的任务栏窗口和托盘窗口，再结束消息循环。
         // 仅投递 WM_QUIT 会把这部分清理推迟到 main() 返回后的析构阶段，
         // 任务栏歌词窗口或探测线程可能在此期间继续存活。
+        cancelTaskbarAutoRestore();
         destroyTaskbar();
         closeUpdatePrompt();
         destroyTray();
@@ -2182,17 +2283,50 @@ struct App {
 
     void toggleTaskbar() {
         runtime_log::writef(L"[action][taskbar] toggle current=%s",
-                            taskbarHost ? L"enabled" : L"disabled");
-        if (taskbarHost) {
+                            taskbarEnabledForUserAction() ? L"enabled" : L"disabled");
+        if (taskbarEnabledForUserAction()) {
+            taskbarAutoClosedForNoSpace_ = false;
+            taskbarManualOpenPending_ = false;
+            cancelTaskbarAutoRestore();
             destroyTaskbar();
         } else {
+            const bool noSpaceAlreadyKnown =
+                !isRenderMode(RenderMode::Stopped) &&
+                ((taskbarHost &&
+                  taskbarHost->placementStatus() == TaskbarPlacementStatus::NoSpace) ||
+                 (!taskbarHost && taskbarAutoClosedForNoSpace_ &&
+                  taskbarAutoRestorePending_));
+            if (noSpaceAlreadyKnown) {
+                // 无空间状态已经由当前宿主确认，不能再销毁后重新异步探测，
+                // 否则用户刚点击“开启”时提示会被推迟到下一轮探测。
+                taskbarAutoClosedForNoSpace_ = true;
+                destroyTaskbar();
+                armTaskbarAutoRestore();
+                showTaskbarSpacePrompt();
+                runtime_log::writef(L"[action][taskbar] toggle result=no-space-prompt");
+                return;
+            }
+            // 空间探测刚判定无空间时，宿主会先隐藏，再由托盘消息异步销毁。
+            // 此时菜单已经显示“开启”，先清掉这个残留宿主，再走正常的手动开启流程。
+            if (taskbarHost)
+                destroyTaskbar();
             if (isRenderMode(RenderMode::Stopped)) {
                 MessageBoxW(
                     trayHwnd,
                     L"当前已开启性能-完全停止模式，如果要显示任务栏歌词，可以在性能设置中选择其他模式",
                     L"任务栏歌词提示", MB_OK | MB_ICONINFORMATION);
+                runtime_log::writef(L"[action][taskbar] toggle result=stopped");
+                return;
             }
-            createTaskbar(GetModuleHandleW(nullptr));
+            taskbarManualOpenPending_ = true;
+            const TaskbarCreateResult result = createTaskbar(GetModuleHandleW(nullptr));
+            if (result == TaskbarCreateResult::NoSpace) {
+                taskbarManualOpenPending_ = false;
+                showTaskbarSpacePrompt();
+            } else if (result == TaskbarCreateResult::Failed) {
+                taskbarManualOpenPending_ = false;
+                runtime_log::writef(L"[action][taskbar] toggle result=failed");
+            }
         }
         runtime_log::writef(L"[action][taskbar] toggle result=%s",
                             taskbarHost ? L"enabled" : L"disabled");
@@ -2661,6 +2795,9 @@ struct App {
     void showFontColorDialog();
     void showAbout(bool downloadUpdate = false);
     void showUpdatePrompt(const std::wstring& latestVersion);
+    void onTaskbarPlacementStatus(TaskbarPlacementStatus status);
+    void handleTaskbarNoSpace();
+    void showTaskbarSpacePrompt();
     void layoutUpdatePrompt();
     void paintUpdatePrompt(fluent::FluentDialogSurface::Painter& painter, float width,
                            float height);
@@ -3561,6 +3698,8 @@ void App::destroyTray() {
         trayHwnd = nullptr;
         KillTimer(hwnd, kTimerIdleQuote);
         KillTimer(hwnd, kTimerTickTickStartupRetry);
+        KillTimer(hwnd, kTimerTaskbarAutoRestore);
+        taskbarAutoRestorePending_ = false;
         tickTickStartupRetryAttempt_ = 0;
         // 先关闭可能打开的 Fluent 菜单（其窗口由托盘窗口所有）
         fluent::FluentMenu::dismiss();
@@ -3587,6 +3726,41 @@ void App::updateTrayIcon() {
     Shell_NotifyIconW(NIM_MODIFY, &nid);
     // 首次创建时 MODIFY 不会生效，用 ADD
     Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+void App::onTaskbarPlacementStatus(TaskbarPlacementStatus status) {
+    if (status != TaskbarPlacementStatus::NoSpace) {
+        taskbarNoSpaceClosePending_ = false;
+        taskbarManualOpenPending_ = false;
+        return;
+    }
+    if (!taskbarHost || taskbarAllowOverlap_ || taskbarNoSpaceClosePending_)
+        return;
+
+    // TaskbarHost 的状态回调可能来自它自己的 WM_TIMER；延迟到托盘窗口消息中再
+    // 销毁宿主，避免在探测/重排调用栈内释放窗口及其工作线程资源。
+    taskbarNoSpaceClosePending_ = true;
+    if (!trayHwnd || !PostMessageW(trayHwnd, kMsgTaskbarNoSpace, 0, 0)) {
+        taskbarNoSpaceClosePending_ = false;
+        runtime_log::writef(L"[taskbar] failed to schedule auto-close reason=no-space");
+    }
+}
+
+void App::handleTaskbarNoSpace() {
+    if (!taskbarNoSpaceClosePending_)
+        return;
+    taskbarNoSpaceClosePending_ = false;
+    const bool shouldPrompt = taskbarManualOpenPending_;
+    taskbarManualOpenPending_ = false;
+    if (!taskbarHost || taskbarAllowOverlap_)
+        return;
+
+    taskbarAutoClosedForNoSpace_ = true;
+    runtime_log::writef(L"[taskbar] auto-close reason=no-space");
+    destroyTaskbar();
+    armTaskbarAutoRestore();
+    if (shouldPrompt)
+        showTaskbarSpacePrompt();
 }
 
 void App::showUpdatePrompt(const std::wstring& latestVersion) {
@@ -3642,6 +3816,31 @@ void App::showUpdatePrompt(const std::wstring& latestVersion) {
     UpdateWindow(hwnd);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
+}
+
+void App::showTaskbarSpacePrompt() {
+    runtime_log::writef(L"[action][taskbar] prompt reason=no-space auto-closed=%d",
+                        taskbarAutoClosedForNoSpace_ ? 1 : 0);
+    // 系统模态框自带标准按钮和关闭行为；显示期间暂停自动恢复定时器，
+    // 避免用户尚未选择时后台又创建宿主并改变当前状态。
+    cancelTaskbarAutoRestore();
+    const int result = MessageBoxW(
+        trayHwnd,
+        L"当前任务栏可用空间不足，开启任务栏歌词可能遮挡任务栏按钮并影响正常使用。\n\n"
+        L"是否仍要开启任务栏歌词？",
+        L"任务栏歌词提示", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2 | MB_SETFOREGROUND);
+    if (result == IDYES) {
+        const TaskbarCreateResult createResult = createTaskbar(GetModuleHandleW(nullptr), true);
+        if (createResult == TaskbarCreateResult::Failed)
+            runtime_log::writef(L"[action][taskbar] forced-open result=failed");
+        else if (createResult == TaskbarCreateResult::NoSpace)
+            runtime_log::writef(L"[action][taskbar] forced-open result=no-space");
+        return;
+    }
+
+    if (!shutdownRequested_ && !isRenderMode(RenderMode::Stopped) &&
+        taskbarAutoClosedForNoSpace_ && !taskbarHost)
+        armTaskbarAutoRestore();
 }
 
 void App::layoutUpdatePrompt() {
@@ -3955,7 +4154,8 @@ void App::showTrayMenu() {
         items.push_back(std::move(it));
     };
 
-    addItem(kCmdToggleTaskbar, taskbarHost ? L"关闭任务栏歌词" : L"开启任务栏歌词");
+    const bool taskbarEnabled = taskbarEnabledForUserAction();
+    addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词");
     fluent::FluentMenuItem performance;
     performance.text = L"性能模式";
     auto addRenderMode = [this, &performance](int id, const wchar_t* text, RenderMode mode) {
@@ -3970,7 +4170,7 @@ void App::showTrayMenu() {
     addRenderMode(kCmdRenderModeStopped, L"完全停止", RenderMode::Stopped);
     addRenderMode(kCmdRenderModeMinimal, L"极简", RenderMode::Minimal);
     items.push_back(std::move(performance));
-    if (taskbarHost) {
+    if (taskbarEnabled) {
         fluent::FluentMenuItem pos;
         pos.text = L"任务栏位置";
         fluent::FluentMenuItem sub;
@@ -4553,6 +4753,10 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->requestQuit();
         return 0;
     }
+    if (msg == kMsgTaskbarNoSpace) {
+        app->handleTaskbarNoSpace();
+        return 0;
+    }
     if (msg == WM_TIMER && wp == kTimerLyricDebounce) {
         KillTimer(h, kTimerLyricDebounce);
         app->onLyricDebounce();
@@ -4577,6 +4781,10 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             app->refreshTickTickTasks();
         return 0;
     }
+    if (msg == WM_TIMER && wp == kTimerTaskbarAutoRestore) {
+        app->tryRestoreTaskbarAfterNoSpace();
+        return 0;
+    }
     if (msg == kMsgDialogClosed) {
         app->onDialogClosed(static_cast<DialogKind>(wp));
         return 0;
@@ -4595,6 +4803,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->updateTrayIcon();
         if (app->taskbarHost)
             app->taskbarHost->onTaskbarCreated();
+        else if (app->taskbarAutoClosedForNoSpace_ &&
+                 !app->isRenderMode(RenderMode::Stopped)) {
+            app->armTaskbarAutoRestore();
+            app->tryRestoreTaskbarAfterNoSpace();
+        }
         return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
@@ -4690,13 +4903,14 @@ int main() {
     if (!app.settingsDialog->create(inst, app.trayHwnd, app.currentSettingsState(),
                                     app.buildSettingsActions()))
         app.settingsDialog.reset();
-    if (wantTaskbar && !app.createTaskbar(inst)) {
-        runtime_log::writef(L"failed to create taskbar window");
-        return 1;
-    }
-    if (!app.taskbarHost) {
-        runtime_log::writef(L"no host enabled");
-        return 1;
+    if (wantTaskbar) {
+        const TaskbarCreateResult result = app.createTaskbar(inst);
+        if (result == TaskbarCreateResult::Failed) {
+            runtime_log::writef(L"failed to create taskbar window");
+            return 1;
+        }
+        if (result == TaskbarCreateResult::NoSpace)
+            runtime_log::writef(L"[taskbar] started tray-only reason=no-space");
     }
 
     app.monitor.start([&app] { PostThreadMessageW(app.mainThread, kMsgSmtcChanged, 0, 0); });

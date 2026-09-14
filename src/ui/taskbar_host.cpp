@@ -44,6 +44,7 @@ constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 
 constexpr float kMinWidthDip = 160.0f;
 constexpr float kMaxWidthDip = 280.0f;
+constexpr float kCompressedMinWidthRatio = 0.5f;
 constexpr float kLeftRatio = 0.38f;
 constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
@@ -396,6 +397,11 @@ struct TaskbarHost::Impl {
     bool timerRunning_ = false;
     UINT timerMs_ = 0; // 当前定时器实际间隔（活动/暂停档位切换用）
     UINT displayRefreshHz_ = 60;
+    bool allowOverlap_ = false;
+    bool visibilitySuppressed_ = false;
+    bool probeReady_ = false;
+    TaskbarPlacementStatus placementStatus_ = TaskbarPlacementStatus::Unavailable;
+    std::function<void(TaskbarPlacementStatus)> onPlacementStatusChanged_;
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
@@ -902,6 +908,8 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] volume popup creation failed");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
+        if (visibilitySuppressed_ && renderMode_ != static_cast<int>(RenderMode::Stopped))
+            startFrameTimer();
         return true;
     }
 
@@ -938,9 +946,63 @@ struct TaskbarHost::Impl {
         return merged;
     }
 
-    bool calculateWindowPlacement(WindowPlacement& placement) {
+    TaskbarPlacementStatus setPlacementStatus(TaskbarPlacementStatus status) {
+        if (placementStatus_ == status)
+            return status;
+        placementStatus_ = status;
+        if (status == TaskbarPlacementStatus::NoSpace) {
+            if (visible) {
+                visible = false;
+                if (hwnd)
+                    ShowWindow(hwnd, SW_HIDE);
+            }
+            stopFrameTimer();
+        }
+        if (onPlacementStatusChanged_)
+            onPlacementStatusChanged_(status);
+        return status;
+    }
+
+    void releaseVisibilitySuppression() {
+        if (!visibilitySuppressed_ || !probeReady_ ||
+            placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+            placementStatus_ == TaskbarPlacementStatus::Unavailable)
+            return;
+
+        visibilitySuppressed_ = false;
+        if (sessionVisible_ && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
+            visible = true;
+            if (hwnd)
+                ShowWindow(hwnd, SW_SHOWNA);
+            startFrameTimer();
+            render();
+        } else if (!visible) {
+            stopFrameTimer();
+        }
+    }
+
+    void setVisibilitySuppressed(bool on) {
+        if (on) {
+            visibilitySuppressed_ = true;
+            if (visible) {
+                visible = false;
+                stopFrameTimer();
+                if (hwnd)
+                    ShowWindow(hwnd, SW_HIDE);
+            }
+            if (hwnd && renderMode_ != static_cast<int>(RenderMode::Stopped))
+                startFrameTimer();
+            return;
+        }
+
+        if (!probeReady_)
+            return;
+        releaseVisibilitySuppression();
+    }
+
+    TaskbarPlacementStatus calculateWindowPlacement(WindowPlacement& placement) {
         if (!hwnd || !taskbar_)
-            return false;
+            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
 
         updateRects();
 
@@ -951,24 +1013,29 @@ struct TaskbarHost::Impl {
         if (crossPx < 16)
             crossPx = taskbarCross;
         if (crossPx <= 0)
-            return false;
+            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
 
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
         float minWidthDip = vertical ? kVerticalMinLengthDip : kMinWidthDip;
         float maxWidthDip = vertical ? kVerticalMaxLengthDip : kMaxWidthDip;
+        float compressedMinWidthDip = minWidthDip * kCompressedMinWidthRatio;
         if (!vertical && !songInfoVisible_ && scene_ != DisplayScene::Idle) {
             // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为可见的封面区域。
             const float compactLeftDip = albumCoverVisible_ ? coverSlotWidth(dip(crossPx)) : 0.0f;
-            minWidthDip = kMinWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
+            const float flexibleMinDip = kMinWidthDip * (1.0f - kLeftRatio);
+            minWidthDip = flexibleMinDip + compactLeftDip;
+            compressedMinWidthDip = flexibleMinDip * kCompressedMinWidthRatio + compactLeftDip;
             maxWidthDip = kMaxWidthDip * (1.0f - kLeftRatio) + compactLeftDip;
         }
         int minW = (int)std::lround(minWidthDip * scale());
+        int compressedMinW = (int)std::lround(compressedMinWidthDip * scale());
         int maxW = (int)std::lround(maxWidthDip * scale());
         // 仅播放场景的独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
         const float spectrumExtra = spectrumExtraForScene(scene_);
         if (!vertical && spectrumExtra > 0.0f) {
             int extra = (int)std::lround(spectrumExtra * scale());
             minW += extra;
+            compressedMinW += extra;
             maxW += extra;
         }
 
@@ -980,27 +1047,31 @@ struct TaskbarHost::Impl {
         const int majorStart = vertical ? rcTaskbar_.top : rcTaskbar_.left;
         const int majorEnd = vertical ? rcTaskbar_.bottom : rcTaskbar_.right;
         int cursor = majorStart;
-        for (const auto& o : occupiedIntervals()) {
+        const auto occupied = occupiedIntervals();
+        for (const auto& o : occupied) {
             if (o.first > cursor)
                 spans.push_back({cursor, std::min(o.first, majorEnd)});
             cursor = std::max(cursor, std::min(o.second, majorEnd));
         }
         if (cursor < majorEnd)
             spans.push_back({cursor, majorEnd});
-        if (spans.empty())
+        // 只有确实没有探测到任何占用区间时，才把整条任务栏视为可用；
+        // 如果占用区间已经覆盖整个主轴，必须保留“无空闲位置”的结果。
+        if (spans.empty() && occupied.empty())
             spans.push_back({majorStart, majorEnd});
 
         auto usableMajor = [gap](const Span& s) { return s.r - s.l - gap * 2; };
-        // 原位优先：模式 0 锚定通知区域之前的主轴末端空闲区，模式 1 锚定
-        // 任务栏起始端空闲区。横向对应右/左，纵向对应下/上。
-        const Span& pref = positionMode_ == 1 ? spans.front() : spans.back();
 
         int pxMajor = 0;
         int x = 0;
         int y = 0;
         auto place = [&](const Span& s, int w) {
-            pxMajor = w;
-            const int major = positionMode_ == 1 ? s.l + gap : s.r - gap - w;
+            pxMajor = std::min(w, std::max(1, majorEnd - majorStart));
+            int major = positionMode_ == 1 ? s.l + gap : s.r - gap - pxMajor;
+            if (pxMajor <= majorEnd - majorStart)
+                major = std::clamp(major, majorStart, majorEnd - pxMajor);
+            else
+                major = majorStart;
             if (vertical) {
                 x = taskbarEdge_ == ABE_LEFT ? rcTaskbar_.left + crossMargin
                                              : rcTaskbar_.right - crossMargin - crossPx;
@@ -1010,20 +1081,43 @@ struct TaskbarHost::Impl {
                 y = rcTaskbar_.top + crossMargin;
             }
         };
-        if (usableMajor(pref) >= minW) {
-            place(pref, std::min(usableMajor(pref), maxW)); // 原位优先：被挤压先收缩长度
+        TaskbarPlacementStatus result = TaskbarPlacementStatus::Unavailable;
+        if (spans.empty()) {
+            if (!allowOverlap_)
+                return setPlacementStatus(TaskbarPlacementStatus::NoSpace);
+            const Span full{majorStart, majorEnd};
+            // 用户明确选择继续开启时，也沿用压缩后的最小主轴尺寸，
+            // 不再恢复为标准最小尺寸，尽量降低对任务栏的遮挡。
+            place(full, compressedMinW);
+            result = TaskbarPlacementStatus::ForcedOverlap;
         } else {
-            // 压到最小长度仍放不下：换到容得下的最大空闲区
-            const Span* best = nullptr;
-            for (const auto& s : spans) {
-                if (usableMajor(s) >= minW && (!best || s.r - s.l > best->r - best->l))
-                    best = &s;
-            }
-            if (best) {
-                place(*best, std::min(usableMajor(*best), maxW));
+            // 原位优先：模式 0 锚定通知区域之前的主轴末端空闲区，模式 1 锚定
+            // 任务栏起始端空闲区。横向对应右/左，纵向对应下/上。
+            const Span& pref = positionMode_ == 1 ? spans.front() : spans.back();
+            if (usableMajor(pref) >= compressedMinW) {
+                place(pref, std::min(usableMajor(pref), maxW)); // 原位优先：被挤压先收缩长度
+                result = usableMajor(pref) < minW ? TaskbarPlacementStatus::Compressed
+                                                  : TaskbarPlacementStatus::Safe;
             } else {
-                // 全任务栏都放不下：维持最小长度锚在原位（与旧行为一致，允许重叠）
-                place(pref, minW);
+                // 原位压到安全最小长度仍放不下：换到容得下的最大空闲区。
+                const Span* best = nullptr;
+                for (const auto& s : spans) {
+                    if (usableMajor(s) >= compressedMinW &&
+                        (!best || s.r - s.l > best->r - best->l))
+                        best = &s;
+                }
+                if (best) {
+                    place(*best, std::min(usableMajor(*best), maxW));
+                    result = TaskbarPlacementStatus::Relocated;
+                } else if (allowOverlap_) {
+                    // 用户已明确允许重叠时，仍把窗口限制在任务栏主轴范围内，
+                    // 只允许与已探测到的控件相交，不让窗口越出任务栏；尺寸使用
+                    // 压缩后的最小值，避免强制开启时又恢复为标准尺寸。
+                    place(pref, compressedMinW);
+                    result = TaskbarPlacementStatus::ForcedOverlap;
+                } else {
+                    return setPlacementStatus(TaskbarPlacementStatus::NoSpace);
+                }
             }
         }
         if (vertical) {
@@ -1039,7 +1133,9 @@ struct TaskbarHost::Impl {
         placement.y = y;
         placement.width = vertical ? crossPx : pxMajor;
         placement.height = vertical ? pxMajor : crossPx;
-        return placement.width > 0 && placement.height > 0;
+        if (placement.width <= 0 || placement.height <= 0)
+            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
+        return setPlacementStatus(result);
     }
 
     void applyWindowPlacement(const WindowPlacement& placement, bool bringToFront = true,
@@ -1066,8 +1162,15 @@ struct TaskbarHost::Impl {
     void adjustPosition() {
         cancelSceneWindowResize();
         WindowPlacement placement;
-        if (calculateWindowPlacement(placement))
+        const TaskbarPlacementStatus status = calculateWindowPlacement(placement);
+        if (status != TaskbarPlacementStatus::Unavailable &&
+            status != TaskbarPlacementStatus::NoSpace)
             applyWindowPlacement(placement);
+    }
+
+    TaskbarPlacementStatus refreshPlacement() {
+        adjustPosition();
+        return placementStatus_;
     }
 
     bool currentWindowPlacement(WindowPlacement& placement) const {
@@ -1829,7 +1932,10 @@ struct TaskbarHost::Impl {
         }
 
         sessionVisible_ = frame.visible;
-        if (frame.visible && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
+        if (frame.visible && renderMode_ != static_cast<int>(RenderMode::Stopped) &&
+            !visibilitySuppressed_ &&
+            placementStatus_ != TaskbarPlacementStatus::NoSpace &&
+            placementStatus_ != TaskbarPlacementStatus::Unavailable) {
             if (!visible) {
                 visible = true;
                 if (hwnd)
@@ -1888,7 +1994,11 @@ struct TaskbarHost::Impl {
     bool beginSceneWindowResize() {
         WindowPlacement from;
         WindowPlacement to;
-        if (!currentWindowPlacement(from) || !calculateWindowPlacement(to))
+        if (!currentWindowPlacement(from))
+            return false;
+        const TaskbarPlacementStatus placementStatus = calculateWindowPlacement(to);
+        if (placementStatus == TaskbarPlacementStatus::Unavailable ||
+            placementStatus == TaskbarPlacementStatus::NoSpace)
             return false;
         if (from.x == to.x && from.y == to.y && from.width == to.width &&
             from.height == to.height) {
@@ -2499,13 +2609,16 @@ struct TaskbarHost::Impl {
         }
         hwnd = nullptr;
         taskbarEmbedded_ = false;
-        if (createWindow(inst) && visible) {
+        // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
+        // timerRunning_ 可能残留为 true，但定时器已随旧窗口消失；重建时同样
+        // 等待新任务栏的首个探测结果，避免按旧矩形先显示一帧。
+        timerRunning_ = false;
+        timerMs_ = 0;
+        visibilitySuppressed_ = true;
+        probeReady_ = false;
+        delete probeOut_.exchange(nullptr);
+        if (createWindow(inst) && !visibilitySuppressed_ && visible) {
             ShowWindow(hwnd, SW_SHOWNA);
-            // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
-            // timerRunning_ 会残留为 true，但定时器已随旧窗口消失；
-            // 必须清掉标志再启动，否则 startFrameTimer 因标志位跳过、新窗口没有定时器
-            timerRunning_ = false;
-            timerMs_ = 0;
             startFrameTimer();
             render();
         }
@@ -2712,6 +2825,8 @@ struct TaskbarHost::Impl {
         std::unique_ptr<ProbeResult> p(probeOut_.exchange(nullptr));
         if (!p)
             return false;
+        const bool firstProbe = !probeReady_;
+        probeReady_ = true;
         bool changed = !EqualRect(&p->rcTm, &rcTrafficMonitor_);
         if (!changed) {
             if (p->buttons.size() != uiaButtons_.size()) {
@@ -2742,7 +2857,7 @@ struct TaskbarHost::Impl {
             uiaButtons_ = std::move(p->buttons);
             kugouTaskbarWindows_ = std::move(p->kugouWindows);
         }
-        return changed;
+        return changed || firstProbe;
     }
 
     // ---------- 封面解码 ----------
@@ -6233,8 +6348,22 @@ struct TaskbarHost::Impl {
     void setRenderMode(int mode) {
         if (mode == renderMode_)
             return;
+        const bool leavingStopped =
+            renderMode_ == static_cast<int>(RenderMode::Stopped) &&
+            mode != static_cast<int>(RenderMode::Stopped);
         const bool wasMinimal = isMinimalMode();
         renderMode_ = mode;
+        if (leavingStopped) {
+            // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
+            // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
+            visibilitySuppressed_ = true;
+            probeReady_ = false;
+            delete probeOut_.exchange(nullptr);
+            visible = false;
+            stopFrameTimer();
+            if (hwnd)
+                ShowWindow(hwnd, SW_HIDE);
+        }
         if (wasMinimal != isMinimalMode()) {
             // 极简关闭逐字绘制后，清掉当前帧的逐字状态；退出时由重新排版恢复几何缓存。
             textDirty_ = true;
@@ -6291,8 +6420,13 @@ struct TaskbarHost::Impl {
                 timerMs_ = wantMs;
             }
         }
+        if (visibilitySuppressed_ && !timerRunning_)
+            startFrameTimer();
         // 从完全停止恢复：按最近会话可见性立即还原窗口；设备链由 render() 惰性重建
-        if (sessionVisible_ && !visible) {
+        if (sessionVisible_ && !visible &&
+            !visibilitySuppressed_ &&
+            placementStatus_ != TaskbarPlacementStatus::NoSpace &&
+            placementStatus_ != TaskbarPlacementStatus::Unavailable) {
             visible = true;
             if (hwnd)
                 ShowWindow(hwnd, SW_SHOWNA);
@@ -6353,11 +6487,20 @@ struct TaskbarHost::Impl {
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
             updateDisplayRefresh();
+            const bool probeWasReady = probeReady_;
             bool changed = detectChanges();
             if (pickProbeResult())
                 changed = true;
             if (changed)
                 adjustPosition();
+            if (!probeWasReady && probeReady_) {
+                // 首次真实探测结果到达后再决定是否显示；否则创建期间可能先按
+                // 空占用区显示一帧，随后被 UIA/窗口探测结果立即隐藏而产生闪烁。
+                if (onPlacementStatusChanged_)
+                    onPlacementStatusChanged_(placementStatus_);
+            }
+            if (probeReady_)
+                releaseVisibilitySuppression();
         }
         updateScroll();
         const bool statusCycleCallbackHandled = statusTextCycleCallbackPending_;
@@ -6385,7 +6528,8 @@ struct TaskbarHost::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            // 初始不可见：帧定时器在首次可见时（applyPresentationFrame/show）启动
+            // 普通创建保持不可见；若正在等待首次避让探测，定时器会由
+            // createWindow() 启动，但仍禁止提交可见窗口。
             return 0;
         case WM_TIMER:
             if (wp == kTimerId)
@@ -6602,11 +6746,41 @@ void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) 
     impl_->onStatusTextCycleCompleted_ = std::move(cb);
 }
 
+void TaskbarHost::setPlacementStatusCallback(
+    std::function<void(TaskbarPlacementStatus)> cb) {
+    impl_->onPlacementStatusChanged_ = std::move(cb);
+}
+
+void TaskbarHost::setAllowOverlap(bool on) {
+    impl_->allowOverlap_ = on;
+}
+
+void TaskbarHost::setVisibilitySuppressed(bool on) {
+    impl_->setVisibilitySuppressed(on);
+}
+
+TaskbarPlacementStatus TaskbarHost::refreshPlacement() {
+    return impl_->refreshPlacement();
+}
+
+TaskbarPlacementStatus TaskbarHost::placementStatus() const {
+    return impl_->placementStatus_;
+}
+
+bool TaskbarHost::isDisplayed() const {
+    return impl_ && impl_->visible && impl_->hwnd && IsWindowVisible(impl_->hwnd);
+}
+
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
     return impl_->lines;
 }
 
 void TaskbarHost::show() {
+    if (impl_->visibilitySuppressed_)
+        return;
+    if (impl_->placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+        impl_->placementStatus_ == TaskbarPlacementStatus::Unavailable)
+        return;
     if (!impl_->visible) {
         impl_->visible = true;
         ShowWindow(impl_->hwnd, SW_SHOWNA);

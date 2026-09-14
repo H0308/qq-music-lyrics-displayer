@@ -40,6 +40,15 @@ enum class TaskbarBackground {
     Solid,
 };
 
+enum class TaskbarPlacementStatus {
+    Unavailable,
+    Safe,
+    Compressed,
+    Relocated,
+    NoSpace,
+    ForcedOverlap,
+};
+
 // 任务栏内容动态背景；绘制在歌词等内容区域下方，不侵入独立频谱容器或悬浮卡片。
 enum class IdleQuoteBackground {
     None,
@@ -91,6 +100,12 @@ public:
     void setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
     void setStatusTextCycleCompletedCallback(std::function<void()> cb);
+    void setPlacementStatusCallback(std::function<void(TaskbarPlacementStatus)> cb);
+    void setAllowOverlap(bool on);
+    void setVisibilitySuppressed(bool on);
+    TaskbarPlacementStatus refreshPlacement();
+    TaskbarPlacementStatus placementStatus() const;
+    bool isDisplayed() const;
 
     const std::vector<LyricLine>& lyrics() const override;
 
