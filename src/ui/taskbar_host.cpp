@@ -956,7 +956,7 @@ struct TaskbarHost::Impl {
         return true;
     }
 
-    bool reconcileWindowVisibility() {
+    bool reconcileWindowVisibility(bool prewarmBeforeShow = false) {
         const bool wantVisible = shouldShowWindow();
         if (wantVisible == isWindowVisible())
             return false;
@@ -964,6 +964,10 @@ struct TaskbarHost::Impl {
         renderState_.setWindowPhase(wantVisible ? RenderState::WindowPhase::Visible
                                                 : RenderState::WindowPhase::Hidden);
         if (wantVisible) {
+            // 完全停止模式会释放 DComp 设备链。先在原生窗口仍隐藏时完成首帧，
+            // 让设备/交换链/字体和位图资源的重建成本不落到用户可见的第一帧。
+            if (prewarmBeforeShow)
+                requestFrameAndFlush();
             ShowWindow(hwnd, SW_SHOWNA);
             startFrameTimer();
         } else {
@@ -1235,8 +1239,8 @@ struct TaskbarHost::Impl {
             // 避免窗口重新出现时先显示旧歌词，等下一帧才追上。
             if (tick)
                 tick();
-            reconcileWindowVisibility();
-            if (isWindowVisible())
+            const bool visibilityChanged = reconcileWindowVisibility(true);
+            if (isWindowVisible() && !visibilityChanged)
                 requestFrameAndFlush();
         } else if (!isWindowVisible()) {
             stopFrameTimer();
