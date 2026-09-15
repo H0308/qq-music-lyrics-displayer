@@ -1147,7 +1147,7 @@ struct App {
 
         renderMode_ = nextMode;
         if (taskbarHost) {
-            taskbarHost->setRenderMode(renderMode_);
+            taskbarHost->setRenderMode(static_cast<RenderMode>(renderMode_));
             applyEffectiveTaskbarSettings();
         }
         if (leavingStopped && taskbarEnabledBeforeStopped_) {
@@ -2230,7 +2230,7 @@ struct App {
         });
         // 先设置渲染模式，再同步当前帧。完全停止模式下新宿主必须从创建开始就保持隐藏，
         // 否则 syncHost() 会按默认正常模式先显示一帧，随后才被 setRenderMode() 隐藏。
-        host->setRenderMode(renderMode_);
+        host->setRenderMode(static_cast<RenderMode>(renderMode_));
         taskbarHost = std::move(host);
         taskbarAllowOverlap_ = allowOverlap;
         syncHost(taskbarHost.get());

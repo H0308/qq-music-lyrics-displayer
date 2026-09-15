@@ -18,6 +18,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -26,6 +27,7 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -385,6 +387,24 @@ bool sameLyrics(const std::vector<LyricLine>& a, const std::vector<LyricLine>& b
     return true;
 }
 
+// 这些位表示“需要重新处理什么”，不再分别由多个布尔量表达。它们不是
+// 生命周期阶段：阶段使用下面 RenderState 中的枚举表示，失效位只描述待处理工作。
+enum class RenderInvalidation : uint32_t {
+    Paint = 1u << 0,
+    Text = 1u << 1,
+    SongInfo = 1u << 2,
+    Geometry = 1u << 3,
+    Layout = 1u << 4,
+    Cover = 1u << 5,
+    PlatformIcon = 1u << 6,
+};
+
+using RenderInvalidationMask = uint32_t;
+
+constexpr RenderInvalidationMask toMask(RenderInvalidation value) {
+    return static_cast<RenderInvalidationMask>(value);
+}
+
 } // namespace
 
 struct TaskbarHost::Impl {
@@ -395,15 +415,147 @@ struct TaskbarHost::Impl {
         int height = 0;
     };
 
+    struct InvalidationSnapshot {
+        RenderInvalidationMask mask = 0;
+        std::array<uint64_t, 7> generations{};
+    };
+
+    class InvalidationState {
+    public:
+        InvalidationState()
+            : pending_(toMask(RenderInvalidation::Paint) |
+                       toMask(RenderInvalidation::Text) |
+                       toMask(RenderInvalidation::SongInfo) |
+                       toMask(RenderInvalidation::Geometry) |
+                       toMask(RenderInvalidation::Layout) |
+                       toMask(RenderInvalidation::Cover) |
+                       toMask(RenderInvalidation::PlatformIcon)) {}
+
+        void request(RenderInvalidation value) {
+            request(toMask(value));
+        }
+
+        void request(RenderInvalidationMask mask) {
+            pending_ |= mask;
+            for (size_t i = 0; i < generations_.size(); ++i) {
+                if (mask & (1u << i))
+                    ++generations_[i];
+            }
+        }
+
+        bool contains(RenderInvalidation value) const {
+            return (pending_ & toMask(value)) != 0;
+        }
+
+        bool any() const { return pending_ != 0; }
+
+        InvalidationSnapshot begin() const {
+            return InvalidationSnapshot{pending_, generations_};
+        }
+
+        void commit(const InvalidationSnapshot& snapshot) {
+            for (size_t i = 0; i < generations_.size(); ++i) {
+                const RenderInvalidationMask bit = 1u << i;
+                if ((snapshot.mask & bit) && generations_[i] == snapshot.generations[i])
+                    pending_ &= ~bit;
+            }
+        }
+
+    private:
+        RenderInvalidationMask pending_ = 0;
+        std::array<uint64_t, 7> generations_{};
+    };
+
+    // 渲染阶段集中在一个对象内：外部只看到枚举/查询，窗口、转场和资源阶段
+    // 不再由宿主成员函数各自拼接多个布尔量表达。
+    class RenderState {
+    public:
+        enum class WindowPhase {
+            Hidden,
+            Visible,
+        };
+        enum class LyricTransitionPhase {
+            Idle,
+            Pending,
+            Running,
+        };
+        enum class DCompTransitionPhase {
+            Inactive,
+            Active,
+            EndRequested,
+        };
+        enum class SongTransitionPhase {
+            Idle,
+            Pending,
+        };
+        enum class DeviceResourcePhase {
+            Uninitialized,
+            Ready,
+        };
+
+        RenderMode mode() const { return mode_; }
+        WindowPhase windowPhase() const { return window_; }
+        LyricTransitionPhase lyricTransitionPhase() const { return lyricTransition_; }
+        DCompTransitionPhase dcompTransitionPhase() const { return dcompTransition_; }
+        DeviceResourcePhase deviceResourcePhase() const { return deviceResources_; }
+        bool sessionVisible() const { return sessionVisible_; }
+        bool visibilitySuppressed() const { return visibilitySuppressed_; }
+        bool songTransitionPending() const {
+            return songTransition_ == SongTransitionPhase::Pending;
+        }
+
+        void setMode(RenderMode mode) { mode_ = mode; }
+        void setWindowPhase(WindowPhase phase) { window_ = phase; }
+        void setSessionVisible(bool visible) { sessionVisible_ = visible; }
+        void setVisibilitySuppressed(bool suppressed) {
+            visibilitySuppressed_ = suppressed;
+        }
+        void setLyricTransitionPhase(LyricTransitionPhase phase) {
+            lyricTransition_ = phase;
+        }
+        void setDCompTransitionPhase(DCompTransitionPhase phase) {
+            dcompTransition_ = phase;
+        }
+        void setDeviceResourcePhase(DeviceResourcePhase phase) {
+            deviceResources_ = phase;
+        }
+        void setSongTransitionPending(bool pending) {
+            songTransition_ = pending ? SongTransitionPhase::Pending
+                                       : SongTransitionPhase::Idle;
+        }
+
+        void requestInvalidation(RenderInvalidation value) { invalidation_.request(value); }
+        void requestInvalidation(RenderInvalidationMask mask) { invalidation_.request(mask); }
+        bool isInvalidated(RenderInvalidation value) const {
+            return invalidation_.contains(value);
+        }
+        bool hasInvalidation() const { return invalidation_.any(); }
+        InvalidationSnapshot beginInvalidation() const { return invalidation_.begin(); }
+        void commitInvalidation(const InvalidationSnapshot& snapshot) {
+            invalidation_.commit(snapshot);
+        }
+
+    private:
+        RenderMode mode_ = RenderMode::Normal;
+        WindowPhase window_ = WindowPhase::Hidden;
+        LyricTransitionPhase lyricTransition_ = LyricTransitionPhase::Idle;
+        DCompTransitionPhase dcompTransition_ = DCompTransitionPhase::Inactive;
+        DeviceResourcePhase deviceResources_ = DeviceResourcePhase::Uninitialized;
+        bool sessionVisible_ = false;
+        bool visibilitySuppressed_ = false;
+        SongTransitionPhase songTransition_ = SongTransitionPhase::Idle;
+        InvalidationState invalidation_;
+    };
+
+    RenderState renderState_;
+
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
-    bool visible = false;
     bool timerRunning_ = false;
     UINT timerMs_ = 0; // 当前定时器实际间隔（活动/暂停档位切换用）
     bool placementTimerRunning_ = false;
     UINT displayRefreshHz_ = 60;
     bool allowOverlap_ = false;
-    bool visibilitySuppressed_ = false;
     bool probeReady_ = false;
     TaskbarPlacementStatus placementStatus_ = TaskbarPlacementStatus::Unavailable;
     std::function<void(TaskbarPlacementStatus)> onPlacementStatusChanged_;
@@ -465,9 +617,7 @@ struct TaskbarHost::Impl {
     OverlayMediaInfo media;
     IdlePresentation idle;
     ID2D1Bitmap* coverBmp = nullptr;
-    bool coverDirty = true;
     ID2D1Bitmap* platformIconBmp = nullptr;
-    bool platformIconDirty = true;
 
     // 交互
     std::function<void()> tick;
@@ -588,8 +738,6 @@ struct TaskbarHost::Impl {
     ULONGLONG lyricTransitionStartMs_ = 0;
     int lyricTransitionDirection_ = 1; // 1: 新行从下方进入，-1: 从上方进入
     uint64_t lyricTransitionRevision_ = 0;
-    bool lyricTransitionPending_ = false;
-    bool lyricTransitionActive_ = false;
     // 行过渡目标：currentLine 是逻辑当前行；transitionTarget_ 是本次动画要进入的行，
     // pendingTarget_ 是动画期间收到的最新目标（latest-frame-wins，只覆盖不累积），
     // 动画结束收尾时统一消费，不让旧的结束逻辑覆盖新行。
@@ -599,13 +747,8 @@ struct TaskbarHost::Impl {
         int direction = 1;
         uint64_t frameRevision = 0;
     };
-    LyricTransitionTarget transitionTarget_{};
-    LyricTransitionTarget pendingTarget_{};
-    bool transitionTargetValid_ = false;
-    bool pendingTargetValid_ = false;
-    bool lyricTransitionDCompActive_ = false;
-    bool lyricTransitionDCompEnd_ = false;
-    bool songTransitionPending_ = false;
+    std::optional<LyricTransitionTarget> transitionTarget_;
+    std::optional<LyricTransitionTarget> pendingTarget_;
     ULONGLONG frameNowMs_ = 0;
     ID2D1SolidColorBrush* brushBg_ = nullptr;
     ID2D1SolidColorBrush* brushHover_ = nullptr;
@@ -642,10 +785,6 @@ struct TaskbarHost::Impl {
     // 渲染模式：0 正常；1 低渲染（播放中也固定 ~30fps）；2 完全停止（窗口隐藏、
     // 帧定时器停止、GPU 设备释放，数据状态保留在内存）；3 极简（保留歌词刷新率，
     // 仅关闭附加视觉、媒体卡片和切歌弹窗）
-    int renderMode_ = 0;
-    // 最近一帧的会话可见性：完全停止模式下窗口被强制隐藏且 visible 被清，
-    // 恢复时据此判断是否需要立即重新显示
-    bool sessionVisible_ = false;
     float vinylAngleDeg_ = 0.0f;
     ULONGLONG vinylTickMs_ = 0;
     // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
@@ -681,16 +820,13 @@ struct TaskbarHost::Impl {
     ID2D1LinearGradientBrush* lyricRightFadeBrush_ = nullptr;
     ID2D1Layer* lyricRightFadeLayer_ = nullptr;
     media_control::Geometry controlGeometry;
-    bool textDirty_ = true;
-    bool songInfoDirty_ = true; // 标题/歌手布局独立重建，换行不触碰歌曲信息
-    bool geomDirty_ = true;
-    bool layoutDirty_ = true;
-    bool sceneWindowResizeActive_ = false;
-    bool sceneWindowResizeApplied_ = false;
-    ULONGLONG sceneWindowResizeStartMs_ = 0;
-    WindowPlacement sceneWindowResizeFrom_{};
-    WindowPlacement sceneWindowResizeTo_{};
-    WindowPlacement sceneWindowResizeLastApplied_{};
+    struct SceneResizeAnimation {
+        WindowPlacement from{};
+        WindowPlacement to{};
+        WindowPlacement lastApplied{};
+        ULONGLONG startMs = 0;
+    };
+    std::optional<SceneResizeAnimation> sceneResize_;
     int lastPxW_ = 0;
     int lastPxH_ = 0;
     int lastLogicalPxW_ = 0;
@@ -718,6 +854,125 @@ struct TaskbarHost::Impl {
     std::array<TextFxCacheEntry, 2> textFxCaches_{};
     uint64_t textFxUse_ = 0;
     uint64_t textFxGen_ = 0;
+
+    bool isWindowVisible() const {
+        return renderState_.windowPhase() == RenderState::WindowPhase::Visible;
+    }
+
+    bool isSessionVisible() const { return renderState_.sessionVisible(); }
+
+    bool isRenderMode(RenderMode mode) const { return renderState_.mode() == mode; }
+
+    bool isStoppedMode() const { return isRenderMode(RenderMode::Stopped); }
+
+    bool isLyricTransitionPending() const {
+        return renderState_.lyricTransitionPhase() ==
+               RenderState::LyricTransitionPhase::Pending;
+    }
+
+    bool isLyricTransitionActive() const {
+        return renderState_.lyricTransitionPhase() ==
+               RenderState::LyricTransitionPhase::Running;
+    }
+
+    bool isLyricTransitionInProgress() const {
+        return renderState_.lyricTransitionPhase() !=
+               RenderState::LyricTransitionPhase::Idle;
+    }
+
+    void setLyricTransitionPending() {
+        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Pending);
+    }
+
+    void setLyricTransitionActive() {
+        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Running);
+    }
+
+    void clearLyricTransitionPhase() {
+        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Idle);
+    }
+
+    bool isLyricDCompActive() const {
+        return renderState_.dcompTransitionPhase() ==
+               RenderState::DCompTransitionPhase::Active;
+    }
+
+    bool isLyricDCompEndRequested() const {
+        return renderState_.dcompTransitionPhase() ==
+               RenderState::DCompTransitionPhase::EndRequested;
+    }
+
+    void requestLyricDCompEnd() {
+        if (isLyricDCompActive())
+            renderState_.setDCompTransitionPhase(
+                RenderState::DCompTransitionPhase::EndRequested);
+    }
+
+    void clearLyricDCompState() {
+        renderState_.setDCompTransitionPhase(RenderState::DCompTransitionPhase::Inactive);
+    }
+
+    bool isSongTransitionPending() const {
+        return renderState_.songTransitionPending();
+    }
+
+    void setSongTransitionPending(bool pending) {
+        renderState_.setSongTransitionPending(pending);
+    }
+
+    bool isSceneResizeActive() const { return sceneResize_.has_value(); }
+
+    void requestInvalidation(RenderInvalidation value) {
+        renderState_.requestInvalidation(value);
+    }
+
+    void requestInvalidation(RenderInvalidationMask mask) {
+        renderState_.requestInvalidation(mask);
+    }
+
+    bool isInvalidated(RenderInvalidation value) const {
+        return renderState_.isInvalidated(value);
+    }
+
+    void requestFrame() { requestInvalidation(RenderInvalidation::Paint); }
+
+    void flushRenderRequest() {
+        if (isWindowVisible() && hwnd)
+            render();
+    }
+
+    void requestFrameAndFlush() {
+        requestFrame();
+        flushRenderRequest();
+    }
+
+    bool shouldShowWindow() const {
+        if (!hwnd || isStoppedMode() || !isSessionVisible() ||
+            renderState_.visibilitySuppressed())
+            return false;
+        if (!allowOverlap_ && (placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+                               placementStatus_ == TaskbarPlacementStatus::Unavailable))
+            return false;
+        return true;
+    }
+
+    bool reconcileWindowVisibility() {
+        const bool wantVisible = shouldShowWindow();
+        if (wantVisible == isWindowVisible())
+            return false;
+
+        renderState_.setWindowPhase(wantVisible ? RenderState::WindowPhase::Visible
+                                                : RenderState::WindowPhase::Hidden);
+        if (wantVisible) {
+            ShowWindow(hwnd, SW_SHOWNA);
+            startFrameTimer();
+        } else {
+            stopFrameTimer();
+            if (hwnd)
+                ShowWindow(hwnd, SW_HIDE);
+        }
+        return true;
+    }
 
     float scale() const { return static_cast<float>(dpi_) / 96.0f; }
     float dip(int px) const { return static_cast<float>(px) / scale(); }
@@ -765,13 +1020,13 @@ struct TaskbarHost::Impl {
         bool durationChanged = info.durationMs != media.durationMs;
         media = info;
         if (thumbChanged)
-            coverDirty = true;
+            requestInvalidation(RenderInvalidation::Cover);
         if (platformChanged)
-            platformIconDirty = true;
+            requestInvalidation(RenderInvalidation::PlatformIcon);
         if (thumbChanged || textChanged)
             vinylAngleDeg_ = 0.0f;
         if (textChanged)
-            songInfoDirty_ = true;
+            requestInvalidation(RenderInvalidation::SongInfo);
         if (thumbChanged || textChanged || playingChanged)
             vinylTickMs_ = monotonicNowMs();
         return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged ||
@@ -873,8 +1128,8 @@ struct TaskbarHost::Impl {
 
         cancelTaskbarAttachRetry();
         adjustPosition();
-        if (visible)
-            render();
+        if (isWindowVisible())
+            requestFrameAndFlush();
     }
 
     bool createWindow(HINSTANCE inst) {
@@ -914,7 +1169,7 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] volume popup creation failed");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
-        if (visibilitySuppressed_ && renderMode_ != static_cast<int>(RenderMode::Stopped))
+        if (renderState_.visibilitySuppressed() && !isStoppedMode())
             startPlacementTimer();
         return true;
     }
@@ -954,7 +1209,7 @@ struct TaskbarHost::Impl {
 
     void startPlacementTimer() {
         if (placementTimerRunning_ || !hwnd ||
-            renderMode_ == static_cast<int>(RenderMode::Stopped))
+            isStoppedMode())
             return;
         if (SetTimer(hwnd, kPlacementTimerId, kPlacementTimerMs, nullptr))
             placementTimerRunning_ = true;
@@ -972,22 +1227,18 @@ struct TaskbarHost::Impl {
             placementStatus_ == TaskbarPlacementStatus::Unavailable)
             return;
 
-        visibilitySuppressed_ = false;
+        renderState_.setVisibilitySuppressed(false);
         probeFast_ = false;
         stopPlacementTimer();
-        if (sessionVisible_ && renderMode_ != static_cast<int>(RenderMode::Stopped)) {
+        if (isSessionVisible() && !isStoppedMode()) {
             // 隐藏期间不运行完整帧定时器；恢复前补一次播放进度/当前行，
             // 避免窗口重新出现时先显示旧歌词，等下一帧才追上。
             if (tick)
                 tick();
-            if (!visible) {
-                visible = true;
-                if (hwnd)
-                    ShowWindow(hwnd, SW_SHOWNA);
-            }
-            startFrameTimer();
-            render();
-        } else if (!visible) {
+            reconcileWindowVisibility();
+            if (isWindowVisible())
+                requestFrameAndFlush();
+        } else if (!isWindowVisible()) {
             stopFrameTimer();
         }
     }
@@ -1001,11 +1252,7 @@ struct TaskbarHost::Impl {
             status == TaskbarPlacementStatus::Unavailable) {
             probeFast_ = status == TaskbarPlacementStatus::NoSpace;
             startPlacementTimer();
-            if (visible) {
-                visible = false;
-                if (hwnd)
-                    ShowWindow(hwnd, SW_HIDE);
-            }
+            reconcileWindowVisibility();
             stopFrameTimer();
         } else if (previous == TaskbarPlacementStatus::NoSpace ||
                    previous == TaskbarPlacementStatus::Unavailable) {
@@ -1017,13 +1264,13 @@ struct TaskbarHost::Impl {
     }
 
     void releaseVisibilitySuppression() {
-        if (!visibilitySuppressed_ || !probeReady_)
+        if (!renderState_.visibilitySuppressed() || !probeReady_)
             return;
 
         if (placementStatus_ == TaskbarPlacementStatus::NoSpace) {
             // 首次真实探测已经完成：解除“等待首次结果”的抑制，但仍保持隐藏，
             // 后续由低频避让计时器等待空间恢复。
-            visibilitySuppressed_ = false;
+            renderState_.setVisibilitySuppressed(false);
             probeFast_ = true;
             startPlacementTimer();
             return;
@@ -1035,14 +1282,9 @@ struct TaskbarHost::Impl {
 
     void setVisibilitySuppressed(bool on) {
         if (on) {
-            visibilitySuppressed_ = true;
-            if (visible) {
-                visible = false;
-                stopFrameTimer();
-                if (hwnd)
-                    ShowWindow(hwnd, SW_HIDE);
-            }
-            if (hwnd && renderMode_ != static_cast<int>(RenderMode::Stopped))
+            renderState_.setVisibilitySuppressed(true);
+            reconcileWindowVisibility();
+            if (hwnd && !isStoppedMode())
                 startPlacementTimer();
             return;
         }
@@ -1050,6 +1292,31 @@ struct TaskbarHost::Impl {
         if (!probeReady_)
             return;
         releaseVisibilitySuppression();
+    }
+
+    void show() {
+        if (renderState_.visibilitySuppressed() && !allowOverlap_)
+            return;
+        if ((placementStatus_ == TaskbarPlacementStatus::NoSpace ||
+             placementStatus_ == TaskbarPlacementStatus::Unavailable) &&
+            !allowOverlap_)
+            return;
+        if (allowOverlap_) {
+            renderState_.setVisibilitySuppressed(false);
+            probeFast_ = false;
+            stopPlacementTimer();
+        }
+        renderState_.setSessionVisible(true);
+        reconcileWindowVisibility();
+        requestFrameAndFlush();
+    }
+
+    void hide() {
+        renderState_.setSessionVisible(false);
+        reconcileWindowVisibility();
+        volumeHover_ = false;
+        volumePopup_.hide();
+        mediaPopup.hideImmediate();
     }
 
     TaskbarPlacementStatus calculateWindowPlacement(WindowPlacement& placement) {
@@ -1269,7 +1536,7 @@ struct TaskbarHost::Impl {
             // 封面位图按显示尺寸解码（decodeCover），DPI/任务栏厚度或方向变化时按新尺寸重解码
             if (dpi != dpi_ || edge != taskbarEdge_ ||
                 taskbarCrossPixels(rcTaskbar, edge) != taskbarCrossPixels(rcTaskbar_, taskbarEdge_))
-                coverDirty = true;
+                requestInvalidation(RenderInvalidation::Cover);
             dpi_ = dpi;
             centerAlign_ = center;
             taskbarEdge_ = edge;
@@ -1278,14 +1545,14 @@ struct TaskbarHost::Impl {
             if (edgeChanged) {
                 // 左右侧的竖排文字方向相反；任务栏方向变化时必须重建逐字布局，
                 // 同时丢弃沿用自另一方向的滚动偏移。
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
                 lyricScrollOffset_ = 0.0f;
             }
             rcTaskbar_ = rcTaskbar;
             rcNotify_ = rcNotify;
             rcStart_ = rcStart;
             renderer.setDpi(dpi_);
-            layoutDirty_ = true;
+            requestInvalidation(RenderInvalidation::Layout);
             if (themeChanged) {
                 lightTheme_ = light;
                 discardDeviceResources();
@@ -1297,8 +1564,10 @@ struct TaskbarHost::Impl {
     // ---------- 资源 ----------
 
     void createDeviceResources() {
-        if (brushBg_)
+        if (brushBg_) {
+            renderState_.setDeviceResourcePhase(RenderState::DeviceResourcePhase::Ready);
             return;
+        }
         renderer.initialize();
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -1347,6 +1616,9 @@ struct TaskbarHost::Impl {
         rt->CreateLayer(&lyricEdgeFadeLayer_);
         rt->CreateLayer(&lyricRightFadeLayer_);
         recreateFormats();
+        renderState_.setDeviceResourcePhase(
+            brushBg_ ? RenderState::DeviceResourcePhase::Ready
+                     : RenderState::DeviceResourcePhase::Uninitialized);
     }
 
     // 黑胶效果画刷：光环/纹理沿用当前已播放色，保证专辑取色后两处同步变化。
@@ -1435,7 +1707,7 @@ struct TaskbarHost::Impl {
         lyricGlowColor_ = glow;
         lyricOutlineColor_ = outline;
         createLyricBrushes();
-        render();
+        requestFrameAndFlush();
     }
 
     void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
@@ -1446,7 +1718,7 @@ struct TaskbarHost::Impl {
         lyricUnplayedColor_ = unplayed;
         lyricUnplayedAlphaPct_ = unplayedAlphaPct;
         createLyricBrushes();
-        render();
+        requestFrameAndFlush();
     }
 
     void setFontGlow(bool on) {
@@ -1454,7 +1726,7 @@ struct TaskbarHost::Impl {
             return;
         lyricGlow_ = on;
         ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
-        render();
+        requestFrameAndFlush();
     }
 
     void setFontOutline(bool on) {
@@ -1462,7 +1734,7 @@ struct TaskbarHost::Impl {
             return;
         lyricOutline_ = on;
         ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
-        render();
+        requestFrameAndFlush();
     }
 
     void setSecondaryLyricMode(bool translation, bool romanization) {
@@ -1474,8 +1746,8 @@ struct TaskbarHost::Impl {
         translationEnabled_ = translation;
         romanizationEnabled_ = romanization;
         resetLyricTransition();
-        textDirty_ = true;
-        render();
+        requestInvalidation(RenderInvalidation::Text);
+        requestFrameAndFlush();
     }
 
     void setDoubleLineLyrics(bool on) {
@@ -1483,8 +1755,8 @@ struct TaskbarHost::Impl {
             return;
         doubleLineLyricsEnabled_ = on;
         resetLyricTransition();
-        textDirty_ = true;
-        render();
+        requestInvalidation(RenderInvalidation::Text);
+        requestFrameAndFlush();
     }
 
     void setLyricAlignment(LyricAlignment alignment) {
@@ -1493,7 +1765,7 @@ struct TaskbarHost::Impl {
         lyricAlignment_ = alignment;
         lyricScrollOffset_ = 0.0f;
         secondaryScrollOffset_ = 0.0f;
-        render();
+        requestFrameAndFlush();
     }
 
     void setIdleQuoteAlignment(LyricAlignment alignment) {
@@ -1502,7 +1774,7 @@ struct TaskbarHost::Impl {
         idleQuoteAlignment_ = alignment;
         lyricScrollOffset_ = 0.0f;
         secondaryScrollOffset_ = 0.0f;
-        render();
+        requestFrameAndFlush();
     }
 
     void setIdleQuoteBackground(IdleQuoteBackground background) {
@@ -1510,7 +1782,7 @@ struct TaskbarHost::Impl {
             return;
         idleQuoteBackground_ = background;
         refreshFrameTimer();
-        render();
+        requestFrameAndFlush();
     }
 
     void setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope) {
@@ -1518,16 +1790,15 @@ struct TaskbarHost::Impl {
             return;
         idleQuoteBackgroundScope_ = scope;
         refreshFrameTimer();
-        render();
+        requestFrameAndFlush();
     }
 
     bool isMinimalMode() const {
-        return renderMode_ == static_cast<int>(RenderMode::Minimal);
+        return isRenderMode(RenderMode::Minimal);
     }
 
     bool mediaPopupAvailable(bool sessionVisible) const {
-        return sessionVisible && renderMode_ != static_cast<int>(RenderMode::Stopped) &&
-               !isMinimalMode();
+        return sessionVisible && !isStoppedMode() && !isMinimalMode();
     }
 
     static bool isTaskbarMediaScene(DisplayScene scene) {
@@ -1541,13 +1812,13 @@ struct TaskbarHost::Impl {
     }
 
     bool mediaPopupEnabledForScene() const {
-        if (isMinimalMode() || renderMode_ == static_cast<int>(RenderMode::Stopped))
+        if (isMinimalMode() || isStoppedMode())
             return false;
         if (scene_ == DisplayScene::Idle)
-            return sessionVisible_ && idle.quickStartEnabled;
+            return isSessionVisible() && idle.quickStartEnabled;
         if (hoverControlStyle_ == HoverControlStyle::Popup)
             return controlsOnHover_;
-        return sessionVisible_ && idle.quickStartEnabled;
+        return isSessionVisible() && idle.quickStartEnabled;
     }
 
     void syncMediaPopupEnabled() {
@@ -1558,7 +1829,7 @@ struct TaskbarHost::Impl {
         if (enabled && !wasEnabled) {
             // 弹窗样式可能在媒体会话已经存在时才开启；补送当前完整快照，
             // 让弹窗的可用状态和展示类别不依赖下一次 SMTC 事件。
-            const bool available = mediaPopupAvailable(sessionVisible_);
+            const bool available = mediaPopupAvailable(isSessionVisible());
             mediaPopup.beginPresentationUpdate();
             mediaPopup.setIdleContent(idle, available);
             mediaPopup.setPresentationMode(scene_, available,
@@ -1566,7 +1837,7 @@ struct TaskbarHost::Impl {
             mediaPopup.setMedia(media, available);
             mediaPopup.endPresentationUpdate();
         } else if (enabled) {
-            const bool available = mediaPopupAvailable(sessionVisible_);
+            const bool available = mediaPopupAvailable(isSessionVisible());
             mediaPopup.beginPresentationUpdate();
             mediaPopup.setPresentationMode(scene_, available,
                                             hoverControlStyle_ == HoverControlStyle::Inline);
@@ -1596,7 +1867,7 @@ struct TaskbarHost::Impl {
         volumeHover_ = false;
         volumePopup_.hide();
         syncMediaPopupEnabled();
-        render();
+        requestFrameAndFlush();
     }
 
     void setHoverControlStyle(HoverControlStyle style) {
@@ -1606,7 +1877,7 @@ struct TaskbarHost::Impl {
         volumeHover_ = false;
         volumePopup_.hide();
         syncMediaPopupEnabled();
-        render();
+        requestFrameAndFlush();
     }
 
     void setFloatingCardTrigger(MediaPopupTrigger trigger) {
@@ -1643,7 +1914,7 @@ struct TaskbarHost::Impl {
         spectrumStyle_ = style;
         if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
             adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     void setSpectrumBackground(bool on) {
@@ -1653,7 +1924,7 @@ struct TaskbarHost::Impl {
         spectrumBackground_ = on;
         if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
             adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     void setSpectrumOpacity(int percent) {
@@ -1662,7 +1933,7 @@ struct TaskbarHost::Impl {
             return;
         spectrumOpacityPct_ = next;
         if (backgroundWaveEnabled())
-            render();
+            requestFrameAndFlush();
     }
 
     // 进度背景实际生效条件：用户开启 && 背景波浪未占用背景 && 当前歌曲有时长
@@ -1674,7 +1945,7 @@ struct TaskbarHost::Impl {
         if (progressBackground_ == on)
             return;
         progressBackground_ = on;
-        render();
+        requestFrameAndFlush();
     }
 
     void setProgressBackgroundOpacity(int percent) {
@@ -1683,7 +1954,7 @@ struct TaskbarHost::Impl {
             return;
         progressBackgroundOpacityPct_ = next;
         if (progressBackgroundActive())
-            render();
+            requestFrameAndFlush();
     }
 
     void setBackground(TaskbarBackground mode) {
@@ -1692,7 +1963,7 @@ struct TaskbarHost::Impl {
         background_ = mode;
         if (mode != TaskbarBackground::CoverBlur)
             releaseCoverBackgroundResources();
-        render();
+        requestFrameAndFlush();
     }
 
     void setCoverBackgroundOpacity(int percent) {
@@ -1701,7 +1972,7 @@ struct TaskbarHost::Impl {
             return;
         coverBackgroundOpacityPct_ = next;
         if (background_ == TaskbarBackground::CoverBlur)
-            render();
+            requestFrameAndFlush();
     }
 
     void setSpectrumVisible(bool on) {
@@ -1713,10 +1984,10 @@ struct TaskbarHost::Impl {
         spectrumVisible_ = on;
         if (!on)
             spectrumBands_.fill(0.0f);
-        // 先改窗口宽度再渲染：若在 render 内经 layoutDirty_ 改大小，
+        // 先改窗口宽度再渲染：若在 render 内经 Layout 失效改大小，
         // render 结尾的 present 会用旧尺寸位图把窗口尺寸拽回去（与 setPositionMode 同序）
         adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     void setSongInfoVisible(bool on) {
@@ -1725,9 +1996,9 @@ struct TaskbarHost::Impl {
         songInfoVisible_ = on;
         titleScrollOffset_ = 0.0f;
         artistScrollOffset_ = 0.0f;
-        songInfoDirty_ = true;
+        requestInvalidation(RenderInvalidation::SongInfo);
         adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     void setAlbumCoverVisible(bool on) {
@@ -1735,25 +2006,25 @@ struct TaskbarHost::Impl {
             return;
         albumCoverVisible_ = on;
         if (!on) {
-            platformIconDirty = true;
+            requestInvalidation(RenderInvalidation::PlatformIcon);
             if (platformIconBmp) {
                 platformIconBmp->Release();
                 platformIconBmp = nullptr;
             }
         } else if (platformIconVisible_) {
-            platformIconDirty = true;
+            requestInvalidation(RenderInvalidation::PlatformIcon);
         }
-        textDirty_ = true;
+        requestInvalidation(RenderInvalidation::Text);
         adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     void setPlatformIconVisible(bool on) {
         if (platformIconVisible_ == on)
             return;
         platformIconVisible_ = on;
-        platformIconDirty = true;
-        render();
+        requestInvalidation(RenderInvalidation::PlatformIcon);
+        requestFrameAndFlush();
     }
 
     void setAlbumCoverEffect(AlbumCoverEffect effect) {
@@ -1762,12 +2033,12 @@ struct TaskbarHost::Impl {
         albumCoverEffect_ = effect;
         vinylAngleDeg_ = 0.0f;
         vinylTickMs_ = monotonicNowMs();
-        geomDirty_ = true;
+        requestInvalidation(RenderInvalidation::Geometry);
         if (effect == AlbumCoverEffect::Vinyl)
             createAlbumCoverBrushes();
         else
             releaseAlbumCoverEffectResources();
-        render();
+        requestFrameAndFlush();
     }
 
     void setSpectrumBands(const std::array<float, TaskbarHost::kSpectrumBands>& bands) {
@@ -1791,9 +2062,9 @@ struct TaskbarHost::Impl {
         if (playingChanged) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
-            mediaPopup.setMedia(media, mediaPopupAvailable(sessionVisible_));
+            mediaPopup.setMedia(media, mediaPopupAvailable(isSessionVisible()));
             mediaPopup.setPresentationMode(
-                scene_, mediaPopupAvailable(sessionVisible_),
+                scene_, mediaPopupAvailable(isSessionVisible()),
                 hoverControlStyle_ == HoverControlStyle::Inline);
         }
         mediaPopup.endPresentationUpdate();
@@ -1801,14 +2072,14 @@ struct TaskbarHost::Impl {
             // 悬浮控制按钮的播放/暂停图标随状态变化，直接提交一帧；弹窗自身
             // 的完整展示帧已在上面的批量更新中提交。
             // 这里仅保留宿主歌词的刷新，不再重复触发弹窗绘制。
-            render();
+            requestFrameAndFlush();
         }
 
         if (patch.currentLine == currentLine)
             return;
 
         if (lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            (lyricTransitionPending_ || lyricTransitionActive_)) {
+            isLyricTransitionInProgress()) {
             // 场景翻页期间不重排目标层，先记下最新歌词行，待翻页完成后
             // 统一提交，避免目标层重建把上下翻页打断成瞬移。
             currentLine = patch.currentLine;
@@ -1849,14 +2120,14 @@ struct TaskbarHost::Impl {
                                  frame.idle.copyEnabled != idle.copyEnabled ||
                                  frame.idle.quickStartEnabled != idle.quickStartEnabled ||
                                  frame.idle.apps.size() != idle.apps.size();
-        const bool wasVisible = visible;
+        const bool wasVisible = isWindowVisible();
         const bool shouldAnimateScene =
-            visible && frame.visible && clientAnimations_ && !isMinimalMode() &&
-            renderMode_ != static_cast<int>(RenderMode::Stopped) &&
+            isWindowVisible() && frame.visible && clientAnimations_ && !isMinimalMode() &&
+            !isStoppedMode() &&
             isTaskbarSceneTransition(scene_, frame.scene) && lyricLayout_;
         const bool continueSceneTransition =
             sceneChanged && lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            (lyricTransitionPending_ || lyricTransitionActive_) &&
+            isLyricTransitionInProgress() &&
             isTaskbarMediaScene(scene_) && isTaskbarMediaScene(frame.scene);
         const bool mediaIdentityChanged =
             frame.media.title != media.title || frame.media.artist != media.artist ||
@@ -1905,7 +2176,7 @@ struct TaskbarHost::Impl {
                     sceneTransitionFromPxH_ = lastLogicalPxH_;
                     lyricTransitionKind_ = LyricTransitionKind::Scene;
                     lyricTransitionDirection_ = frame.scene == DisplayScene::Lyrics ? 1 : -1;
-                    lyricTransitionPending_ = true;
+                    setLyricTransitionPending();
                     lyricTransitionRevision_ = frame.frameRevision;
                 }
             }
@@ -1915,13 +2186,15 @@ struct TaskbarHost::Impl {
             if (shouldAnimateScene) {
                 // 与内容转场使用同一段平滑时间曲线，窗口宽度/锚点连续变化，避免
                 // 在转场开始或结束时一次性收窄/撑开并触发位图重绑闪烁。
-                if (beginSceneWindowResize())
-                    layoutDirty_ = false;
-                else
-                    layoutDirty_ = true;
+                if (beginSceneWindowResize()) {
+                    // 窗口尺寸动画接管本次布局失效；render() 在动画期间不再执行
+                    // 一次性的 adjustPosition，成功提交后由失效快照统一确认。
+                } else {
+                    requestInvalidation(RenderInvalidation::Layout);
+                }
             } else {
                 cancelSceneWindowResize();
-                layoutDirty_ = true;
+                requestInvalidation(RenderInvalidation::Layout);
             }
         }
         idle = frame.idle;
@@ -1938,13 +2211,12 @@ struct TaskbarHost::Impl {
         statusText = frame.statusText;
 
         // 只对已有曲目之间的切换做入场动画；首次显示、同曲刷新和会话关闭保持即时提交。
-        songTransitionPending_ = songChanged && frame.visible && !isMinimalMode() &&
-                                 renderMode_ != static_cast<int>(RenderMode::Stopped) &&
-                                 clientAnimations_;
+        setSongTransitionPending(songChanged && frame.visible && !isMinimalMode() &&
+                                 !isStoppedMode() && clientAnimations_);
 
         const bool sceneTransitionInProgress =
             lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            (lyricTransitionPending_ || lyricTransitionActive_);
+            isLyricTransitionInProgress();
         if (trackChanged || lyricsChanged) {
             lines = frame.lyrics;
             currentLine = frame.currentLine;
@@ -1956,7 +2228,7 @@ struct TaskbarHost::Impl {
                 }
                 nextLyricWidth_ = 0.0f;
                 nextLyricHeight_ = 0.0f;
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
             } else if (!sceneChanged || continueSceneTransition) {
                 sceneTransitionNeedsRelayout_ = true;
                 lyricTransitionRevision_ = frame.frameRevision;
@@ -1970,7 +2242,7 @@ struct TaskbarHost::Impl {
                 onLyricLineTargetChanged(frame.currentLine, frame.actualPositionMs,
                                          frame.frameRevision, frame.animateTransition);
             }
-        } else if (lyricTransitionPending_ || lyricTransitionActive_) {
+        } else if (isLyricTransitionInProgress()) {
             // 同一目标行的低频媒体/场景更新不应打断动画，但动画版本要跟随最新完整帧。
             lyricTransitionRevision_ = frame.frameRevision;
         }
@@ -1979,37 +2251,22 @@ struct TaskbarHost::Impl {
                 sceneTransitionNeedsRelayout_ = true;
                 lyricTransitionRevision_ = frame.frameRevision;
             } else {
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
             }
         }
 
-        sessionVisible_ = frame.visible;
-        if (sessionVisible_ && placementStatus_ == TaskbarPlacementStatus::NoSpace)
+        renderState_.setSessionVisible(frame.visible);
+        if (isSessionVisible() && placementStatus_ == TaskbarPlacementStatus::NoSpace)
             startPlacementTimer();
-        else if (!sessionVisible_)
+        else if (!isSessionVisible())
             stopPlacementTimer();
-        if (frame.visible && renderMode_ != static_cast<int>(RenderMode::Stopped) &&
-            !visibilitySuppressed_ &&
-            placementStatus_ != TaskbarPlacementStatus::NoSpace &&
-            placementStatus_ != TaskbarPlacementStatus::Unavailable) {
-            if (!visible) {
-                visible = true;
-                if (hwnd)
-                    ShowWindow(hwnd, SW_SHOWNA);
-                startFrameTimer();
-            }
-        } else if (visible) {
-            visible = false;
-            stopFrameTimer();
-            if (hwnd)
-                ShowWindow(hwnd, SW_HIDE);
-        }
+        reconcileWindowVisibility();
         syncMediaPopupEnabled();
 
-        if (visible && (wasVisible != visible || trackChanged || mediaChanged || lyricsChanged ||
+        if (isWindowVisible() && (wasVisible != isWindowVisible() || trackChanged || mediaChanged || lyricsChanged ||
                         lineChanged || statusChanged || statusOneShotChanged || sceneChanged ||
                         idleChanged))
-            render();
+            requestFrameAndFlush();
     }
 
     // 频谱簇总宽（含柱间间隙）
@@ -2042,9 +2299,7 @@ struct TaskbarHost::Impl {
     }
 
     void cancelSceneWindowResize() {
-        sceneWindowResizeActive_ = false;
-        sceneWindowResizeApplied_ = false;
-        sceneWindowResizeStartMs_ = 0;
+        sceneResize_.reset();
     }
 
     bool beginSceneWindowResize() {
@@ -2062,52 +2317,41 @@ struct TaskbarHost::Impl {
             return false;
         }
 
-        sceneWindowResizeFrom_ = from;
-        sceneWindowResizeTo_ = to;
-        sceneWindowResizeLastApplied_ = from;
-        sceneWindowResizeApplied_ = true;
-        sceneWindowResizeStartMs_ = monotonicNowMs();
-        sceneWindowResizeActive_ = true;
+        sceneResize_ = SceneResizeAnimation{from, to, from, monotonicNowMs()};
         return true;
     }
 
     bool updateSceneWindowResize(ULONGLONG now) {
-        if (!sceneWindowResizeActive_)
+        if (!sceneResize_)
             return false;
-        if (now < sceneWindowResizeStartMs_)
-            now = sceneWindowResizeStartMs_;
+        SceneResizeAnimation& resize = *sceneResize_;
+        if (now < resize.startMs)
+            now = resize.startMs;
 
         const float progress = std::clamp(
-            static_cast<float>(now - sceneWindowResizeStartMs_) / kSceneTransitionMs, 0.0f,
+            static_cast<float>(now - resize.startMs) / kSceneTransitionMs, 0.0f,
             1.0f);
         const float t = smoothStep(progress);
         WindowPlacement placement;
         placement.x = static_cast<int>(std::lround(
-            sceneWindowResizeFrom_.x +
-            (sceneWindowResizeTo_.x - sceneWindowResizeFrom_.x) * t));
+            resize.from.x + (resize.to.x - resize.from.x) * t));
         placement.y = static_cast<int>(std::lround(
-            sceneWindowResizeFrom_.y +
-            (sceneWindowResizeTo_.y - sceneWindowResizeFrom_.y) * t));
+            resize.from.y + (resize.to.y - resize.from.y) * t));
         placement.width = static_cast<int>(std::lround(
-            sceneWindowResizeFrom_.width +
-            (sceneWindowResizeTo_.width - sceneWindowResizeFrom_.width) * t));
+            resize.from.width + (resize.to.width - resize.from.width) * t));
         placement.height = static_cast<int>(std::lround(
-            sceneWindowResizeFrom_.height +
-            (sceneWindowResizeTo_.height - sceneWindowResizeFrom_.height) * t));
+            resize.from.height + (resize.to.height - resize.from.height) * t));
 
-        const bool changed =
-            !sceneWindowResizeApplied_ || placement.x != sceneWindowResizeLastApplied_.x ||
-            placement.y != sceneWindowResizeLastApplied_.y ||
-            placement.width != sceneWindowResizeLastApplied_.width ||
-            placement.height != sceneWindowResizeLastApplied_.height;
+        const bool changed = placement.x != resize.lastApplied.x ||
+                             placement.y != resize.lastApplied.y ||
+                             placement.width != resize.lastApplied.width ||
+                             placement.height != resize.lastApplied.height;
         if (changed) {
             applyWindowPlacement(placement, false, true);
-            sceneWindowResizeLastApplied_ = placement;
-            sceneWindowResizeApplied_ = true;
+            resize.lastApplied = placement;
         }
         if (progress >= 1.0f) {
-            sceneWindowResizeActive_ = false;
-            sceneWindowResizeStartMs_ = 0;
+            sceneResize_.reset();
         }
         return true;
     }
@@ -2636,7 +2880,7 @@ struct TaskbarHost::Impl {
             return;
         positionMode_ = mode;
         adjustPosition();
-        render();
+        requestFrameAndFlush();
     }
 
     // Explorer 重启后由托盘主窗口调用（TaskbarCreated 广播只发给顶层窗口）。
@@ -2645,7 +2889,7 @@ struct TaskbarHost::Impl {
     // 歌词/媒体/字体等状态都保存在 Impl 成员里，重建窗口后原样恢复
     void onTaskbarCreated() {
         runtime_log::writef(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d",
-                            hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, visible ? 1 : 0,
+                            hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, isWindowVisible() ? 1 : 0,
                             timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
@@ -2654,9 +2898,8 @@ struct TaskbarHost::Impl {
                 else
                     cancelTaskbarAttachRetry();
                 adjustPosition();
-                if (visible)
-                    ShowWindow(hwnd, SW_SHOWNA);
-                render();
+                reconcileWindowVisibility();
+                requestFrameAndFlush();
             } else {
                 taskbarEmbedded_ = false;
                 scheduleTaskbarAttachRetry();
@@ -2670,13 +2913,14 @@ struct TaskbarHost::Impl {
         // 等待新任务栏的首个探测结果，避免按旧矩形先显示一帧。
         timerRunning_ = false;
         timerMs_ = 0;
-        visibilitySuppressed_ = true;
+        renderState_.setVisibilitySuppressed(true);
+        renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
         probeReady_ = false;
         delete probeOut_.exchange(nullptr);
-        if (createWindow(inst) && !visibilitySuppressed_ && visible) {
-            ShowWindow(hwnd, SW_SHOWNA);
-            startFrameTimer();
-            render();
+        if (createWindow(inst)) {
+            reconcileWindowVisibility();
+            if (isWindowVisible())
+                requestFrameAndFlush();
         }
     }
 
@@ -2717,8 +2961,8 @@ struct TaskbarHost::Impl {
              &fmtNextLyric_);
         make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtSecondary_);
-        textDirty_ = true;
-        songInfoDirty_ = true;
+        requestInvalidation(RenderInvalidation::Text);
+        requestInvalidation(RenderInvalidation::SongInfo);
     }
 
     void changeFont(float delta) {
@@ -2730,8 +2974,8 @@ struct TaskbarHost::Impl {
         fontSize_ = std::clamp(size, kMinFont, kMaxFont);
         fontStyle_ = style;
         recreateFormats();
-        layoutDirty_ = true;
-        render();
+        requestInvalidation(RenderInvalidation::Layout);
+        requestFrameAndFlush();
     }
 
     void discardDeviceResources() {
@@ -2806,14 +3050,14 @@ struct TaskbarHost::Impl {
             platformIconBmp = nullptr;
         }
         renderer.discard();
-        lyricTransitionDCompActive_ = false;
-        lyricTransitionDCompEnd_ = false;
-        textDirty_ = true;
-        songInfoDirty_ = true;
-        geomDirty_ = true;
-        layoutDirty_ = true;
-        coverDirty = true;
-        platformIconDirty = true;
+        renderState_.setDeviceResourcePhase(RenderState::DeviceResourcePhase::Uninitialized);
+        clearLyricDCompState();
+        requestInvalidation(toMask(RenderInvalidation::Text) |
+                            toMask(RenderInvalidation::SongInfo) |
+                            toMask(RenderInvalidation::Geometry) |
+                            toMask(RenderInvalidation::Layout) |
+                            toMask(RenderInvalidation::Cover) |
+                            toMask(RenderInvalidation::PlatformIcon));
     }
 
     void refreshTheme() {
@@ -2825,8 +3069,8 @@ struct TaskbarHost::Impl {
         }
         // 媒体卡片属于普通悬浮窗，使用 Window 主题，而不是任务栏主题。
         mediaPopup.refreshTheme();
-        if (visible)
-            render();
+        if (isWindowVisible())
+            requestFrameAndFlush();
     }
 
     void releaseAll() {
@@ -2927,7 +3171,6 @@ struct TaskbarHost::Impl {
     // ---------- 封面解码 ----------
 
     void decodeCover() {
-        coverDirty = false;
         if (coverBmp) {
             coverBmp->Release();
             coverBmp = nullptr;
@@ -3036,7 +3279,6 @@ struct TaskbarHost::Impl {
     }
 
     void decodePlatformIcon() {
-        platformIconDirty = false;
         if (platformIconBmp) {
             platformIconBmp->Release();
             platformIconBmp = nullptr;
@@ -3089,7 +3331,7 @@ struct TaskbarHost::Impl {
     }
 
     bool useDoubleLineLyrics() const {
-        if (lyricTransitionActive_ && lyricLayout_)
+        if (isLyricTransitionActive() && lyricLayout_)
             return lyricLayoutDoubleLine_;
         return useDoubleLineLyricsForLine(displayLyricLine());
     }
@@ -3130,22 +3372,20 @@ struct TaskbarHost::Impl {
 
     // 丢弃当前行过渡：清空待启动/进行中状态并释放旧布局，下一次排版直接提交最终行。
     void resetLyricTransition() {
-        if (sceneWindowResizeActive_) {
+        if (isSceneResizeActive()) {
             cancelSceneWindowResize();
-            layoutDirty_ = true;
+            requestInvalidation(RenderInvalidation::Layout);
         }
-        lyricTransitionPending_ = false;
-        lyricTransitionActive_ = false;
+        clearLyricTransitionPhase();
         lyricTransitionKind_ = LyricTransitionKind::None;
         outgoingScene_ = DisplayScene::NoPlayback;
         outgoingDoubleLine_ = false;
         sceneTransitionNeedsRelayout_ = false;
         lyricTransitionStartMs_ = 0;
         lyricTransitionRevision_ = 0;
-        transitionTargetValid_ = false;
-        pendingTargetValid_ = false;
-        if (lyricTransitionDCompActive_)
-            lyricTransitionDCompEnd_ = true;
+        transitionTarget_.reset();
+        pendingTarget_.reset();
+        requestLyricDCompEnd();
         releaseOutgoingLyricLayouts();
         karaokeEnteringLine_ = false;
     }
@@ -3158,37 +3398,35 @@ struct TaskbarHost::Impl {
         currentLine = newLine;
         if (!allowAnimate || !clientAnimations_ || previous < 0 || newLine < 0) {
             resetLyricTransition();
-            textDirty_ = true;
+            requestInvalidation(RenderInvalidation::Text);
             return;
         }
         // 只有相邻自然换行才做空间转场。seek、快速切行或反向跳转不能把多次
         // 280ms 动画串起来，否则画面会长期追不上真实歌词。
         if (std::abs(newLine - previous) > 1) {
             resetLyricTransition();
-            textDirty_ = true;
+            requestInvalidation(RenderInvalidation::Text);
             return;
         }
         LyricTransitionTarget target{newLine, actualPositionMs,
                                      newLine > previous ? 1 : -1, revision};
-        if (lyricTransitionActive_) {
+        if (isLyricTransitionActive()) {
             if (target.direction != lyricTransitionDirection_) {
                 resetLyricTransition();
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
                 return;
             }
             pendingTarget_ = target;
-            pendingTargetValid_ = true;
             // 过渡版本跟随最新帧，避免被 updateScroll 的过期检查丢弃。
             lyricTransitionRevision_ = revision;
             return;
         }
         transitionTarget_ = target;
-        transitionTargetValid_ = true;
         lyricTransitionKind_ = LyricTransitionKind::Line;
         lyricTransitionDirection_ = target.direction;
-        lyricTransitionPending_ = true;
+        setLyricTransitionPending();
         lyricTransitionRevision_ = revision;
-        textDirty_ = true;
+        requestInvalidation(RenderInvalidation::Text);
     }
 
     // 行过渡收尾：先冻结动画再交换状态。释放旧布局、消费动画期间记录的最新目标；
@@ -3196,10 +3434,9 @@ struct TaskbarHost::Impl {
     void finalizeLyricTransition(ULONGLONG now) {
         const bool sceneTransition = lyricTransitionKind_ == LyricTransitionKind::Scene;
         const bool sceneNeedsRelayout = sceneTransitionNeedsRelayout_;
-        if (lyricTransitionDCompActive_)
-            lyricTransitionDCompEnd_ = true;
+        requestLyricDCompEnd();
         releaseOutgoingLyricLayouts();
-        lyricTransitionActive_ = false;
+        clearLyricTransitionPhase();
         lyricTransitionStartMs_ = 0;
 
         if (sceneTransition) {
@@ -3209,24 +3446,23 @@ struct TaskbarHost::Impl {
             outgoingScene_ = DisplayScene::NoPlayback;
             outgoingDoubleLine_ = false;
             sceneTransitionNeedsRelayout_ = false;
-            transitionTargetValid_ = false;
-            pendingTargetValid_ = false;
+            transitionTarget_.reset();
+            pendingTarget_.reset();
             lyricTransitionRevision_ = 0;
             if (sceneNeedsRelayout)
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
             return;
         }
 
-        if (pendingTargetValid_) {
+        if (pendingTarget_) {
             // 动画期间收到了更新的目标行：当前布局仍是旧目标，以它为旧行立即
             // 发起向最新目标的过渡，不经过稳定的中间帧。
             transitionTarget_ = pendingTarget_;
-            transitionTargetValid_ = true;
-            pendingTargetValid_ = false;
-            lyricTransitionDirection_ = transitionTarget_.direction;
-            lyricTransitionPending_ = true;
+            pendingTarget_.reset();
+            lyricTransitionDirection_ = transitionTarget_->direction;
+            setLyricTransitionPending();
             lyricTransitionRevision_ = frameRevision_;
-            textDirty_ = true;
+            requestInvalidation(RenderInvalidation::Text);
             // 布局尚未对应新行：解绑逐字平滑状态，排版完成后直接对齐真实目标。
             karaokeSmoothLine_ = -1;
             karaokeSettled_ = false;
@@ -3234,7 +3470,7 @@ struct TaskbarHost::Impl {
             karaokeEnteringLine_ = false;
             return;
         }
-        transitionTargetValid_ = false;
+        transitionTarget_.reset();
         lyricTransitionRevision_ = 0;
 
         karaokeTick_ = now;
@@ -3259,6 +3495,7 @@ struct TaskbarHost::Impl {
             karaokeSettled_ = true;
             karaokeEnteringLine_ = false;
         }
+        clearLyricTransitionPhase();
         lyricTransitionKind_ = LyricTransitionKind::None;
         outgoingScene_ = DisplayScene::NoPlayback;
         outgoingDoubleLine_ = false;
@@ -3634,8 +3871,7 @@ struct TaskbarHost::Impl {
 
         // 歌曲信息（标题/歌手）独立重建：换行只走下面的歌词分支，
         // 歌曲信息变化也不触碰歌词布局与行过渡状态
-        if (songInfoDirty_) {
-            songInfoDirty_ = false;
+        if (isInvalidated(RenderInvalidation::SongInfo)) {
             if (titleLayout_) {
                 titleLayout_->Release();
                 titleLayout_ = nullptr;
@@ -3681,9 +3917,8 @@ struct TaskbarHost::Impl {
             if (titleChanged || artistChanged)
                 lastTickMs_ = 0;
         }
-        if (!textDirty_)
+        if (!isInvalidated(RenderInvalidation::Text))
             return;
-        textDirty_ = false;
         ++textFxGen_; // 布局指针重建，离屏缓存全部失效
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
@@ -3693,7 +3928,7 @@ struct TaskbarHost::Impl {
         // 准备阶段：先把当前布局移交为旧行，目标行布局构建完成后才记录动画起点，
         // 避免“新布局已替换但动画初始位置还没准备好”导致的文字瞬移。
         bool preparedTransition = false;
-        if (lyricTransitionPending_ && lyricLayout_) {
+        if (isLyricTransitionPending() && lyricLayout_) {
             // 保留旧行离场前的滚动位置。新布局后面会把 lyricScrollOffset_ 重置为 0，
             // 不能让旧的超长歌词因此在转场第一帧跳回开头。
             const float outgoingLyricOffset = lyricScrollOffset_;
@@ -3765,7 +4000,7 @@ struct TaskbarHost::Impl {
             lyricLayout_ = nullptr;
             secondaryLayout_ = nullptr;
         }
-        lyricTransitionPending_ = false;
+        // 排版已接管待启动转场；成功构建目标布局后会转换为 Running。
 
         if (nextLyricLayout_) {
             nextLyricLayout_->Release();
@@ -3860,7 +4095,7 @@ struct TaskbarHost::Impl {
             if (lyricLayout_) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
                 lyricTransitionStartMs_ = monotonicNowMs();
-                lyricTransitionActive_ = true;
+                setLyricTransitionActive();
                 lyricTransitionRevision_ = frameRevision_;
             } else {
                 // 目标行没有可绘制布局：放弃过渡，直接回到稳定状态。
@@ -4126,7 +4361,7 @@ struct TaskbarHost::Impl {
         const bool lineChanged = karaokeSmoothLine_ != currentLine;
         if (lineChanged) {
             karaokeSmoothLine_ = currentLine;
-            karaokeEnteringLine_ = lyricTransitionActive_;
+            karaokeEnteringLine_ = isLyricTransitionActive();
             karaokeSmoothX_ = karaokeEnteringLine_ ? 0.0f : target;
         } else if (std::fabs(gap) > 100.0f && !karaokeEnteringLine_) {
             karaokeSmoothX_ = target;
@@ -4137,7 +4372,7 @@ struct TaskbarHost::Impl {
         }
         karaokeProgX_ = karaokeSmoothX_;
         karaokeSettled_ = std::fabs(target - karaokeSmoothX_) < 0.5f;
-        if (karaokeSettled_ && !lyricTransitionActive_)
+        if (karaokeSettled_ && !isLyricTransitionActive())
             karaokeEnteringLine_ = false;
         return karaokeProgX_;
     }
@@ -4152,9 +4387,8 @@ struct TaskbarHost::Impl {
     // ---------- 图标几何 ----------
 
     void ensureGeometry() {
-        if (!geomDirty_)
+        if (!isInvalidated(RenderInvalidation::Geometry))
             return;
-        geomDirty_ = false;
         ID2D1Factory* d2d = renderer.d2d();
         if (!d2d)
             return;
@@ -4179,7 +4413,7 @@ struct TaskbarHost::Impl {
         }
 
         if (!media_control::create(d2d, controlGeometry))
-            geomDirty_ = true;
+            requestInvalidation(RenderInvalidation::Geometry);
     }
 
     // ---------- 渲染 ----------
@@ -4364,7 +4598,7 @@ struct TaskbarHost::Impl {
 
     LyricTransitionSample lyricTransitionSample() const {
         LyricTransitionSample sample;
-        if (!lyricTransitionActive_ || lyricTransitionStartMs_ == 0)
+        if (!isLyricTransitionActive() || lyricTransitionStartMs_ == 0)
             return sample;
 
         // applyPresentationFrame() 可以在定时器之外直接触发 render()。此时
@@ -5084,7 +5318,7 @@ struct TaskbarHost::Impl {
 
         // 不再使用整段统一裁剪：各绘制路径自带裁剪/渐隐图层，滚入侧借位内容
         // 需要画出可视槽之外才能形成渐隐带
-        if (lyricTransitionActive_ &&
+        if (isLyricTransitionActive() &&
             (outgoingVerticalLyricLayout_ || !outgoingVerticalLyricParts_.empty())) {
             const LyricTransitionSample transition = lyricTransitionSample();
             const float travel = std::clamp(areaH * 0.24f, 18.0f, 48.0f);
@@ -5213,7 +5447,7 @@ struct TaskbarHost::Impl {
         ID2D1Brush* effectGlow = scene_ != DisplayScene::Idle && lyricGlow_
                                      ? static_cast<ID2D1Brush*>(brushLyricGlow_)
                                      : nullptr;
-        if (lyricTransitionActive_ && outgoingLyricLayout_) {
+        if (isLyricTransitionActive() && outgoingLyricLayout_) {
             const LyricTransitionSample transition = lyricTransitionSample();
             const float movementT = transition.movement;
             float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
@@ -5512,7 +5746,7 @@ struct TaskbarHost::Impl {
     bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
                                      float lyricBlockH) {
         if (isVerticalTaskbar() || useDoubleLineLyrics() || outgoingDoubleLine_ ||
-            !lyricTransitionActive_ ||
+            !isLyricTransitionActive() ||
             !outgoingLyricLayout_ ||
             !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
@@ -5547,8 +5781,7 @@ struct TaskbarHost::Impl {
         // 不在此单独 Commit：图层上线随 render() 末尾 present() 的 Commit 与底层新帧
         // 同批生效，避免「图层已上屏、底层旧歌词未撤」的双画帧。动画以提交时刻为起点，
         // 延迟到 present 提交仅差一次绘制耗时，不影响时长。
-        lyricTransitionDCompActive_ = true;
-        lyricTransitionDCompEnd_ = false;
+        renderState_.setDCompTransitionPhase(RenderState::DCompTransitionPhase::Active);
         return true;
     }
 
@@ -5556,24 +5789,23 @@ struct TaskbarHost::Impl {
                                   float lyricBlockH) {
         // 图层增删不单独 Commit：改动挂起到 render() 末尾 present() 的 Commit，与承载
         // 歌词的底层新帧同批上屏，避免「图层已撤、底层新帧未上屏」的空窗闪烁。
-        if ((isVerticalTaskbar() && lyricTransitionDCompActive_) || lyricTransitionDCompEnd_ ||
-            (showControls && lyricTransitionDCompActive_) ||
-            (lyricTransitionDCompActive_ && karaokeLine())) {
+        if ((isVerticalTaskbar() && isLyricDCompActive()) || isLyricDCompEndRequested() ||
+            (showControls && isLyricDCompActive()) ||
+            (isLyricDCompActive() && karaokeLine())) {
             renderer.clearLyricTransitionLayers();
-            lyricTransitionDCompActive_ = false;
-            lyricTransitionDCompEnd_ = false;
+            clearLyricDCompState();
         }
         if (showControls)
             return;
         // 逐字高亮需要每帧跟随真实播放位置；DComp 快照是静态位图，不能在入场期间
         // 更新填充边界，因此逐字歌词转场保留 D2D 路径，普通歌词仍使用合成器动画。
         if (lyricTransitionKind_ != LyricTransitionKind::Scene &&
-            !lyricTransitionDCompActive_ && lyricTransitionActive_ && !useDoubleLineLyrics() &&
+            !isLyricDCompActive() && isLyricTransitionActive() && !useDoubleLineLyrics() &&
             !outgoingDoubleLine_ &&
             !karaokeLine() && outgoingLyricLayout_ && lyricLayout_) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
                 renderer.clearLyricTransitionLayers();
-                lyricTransitionDCompActive_ = false;
+                clearLyricDCompState();
             }
         }
     }
@@ -5648,14 +5880,14 @@ struct TaskbarHost::Impl {
             drawIdleQuoteBackground(w, h, dynamicBackgroundW);
     }
 
-    void finishTaskbarFrame(HRESULT hr) {
+    bool finishTaskbarFrame(HRESULT hr) {
         if (hr == D2DERR_RECREATE_TARGET) {
             discardDeviceResources();
-            return;
+            return false;
         }
         if (SUCCEEDED(hr)) {
-            if (songTransitionPending_) {
-                songTransitionPending_ = false;
+            const bool startSongTransition = isSongTransitionPending();
+            if (startSongTransition) {
                 renderer.resetRoot();
                 if (!isMinimalMode()) {
                     const float travel = kSongTransitionTravelDip * scale();
@@ -5670,21 +5902,30 @@ struct TaskbarHost::Impl {
                 }
             }
             // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
-            if (!renderer.present())
+            if (!renderer.present()) {
                 discardDeviceResources();
+                return false;
+            }
+            // 只有真正 Present 成功后才消费该阶段；设备丢失时保留 Pending，
+            // 下一次资源重建仍会以同一首歌的完整帧启动转场。
+            if (startSongTransition)
+                setSongTransitionPending(false);
+            return true;
         } else {
             runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
+            discardDeviceResources();
+            return false;
         }
     }
 
-    void renderVerticalTaskbar(float w, float h, ID2D1Effect* coverBlurChain) {
+    bool renderVerticalTaskbar(float w, float h, ID2D1Effect* coverBlurChain) {
         auto* rt = renderer.renderTarget();
         if (!rt || w <= 0.0f || h <= 0.0f)
-            return;
+            return false;
 
         const VerticalLayout layout = verticalLayout();
         if (layout.w <= 0.0f || layout.h <= 0.0f)
-            return;
+            return false;
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -5727,21 +5968,22 @@ struct TaskbarHost::Impl {
             drawVerticalLyrics(layout);
         }
 
-        finishTaskbarFrame(rt->EndDraw());
+        return finishTaskbarFrame(rt->EndDraw());
     }
 
     void render() {
-        if (!visible || !hwnd)
+        if (!isWindowVisible() || !hwnd)
             return;
 
-        if (sceneWindowResizeActive_)
+        if (isSceneResizeActive())
             updateSceneWindowResize(monotonicNowMs());
 
         // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
         // 把刚刚收缩/扩展的窗口尺寸恢复回去。
-        if (layoutDirty_) {
+        if (isInvalidated(RenderInvalidation::Layout) && !isSceneResizeActive()) {
             adjustPosition();
-            layoutDirty_ = false;
+            if (!isWindowVisible())
+                return;
         }
 
         int pxW = 0;
@@ -5753,15 +5995,15 @@ struct TaskbarHost::Impl {
         int logicalPxW = pxW;
         int logicalPxH = pxH;
         if (pxW != lastPxW_ || pxH != lastPxH_) {
-            if (lyricTransitionDCompActive_)
-                lyricTransitionDCompEnd_ = true;
+            if (isLyricDCompActive())
+                requestLyricDCompEnd();
             lastPxW_ = pxW;
             lastPxH_ = pxH;
-            geomDirty_ = true;
+            requestInvalidation(RenderInvalidation::Geometry);
             if (vertical)
-                textDirty_ = true;
+                requestInvalidation(RenderInvalidation::Text);
             // 横向文本布局以超宽无换行创建，度量与窗口尺寸无关；侧边竖排布局
-            // 依赖任务栏窄栏宽度，已在上面标记 textDirty_ 以便重建。
+            // 依赖任务栏窄栏宽度，已在上面标记 Text 失效以便重建。
         }
         lastLogicalPxW_ = logicalPxW;
         lastLogicalPxH_ = logicalPxH;
@@ -5774,25 +6016,32 @@ struct TaskbarHost::Impl {
         renderer.setDpi(dpi_);
         // DComp 设备上下文在首次 bind 后才存在，画刷/图层创建必须排在 bind 之后
         createDeviceResources();
+        if (renderState_.deviceResourcePhase() != RenderState::DeviceResourcePhase::Ready)
+            return;
+
+        // 预处理和资源创建阶段可能追加失效项；从这里开始才捕获本次提交快照，
+        // 避免把本帧刚处理的尺寸/字体失效错误地留到下一帧。
+        const InvalidationSnapshot invalidation = renderState_.beginInvalidation();
 
         ensureGeometry();
-        if (coverDirty)
+        if (isInvalidated(RenderInvalidation::Cover))
             decodeCover();
-        if (platformIconDirty)
+        if (isInvalidated(RenderInvalidation::PlatformIcon))
             decodePlatformIcon();
 
         if (vertical) {
-            if (textDirty_ || songInfoDirty_)
+            if (isInvalidated(RenderInvalidation::Text) ||
+                isInvalidated(RenderInvalidation::SongInfo))
                 buildTextLayouts(0.0f, 0.0f);
-            if (lyricTransitionDCompActive_) {
+            if (isLyricDCompActive() || isLyricDCompEndRequested()) {
                 renderer.clearLyricTransitionLayers();
-                lyricTransitionDCompActive_ = false;
-                lyricTransitionDCompEnd_ = false;
+                clearLyricDCompState();
             }
             ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp
                                               ? ensureCoverBlurChain(dip(pxW), dip(pxH))
                                               : nullptr;
-            renderVerticalTaskbar(dip(pxW), dip(pxH), coverBlurChain);
+            if (renderVerticalTaskbar(dip(pxW), dip(pxH), coverBlurChain))
+                renderState_.commitInvalidation(invalidation);
             return;
         }
 
@@ -5802,7 +6051,8 @@ struct TaskbarHost::Impl {
         float leftW = layout.leftW;
         float rightW = layout.rightW;
 
-        if (textDirty_ || songInfoDirty_)
+        if (isInvalidated(RenderInvalidation::Text) ||
+            isInvalidated(RenderInvalidation::SongInfo))
             buildTextLayouts(leftW, rightW);
 
         float lyricStart = lyricStartPadding();
@@ -5824,7 +6074,7 @@ struct TaskbarHost::Impl {
         bool showControls = mouseOver_ && controlsOnHover_ &&
                             hoverControlStyle_ == HoverControlStyle::Inline && !idleScene &&
                             !(lyricTransitionKind_ == LyricTransitionKind::Scene &&
-                              lyricTransitionActive_);
+                              isLyricTransitionActive());
         const bool backgroundSpectrum =
             !idleScene && spectrumVisible_ && backgroundWaveEnabled();
         // 独立频谱占用歌词区右端；背景波浪不改变窗口宽度和歌词布局。
@@ -5907,13 +6157,13 @@ struct TaskbarHost::Impl {
         } else {
             if (showSpectrum)
                 drawSpectrum(lyricAreaX + lyricAreaW + kTextPadding, h);
-            if (lyricTransitionKind_ == LyricTransitionKind::Scene && lyricTransitionActive_ &&
+            if (lyricTransitionKind_ == LyricTransitionKind::Scene && isLyricTransitionActive() &&
                 outgoingLyricLayout_) {
                 drawSceneTransition(w, lyricAreaX, lyricAreaW, h, lyricBlockH);
             } else if (useDoubleLineLyrics()) {
                 drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h, primaryBrush);
-            } else if (!lyricTransitionDCompActive_) {
-                if (lyricTransitionActive_ && outgoingLyricLayout_) {
+            } else if (!isLyricDCompActive()) {
+                if (isLyricTransitionActive() && outgoingLyricLayout_) {
                     // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
                     const LyricTransitionSample transition = lyricTransitionSample();
                     const float movementT = transition.movement;
@@ -6006,7 +6256,8 @@ struct TaskbarHost::Impl {
             }
         }
 
-        finishTaskbarFrame(rt->EndDraw());
+        if (finishTaskbarFrame(rt->EndDraw()))
+            renderState_.commitInvalidation(invalidation);
     }
 
     // ---------- 滚动字幕 ----------
@@ -6019,15 +6270,15 @@ struct TaskbarHost::Impl {
         float dt = static_cast<float>(now - lastTickMs_) / 1000.0f;
         lastTickMs_ = now;
 
-        if ((lyricTransitionPending_ || lyricTransitionActive_) &&
+        if (isLyricTransitionInProgress() &&
             lyricTransitionRevision_ != 0 && lyricTransitionRevision_ != frameRevision_) {
             // 不存在历史过渡队列：版本过期时直接丢弃旧过渡，下一次排版只处理当前行。
             resetLyricTransition();
-            textDirty_ = true;
+            requestInvalidation(RenderInvalidation::Text);
         }
 
-        const bool wasTransitioning = lyricTransitionPending_ || lyricTransitionActive_;
-        if (lyricTransitionActive_ &&
+        const bool wasTransitioning = isLyricTransitionInProgress();
+        if (isLyricTransitionActive() &&
             now - lyricTransitionStartMs_ >=
                 static_cast<ULONGLONG>(lyricTransitionDurationMs())) {
             finalizeLyricTransition(now);
@@ -6114,7 +6365,7 @@ struct TaskbarHost::Impl {
                 return;
             }
 
-            const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
+            const bool holdLyricScroll = isLyricTransitionInProgress();
             const bool lyricMarqueePlaying = media.playing;
             const bool idleMarquee = scene_ == DisplayScene::Idle;
             const float verticalLyricExtent = verticalLyricHeight_ > 0.0f
@@ -6187,7 +6438,7 @@ struct TaskbarHost::Impl {
         float lyricAreaW =
             std::max(1.0f,
                      rightW - lyricStart - kTextPadding - spectrumExtraForScene(scene_));
-        const bool holdLyricScroll = lyricTransitionPending_ || lyricTransitionActive_;
+        const bool holdLyricScroll = isLyricTransitionInProgress();
         // 普通横向歌词只在播放中推进；每日一言无播放状态也允许慢速滚动。
         // 暂停歌词时保留偏移，恢复播放后从原位置继续。
         const bool lyricMarqueePlaying = media.playing;
@@ -6294,16 +6545,16 @@ struct TaskbarHost::Impl {
 
     UINT activeFrameMs() const {
         // 只有低渲染模式固定 ~30fps；极简模式仍使用正常刷新率，歌词帧率不变。
-        if (renderMode_ == static_cast<int>(RenderMode::Low))
+        if (isRenderMode(RenderMode::Low))
             return kTimerPausedMs;
         const UINT hz = displayRefreshHz_ ? displayRefreshHz_ : 60;
         return std::clamp(1000 / hz, kTimerMinMs, kTimerMs);
     }
 
     bool hasHighFrequencyAnimation() const {
-        if (lyricTransitionPending_ || lyricTransitionActive_)
+        if (isLyricTransitionInProgress())
             return true;
-        if (sceneWindowResizeActive_)
+        if (isSceneResizeActive())
             return true;
         if (taskbarDynamicBackgroundAnimating())
             return true;
@@ -6349,29 +6600,26 @@ struct TaskbarHost::Impl {
         }
     }
 
-    void setRenderMode(int mode) {
-        if (mode == renderMode_)
+    void setRenderMode(RenderMode mode) {
+        if (mode == renderState_.mode())
             return;
         const bool leavingStopped =
-            renderMode_ == static_cast<int>(RenderMode::Stopped) &&
-            mode != static_cast<int>(RenderMode::Stopped);
+            isStoppedMode() && mode != RenderMode::Stopped;
         const bool wasMinimal = isMinimalMode();
-        renderMode_ = mode;
+        renderState_.setMode(mode);
         if (leavingStopped) {
             // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
             // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
-            visibilitySuppressed_ = true;
+            renderState_.setVisibilitySuppressed(true);
             probeReady_ = false;
             delete probeOut_.exchange(nullptr);
-            visible = false;
             stopFrameTimer();
             stopPlacementTimer();
-            if (hwnd)
-                ShowWindow(hwnd, SW_HIDE);
+            reconcileWindowVisibility();
         }
         if (wasMinimal != isMinimalMode()) {
             // 极简关闭逐字绘制后，清掉当前帧的逐字状态；退出时由重新排版恢复几何缓存。
-            textDirty_ = true;
+            requestInvalidation(RenderInvalidation::Text);
             karaokeSpans_.clear();
             karaokeGeometryLine_ = -1;
             karaokeGeometryLayout_ = nullptr;
@@ -6382,7 +6630,7 @@ struct TaskbarHost::Impl {
             karaokeSettled_ = true;
             karaokeTick_ = 0;
         }
-        const bool popupAvailable = mediaPopupAvailable(sessionVisible_);
+        const bool popupAvailable = mediaPopupAvailable(isSessionVisible());
         mediaPopup.beginPresentationUpdate();
         mediaPopup.setIdleContent(idle, popupAvailable);
         mediaPopup.setMedia(media, popupAvailable);
@@ -6398,22 +6646,17 @@ struct TaskbarHost::Impl {
             mediaPopup.setEnabled(false);
             releaseCoverBackgroundResources();
             // 切歌转场只改变合成器根视觉；进入极简时立即恢复到静止位置。
-            songTransitionPending_ = false;
+            setSongTransitionPending(false);
             renderer.resetRoot();
         }
-        if (mode == static_cast<int>(RenderMode::Stopped)) {
+        if (mode == RenderMode::Stopped) {
             // 完全停止：隐藏窗口、停帧定时器、释放 GPU 设备链。此后 SMTC 事件仍更新
-            // 内存中的歌词/媒体数据，但 render() 因 visible=false 直接早退，不占 GPU/CPU
+            // 内存中的歌词/媒体数据，但 render() 因窗口隐藏直接早退，不占 GPU/CPU
             volumeHover_ = false;
             volumePopup_.hide();
             mediaPopupEnabled_ = false;
             mediaPopup.setEnabled(false);
-            if (visible) {
-                visible = false;
-                stopFrameTimer();
-                if (hwnd)
-                    ShowWindow(hwnd, SW_HIDE);
-            }
+            reconcileWindowVisibility();
             stopPlacementTimer();
             releaseAll();
             return;
@@ -6426,31 +6669,22 @@ struct TaskbarHost::Impl {
                 timerMs_ = wantMs;
             }
         }
-        if (visibilitySuppressed_ && !timerRunning_)
+        if (renderState_.visibilitySuppressed() && !timerRunning_)
             startPlacementTimer();
         // 从完全停止恢复：按最近会话可见性立即还原窗口；设备链由 render() 惰性重建
-        if (sessionVisible_ && !visible &&
-            !visibilitySuppressed_ &&
-            placementStatus_ != TaskbarPlacementStatus::NoSpace &&
-            placementStatus_ != TaskbarPlacementStatus::Unavailable) {
-            visible = true;
-            if (hwnd)
-                ShowWindow(hwnd, SW_SHOWNA);
-            startFrameTimer();
-        }
-        if (visible)
-            render();
+        reconcileWindowVisibility();
+        if (isWindowVisible())
+            requestFrameAndFlush();
     }
 
     // 静止判定：所有动画源都停止且没有待处理的布局/资源变化时，跳过整帧重绘。
     // 跳过时屏幕上保持上一次 DirectComposition 提交的内容，不会闪烁或丢状态。
     bool needsFrameRender() const {
-        if (textDirty_ || songInfoDirty_ || geomDirty_ || layoutDirty_ || coverDirty ||
-            platformIconDirty)
+        if (renderState_.hasInvalidation())
             return true;
-        if (lyricTransitionPending_ || lyricTransitionActive_)
+        if (isLyricTransitionInProgress())
             return true;
-        if (sceneWindowResizeActive_)
+        if (isSceneResizeActive())
             return true;
         if (taskbarDynamicBackgroundAnimating())
             return true;
@@ -6521,11 +6755,11 @@ struct TaskbarHost::Impl {
         }
         // 静止场景跳过整帧重绘：动画源全部停止且无脏状态时，画面保持上一帧内容
         if (!statusCycleCallbackHandled && needsFrameRender())
-            render();
+            requestFrameAndFlush();
     }
 
     void onPlacementTimer() {
-        if (renderMode_ == static_cast<int>(RenderMode::Stopped) || !hwnd)
+        if (isStoppedMode() || !hwnd)
             return;
         processPlacementProbe();
     }
@@ -6569,7 +6803,7 @@ struct TaskbarHost::Impl {
             if (mediaPopupEnabledForScene())
                 mediaPopup.onAnchorEnter();
             if (!wasOver)
-                render();
+                requestFrameAndFlush();
             trackMouseLeave();
             // 内嵌控件的音量按钮：悬停弹出音量滑块浮窗
             const bool volHover =
@@ -6593,7 +6827,7 @@ struct TaskbarHost::Impl {
             volumeHover_ = false;
             volumePopup_.onAnchorLeave();
             mediaPopup.onAnchorLeave();
-            render();
+            requestFrameAndFlush();
             return 0;
         case WM_MOUSEWHEEL: {
             // 滚轮消息使用屏幕坐标；音量图标上滚动直接调整应用音量（每格 ±2）
@@ -6635,7 +6869,9 @@ struct TaskbarHost::Impl {
                 DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", visible ? 1 : 0);
+            runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)",
+                                isWindowVisible() ? 1 : 0);
+            renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
             KillTimer(hwnd, kTaskbarAttachTimerId);
             taskbarEmbedded_ = false;
             stopFrameTimer();
@@ -6703,7 +6939,7 @@ void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
 void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
     // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
     // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
-    const bool popupAvailable = impl_->mediaPopupAvailable(impl_->sessionVisible_);
+    const bool popupAvailable = impl_->mediaPopupAvailable(impl_->isSessionVisible());
     impl_->mediaPopup.beginPresentationUpdate();
     impl_->mediaPopup.setIdleContent(impl_->idle, popupAvailable);
     impl_->mediaPopup.setMedia(info, popupAvailable);
@@ -6712,8 +6948,10 @@ void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
         impl_->hoverControlStyle_ == HoverControlStyle::Inline);
     impl_->mediaPopup.setProgress(impl_->positionMs_);
     impl_->mediaPopup.endPresentationUpdate();
-    if (impl_->updateMediaInfo(info))
-        impl_->render();
+    if (impl_->updateMediaInfo(info)) {
+        impl_->requestFrame();
+        impl_->flushRenderRequest();
+    }
 }
 
 void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
@@ -6730,8 +6968,10 @@ void TaskbarHost::setAppVolume(const AppVolumeState& state) {
     impl_->mediaPopup.setAppVolume(state);
     if (!state.available)
         impl_->volumePopup_.hide();
-    if (changed)
-        impl_->render();
+    if (changed) {
+        impl_->requestFrame();
+        impl_->flushRenderRequest();
+    }
 }
 
 void TaskbarHost::setAppVolumeCallback(std::function<void(int)> cb) {
@@ -6772,6 +7012,8 @@ void TaskbarHost::setPlacementStatusCallback(
 
 void TaskbarHost::setAllowOverlap(bool on) {
     impl_->allowOverlap_ = on;
+    if (impl_->reconcileWindowVisibility() && impl_->isWindowVisible())
+        impl_->requestFrameAndFlush();
 }
 
 void TaskbarHost::setVisibilitySuppressed(bool on) {
@@ -6787,7 +7029,7 @@ TaskbarPlacementStatus TaskbarHost::placementStatus() const {
 }
 
 bool TaskbarHost::isDisplayed() const {
-    return impl_ && impl_->visible && impl_->hwnd && IsWindowVisible(impl_->hwnd);
+    return impl_ && impl_->isWindowVisible() && impl_->hwnd && IsWindowVisible(impl_->hwnd);
 }
 
 const std::vector<LyricLine>& TaskbarHost::lyrics() const {
@@ -6795,34 +7037,11 @@ const std::vector<LyricLine>& TaskbarHost::lyrics() const {
 }
 
 void TaskbarHost::show() {
-    if (impl_->visibilitySuppressed_ && !impl_->allowOverlap_)
-        return;
-    if ((impl_->placementStatus_ == TaskbarPlacementStatus::NoSpace ||
-         impl_->placementStatus_ == TaskbarPlacementStatus::Unavailable) &&
-        !impl_->allowOverlap_)
-        return;
-    if (impl_->allowOverlap_) {
-        impl_->visibilitySuppressed_ = false;
-        impl_->probeFast_ = false;
-        impl_->stopPlacementTimer();
-    }
-    if (!impl_->visible) {
-        impl_->visible = true;
-        ShowWindow(impl_->hwnd, SW_SHOWNA);
-        impl_->startFrameTimer();
-    }
-    impl_->render();
+    impl_->show();
 }
 
 void TaskbarHost::hide() {
-    if (impl_->visible) {
-        impl_->visible = false;
-        impl_->stopFrameTimer();
-        ShowWindow(impl_->hwnd, SW_HIDE);
-    }
-    impl_->volumeHover_ = false;
-    impl_->volumePopup_.hide();
-    impl_->mediaPopup.hideImmediate();
+    impl_->hide();
 }
 
 void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
@@ -6836,10 +7055,11 @@ void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
     }
     impl_->nextLyricWidth_ = 0.0f;
     impl_->nextLyricHeight_ = 0.0f;
-    impl_->textDirty_ = true;
+    impl_->requestInvalidation(RenderInvalidation::Text);
     if (!lines.empty())
         impl_->statusText.clear();
-    impl_->render();
+    impl_->requestFrame();
+    impl_->flushRenderRequest();
 }
 
 void TaskbarHost::setCurrentLine(int index) {
@@ -6861,8 +7081,9 @@ void TaskbarHost::setStatusText(const std::wstring& text) {
         impl_->scene_ = DisplayScene::Message;
     else if (text.empty() && !impl_->lines.empty())
         impl_->scene_ = DisplayScene::Lyrics;
-    impl_->textDirty_ = true;
-    impl_->render();
+    impl_->requestInvalidation(RenderInvalidation::Text);
+    impl_->requestFrame();
+    impl_->flushRenderRequest();
 }
 
 bool TaskbarHost::isTaskbar() const {
@@ -6977,7 +7198,7 @@ void TaskbarHost::setAlbumCoverEffect(AlbumCoverEffect effect) {
     impl_->setAlbumCoverEffect(effect);
 }
 
-void TaskbarHost::setRenderMode(int mode) {
+void TaskbarHost::setRenderMode(RenderMode mode) {
     impl_->setRenderMode(mode);
 }
 
