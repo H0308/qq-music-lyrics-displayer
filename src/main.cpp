@@ -39,6 +39,7 @@
 
 #include <cstdio>
 #include <cwctype>
+#include <exception>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,7 @@
 #include <ctime>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -2891,6 +2893,7 @@ struct App {
     void tryExtractAlbumColor();
     void loadSettings();
     void saveSettings();
+    void showSettingsError(const wchar_t* operation, const std::wstring& message);
     static LRESULT CALLBACK trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     static LRESULT CALLBACK updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
 };
@@ -3206,6 +3209,12 @@ void App::openTickTickTask(const IdleTaskInfo& task) {
                         opened ? L"ok" : L"failed");
 }
 
+void App::showSettingsError(const wchar_t* operation, const std::wstring& message) {
+    runtime_log::writef(L"[settings] %s failed path=%s", operation, settingsPath_.c_str());
+    message_dialog::showModal(GetModuleHandleW(nullptr), trayHwnd, L"设置文件提示", message,
+                              L"确定");
+}
+
 void App::loadSettings() {
     std::wstring dir = configDir();
     if (dir.empty())
@@ -3224,12 +3233,40 @@ void App::loadSettings() {
     provider.setQqLyricOrderDir(dir + L"\\manual_lyrics_settings");
     fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
     try {
+        std::error_code fileStatusError;
+        const bool settingsFileExists =
+            std::filesystem::exists(std::filesystem::path(settingsPath_), fileStatusError);
         std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
-        if (!f)
+        if (!f) {
+            // 首次启动时配置文件不存在是正常情况；只有“文件存在但打不开”
+            // 或文件系统查询本身失败时才提示用户。
+            if (settingsFileExists || fileStatusError)
+                showSettingsError(
+                    L"load-open",
+                    L"无法打开设置文件，可能是权限不足或文件正被其他程序占用。\n\n"
+                    L"程序将继续使用当前可用设置。\n\n"
+                    L"请检查 settings.json 的访问权限。\n\n"
+                    L"设置文件路径：\n" + settingsPath_);
             return;
+        }
         auto j = nlohmann::json::parse(f, nullptr, false);
-        if (j.is_discarded())
+        if (f.bad()) {
+            showSettingsError(
+                L"load-read",
+                L"读取设置文件时发生磁盘或文件系统错误。\n\n"
+                L"程序将继续使用当前可用设置。\n\n"
+                L"设置文件路径：\n" + settingsPath_);
             return;
+        }
+        if (j.is_discarded()) {
+            showSettingsError(
+                L"load-parse",
+                L"设置文件内容无法解析，文件可能已经损坏。\n\n"
+                L"程序将继续使用当前默认设置。\n\n"
+                L"请修复或删除 settings.json 后重新启动。\n\n"
+                L"设置文件路径：\n" + settingsPath_);
+            return;
+        }
         tickTickEnabled_ = j.value("tickTickEnabled", !tickTickApiToken_.empty());
         const std::wstring configuredLogDirectory =
             wideOf(j.value("logDirectory", utf8Of(logDirectory_)));
@@ -3442,7 +3479,18 @@ void App::loadSettings() {
         qqLocalLyricsPersistOrder_ = j.value("qqLocalLyricsPersistOrder", false);
         qqLocalLyricsPath_ = wideOf(j.value("qqLocalLyricsPath", std::string()));
         provider.setQqLocalLyricsConfig(qqLocalLyricsEnabled_, qqLocalLyricsPath_);
+    } catch (const std::exception&) {
+        showSettingsError(
+            L"load-exception",
+            L"读取设置文件时发生异常，文件可能损坏或当前账户没有访问权限。\n\n"
+            L"程序将继续使用当前可用设置。\n\n"
+            L"设置文件路径：\n" + settingsPath_);
     } catch (...) {
+        showSettingsError(
+            L"load-unknown-exception",
+            L"读取设置文件时发生未知错误。\n\n"
+            L"程序将继续使用当前可用设置。\n\n"
+            L"设置文件路径：\n" + settingsPath_);
     }
     tickTickConnected_ = false;
     tickTickConnecting_ = false;
@@ -3580,9 +3628,24 @@ void App::saveSettings() {
         j["qqLocalLyricsPath"] = utf8Of(qqLocalLyricsPath_);
         j["logDirectory"] = utf8Of(logDirectory_);
         j["logRetentionDays"] = logRetentionDays_;
-        std::ofstream f(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
+        std::ofstream f;
+        f.exceptions(std::ios::failbit | std::ios::badbit);
+        f.open(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
         f << j.dump();
+        f.flush();
+        f.close();
+    } catch (const std::exception&) {
+        showSettingsError(
+            L"save-exception",
+            L"设置未能保存到磁盘。\n\n"
+            L"请检查磁盘空间、文件权限，或确认 settings.json 未被其他程序占用。\n\n"
+            L"设置文件路径：\n" + settingsPath_);
     } catch (...) {
+        showSettingsError(
+            L"save-unknown-exception",
+            L"设置未能保存到磁盘，原因未知。\n\n"
+            L"请检查磁盘空间、文件权限，或确认 settings.json 未被其他程序占用。\n\n"
+            L"设置文件路径：\n" + settingsPath_);
     }
     refreshSettingsDialog();
 }
