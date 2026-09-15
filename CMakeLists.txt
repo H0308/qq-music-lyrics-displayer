@@ -32,6 +32,8 @@ endif()
 
 project(QQMusicLyric LANGUAGES CXX)
 
+include(CTest)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -62,6 +64,7 @@ add_executable(QQMusicLyric
     src/idle/idle_quote_provider.cpp
     src/idle/ticktick_provider.cpp
     src/lyric/lyric_provider.cpp
+    src/lyric/lrc_parser.cpp
     src/lyric/qrc_decoder.cpp
     src/lyric/qrc_des.cpp
     src/lyric/cover_provider.cpp
@@ -132,6 +135,18 @@ target_link_libraries(QQMusicLyric PRIVATE
     winmm
     version
 )
+
+if(BUILD_TESTING)
+    add_executable(QQMusicLyricParserTests
+        tests/lrc_parser_tests.cpp
+        src/lyric/lrc_parser.cpp
+    )
+    target_include_directories(QQMusicLyricParserTests PRIVATE src)
+    target_compile_definitions(QQMusicLyricParserTests PRIVATE
+        UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
+    target_compile_options(QQMusicLyricParserTests PRIVATE /utf-8 /EHsc)
+    add_test(NAME QQMusicLyricParserTests COMMAND QQMusicLyricParserTests)
+endif()
 
 # CMake owns the deployable application layout. Packaging tools consume this
 # staging tree instead of reaching into a generator-specific build directory.

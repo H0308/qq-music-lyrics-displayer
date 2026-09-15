@@ -1,5 +1,7 @@
 #include "media_popup.h"
 
+#include "util/com_release.h"
+
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
@@ -149,35 +151,6 @@ GdiplusInit g_gdiplusInit;
 
 bool contains(const D2D1_RECT_F& rect, float x, float y) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-}
-
-void releaseBitmap(ID2D1Bitmap*& bitmap) {
-    if (bitmap) {
-        bitmap->Release();
-        bitmap = nullptr;
-    }
-}
-
-void releaseBrush(ID2D1SolidColorBrush*& brush) {
-    if (brush) {
-        brush->Release();
-        brush = nullptr;
-    }
-}
-
-void releaseFormat(IDWriteTextFormat*& format) {
-    if (format) {
-        format->Release();
-        format = nullptr;
-    }
-}
-
-template <typename T>
-void releaseCom(T*& value) {
-    if (value) {
-        value->Release();
-        value = nullptr;
-    }
 }
 
 std::wstring sourceLabel(const std::wstring& source) {
@@ -878,50 +851,50 @@ struct MediaPopup::Impl {
     }
 
     void releaseVisualResources() {
-        releaseBitmap(coverBmp);
-        releaseBitmap(sourceIconBmp);
+        releaseCom(coverBmp);
+        releaseCom(sourceIconBmp);
         sourceIconLoadedFor.clear();
         for (auto*& bitmap : idleIconBitmaps)
-            releaseBitmap(bitmap);
+            releaseCom(bitmap);
         idleIconBitmaps.clear();
         idleIconsDirty = true;
         sourceIconDirty = true;
-        releaseBitmap(backdropBmp);
+        releaseCom(backdropBmp);
         releaseCom(backdropBlur);
         lastBackdropLuminance = -1.0f;
         backdropDirty = true;
-        releaseBrush(brushBackground);
-        releaseBrush(brushStroke);
-        releaseBrush(brushText);
-        releaseBrush(brushSecondary);
-        releaseBrush(brushDisabled);
-        releaseBrush(brushProgressTrack);
-        releaseBrush(brushControl);
-        releaseBrush(brushControlHover);
-        releaseBrush(brushControlPressed);
-        releaseBrush(brushIdleCell);
-        releaseBrush(brushIdleCellHover);
-        releaseBrush(brushAccent);
-        releaseBrush(brushAccentHover);
-        releaseBrush(brushTextOnAccent);
-        releaseBrush(brushTaskPriorityHigh);
-        releaseBrush(brushTaskPriorityMedium);
-        releaseBrush(brushTaskPriorityLow);
-        releaseBrush(brushTaskPriorityNone);
+        releaseCom(brushBackground);
+        releaseCom(brushStroke);
+        releaseCom(brushText);
+        releaseCom(brushSecondary);
+        releaseCom(brushDisabled);
+        releaseCom(brushProgressTrack);
+        releaseCom(brushControl);
+        releaseCom(brushControlHover);
+        releaseCom(brushControlPressed);
+        releaseCom(brushIdleCell);
+        releaseCom(brushIdleCellHover);
+        releaseCom(brushAccent);
+        releaseCom(brushAccentHover);
+        releaseCom(brushTextOnAccent);
+        releaseCom(brushTaskPriorityHigh);
+        releaseCom(brushTaskPriorityMedium);
+        releaseCom(brushTaskPriorityLow);
+        releaseCom(brushTaskPriorityNone);
         releaseCom(brushMediaTextEdgeFade);
         releaseCom(brushIdleTextEdgeFade);
         releaseCom(textEdgeFadeLayer);
         releaseDynamicBackgroundResources();
-        releaseFormat(fmtSource);
-        releaseFormat(fmtTimeRight);
-        releaseFormat(fmtTitle);
-        releaseFormat(fmtArtist);
-        releaseFormat(fmtIcon);
-        releaseFormat(fmtIdleHeader);
-        releaseFormat(fmtIdleQuote);
-        releaseFormat(fmtIdleSource);
+        releaseCom(fmtSource);
+        releaseCom(fmtTimeRight);
+        releaseCom(fmtTitle);
+        releaseCom(fmtArtist);
+        releaseCom(fmtIcon);
+        releaseCom(fmtIdleHeader);
+        releaseCom(fmtIdleQuote);
+        releaseCom(fmtIdleSource);
         releaseCom(idleAppTrimmingSign);
-        releaseFormat(fmtIdleApp);
+        releaseCom(fmtIdleApp);
         releaseCom(titleLayout);
         releaseCom(artistLayout);
         releaseCom(idleQuoteLayout);
@@ -1156,7 +1129,7 @@ struct MediaPopup::Impl {
         }
         backdropDirty = false;
         releaseCom(backdropBlur);
-        releaseBitmap(backdropBmp);
+        releaseCom(backdropBmp);
         resetBackdropTextColors();
         if ((!force && !frostedBackgroundActive()) || !hwnd)
             return true;
@@ -1398,7 +1371,7 @@ struct MediaPopup::Impl {
             }
         }
         for (auto*& bitmap : idleIconBitmaps)
-            releaseBitmap(bitmap);
+            releaseCom(bitmap);
         idleIconBitmaps = std::move(nextBitmaps);
         idleIconsDirty = false;
     }
@@ -1526,7 +1499,7 @@ struct MediaPopup::Impl {
 
     void decodeCover() {
         coverDirty = false;
-        releaseBitmap(coverBmp);
+        releaseCom(coverBmp);
         auto* rt = renderer.renderTarget();
         if (!rt || !media.thumbnail || media.thumbnail->empty())
             return;
@@ -1599,7 +1572,7 @@ struct MediaPopup::Impl {
         sourceIconDirty = false;
         auto* rt = renderer.renderTarget();
         if (media.sourceAppUserModelId.empty()) {
-            releaseBitmap(sourceIconBmp);
+            releaseCom(sourceIconBmp);
             sourceIconLoadedFor.clear();
             return;
         }
@@ -1624,7 +1597,7 @@ struct MediaPopup::Impl {
 
         // 只有新位图创建成功后才替换旧位图。切换期间路径解析或进程图标读取
         // 出现一次性失败时，仍然保留上一帧可用的 QQ 音乐图标。
-        releaseBitmap(sourceIconBmp);
+        releaseCom(sourceIconBmp);
         sourceIconBmp = decoded;
         sourceIconLoadedFor = media.sourceAppUserModelId;
     }

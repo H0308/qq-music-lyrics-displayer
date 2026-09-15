@@ -4,6 +4,7 @@
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
 #include "logging/runtime_logger.h"
+#include "util/com_release.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -61,23 +62,14 @@ struct VolumePopup::Impl {
     float dip(int px) const { return static_cast<float>(px) / scale(); }
 
     void releaseResources() {
-        auto releaseBrush = [](ID2D1SolidColorBrush*& brush) {
-            if (brush) {
-                brush->Release();
-                brush = nullptr;
-            }
-        };
-        releaseBrush(brushBg);
-        releaseBrush(brushStroke);
-        releaseBrush(brushText);
-        releaseBrush(brushSecondary);
-        releaseBrush(brushTrack);
-        releaseBrush(brushAccent);
-        releaseBrush(brushKnob);
-        if (fmtValue) {
-            fmtValue->Release();
-            fmtValue = nullptr;
-        }
+        releaseCom(brushBg);
+        releaseCom(brushStroke);
+        releaseCom(brushText);
+        releaseCom(brushSecondary);
+        releaseCom(brushTrack);
+        releaseCom(brushAccent);
+        releaseCom(brushKnob);
+        releaseCom(fmtValue);
         renderer.discard();
     }
 

@@ -1662,6 +1662,59 @@ struct SettingsDialog::Impl {
         factory->Release();
     }
 
+    void drawRadioCardBackground(fluent::FluentDialogSurface::Painter& painter, const Row& row,
+                                 const D2D1_RECT_F& card, bool selected, bool hovered,
+                                 bool pressed) const {
+        const auto& p = fluent::palette();
+        D2D1_COLOR_F fill = p.controlFill;
+        if (!row.enabled)
+            fill = p.listHover;
+        else if (pressed)
+            fill = p.controlPressed;
+        else if (selected)
+            fill = p.listSelected;
+        else if (hovered)
+            fill = p.controlHover;
+        painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+
+        const bool focused = focusedId == row.id && focusVisible && row.enabled;
+        if (selected) {
+            painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
+                                                 : p.disabled,
+                                    card, focused ? 2.0f : 1.5f,
+                                    fluent::metrics::controlRadius);
+        } else {
+            painter.strokeRoundRect(p.cardStroke, card, 1.0f,
+                                    fluent::metrics::controlRadius);
+        }
+    }
+
+    void drawRadioIndicator(fluent::FluentDialogSurface::Painter& painter, const Row& row,
+                            const D2D1_RECT_F& card, bool selected, bool hovered, bool pressed,
+                            float rightInset, float topInset) const {
+        const auto& p = fluent::palette();
+        const D2D1_POINT_2F radioCenter =
+            D2D1::Point2F(card.right - rightInset, card.top + topInset);
+        if (!row.enabled) {
+            if (auto* brush = painter.brush(p.disabled))
+                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                              1.0f);
+            if (selected) {
+                if (auto* brush = painter.brush(p.disabled))
+                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
+                                                  brush);
+            }
+        } else if (selected) {
+            if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
+                painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush);
+            if (auto* brush = painter.brush(p.textOnAccent))
+                painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f), brush);
+        } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
+            painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
+                                          pressed ? 1.5f : 1.0f);
+        }
+    }
+
     void drawSpectrumStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
         const auto& p = fluent::palette();
         auto* titleFormat = painter.textFormat(13.0f, 500, true, true);
@@ -1687,27 +1740,7 @@ struct SettingsDialog::Impl {
                                  hoverOption == static_cast<int>(i);
             const bool pressed = row.enabled && pressedId == row.id &&
                                  pressedOption == static_cast<int>(i);
-            D2D1_COLOR_F fill = p.controlFill;
-            if (!row.enabled)
-                fill = p.listHover;
-            else if (pressed)
-                fill = p.controlPressed;
-            else if (selected)
-                fill = p.listSelected;
-            else if (hovered)
-                fill = p.controlHover;
-            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
-
-            const bool focused = focusedId == row.id && focusVisible && row.enabled;
-            if (selected) {
-                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
-                                                     : p.disabled,
-                                        card, focused ? 2.0f : 1.5f,
-                                        fluent::metrics::controlRadius);
-            } else {
-                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
-                                        fluent::metrics::controlRadius);
-            }
+            drawRadioCardBackground(painter, row, card, selected, hovered, pressed);
 
             const D2D1_RECT_F artwork =
                 D2D1::RectF(card.left + 8.0f, card.top + 8.0f, card.right - 24.0f,
@@ -1720,28 +1753,7 @@ struct SettingsDialog::Impl {
                              row.enabled ? p.text : p.disabled);
 
             // 示意图和文字先画，单选框最后画，避免缩放时被内容盖住。
-            const D2D1_POINT_2F radioCenter =
-                D2D1::Point2F(card.right - 14.0f, card.top + 14.0f);
-            if (!row.enabled) {
-                if (auto* brush = painter.brush(p.disabled))
-                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush, 1.0f);
-                if (selected) {
-                    if (auto* brush = painter.brush(p.disabled))
-                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                      brush);
-                }
-            } else if (selected) {
-                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush);
-                if (auto* brush = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                  brush);
-            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
-                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
-                                              pressed ? 1.5f : 1.0f);
-            }
+            drawRadioIndicator(painter, row, card, selected, hovered, pressed, 14.0f, 14.0f);
         }
     }
 
@@ -1843,50 +1855,9 @@ struct SettingsDialog::Impl {
                                  hoverOption == static_cast<int>(i);
             const bool pressed = row.enabled && pressedId == row.id &&
                                  pressedOption == static_cast<int>(i);
-            D2D1_COLOR_F fill = p.controlFill;
-            if (!row.enabled)
-                fill = p.listHover;
-            else if (pressed)
-                fill = p.controlPressed;
-            else if (selected)
-                fill = p.listSelected;
-            else if (hovered)
-                fill = p.controlHover;
-            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
+            drawRadioCardBackground(painter, row, card, selected, hovered, pressed);
 
-            const bool focused = focusedId == row.id && focusVisible && row.enabled;
-            if (selected) {
-                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
-                                                     : p.disabled,
-                                        card, focused ? 2.0f : 1.5f,
-                                        fluent::metrics::controlRadius);
-            } else {
-                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
-                                        fluent::metrics::controlRadius);
-            }
-
-            const D2D1_POINT_2F radioCenter =
-                D2D1::Point2F(card.right - 16.0f, card.top + 16.0f);
-            if (!row.enabled) {
-                if (auto* brush = painter.brush(p.disabled))
-                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush, 1.0f);
-                if (selected) {
-                    if (auto* brush = painter.brush(p.disabled))
-                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                      brush);
-                }
-            } else if (selected) {
-                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush);
-                if (auto* brush = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                  brush);
-            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
-                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
-                                              pressed ? 1.5f : 1.0f);
-            }
+            drawRadioIndicator(painter, row, card, selected, hovered, pressed, 16.0f, 16.0f);
 
             const D2D1_RECT_F artwork =
                 D2D1::RectF(card.left + 12.0f, card.top + 14.0f, card.left + 56.0f,
@@ -1981,27 +1952,7 @@ struct SettingsDialog::Impl {
                                  hoverOption == static_cast<int>(i);
             const bool pressed = row.enabled && pressedId == row.id &&
                                  pressedOption == static_cast<int>(i);
-            D2D1_COLOR_F fill = p.controlFill;
-            if (!row.enabled)
-                fill = p.listHover;
-            else if (pressed)
-                fill = p.controlPressed;
-            else if (selected)
-                fill = p.listSelected;
-            else if (hovered)
-                fill = p.controlHover;
-            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
-
-            const bool focused = focusedId == row.id && focusVisible && row.enabled;
-            if (selected) {
-                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
-                                                     : p.disabled,
-                                        card, focused ? 2.0f : 1.5f,
-                                        fluent::metrics::controlRadius);
-            } else {
-                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
-                                        fluent::metrics::controlRadius);
-            }
+            drawRadioCardBackground(painter, row, card, selected, hovered, pressed);
 
             const float artworkW = std::min(100.0f, cardW - 20.0f);
             const D2D1_RECT_F artwork = D2D1::RectF(
@@ -2010,28 +1961,7 @@ struct SettingsDialog::Impl {
             drawSongToastPositionArtwork(painter, artwork, i == 0, row.enabled);
 
             // 示意图先画，单选框最后画，避免位置指示被单选框遮住。
-            const D2D1_POINT_2F radioCenter =
-                D2D1::Point2F(card.right - 16.0f, card.top + 16.0f);
-            if (!row.enabled) {
-                if (auto* brush = painter.brush(p.disabled))
-                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush, 1.0f);
-                if (selected) {
-                    if (auto* brush = painter.brush(p.disabled))
-                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                      brush);
-                }
-            } else if (selected) {
-                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush);
-                if (auto* brush = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                  brush);
-            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
-                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
-                                              pressed ? 1.5f : 1.0f);
-            }
+            drawRadioIndicator(painter, row, card, selected, hovered, pressed, 16.0f, 16.0f);
 
             painter.drawText(row.options[i], titleFormat,
                              D2D1::RectF(card.left + 10.0f, card.top + 65.0f,
@@ -2468,55 +2398,14 @@ struct SettingsDialog::Impl {
                                  hoverOption == optionIndex;
             const bool pressed = row.enabled && pressedId == row.id &&
                                  pressedOption == optionIndex;
-            D2D1_COLOR_F fill = p.controlFill;
-            if (!row.enabled)
-                fill = p.listHover;
-            else if (pressed)
-                fill = p.controlPressed;
-            else if (selected)
-                fill = p.listSelected;
-            else if (hovered)
-                fill = p.controlHover;
-            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
-
-            const bool focused = focusedId == row.id && focusVisible && row.enabled;
-            if (selected) {
-                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
-                                                     : p.disabled,
-                                        card, focused ? 2.0f : 1.5f,
-                                        fluent::metrics::controlRadius);
-            } else {
-                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
-                                        fluent::metrics::controlRadius);
-            }
+            drawRadioCardBackground(painter, row, card, selected, hovered, pressed);
 
             const D2D1_RECT_F artwork =
                 D2D1::RectF(card.left + 10.0f, card.top + 10.0f, card.right - 10.0f,
                             card.bottom - 31.0f);
             drawIdleQuoteBackgroundArtwork(painter, artwork, optionIndex, row.enabled);
 
-            const D2D1_POINT_2F radioCenter =
-                D2D1::Point2F(card.right - 16.0f, card.top + 14.0f);
-            if (!row.enabled) {
-                if (auto* brush = painter.brush(p.disabled))
-                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush, 1.0f);
-                if (selected) {
-                    if (auto* brush = painter.brush(p.disabled))
-                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                      brush);
-                }
-            } else if (selected) {
-                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush);
-                if (auto* brush = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                  brush);
-            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
-                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
-                                              pressed ? 1.5f : 1.0f);
-            }
+            drawRadioIndicator(painter, row, card, selected, hovered, pressed, 16.0f, 14.0f);
 
             painter.drawText(row.options[optionIndex], titleFormat,
                              D2D1::RectF(card.left + 10.0f, card.bottom - 24.0f,
@@ -2547,27 +2436,7 @@ struct SettingsDialog::Impl {
                                  hoverOption == static_cast<int>(i);
             const bool pressed = row.enabled && pressedId == row.id &&
                                  pressedOption == static_cast<int>(i);
-            D2D1_COLOR_F fill = p.controlFill;
-            if (!row.enabled)
-                fill = p.listHover;
-            else if (pressed)
-                fill = p.controlPressed;
-            else if (selected)
-                fill = p.listSelected;
-            else if (hovered)
-                fill = p.controlHover;
-            painter.fillRoundRect(fill, card, fluent::metrics::controlRadius);
-
-            const bool focused = focusedId == row.id && focusVisible && row.enabled;
-            if (selected) {
-                painter.strokeRoundRect(row.enabled ? (hovered ? p.accentHover : p.accent)
-                                                     : p.disabled,
-                                        card, focused ? 2.0f : 1.5f,
-                                        fluent::metrics::controlRadius);
-            } else {
-                painter.strokeRoundRect(p.cardStroke, card, 1.0f,
-                                        fluent::metrics::controlRadius);
-            }
+            drawRadioCardBackground(painter, row, card, selected, hovered, pressed);
 
             const D2D1_RECT_F artwork =
                 D2D1::RectF(card.left + 10.0f, card.top + 10.0f, card.right - 30.0f,
@@ -2575,28 +2444,7 @@ struct SettingsDialog::Impl {
             drawHoverControlStyleArtwork(painter, artwork, i == 1, row.enabled);
 
             // 示意图先画，单选框最后画，确保它始终位于卡片内容之上。
-            const D2D1_POINT_2F radioCenter =
-                D2D1::Point2F(card.right - 16.0f, card.top + 14.0f);
-            if (!row.enabled) {
-                if (auto* brush = painter.brush(p.disabled))
-                    painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush, 1.0f);
-                if (selected) {
-                    if (auto* brush = painter.brush(p.disabled))
-                        painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                      brush);
-                }
-            } else if (selected) {
-                if (auto* brush = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f),
-                                                  brush);
-                if (auto* brush = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(radioCenter, 2.0f, 2.0f),
-                                                  brush);
-            } else if (auto* brush = painter.brush(hovered ? p.text : p.textSecondary)) {
-                painter.target()->DrawEllipse(D2D1::Ellipse(radioCenter, 6.0f, 6.0f), brush,
-                                              pressed ? 1.5f : 1.0f);
-            }
+            drawRadioIndicator(painter, row, card, selected, hovered, pressed, 16.0f, 14.0f);
 
             painter.drawText(row.options[i], titleFormat,
                              D2D1::RectF(card.left + 10.0f, card.bottom - 24.0f,

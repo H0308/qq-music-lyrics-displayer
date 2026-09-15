@@ -1,5 +1,7 @@
 #include "audio_spectrum.h"
 
+#include "util/com_release.h"
+
 #include <windows.h>
 #include <audioclient.h>
 #include <audioclientactivationparams.h>
@@ -276,14 +278,6 @@ struct Analyzer {
             s = 0.0f;
     }
 };
-
-template <typename T>
-void releaseCom(T*& p) {
-    if (p) {
-        p->Release();
-        p = nullptr;
-    }
-}
 
 } // namespace
 

@@ -5578,21 +5578,19 @@ struct TaskbarHost::Impl {
         }
     }
 
-    void renderVerticalTaskbar(float w, float h, ID2D1Effect* coverBlurChain) {
-        auto* rt = renderer.renderTarget();
-        if (!rt || w <= 0.0f || h <= 0.0f)
-            return;
-
-        const VerticalLayout layout = verticalLayout();
-        if (layout.w <= 0.0f || layout.h <= 0.0f)
-            return;
-
-        rt->BeginDraw();
-        rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-
+    D2D1_ROUNDED_RECT taskbarBackgroundRect(float w, float h) const {
         const float radius = std::min(kCornerRadius, w * 0.5f);
-        D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), radius, radius};
+        return D2D1_ROUNDED_RECT{D2D1::RectF(0.0f, 0.0f, w, h), radius, radius};
+    }
+
+    void drawTaskbarBackground(float w, float h, float progressExtent, bool vertical,
+                               float dynamicBackgroundW, ID2D1Effect* coverBlurChain) {
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return;
+
+        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        const D2D1_ROUNDED_RECT bg = taskbarBackgroundRect(w, h);
         if (coverBlurChain && coverLayer_ && brushBackground_) {
             ID2D1RoundedRectangleGeometry* clip = nullptr;
             if (auto* factory = renderer.d2d())
@@ -5627,22 +5625,70 @@ struct TaskbarHost::Impl {
             const float fraction = static_cast<float>(std::clamp(
                 static_cast<double>(positionMs_) / static_cast<double>(media.durationMs), 0.0,
                 1.0));
-            const float fillBottom = h * fraction;
-            if (fillBottom > 0.5f) {
+            const float fillExtent = progressExtent * fraction;
+            if (fillExtent > 0.5f) {
                 const COLORREF c = media.hasDominantColor ? media.dominantColor
                                                           : fluent::accentColor();
                 brushProgressBg_->SetColor(
                     fluent::toD2D(c, progressBackgroundOpacityPct_ / 100.0f));
-                const float fillRadius = std::min({radius, fillBottom * 0.5f, w * 0.5f});
+                const float fillRadius = vertical
+                                             ? std::min({bg.radiusX, fillExtent * 0.5f,
+                                                         w * 0.5f})
+                                             : std::min({bg.radiusX, fillExtent * 0.5f,
+                                                         h * 0.5f});
+                const D2D1_RECT_F fillRect = vertical
+                                                 ? D2D1::RectF(0.0f, 0.0f, w, fillExtent)
+                                                 : D2D1::RectF(0.0f, 0.0f, fillExtent, h);
                 rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, fillBottom), fillRadius,
-                                      fillRadius),
-                    brushProgressBg_);
+                    D2D1::RoundedRect(fillRect, fillRadius, fillRadius), brushProgressBg_);
             }
         }
 
         if (taskbarDynamicBackgroundVisible())
-            drawIdleQuoteBackground(w, h, w);
+            drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+    }
+
+    void finishTaskbarFrame(HRESULT hr) {
+        if (hr == D2DERR_RECREATE_TARGET) {
+            discardDeviceResources();
+            return;
+        }
+        if (SUCCEEDED(hr)) {
+            if (songTransitionPending_) {
+                songTransitionPending_ = false;
+                renderer.resetRoot();
+                if (!isMinimalMode()) {
+                    const float travel = kSongTransitionTravelDip * scale();
+                    const bool vertical = isVerticalTaskbar();
+                    const float fromX = vertical ? 0.0f : travel;
+                    const float fromY = vertical
+                                            ? (taskbarEdge_ == ABE_LEFT ? -travel : travel)
+                                            : 0.0f;
+                    if (!renderer.animateRoot(fromX, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
+                                              kSongTransitionMs / 1000.0f))
+                        renderer.resetRoot();
+                }
+            }
+            // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
+            if (!renderer.present())
+                discardDeviceResources();
+        } else {
+            runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
+        }
+    }
+
+    void renderVerticalTaskbar(float w, float h, ID2D1Effect* coverBlurChain) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || w <= 0.0f || h <= 0.0f)
+            return;
+
+        const VerticalLayout layout = verticalLayout();
+        if (layout.w <= 0.0f || layout.h <= 0.0f)
+            return;
+
+        rt->BeginDraw();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        drawTaskbarBackground(w, h, h, true, w, coverBlurChain);
 
         const bool playbackScene = scene_ != DisplayScene::Idle &&
                                     scene_ != DisplayScene::NoPlayback;
@@ -5681,28 +5727,7 @@ struct TaskbarHost::Impl {
             drawVerticalLyrics(layout);
         }
 
-        const HRESULT hr = rt->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET) {
-            discardDeviceResources();
-            return;
-        }
-        if (SUCCEEDED(hr)) {
-            if (songTransitionPending_) {
-                songTransitionPending_ = false;
-                renderer.resetRoot();
-                if (!isMinimalMode()) {
-                    const float travel = kSongTransitionTravelDip * scale();
-                    const float fromY = taskbarEdge_ == ABE_LEFT ? -travel : travel;
-                    if (!renderer.animateRoot(0.0f, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
-                                              kSongTransitionMs / 1000.0f))
-                        renderer.resetRoot();
-                }
-            }
-            if (!renderer.present())
-                discardDeviceResources();
-        } else {
-            runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
-        }
+        finishTaskbarFrame(rt->EndDraw());
     }
 
     void render() {
@@ -5813,71 +5838,12 @@ struct TaskbarHost::Impl {
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-
-        // 背景：alpha 极低，视觉上透明但保证整个窗口可命中
-        D2D1_ROUNDED_RECT bg{D2D1::RectF(0.0f, 0.0f, w, h), kCornerRadius, kCornerRadius};
-
-        // 封面模糊背景：模糊后的封面按不透明度铺满全窗，叠加主题遮罩保证文字可读；
-        // 纯色背景：跟随任务栏深浅色。画在最底层，进度背景/背景波浪叠加其上
-        if (coverBlurChain && coverLayer_ && brushBackground_) {
-            ID2D1RoundedRectangleGeometry* clip = nullptr;
-            if (auto* factory = renderer.d2d())
-                factory->CreateRoundedRectangleGeometry(bg, &clip);
-            if (clip) {
-                rt->PushLayer(D2D1::LayerParameters1(
-                                  D2D1::InfiniteRect(), clip,
-                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                  D2D1::Matrix3x2F::Identity(),
-                                  coverBackgroundOpacityPct_ / 100.0f),
-                              coverLayer_);
-                rt->DrawImage(coverBlurChain, D2D1::Point2F(0.0f, 0.0f));
-                rt->PopLayer();
-                clip->Release();
-                brushBackground_->SetColor(lightTheme_
-                                               ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f)
-                                               : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f));
-                rt->FillRoundedRectangle(bg, brushBackground_);
-            }
-        } else if (background_ == TaskbarBackground::Solid && brushBackground_) {
-            brushBackground_->SetColor(lightTheme_
-                                           ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.85f)
-                                           : D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.85f));
-            rt->FillRoundedRectangle(bg, brushBackground_);
-        }
-
-        rt->FillRoundedRectangle(bg, brushBg_);
-        // 悬浮反馈：鼠标位于歌词区域时叠加一层柔和的圆角底色
-        if (mouseOver_ && brushHover_)
-            rt->FillRoundedRectangle(bg, brushHover_);
-
-        // 播放进度背景：从窗口左缘按进度填充到歌词右缘（lyricAreaW 已排除独立频谱
-        // 占宽，天然不会延伸进频谱容器）；与背景波浪互斥，画在封面/文字之下
-        if (progressBackgroundActive() && brushProgressBg_) {
-            const float progressRight = lyricAreaX + lyricAreaW;
-            const float fraction = static_cast<float>(std::clamp(
-                static_cast<double>(positionMs_) / static_cast<double>(media.durationMs), 0.0,
-                1.0));
-            const float fillRight = progressRight * fraction;
-            if (fillRight > 0.5f) {
-                const COLORREF c = media.hasDominantColor ? media.dominantColor
-                                                          : fluent::accentColor();
-                brushProgressBg_->SetColor(
-                    fluent::toD2D(c, progressBackgroundOpacityPct_ / 100.0f));
-                const float radius =
-                    std::min({kCornerRadius, fillRight * 0.5f, h * 0.5f});
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, fillRight, h), radius, radius),
-                    brushProgressBg_);
-            }
-        }
-
-        // 动态背景先于背景波浪绘制，避免覆盖频谱背景层。
         const float dynamicBackgroundW = showSpectrum
                                               ? std::max(1.0f, lyricAreaX + lyricAreaW)
                                               : w;
-        if (taskbarDynamicBackgroundVisible())
-            drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+        // 背景、进度和动态底图由横竖两种布局共用，避免后续修复只落在一条路径。
+        drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, dynamicBackgroundW,
+                              coverBlurChain);
 
         if (backgroundSpectrum) {
             const float waveX = infoStartX();
@@ -6040,33 +6006,7 @@ struct TaskbarHost::Impl {
             }
         }
 
-        HRESULT hr = rt->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET) {
-            discardDeviceResources();
-            return;
-        }
-        if (SUCCEEDED(hr)) {
-            if (songTransitionPending_) {
-                songTransitionPending_ = false;
-                renderer.resetRoot();
-                if (!isMinimalMode()) {
-                    const float travel = kSongTransitionTravelDip * scale();
-                    const bool vertical = isVerticalTaskbar();
-                    const float fromX = vertical ? 0.0f : travel;
-                    const float fromY = vertical
-                                            ? (taskbarEdge_ == ABE_LEFT ? -travel : travel)
-                                            : 0.0f;
-                    if (!renderer.animateRoot(fromX, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
-                                              kSongTransitionMs / 1000.0f))
-                        renderer.resetRoot();
-                }
-            }
-            // Present 失败（设备丢失/重置）时丢弃设备链，下一帧惰性重建
-            if (!renderer.present())
-                discardDeviceResources();
-        } else {
-            runtime_log::writef(L"[taskbar] EndDraw failed: 0x%08X", hr);
-        }
+        finishTaskbarFrame(rt->EndDraw());
     }
 
     // ---------- 滚动字幕 ----------

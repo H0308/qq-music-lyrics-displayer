@@ -223,26 +223,14 @@ void QqMusicSmtcAdapter::refreshPlayback(const Session& session,
         snapshot.anchorUtcMs = eventNowMs;
     }
 
-    auto controls = info.Controls();
-    if (controls) {
-        snapshot.canPrev = controls.IsPreviousEnabled();
-        snapshot.canPlayPause = controls.IsPlayEnabled() || controls.IsPauseEnabled();
-        snapshot.canNext = controls.IsNextEnabled();
-    }
+    applyPlaybackControls(info, snapshot);
 }
 
 SmtcSnapshot QqMusicSmtcAdapter::snapshot(const SmtcSnapshot& source,
                                           int64_t nowMs) const {
     SmtcSnapshot result = source;
     const int64_t rawPos = result.positionMs;
-    if (result.status == PlaybackStatus::Playing) {
-        int64_t elapsed = nowMs - result.anchorUtcMs;
-        if (elapsed > 0) {
-            result.positionMs += elapsed;
-            if (result.durationMs > 0 && result.positionMs > result.durationMs)
-                result.positionMs = result.durationMs;
-        }
-    }
+    advancePlayingPosition(result, nowMs, false);
 
     std::wstring key = positionTrackKey(result);
     auto now = std::chrono::steady_clock::now();

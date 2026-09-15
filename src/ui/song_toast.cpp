@@ -1,5 +1,7 @@
 #include "song_toast.h"
 
+#include "util/com_release.h"
+
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "platform_icon.h"
@@ -74,14 +76,6 @@ private:
 };
 
 GdiplusInit g_gdiplusInit;
-
-template <typename T>
-void releaseCom(T*& value) {
-    if (value) {
-        value->Release();
-        value = nullptr;
-    }
-}
 
 float srgbChannelToLinear(BYTE value) {
     const float channel = static_cast<float>(value) / 255.0f;

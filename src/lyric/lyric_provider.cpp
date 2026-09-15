@@ -1,4 +1,5 @@
 #include "lyric_provider.h"
+#include "lyric/lrc_parser.h"
 #include "qrc_decoder.h"
 
 #include "util/base64.h"
@@ -797,53 +798,6 @@ std::vector<std::pair<int, const Candidate*>> rankCandidates(const MatchQuery& q
     return ranked;
 }
 
-// 解析 LRC 时间戳 "mm:ss.xx"；非纯数字（如 ti:/ar:）返回 false
-bool parseTimeStamp(const std::string& s, int64_t& msOut) {
-    auto colon = s.find(':');
-    if (colon == std::string::npos || colon == 0) return false;
-    for (size_t i = 0; i < colon; ++i)
-        if (!std::isdigit((unsigned char)s[i])) return false;
-    char* end = nullptr;
-    double sec = std::strtod(s.c_str() + colon + 1, &end);
-    if (end == s.c_str() + colon + 1) return false;
-    long long min = std::strtoll(s.c_str(), nullptr, 10);
-    msOut = (int64_t)((min * 60.0 + sec) * 1000.0 + 0.5);
-    return true;
-}
-
-std::vector<LyricLine> parseLrc(const std::string& lrc) {
-    std::vector<LyricLine> lines;
-    std::istringstream ss(lrc);
-    std::string raw;
-    while (std::getline(ss, raw)) {
-        if (!raw.empty() && raw.back() == '\r') raw.pop_back();
-        // 支持一行多时间戳：[t1][t2]文本
-        std::vector<int64_t> stamps;
-        size_t pos = 0;
-        while (pos < raw.size() && raw[pos] == '[') {
-            size_t close = raw.find(']', pos);
-            if (close == std::string::npos) break;
-            int64_t ms = 0;
-            if (!parseTimeStamp(raw.substr(pos + 1, close - pos - 1), ms)) {
-                stamps.clear();
-                break; // [ti:] 等元数据行
-            }
-            stamps.push_back(ms);
-            pos = close + 1;
-        }
-        if (stamps.empty()) continue;
-        std::wstring text = toWide(raw.substr(pos));
-        while (!text.empty() && (text.back() == L' ' || text.back() == L'\t')) text.pop_back();
-        size_t first = text.find_first_not_of(L" \t");
-        if (first == std::wstring::npos) continue; // 空行歌词跳过
-        text = text.substr(first);
-        for (int64_t ms : stamps) lines.push_back({ms, text});
-    }
-    std::sort(lines.begin(), lines.end(),
-              [](const LyricLine& a, const LyricLine& b) { return a.ms < b.ms; });
-    return lines;
-}
-
 bool parseIntegerField(const std::string& value, int64_t& out) {
     if (value.empty())
         return false;
@@ -879,7 +833,7 @@ std::vector<LyricLine> parseYrc(std::string content) {
         if (comma == std::string::npos) {
             // 个别接口响应会在 yrc 字段中混入普通 LRC 行，保留它们作为非逐字行。
             int64_t lineStart = 0;
-            if (!parseTimeStamp(header, lineStart))
+            if (!parseLrcTimestamp(header, lineStart))
                 continue;
             std::wstring plain = toWide(raw.substr(close + 1));
             while (!plain.empty() && (plain.back() == L' ' || plain.back() == L'\t'))
@@ -1325,7 +1279,7 @@ bool decodeLocalLyricFile(const std::filesystem::path& path, std::vector<LyricLi
         return false;
     if (parseQrcLyricsText(content, out))
         return true;
-    out = parseLrc(content);
+    out = parseLrcText(content);
     return !out.empty();
 }
 
@@ -1548,13 +1502,13 @@ bool downloadLyric(CURL* curl, const std::string& songmid, std::vector<LyricLine
     if (j.is_discarded() || j.value("retcode", -1) != 0) return false;
     std::string lrc = base64Decode(j.value("lyric", std::string()));
     if (lrc.empty()) return false;
-    out = parseLrc(lrc);
+    out = parseLrcText(lrc);
     const std::string trans = base64Decode(j.value("trans", std::string()));
     const std::string roma = base64Decode(j.value("roma", std::string()));
     if (!trans.empty())
-        attachSecondary(out, parseLrc(trans), true);
+        attachSecondary(out, parseLrcText(trans), true);
     if (!roma.empty())
-        attachSecondary(out, parseLrc(roma), false);
+        attachSecondary(out, parseLrcText(roma), false);
     return !out.empty();
 }
 
@@ -1592,7 +1546,7 @@ bool downloadNeteaseLyric(CURL* curl, const std::wstring& songId,
         const std::string lrc = lyricField(root, "lrc");
         if (lrc.empty())
             return false;
-        lines = parseLrc(lrc);
+        lines = parseLrcText(lrc);
     }
     if (lines.empty())
         return false;
@@ -1608,13 +1562,13 @@ bool downloadNeteaseLyric(CURL* curl, const std::wstring& songId,
     if (!translation.empty()) {
         auto translatedLines = parseYrc(translation);
         if (translatedLines.empty())
-            translatedLines = parseLrc(translation);
+            translatedLines = parseLrcText(translation);
         attachSecondary(lines, translatedLines, true);
     }
     if (!romanization.empty()) {
         auto romanizedLines = parseYrc(romanization);
         if (romanizedLines.empty())
-            romanizedLines = parseLrc(romanization);
+            romanizedLines = parseLrcText(romanization);
         attachSecondary(lines, romanizedLines, false);
     }
 

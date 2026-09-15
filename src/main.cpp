@@ -792,10 +792,10 @@ struct App {
     bool qqLocalLyricsPickerOpen_ = false;
     bool idleAppPickerOpen_ = false;
 
-    std::vector<ILyricHost*> hosts() {
-        std::vector<ILyricHost*> v;
-        if (taskbarHost) v.push_back(taskbarHost.get());
-        return v;
+    template <typename Fn>
+    void forEachHost(Fn&& fn) {
+        if (taskbarHost)
+            fn(taskbarHost.get());
     }
 
     const wchar_t* notRunningStatus() const {
@@ -890,13 +890,21 @@ struct App {
         }
     }
 
+    // 设置变更只有一个 UI 同步入口，避免每个动作都重复判断窗口生命周期。
+    void refreshSettingsDialog(bool onlyWhenOpen = false) {
+        auto* dialog = settingsDialog.get();
+        if (dialog && (!onlyWhenOpen || dialog->isOpen()))
+            dialog->updateState(currentSettingsState());
+    }
+
     void applySecondaryLyricMode() {
         const bool showTranslation = !taskbarVertical_ && secondaryLyricEnabled_ &&
                                      !preferRomanization_;
         const bool showRomanization = !taskbarVertical_ && secondaryLyricEnabled_ &&
                                       preferRomanization_;
-        for (auto* h : hosts())
-            h->setSecondaryLyricMode(showTranslation, showRomanization);
+        forEachHost([&](ILyricHost* host) {
+            host->setSecondaryLyricMode(showTranslation, showRomanization);
+        });
     }
 
     void logSettingBool(const wchar_t* name, bool value) {
@@ -1125,8 +1133,7 @@ struct App {
 
         applyEffectiveTaskbarSettings();
         syncSpectrumWithMode();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
     }
 
     void applyRenderMode(int mode) {
@@ -1167,8 +1174,7 @@ struct App {
             cancelTaskbarAutoRestore();
         else if (taskbarAutoClosedForNoSpace_ && !taskbarHost)
             armTaskbarAutoRestore();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
         logSettingInt(L"render-mode", renderMode_);
         saveSettings();
     }
@@ -1341,8 +1347,7 @@ struct App {
                                                          floatingCardBackgroundColorCustomized_);
         }
         refreshThemeWindows();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
     }
 
     void applyTaskbarTheme(fluent::ThemeMode mode) {
@@ -1425,8 +1430,7 @@ struct App {
     void applySecondaryEnabled(bool on) {
         secondaryLyricEnabled_ = on;
         applySecondaryLyricMode();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
         logSettingBool(L"secondary-lyrics", on);
         saveSettings();
     }
@@ -1434,8 +1438,7 @@ struct App {
     void applyPreferRomanization(bool on) {
         preferRomanization_ = on;
         applySecondaryLyricMode();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
         logSettingBool(L"prefer-romanization", on);
         saveSettings();
     }
@@ -1445,8 +1448,7 @@ struct App {
         secondaryLyricEnabled_ = true;
         preferRomanization_ = romanization;
         applySecondaryLyricMode();
-        if (settingsDialog && settingsDialog->isOpen())
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog(true);
         logSettingBool(L"secondary-lyrics", true);
         logSettingBool(L"prefer-romanization", romanization);
         saveSettings();
@@ -1840,8 +1842,7 @@ struct App {
         prepareIdleApps();
         runtime_log::writef(L"[action][idle-entry] app-added path=%s", path.c_str());
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
@@ -1871,8 +1872,7 @@ struct App {
             runtime_log::writef(L"[action][idle-entry] app-name-changed index=%d name=%s",
                                 index, app.name.c_str());
             saveSettings();
-            if (settingsDialog)
-                settingsDialog->updateState(currentSettingsState());
+            refreshSettingsDialog();
             publishPresentationFrame(monitor.snapshot(), false, true);
         });
         idleAppNameDialog = std::move(dialog);
@@ -1915,8 +1915,7 @@ struct App {
         runtime_log::writef(L"[action][idle-entry] app-names-visibility show=%d",
                             show ? 1 : 0);
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
@@ -1927,8 +1926,7 @@ struct App {
                             idleApps_[static_cast<size_t>(index)].path.c_str());
         idleApps_.erase(idleApps_.begin() + index);
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
@@ -1949,8 +1947,7 @@ struct App {
         runtime_log::writef(L"[action][idle-entry] app-reordered from=%d to=%d path=%s",
                             fromIndex, toIndex, path.c_str());
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
@@ -2050,20 +2047,22 @@ struct App {
         return spectrumOn_ ? DisplayScene::Spectrum : DisplayScene::Message;
     }
 
-    PresentationFrame buildPresentationFrame(const SmtcSnapshot& snap,
-                                              bool animateTransition) const {
-        PresentationFrame frame;
+    void fillPresentationFrame(PresentationFrame& frame, const SmtcSnapshot& snap,
+                               bool animateTransition, bool copyLyrics,
+                               bool durationOnlyUpdate) const {
         frame.requestGeneration = requestGeneration_;
         frame.trackKey = currentKey;
         frame.scene = displaySceneFor(snap);
         frame.media = makeMediaInfo(snap);
         frame.idle = currentIdlePresentation();
-        frame.lyrics = currentLyrics_;
+        if (copyLyrics)
+            frame.lyrics = currentLyrics_;
         frame.actualPositionMs = snap.positionMs;
         frame.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
         frame.currentLine = LyricProvider::findLine(frame.lyrics, frame.lineSelectionPositionMs);
         frame.visible = snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
         frame.animateTransition = animateTransition;
+        frame.durationOnlyUpdate = durationOnlyUpdate;
         const bool showStartupTaskSummary = startupTaskSummaryActive_ &&
                                              !snap.sessionAlive &&
                                              frame.scene == DisplayScene::Idle;
@@ -2071,6 +2070,7 @@ struct App {
                                              tickTickEffectiveEnabled() &&
                                              !snap.sessionAlive &&
                                              frame.scene == DisplayScene::Idle;
+        frame.statusTextOneShot = showStartupTaskSummary;
         if (showStartupTaskSummary) {
             frame.statusText = startupTaskSummaryText();
             frame.statusTextOneShot = true;
@@ -2084,6 +2084,14 @@ struct App {
             frame.statusText = L"歌词加载中…";
         else if (currentLyrics_.empty())
             frame.statusText = currentKey.empty() ? L"等待播放…" : L"暂无歌词";
+        else
+            frame.statusText.clear();
+    }
+
+    PresentationFrame buildPresentationFrame(const SmtcSnapshot& snap,
+                                              bool animateTransition) const {
+        PresentationFrame frame;
+        fillPresentationFrame(frame, snap, animateTransition, true, false);
         return frame;
     }
 
@@ -2091,46 +2099,10 @@ struct App {
                                   bool lyricsChanged = false,
                                   bool durationOnlyUpdate = false) {
         // SMTC 状态/控制/封面事件只刷新帧字段；完整歌词仅在内容事务变化时复制。
-        if (frameRevision_ == 0 || lyricsChanged)
-            currentFrame_.lyrics = currentLyrics_;
-        currentFrame_.requestGeneration = requestGeneration_;
-        currentFrame_.trackKey = currentKey;
-        currentFrame_.scene = displaySceneFor(snap);
-        currentFrame_.media = makeMediaInfo(snap);
-        currentFrame_.idle = currentIdlePresentation();
-        currentFrame_.actualPositionMs = snap.positionMs;
-        currentFrame_.lineSelectionPositionMs = snap.positionMs + kLyricTransitionLeadMs;
-        currentFrame_.currentLine =
-            LyricProvider::findLine(currentFrame_.lyrics, currentFrame_.lineSelectionPositionMs);
-        currentFrame_.visible =
-            snap.sessionAlive || (idleEntryEnabled_ && !snap.sessionAlive);
-        currentFrame_.animateTransition = animateTransition;
-        currentFrame_.durationOnlyUpdate = durationOnlyUpdate;
-        const bool showStartupTaskSummary = startupTaskSummaryActive_ &&
-                                             !snap.sessionAlive &&
-                                             currentFrame_.scene == DisplayScene::Idle;
-        const bool showStartupTaskLoading = startupTaskSummaryPending_ &&
-                                             tickTickEffectiveEnabled() &&
-                                             !snap.sessionAlive &&
-                                             currentFrame_.scene == DisplayScene::Idle;
-        currentFrame_.statusTextOneShot = showStartupTaskSummary;
-        if (showStartupTaskSummary)
-            currentFrame_.statusText = startupTaskSummaryText();
-        else if (showStartupTaskLoading)
-            currentFrame_.statusText = L"正在同步今日任务…";
-        else if (currentFrame_.scene == DisplayScene::Idle)
-            currentFrame_.statusText = currentFrame_.idle.sentence;
-        else if (!snap.sessionAlive)
-            currentFrame_.statusText = notRunningStatus();
-        else if (lyricLoading_)
-            currentFrame_.statusText = L"歌词加载中…";
-        else if (currentLyrics_.empty())
-            currentFrame_.statusText = currentKey.empty() ? L"等待播放…" : L"暂无歌词";
-        else
-            currentFrame_.statusText.clear();
+        fillPresentationFrame(currentFrame_, snap, animateTransition,
+                              frameRevision_ == 0 || lyricsChanged, durationOnlyUpdate);
         currentFrame_.frameRevision = ++frameRevision_;
-        for (auto* h : hosts())
-            h->applyPresentationFrame(currentFrame_);
+        forEachHost([&](ILyricHost* host) { host->applyPresentationFrame(currentFrame_); });
         // 弹窗可见期间异步补齐封面等字段；隐藏时只缓存不渲染
         if (songToast_)
             songToast_->setMedia(currentFrame_.media);
@@ -2242,8 +2214,7 @@ struct App {
                         break;
                     }
                 }
-                if (settingsDialog)
-                    settingsDialog->updateState(currentSettingsState());
+                refreshSettingsDialog();
                 publishPresentationFrame(monitor.snapshot(), false, true);
             }
         });
@@ -2515,8 +2486,7 @@ struct App {
                                   state.muted == appVolumeState_.muted)))
             return;
         appVolumeState_ = state;
-        for (auto* h : hosts())
-            h->setAppVolume(state);
+        forEachHost([&](ILyricHost* host) { host->setAppVolume(state); });
     }
 
     // SMTC 来源播放器切换时更新音量控制目标进程；无会话时清空（音量不可用）
@@ -2844,11 +2814,11 @@ struct App {
         playback.lineSelectionPositionMs = lineSelectionPositionMs;
         playback.currentLine = idx;
         playback.playing = currentFrame_.media.playing;
-        for (auto* h : hosts()) {
+        forEachHost([&](ILyricHost* host) {
             // 提前切换显示行，让上下滚动动画在下一句真正开始前完成；
             // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
-            h->applyPlaybackPatch(playback);
-        }
+            host->applyPlaybackPatch(playback);
+        });
         if (taskbarHost && spectrumOn_ && !taskbarVertical_) {
             SpectrumPatch spectrumPatch;
             spectrumPatch.frameRevision = currentFrame_.frameRevision;
@@ -2937,8 +2907,7 @@ void App::applyTickTickEnabled(bool enabled) {
         tickTickEnabled_ = true;
         tickTickStatus_ = L"滴答清单已开启，正在同步今日任务…";
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
         refreshTickTickTasks();
         return;
@@ -2957,8 +2926,7 @@ void App::applyTickTickEnabled(bool enabled) {
     startupTaskSummaryActive_ = false;
     tickTickStatus_ = L"滴答清单已关闭";
     saveSettings();
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(monitor.snapshot(), false, true);
 }
 
@@ -3016,8 +2984,7 @@ void App::editTickTickApiToken(bool enableAfterSave) {
                                             : L"API 口令已保存，滴答清单已关闭";
         }
         saveSettings();
-        if (settingsDialog)
-            settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
         publishPresentationFrame(monitor.snapshot(), false, true);
         if (shouldRefresh)
             refreshTickTickTasks();
@@ -3077,8 +3044,7 @@ void App::refreshTickTickTasks() {
     if (tickTickConnecting_)
         tickTickConnected_ = false;
     tickTickStatus_ = tickTickConnecting_ ? L"正在连接并同步今日任务…" : L"正在同步今日任务…";
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(monitor.snapshot(), false, true);
     tickTickProvider_.requestTodayTasksAsync(
         tickTickService_, tickTickApiToken_,
@@ -3105,8 +3071,7 @@ void App::completeTickTickTask(const IdleTaskInfo& task) {
     const uint64_t generation = tickTickRequestGeneration_;
     tickTickCompletingTaskId_ = task.id;
     tickTickStatus_ = L"正在完成任务…";
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(monitor.snapshot(), false, true);
     tickTickProvider_.completeTaskAsync(
         tickTickService_, tickTickApiToken_, task.projectId, task.id,
@@ -3135,8 +3100,7 @@ void App::disconnectTickTick() {
     startupTaskSummaryPending_ = false;
     startupTaskSummaryActive_ = false;
     saveSettings();
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(monitor.snapshot(), false, true);
 }
 
@@ -3179,8 +3143,7 @@ void App::onTickTickTasksReady(std::unique_ptr<TickTickTasksPayload> payload) {
         // 播报期间刷新失败时不继续播报一份已经清空的任务统计，直接回到普通空闲文案。
         startupTaskSummaryActive_ = false;
     }
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(snap, false, true);
 }
 
@@ -3209,8 +3172,7 @@ void App::onTickTickTaskCompleteReady(
         if (payload->result.authRequired)
             tickTickConnected_ = false;
     }
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     publishPresentationFrame(monitor.snapshot(), false, true);
 }
 
@@ -3622,6 +3584,7 @@ void App::saveSettings() {
         f << j.dump();
     } catch (...) {
     }
+    refreshSettingsDialog();
 }
 
 void App::initializeRuntimeLogger() {
@@ -3730,8 +3693,7 @@ void App::applyQqLocalLyricsPath(const std::wstring& selectedPath) {
                         selectedPath.c_str());
     qqLocalLyricsPath_ = selectedPath;
     saveSettings();
-    if (settingsDialog)
-        settingsDialog->updateState(currentSettingsState());
+    refreshSettingsDialog();
     if (qqLocalLyricsEnabled_) {
         provider.setQqLocalLyricsConfig(true, qqLocalLyricsPath_);
         reloadCurrentQqLyrics();
@@ -4532,9 +4494,10 @@ void App::tryExtractAlbumColor() {
 
 void App::applyFontColors() {
     const auto& appearance = currentLyricAppearance();
-    for (auto* h : hosts())
-        h->setFontColors(effectivePlayedColor(), appearance.unplayed,
-                         appearance.unplayedAlphaPct);
+    forEachHost([&](ILyricHost* host) {
+        host->setFontColors(effectivePlayedColor(), appearance.unplayed,
+                            appearance.unplayedAlphaPct);
+    });
 }
 
 void App::applyFontAppearance() {
@@ -4760,7 +4723,7 @@ void App::showSettings() {
         return;
     } else {
         // 启动时窗口已预创建但仍隐藏，打开前同步最新状态快照。
-        settingsDialog->updateState(currentSettingsState());
+        refreshSettingsDialog();
     }
     settingsDialog->show();
 }

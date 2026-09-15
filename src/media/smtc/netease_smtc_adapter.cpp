@@ -160,25 +160,13 @@ void NeteaseSmtcAdapter::refreshPlayback(const Session& session,
         snapshot.anchorUtcMs = eventNowMs;
     }
 
-    auto controls = info.Controls();
-    if (controls) {
-        snapshot.canPrev = controls.IsPreviousEnabled();
-        snapshot.canPlayPause = controls.IsPlayEnabled() || controls.IsPauseEnabled();
-        snapshot.canNext = controls.IsNextEnabled();
-    }
+    applyPlaybackControls(info, snapshot);
 }
 
 SmtcSnapshot NeteaseSmtcAdapter::snapshot(const SmtcSnapshot& source,
                                           int64_t nowMs) const {
     SmtcSnapshot result = source;
-    if (result.status == PlaybackStatus::Playing && result.anchorUtcMs > 0) {
-        int64_t elapsed = nowMs - result.anchorUtcMs;
-        if (elapsed > 0) {
-            result.positionMs += elapsed;
-            if (result.durationMs > 0 && result.positionMs > result.durationMs)
-                result.positionMs = result.durationMs;
-        }
-    }
+    advancePlayingPosition(result, nowMs, true);
     return result;
 }
 
