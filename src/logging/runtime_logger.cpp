@@ -33,6 +33,10 @@ namespace {
 constexpr wchar_t kLogPrefix[] = L"QQMusicLyric-";
 constexpr wchar_t kLogExtension[] = L".log";
 constexpr size_t kBufferedBytesLimit = 64 * 1024;
+// 日志文件持续不可写（目录失效、磁盘满等）时 pending 只进不出；给内存队列一个
+// 硬上限，超出后丢弃最旧的行。正常运行稳态占用远低于 64KB 刷盘阈值，此上限只
+// 在故障场景生效
+constexpr size_t kPendingHardLimit = 4 * 1024 * 1024;
 constexpr auto kFlushInterval = std::chrono::milliseconds(1000);
 constexpr auto kSampleInterval = std::chrono::milliseconds(1000);
 constexpr auto kResourceLogInterval = std::chrono::seconds(5);
@@ -354,6 +358,10 @@ struct RuntimeLogger::Impl {
             return;
         pendingBytes += line.size();
         pending.push_back(line);
+        while (pendingBytes > kPendingHardLimit && !pending.empty()) {
+            pendingBytes -= pending.front().size();
+            pending.pop_front();
+        }
         wake.notify_one();
     }
 
