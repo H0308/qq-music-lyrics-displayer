@@ -605,6 +605,7 @@ struct App {
     bool taskbarAutoRestorePending_ = false;
     bool taskbarManualOpenPending_ = false;
     // 完全停止模式只是临时隐藏任务栏歌词；退出时按进入前的用户开启状态恢复。
+    // 在退出后的重新探测期间保留该状态，窗口恢复显示后由实际显示状态接管。
     bool taskbarEnabledBeforeStopped_ = false;
     std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
@@ -1153,8 +1154,6 @@ struct App {
                 createTaskbar(GetModuleHandleW(nullptr));
             }
         }
-        if (leavingStopped)
-            taskbarEnabledBeforeStopped_ = false;
         syncSpectrumWithMode();
         if (isMinimalRenderMode()) {
             cancelSongToastCoverWait();
@@ -2335,13 +2334,18 @@ struct App {
         updateTrayIcon();
     }
 
-    bool taskbarEnabledForUserAction() const {
-        if (!taskbarHost)
+    bool taskbarEnabledForUserAction() {
+        if (!taskbarHost || isRenderMode(RenderMode::Stopped))
             return false;
         const TaskbarPlacementStatus status = taskbarHost->placementStatus();
-        return status != TaskbarPlacementStatus::NoSpace &&
-               status != TaskbarPlacementStatus::Unavailable &&
-               taskbarHost->isDisplayed();
+        if (status == TaskbarPlacementStatus::NoSpace ||
+            status == TaskbarPlacementStatus::Unavailable)
+            return false;
+        if (taskbarHost->isDisplayed()) {
+            taskbarEnabledBeforeStopped_ = false;
+            return true;
+        }
+        return taskbarEnabledBeforeStopped_;
     }
 
     void requestQuit() {
