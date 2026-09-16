@@ -4,11 +4,18 @@ on:
   push:
     branches:
       - main
+    # 官网与 Pages 部署配置的变动不触发软件构建
+    paths-ignore:
+      - "site/**"
+      - ".github/workflows/deploy-pages.yml"
     tags:
       - "v*"
   pull_request:
     branches:
       - main
+    paths-ignore:
+      - "site/**"
+      - ".github/workflows/deploy-pages.yml"
   workflow_dispatch:
     inputs:
       publish_release:
