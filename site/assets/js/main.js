@@ -3,6 +3,16 @@ const themeToggle = document.getElementById('themeToggle');
 const root = document.documentElement;
 const systemLight = matchMedia('(prefers-color-scheme: light)');
 
+// Utterances 评论框主题与站点主题联动
+function syncUtterancesTheme() {
+  const frame = document.querySelector('.utterances-frame');
+  if (!frame) return;
+  frame.contentWindow.postMessage(
+    { type: 'set-theme', theme: root.dataset.theme === 'light' ? 'github-light' : 'github-dark' },
+    'https://utteranc.es'
+  );
+}
+
 const themeLabels = { system: '跟随系统', light: '浅色', dark: '深色' };
 const themeOrder = ['system', 'light', 'dark'];
 
@@ -13,6 +23,7 @@ function applyThemeMode(mode) {
   if (mode === 'system') localStorage.removeItem('theme');
   else localStorage.setItem('theme', mode);
   themeToggle.title = themeToggle.ariaLabel = `主题：${themeLabels[mode]}（点击切换）`;
+  syncUtterancesTheme();
 }
 
 themeToggle.addEventListener('click', () => {
@@ -24,9 +35,31 @@ themeToggle.addEventListener('click', () => {
 systemLight.addEventListener('change', () => {
   if (root.dataset.themeMode === 'system')
     root.dataset.theme = systemLight.matches ? 'light' : 'dark';
+  syncUtterancesTheme();
 });
 
 applyThemeMode(root.dataset.themeMode || 'system');
+
+// 首页意见反馈：按当前主题加载 Utterances
+const utterancesBox = document.getElementById('utterancesBox');
+if (utterancesBox) {
+  const s = document.createElement('script');
+  s.src = 'https://utteranc.es/client.js';
+  s.setAttribute('repo', 'H0308/qq-music-lyrics-displayer');
+  s.setAttribute('issue-term', '官网反馈与建议');
+  s.setAttribute('theme', root.dataset.theme === 'light' ? 'github-light' : 'github-dark');
+  s.setAttribute('crossorigin', 'anonymous');
+  s.async = true;
+  utterancesBox.appendChild(s);
+
+  // 超时未加载（本地预览 / 未安装 Utterances App / 网络问题）时给出兜底指引
+  setTimeout(() => {
+    if (utterancesBox.querySelector('.utterances-frame')) return;
+    utterancesBox.innerHTML =
+      '<p class="feedback-fallback">评论组件暂时加载不出来（本地预览或未安装 Utterances App 都会导致此问题）。' +
+      '也可以直接前往 <a href="https://github.com/H0308/qq-music-lyrics-displayer/issues" target="_blank" rel="noopener">GitHub Issues</a> 提交反馈。</p>';
+  }, 6000);
+}
 
 // 头部滚动态
 const header = document.getElementById('siteHeader');

@@ -1,21 +1,54 @@
-// 更新日志页：从 GitHub API 分页拉取 Release，渲染为时间线
-// 每页 10 个，触底自动加载（按钮也可手动点击），直到没有更早的版本
+// 更新日志页：GitHub API 分页拉取 Release
+// 时间线：每页 10 个，触底自动加载（按钮可手动点击）
+// 版本目录：独立按页请求，上一页/下一页翻页；点击未加载版本时自动补载时间线再跳转
 const timeline = document.getElementById('timeline');
 const statusEl = document.getElementById('releasesStatus');
 const toc = document.getElementById('releasesToc');
 
 const PER_PAGE = 10;
-let page = 1;
-let loading = false;
-let exhausted = false;
+
+// 时间线状态
+let nextTimelinePage = 1;
+let timelineLoading = false;
+let timelineExhausted = false;
 let totalLoaded = 0;
+
+// 目录状态
+let tocPage = 1;
+let tocLoading = false;
+let tocExhausted = false;
+
+// GitHub API 响应缓存（30 分钟），避免刷新/重复访问消耗未认证限流额度（60 次/小时/IP）
+function ghCacheGet(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const { time, data } = JSON.parse(raw);
+    return Date.now() - time < 30 * 60 * 1000 ? data : null;
+  } catch { return null; }
+}
+function ghCacheSet(key, data) {
+  try { localStorage.setItem(key, JSON.stringify({ time: Date.now(), data })); } catch { /* 隐私模式等场景忽略 */ }
+}
+
+async function fetchReleasePage(pageNum) {
+  const cacheKey = `gh-releases-p${pageNum}`;
+  const cached = ghCacheGet(cacheKey);
+  if (cached) return cached;
+  const r = await fetch(
+    `https://api.github.com/repos/H0308/qq-music-lyrics-displayer/releases?per_page=${PER_PAGE}&page=${pageNum}`);
+  if (!r.ok) throw r.status;
+  const data = await r.json();
+  ghCacheSet(cacheKey, data);
+  return data;
+}
 
 function escapeHtml(s) {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
           .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// 轻量 Markdown 渲染：标题、加粗、行内代码、链接、无序列表、段落
+// 轻量 Markdown 渲染：标题、加粗、行内代码、链接、无序列表、引用块、段落
 function mdToHtml(md) {
   const lines = escapeHtml(md).split(/\r?\n/);
   let html = '';
@@ -31,6 +64,10 @@ function mdToHtml(md) {
     if (/^#{1,4}\s+/.test(line)) {
       if (inList) { html += '</ul>'; inList = false; }
       html += `<h4>${inline(line.replace(/^#{1,4}\s+/, ''))}</h4>`;
+    } else if (/^&gt;\s*/.test(line)) {
+      // 引用块（行首 > 已在转义后变为 &gt;）
+      if (inList) { html += '</ul>'; inList = false; }
+      html += `<blockquote>${inline(line.replace(/^&gt;\s*/, ''))}</blockquote>`;
     } else if (/^[-*]\s+/.test(line)) {
       if (!inList) { html += '<ul>'; inList = true; }
       html += `<li>${inline(line.replace(/^[-*]\s+/, ''))}</li>`;
@@ -48,7 +85,9 @@ function formatDate(iso) {
   return `${d.getFullYear()} 年 ${d.getMonth() + 1} 月 ${d.getDate()} 日`;
 }
 
-// 版本目录滚动高亮（所有已加载的卡片统一监听）
+// ===== 时间线 =====
+
+// 目录高亮监听（目录链接按页重绘，每次重绘后重新查询）
 const tocSpy = new IntersectionObserver(entries => {
   for (const e of entries) {
     if (!e.isIntersecting) return;
@@ -58,10 +97,10 @@ const tocSpy = new IntersectionObserver(entries => {
 }, { rootMargin: '-20% 0px -70% 0px' });
 
 function appendReleases(releases) {
-  const itemsHtml = releases.map(r => {
-    const isFirstOverall = totalLoaded === 0 && releases.indexOf(r) === 0;
+  const startIndex = totalLoaded;
+  const itemsHtml = releases.map((r, i) => {
     const badges = [
-      isFirstOverall ? '<span class="rel-badge rel-badge-latest">最新</span>' : '',
+      startIndex === 0 && i === 0 ? '<span class="rel-badge rel-badge-latest">最新</span>' : '',
       r.prerelease ? '<span class="rel-badge rel-badge-pre">预发布</span>' : '',
     ].join('');
     const title = r.name && r.name !== r.tag_name ? `${r.tag_name} · ${escapeHtml(r.name)}` : r.tag_name;
@@ -78,9 +117,6 @@ function appendReleases(releases) {
   }).join('');
 
   timeline.insertAdjacentHTML('beforeend', itemsHtml);
-  toc.insertAdjacentHTML('beforeend', releases.map(r =>
-    `<a href="#rel-${r.tag_name}" data-tag="${r.tag_name}">${escapeHtml(r.tag_name)}</a>`
-  ).join(''));
 
   // 新卡片加入入场动画与目录高亮监听
   timeline.querySelectorAll('.release-item:not(.reveal-watched)').forEach(el => {
@@ -98,45 +134,31 @@ loadMoreWrap.innerHTML = '<button class="btn btn-ghost" id="loadMoreBtn" type="b
 timeline.after(loadMoreWrap);
 const loadMoreBtn = loadMoreWrap.querySelector('#loadMoreBtn');
 
-// GitHub API 响应缓存（30 分钟），避免刷新/重复访问消耗未认证限流额度（60 次/小时/IP）
-function ghCacheGet(key) {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const { time, data } = JSON.parse(raw);
-    return Date.now() - time < 30 * 60 * 1000 ? data : null;
-  } catch { return null; }
-}
-function ghCacheSet(key, data) {
-  try { localStorage.setItem(key, JSON.stringify({ time: Date.now(), data })); } catch { /* 隐私模式等场景忽略 */ }
-}
-
-function loadMore() {
-  if (loading || exhausted) return;
-  loading = true;
+async function loadTimelineMore() {
+  if (timelineLoading || timelineExhausted) return;
+  timelineLoading = true;
   loadMoreBtn.textContent = '加载中…';
   loadMoreBtn.disabled = true;
-
-  const finish = releases => {
+  try {
+    const releases = await fetchReleasePage(nextTimelinePage);
     if (statusEl) statusEl.remove();
     if (releases.length === 0) {
-      exhausted = true;
+      timelineExhausted = true;
       loadMoreWrap.innerHTML = '<p class="load-more-end">已经到底啦，共 ' + totalLoaded + ' 个版本</p>';
       sentinelObserver.disconnect();
       return;
     }
     appendReleases(releases);
-    page += 1;
+    nextTimelinePage += 1;
     if (releases.length < PER_PAGE) {
-      exhausted = true;
+      timelineExhausted = true;
       loadMoreWrap.innerHTML = '<p class="load-more-end">已经到底啦，共 ' + totalLoaded + ' 个版本</p>';
       sentinelObserver.disconnect();
       return;
     }
     loadMoreBtn.textContent = '加载更早版本';
     loadMoreBtn.disabled = false;
-  };
-  const fail = () => {
+  } catch {
     if (totalLoaded === 0) {
       statusEl.innerHTML = '加载失败，可能是网络问题或 GitHub 接口限流。可直接前往 ' +
         '<a href="https://github.com/H0308/qq-music-lyrics-displayer/releases" target="_blank" rel="noopener">GitHub Releases</a> 查看。';
@@ -146,28 +168,107 @@ function loadMore() {
       loadMoreBtn.textContent = '加载失败，点击重试';
       loadMoreBtn.disabled = false;
     }
-  };
-
-  const cacheKey = `gh-releases-p${page}`;
-  const cached = ghCacheGet(cacheKey);
-  if (cached) {
-    finish(cached);
-    loading = false;
-    return;
+  } finally {
+    timelineLoading = false;
   }
-
-  fetch(`https://api.github.com/repos/H0308/qq-music-lyrics-displayer/releases?per_page=${PER_PAGE}&page=${page}`)
-    .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
-    .then(releases => { ghCacheSet(cacheKey, releases); finish(releases); })
-    .catch(fail)
-    .finally(() => { loading = false; });
 }
 
 // 触底自动加载
 const sentinelObserver = new IntersectionObserver(entries => {
-  if (entries.some(e => e.isIntersecting)) loadMore();
+  if (entries.some(e => e.isIntersecting)) loadTimelineMore();
 }, { rootMargin: '400px 0px 0px 0px' });
 sentinelObserver.observe(loadMoreWrap);
+loadMoreBtn.addEventListener('click', loadTimelineMore);
 
-loadMoreBtn.addEventListener('click', loadMore);
-loadMore();
+// ===== 版本目录（独立分页） =====
+
+function renderToc(releases) {
+  toc.innerHTML = releases.map(r =>
+    `<a href="#rel-${r.tag_name}" data-tag="${r.tag_name}">${escapeHtml(r.tag_name)}</a>`
+  ).join('') + `
+    <div class="toc-pager">
+      <button type="button" data-nav="prev" ${tocPage === 1 ? 'disabled' : ''}>‹ 上一页</button>
+      <span>第 ${tocPage} 页</span>
+      <button type="button" data-nav="next" ${tocExhausted ? 'disabled' : ''}>下一页 ›</button>
+    </div>`;
+}
+
+async function showTocPage(pageNum) {
+  if (tocLoading || pageNum < 1) return;
+  tocLoading = true;
+  try {
+    const releases = await fetchReleasePage(pageNum);
+    if (releases.length === 0) {
+      tocExhausted = true; // 没有更多页，停留在当前页
+      renderTocCurrentState();
+      return;
+    }
+    tocPage = pageNum;
+    tocExhausted = releases.length < PER_PAGE;
+    renderToc(releases);
+  } catch {
+    toc.innerHTML = '<p class="toc-error">目录加载失败，<a href="#" data-nav="retry">点击重试</a></p>';
+  } finally {
+    tocLoading = false;
+  }
+}
+
+// 到底后重绘翻页器（禁用下一页），保持当前页链接不变
+function renderTocCurrentState() {
+  const pager = toc.querySelector('.toc-pager');
+  if (!pager) return;
+  pager.querySelector('[data-nav="next"]').disabled = true;
+}
+
+// 目录点击：翻页 / 重试 / 版本跳转（未加载的版本先补载时间线）
+toc.addEventListener('click', async e => {
+  const navBtn = e.target.closest('[data-nav]');
+  if (navBtn) {
+    e.preventDefault();
+    const nav = navBtn.dataset.nav;
+    if (nav === 'prev') showTocPage(tocPage - 1);
+    else if (nav === 'next') showTocPage(tocPage + 1);
+    else if (nav === 'retry') showTocPage(tocPage);
+    return;
+  }
+
+  const link = e.target.closest('a[data-tag]');
+  if (!link) return;
+  const targetId = 'rel-' + link.dataset.tag;
+  if (document.getElementById(targetId)) {
+    closeTocDrawer(); // 已加载：走原生锚点跳转
+    return;
+  }
+  // 未加载：自动补载时间线，直到该版本出现或全部加载完
+  e.preventDefault();
+  link.classList.add('toc-loading');
+  while (!timelineExhausted && !document.getElementById(targetId))
+    await loadTimelineMore();
+  link.classList.remove('toc-loading');
+  const target = document.getElementById(targetId);
+  if (target) target.scrollIntoView({ behavior: 'smooth' });
+  closeTocDrawer();
+});
+
+// ===== 移动端抽屉 =====
+
+const tocFab = document.getElementById('tocFab');
+let tocBackdrop = null;
+if (tocFab) {
+  tocBackdrop = document.createElement('div');
+  tocBackdrop.className = 'toc-backdrop';
+  document.body.appendChild(tocBackdrop);
+  tocFab.addEventListener('click', () => {
+    toc.classList.toggle('open');
+    tocBackdrop.classList.toggle('open');
+  });
+  tocBackdrop.addEventListener('click', closeTocDrawer);
+}
+function closeTocDrawer() {
+  toc.classList.remove('open');
+  if (tocBackdrop) tocBackdrop.classList.remove('open');
+}
+
+// ===== 初始化 =====
+loadTimelineMore();
+showTocPage(1);
