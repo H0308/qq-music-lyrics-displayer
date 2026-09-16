@@ -6,6 +6,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "ui/media_control_icons.h"
+#include "ui/settings_icons.h"
 
 #include <windowsx.h>
 
@@ -95,6 +96,9 @@ constexpr float kMinClientWidthDip = 600.0f;
 constexpr float kMinClientHeightDip = 552.0f;
 constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 constexpr float kNavW = 176.0f;
+constexpr float kNavIconSize = 16.0f;
+constexpr float kNavIconLeft = 18.0f;
+constexpr float kNavIconTextGap = 10.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
 constexpr float kHeaderH = 30.0f;
@@ -134,6 +138,11 @@ constexpr float kScrollBarInset = 8.0f;
 constexpr float kScrollBarOutsideGap = 8.0f;
 constexpr float kScrollMinThumbHeight = 24.0f;
 constexpr float kScrollWheelDip = 72.0f;
+constexpr float kRowIconSize = 16.0f;
+constexpr float kRowIconTextGap = 10.0f;
+constexpr float kRowIconSlotW = kRowIconSize + kRowIconTextGap;
+constexpr float kPageTitleIconSize = 20.0f;
+constexpr float kPageTitleIconTextGap = 10.0f;
 constexpr float kIdleAppItemH = 52.0f;
 constexpr float kIdleAppsListTop = 76.0f;
 constexpr float kIdleAppsBaseH = 128.0f;
@@ -203,6 +212,132 @@ const wchar_t* idleQuoteSourceHint(int source) {
     return L"默认使用一言获取每日一言。";
 }
 
+settings_icon::Kind iconForPage(int page) {
+    switch (page) {
+    case 0:
+        return settings_icon::Kind::Display;
+    case 1:
+        return settings_icon::Kind::Performance;
+    case 2:
+        return settings_icon::Kind::Card;
+    case 3:
+        return settings_icon::Kind::Media;
+    case 4:
+        return settings_icon::Kind::Spectrum;
+    case 5:
+        return settings_icon::Kind::Lyrics;
+    case 6:
+        return settings_icon::Kind::Toast;
+    case 7:
+        return settings_icon::Kind::Idle;
+    default:
+        return settings_icon::Kind::None;
+    }
+}
+
+settings_icon::Kind iconForRow(int id) {
+    switch (id) {
+    case kIdTaskbarTheme:
+    case kIdWindowTheme:
+        return settings_icon::Kind::Theme;
+    case kIdPickFont:
+        return settings_icon::Kind::Font;
+    case kIdSongInfo:
+        return settings_icon::Kind::SongInfo;
+    case kIdAlbumCover:
+        return settings_icon::Kind::AlbumCover;
+    case kIdPlatformIcon:
+        return settings_icon::Kind::Platform;
+    case kIdCoverEffect:
+        return settings_icon::Kind::Vinyl;
+    case kIdProgressBackground:
+        return settings_icon::Kind::Progress;
+    case kIdProgressBackgroundOpacity:
+    case kIdCoverBackgroundOpacity:
+        return settings_icon::Kind::Opacity;
+    case kIdTaskbarBackground:
+        return settings_icon::Kind::Background;
+    case kIdIdleQuoteBackground:
+        return settings_icon::Kind::DynamicBackground;
+    case kIdIdleQuoteBackgroundScope:
+        return settings_icon::Kind::Scope;
+    case kIdRenderMode:
+        return settings_icon::Kind::RenderMode;
+    case kIdHoverControls:
+        return settings_icon::Kind::Hover;
+    case kIdHoverControlStyle:
+        return settings_icon::Kind::Control;
+    case kIdFloatingCardTrigger:
+        return settings_icon::Kind::Trigger;
+    case kIdFloatingCardBackground:
+        return settings_icon::Kind::Background;
+    case kIdFloatingCardBackgroundColor:
+    case kIdSpectrumColorMode:
+    case kIdSpectrumColor:
+    case kIdFontColor:
+        return settings_icon::Kind::Color;
+    case kIdFloatingCardFollowAlbum:
+    case kIdFollowAlbum:
+        return settings_icon::Kind::Follow;
+    case kIdFloatingCardAutoTextContrast:
+        return settings_icon::Kind::Contrast;
+    case kIdSpectrum:
+    case kIdSpectrumStyle:
+        return settings_icon::Kind::Spectrum;
+    case kIdSpectrumGradient:
+        return settings_icon::Kind::Gradient;
+    case kIdSpectrumBackground:
+        return settings_icon::Kind::Wave;
+    case kIdSpectrumOpacity:
+        return settings_icon::Kind::Opacity;
+    case kIdSongToast:
+        return settings_icon::Kind::Toast;
+    case kIdSongToastDuration:
+        return settings_icon::Kind::Duration;
+    case kIdSongToastSkipFullscreen:
+        return settings_icon::Kind::Fullscreen;
+    case kIdSongToastPosition:
+        return settings_icon::Kind::Position;
+    case kIdIdleEntry:
+        return settings_icon::Kind::Idle;
+    case kIdIdleQuote:
+    case kIdIdleCustomWelcome:
+        return settings_icon::Kind::Quote;
+    case kIdIdleQuoteSource:
+        return settings_icon::Kind::Language;
+    case kIdIdleQuoteRefreshInterval:
+        return settings_icon::Kind::Refresh;
+    case kIdIdleApps:
+        return settings_icon::Kind::Apps;
+    case kIdTickTickApiToken:
+        return settings_icon::Kind::Api;
+    case kIdTickTickConnect:
+        return settings_icon::Kind::Connect;
+    case kIdTickTickRefresh:
+        return settings_icon::Kind::Sync;
+    case kIdTickTickDisconnect:
+        return settings_icon::Kind::Disconnect;
+    case kIdTickTickEnabled:
+        return settings_icon::Kind::Apps;
+    case kIdDoubleLine:
+    case kIdSecondaryOn:
+        return settings_icon::Kind::DoubleLine;
+    case kIdAlignment:
+    case kIdIdleQuoteAlignment:
+        return settings_icon::Kind::Alignment;
+    case kIdSecondaryType:
+        return settings_icon::Kind::Language;
+    case kIdQqLocalLyricsEnabled:
+        return settings_icon::Kind::LocalLyrics;
+    case kIdQqLocalLyricsPath:
+        return settings_icon::Kind::Folder;
+    case kIdQqLocalLyricsPersistOrder:
+        return settings_icon::Kind::Persist;
+    default:
+        return settings_icon::Kind::None;
+    }
+}
+
 } // namespace
 
 struct SettingsDialog::Impl {
@@ -238,6 +373,7 @@ struct SettingsDialog::Impl {
         float titleHeight = kTitleMinHeight;
         float valueHeight = 0.0f;
         D2D1_RECT_F cardRect{};
+        D2D1_RECT_F iconRect{};
         D2D1_RECT_F labelRect{};
         D2D1_RECT_F valueRect{};
         D2D1_RECT_F hintRect{};
@@ -270,6 +406,7 @@ struct SettingsDialog::Impl {
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
+    std::array<D2D1_RECT_F, kSettingsPageCount> pageTitleIconRects{};
     std::array<D2D1_RECT_F, kSettingsPageCount> pageTitleRects{};
     D2D1_RECT_F contentViewportRect{};
     D2D1_RECT_F scrollTrackRect{};
@@ -1028,13 +1165,18 @@ struct SettingsDialog::Impl {
         for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * 32.0f,
                                           navRect.right, navRect.top + (i + 1) * 32.0f);
+            pageTitleIconRects[i] = D2D1::RectF(0, 0, 0, 0);
             pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
         }
 
         const float contentX = 12.0f + kNavW + 16.0f;
         const float contentW = std::max(20.0f, w - contentX - 24.0f);
+        pageTitleIconRects[activePage] =
+            D2D1::RectF(contentX, 18.0f, contentX + kPageTitleIconSize,
+                        18.0f + kPageTitleIconSize);
         pageTitleRects[activePage] =
-            D2D1::RectF(contentX, 14.0f, contentX + contentW, 42.0f);
+            D2D1::RectF(contentX + kPageTitleIconSize + kPageTitleIconTextGap, 14.0f,
+                        contentX + contentW, 42.0f);
         const float contentTop = 14.0f + 28.0f + 16.0f;
         const float contentBottom = std::max(contentTop, h - 12.0f);
         contentViewportRect =
@@ -1056,6 +1198,7 @@ struct SettingsDialog::Impl {
         for (auto& page : rows) {
             for (auto& row : page) {
                 row.cardRect = D2D1::RectF(0, 0, 0, 0);
+                row.iconRect = D2D1::RectF(0, 0, 0, 0);
                 row.labelRect = D2D1::RectF(0, 0, 0, 0);
                 row.valueRect = D2D1::RectF(0, 0, 0, 0);
                 row.hintRect = D2D1::RectF(0, 0, 0, 0);
@@ -1081,18 +1224,26 @@ struct SettingsDialog::Impl {
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
             const float innerX = contentX + 16.0f;
             const float innerRight = contentX + contentW - 16.0f;
+            const float labelX = innerX + kRowIconSlotW;
+            const auto placeIcon = [&](float titleTop) {
+                const float iconTop = titleTop +
+                                      (row.titleHeight - kRowIconSize) * 0.5f;
+                row.iconRect = D2D1::RectF(innerX, iconTop, innerX + kRowIconSize,
+                                           iconTop + kRowIconSize);
+            };
             if (row.id == kIdIdleApps) {
                 const float titleTop = y + kTitleTopPadding;
+                placeIcon(titleTop);
                 const float toggleLeft = innerRight - kIdleAppNamesToggleW;
                 const float toggleLabelRight = toggleLeft - kIdleAppNamesToggleGap;
                 const float toggleLabelLeft = toggleLabelRight - kIdleAppNamesToggleLabelW;
-                row.labelRect = D2D1::RectF(innerX, titleTop,
-                                            std::max(innerX, toggleLabelLeft - kIdleAppNamesToggleGap),
+                row.labelRect = D2D1::RectF(labelX, titleTop,
+                                            std::max(labelX, toggleLabelLeft - kIdleAppNamesToggleGap),
                                             titleTop + row.titleHeight);
                 row.controlRect = D2D1::RectF(toggleLeft, titleTop, innerRight,
                                               titleTop + row.titleHeight);
                 const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
-                row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                            hintTop + 30.0f);
                 const float listTop = y + kIdleAppsListTop;
                 const size_t count = state.idleApps.size();
@@ -1123,7 +1274,8 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdCoverEffect) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1131,7 +1283,7 @@ struct SettingsDialog::Impl {
                     innerX, gridTop, innerRight, gridTop + kCoverEffectCardH);
                 if (row.showHint) {
                     const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
-                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                    row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
                 y += rowH + kRowGap;
@@ -1139,7 +1291,8 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdIdleQuoteBackground) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1148,7 +1301,7 @@ struct SettingsDialog::Impl {
                 row.controlRect = D2D1::RectF(innerX, gridTop, innerRight, gridTop + gridH);
                 if (row.showHint) {
                     const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
-                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                    row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
                 y += rowH + kRowGap;
@@ -1156,7 +1309,8 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdHoverControlStyle) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1164,7 +1318,7 @@ struct SettingsDialog::Impl {
                     innerX, gridTop, innerRight, gridTop + kHoverControlStyleCardH);
                 if (row.showHint) {
                     const float hintTop = row.controlRect.bottom + kModeGridNoteGap;
-                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                    row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
                 y += rowH + kRowGap;
@@ -1172,7 +1326,8 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdSongToastPosition) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1183,7 +1338,8 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdSpectrumStyle) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1201,10 +1357,11 @@ struct SettingsDialog::Impl {
                     std::max(kSpectrumBackgroundArtworkMinW, availableW * 0.42f));
                 const float artworkRight = controlX - kSpectrumBackgroundArtworkGap;
                 const float artworkLeft = std::max(innerX, artworkRight - artworkW);
-                const float labelRight = std::max(innerX + 20.0f,
+                const float labelRight = std::max(labelX + 20.0f,
                                                   artworkLeft - kSpectrumBackgroundArtworkGap);
                 const float titleTop = y + (rowH - row.titleHeight) * 0.5f;
-                row.labelRect = D2D1::RectF(innerX, titleTop, labelRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, labelRight,
                                             titleTop + row.titleHeight);
                 const float artworkTop = y + (rowH - kSpectrumBackgroundArtworkH) * 0.5f;
                 row.artworkRect = D2D1::RectF(artworkLeft, artworkTop, artworkRight,
@@ -1217,7 +1374,8 @@ struct SettingsDialog::Impl {
             }
             if (row.kind == ControlKind::ModeGrid) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerRight,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, innerRight,
                                             titleTop + row.titleHeight);
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
@@ -1227,7 +1385,7 @@ struct SettingsDialog::Impl {
 
                 if (row.showHint) {
                     const float hintTop = gridBottom + kModeGridNoteGap;
-                    row.hintRect = D2D1::RectF(innerX, hintTop, innerRight,
+                    row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
                 y += rowH + kRowGap;
@@ -1235,32 +1393,35 @@ struct SettingsDialog::Impl {
             }
 
             const float controlX = innerRight - row.controlW;
-            const float labelW = std::max(20.0f, controlX - innerX - 12.0f);
+            const float labelW = std::max(20.0f, controlX - labelX - 12.0f);
             const float controlH = row.kind == ControlKind::Button
                                        ? fluent::metrics::controlHeight
                                        : 24.0f;
             if (row.id == kIdPickFont) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, labelX + labelW,
                                             titleTop + row.titleHeight);
                 const float valueTop = titleTop + row.titleHeight + kTitleHintGap;
-                row.valueRect = D2D1::RectF(innerX, valueTop, innerX + labelW,
+                row.valueRect = D2D1::RectF(labelX, valueTop, labelX + labelW,
                                             valueTop + row.valueHeight);
                 const float hintTop = valueTop + row.valueHeight +
                                       (row.valueHeight > 0.0f ? kTitleHintGap : 0.0f);
-                row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
+                row.hintRect = D2D1::RectF(labelX, hintTop, labelX + labelW,
                                            y + rowH - kHintBottomPadding);
             } else if (row.showHint) {
                 const float titleTop = y + kTitleTopPadding;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, labelX + labelW,
                                             titleTop + row.titleHeight);
                 // 提示区域从标题实际高度之后开始，避免窄窗口下标题换行后侵入提示文字。
                 const float hintTop = titleTop + row.titleHeight + kTitleHintGap;
-                row.hintRect = D2D1::RectF(innerX, hintTop, innerX + labelW,
+                row.hintRect = D2D1::RectF(labelX, hintTop, labelX + labelW,
                                            y + rowH - kHintBottomPadding);
             } else {
                 const float titleTop = y + (rowH - row.titleHeight) / 2.0f;
-                row.labelRect = D2D1::RectF(innerX, titleTop, innerX + labelW,
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, labelX + labelW,
                                             titleTop + row.titleHeight);
             }
             const float controlY = y + (rowH - controlH) / 2.0f;
@@ -1313,6 +1474,16 @@ struct SettingsDialog::Impl {
                                                   navItemRects[i].top + 2.0f,
                                                   navItemRects[i].right - 4.0f,
                                                   navItemRects[i].bottom - 2.0f));
+            const auto icon = iconForPage(i);
+            if (icon != settings_icon::Kind::None) {
+                const float centerY = (navItemRects[i].top + navItemRects[i].bottom) * 0.5f;
+                const D2D1_RECT_F iconRect = D2D1::RectF(
+                    navItemRects[i].left + kNavIconLeft, centerY - kNavIconSize * 0.5f,
+                    navItemRects[i].left + kNavIconLeft + kNavIconSize,
+                    centerY + kNavIconSize * 0.5f);
+                if (auto* iconBrush = painter.brush(selected ? p.accent : p.textSecondary))
+                    settings_icon::draw(painter.target(), icon, iconRect, iconBrush);
+            }
             if (selected)
                 painter.fillRoundRect(
                     p.accent,
@@ -1322,7 +1493,9 @@ struct SettingsDialog::Impl {
                                 (navItemRects[i].top + navItemRects[i].bottom) / 2.0f + 8.0f),
                     1.5f);
             painter.drawText(navItems[i], format,
-                             D2D1::RectF(navItemRects[i].left + 16.0f, navItemRects[i].top,
+                             D2D1::RectF(navItemRects[i].left + kNavIconLeft + kNavIconSize +
+                                             kNavIconTextGap,
+                                         navItemRects[i].top,
                                          navItemRects[i].right - 12.0f, navItemRects[i].bottom),
                              p.text);
         }
@@ -2754,6 +2927,12 @@ struct SettingsDialog::Impl {
         updateHintHeights(painter);
         const auto& p = fluent::palette();
         drawNav(painter);
+        if (const auto icon = iconForPage(activePage);
+            icon != settings_icon::Kind::None) {
+            if (auto* iconBrush = painter.brush(p.accent))
+                settings_icon::draw(painter.target(), icon, pageTitleIconRects[activePage],
+                                    iconBrush, 1.35f);
+        }
         painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
                          pageTitleRects[activePage], p.text);
 
@@ -2767,6 +2946,11 @@ struct SettingsDialog::Impl {
             }
             painter.fillRoundRect(p.cardFill, row.cardRect, fluent::metrics::cardRadius);
             painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
+            const auto icon = iconForRow(row.id);
+            if (icon != settings_icon::Kind::None) {
+                if (auto* iconBrush = painter.brush(row.enabled ? p.textSecondary : p.disabled))
+                    settings_icon::draw(painter.target(), icon, row.iconRect, iconBrush);
+            }
             painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect,
                              row.enabled ? p.text : p.disabled);
             if (row.id == kIdPickFont && !row.valueText.empty())

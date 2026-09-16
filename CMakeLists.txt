@@ -70,6 +70,7 @@ add_executable(QQMusicLyric
     src/lyric/cover_provider.cpp
     src/ui/lyric_renderer.cpp
     src/ui/media_control_icons.cpp
+    src/ui/settings_icons.cpp
     src/ui/media_popup.cpp
     src/ui/volume_popup.cpp
     src/ui/song_toast.cpp
