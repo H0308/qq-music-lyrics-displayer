@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QQ 音乐 / 网易云任务栏歌词 — 把歌词嵌入 Windows 任务栏</title>
+  <meta name="description" content="把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏：滚动歌词、逐字高亮、播放控制、音频频谱、每日一言。C++ 原生实现，无 Electron。">
+  <meta property="og:title" content="QQ 音乐 / 网易云任务栏歌词">
+  <meta property="og:description" content="把歌词嵌入 Windows 任务栏——滚动歌词、逐字高亮、播放控制、音频频谱。C++ 原生实现，无 Electron。">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/img/social-preview.png">
+  <link rel="icon" type="image/png" href="assets/img/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <script>
+    // 首帧前确定主题，避免闪屏。themeMode: system | light | dark
+    (function () {
+      var saved = localStorage.getItem('theme');
+      var mode = (saved === 'light' || saved === 'dark') ? saved : 'system';
+      var resolved = mode === 'system'
+        ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : mode;
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.theme = resolved;
+    })();
+  </script>
+</head>
+<body>
+
+  <header class="site-header" id="siteHeader">
+    <div class="container header-inner">
+      <a class="brand" href="#top">
+        <img src="assets/img/logo.png" alt="logo" width="28" height="28">
+        <span>任务栏歌词</span>
+      </a>
+      <nav class="nav">
+        <a href="#features">功能</a>
+        <a href="#quickstart">快速开始</a>
+        <a href="releases.html">更新日志</a>
+        <a class="nav-github" href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
+        <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题模式" title="切换主题模式">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+          </svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+          </svg>
+          <svg class="icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="12" rx="2"/>
+            <path d="M8 20h8M12 16v4"/>
+          </svg>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+
+    <!-- Hero -->
+    <section class="hero" id="hero">
+      <div class="container">
+        <h1>把歌词嵌入<br><span class="accent">Windows 任务栏</span></h1>
+        <p class="hero-sub">
+          QQ 音乐、网易云音乐双平台自动识别，滚动歌词、逐字高亮、播放控制、音频频谱、每日一言<br>
+          C++ 原生实现，无 Electron
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">下载 Windows (x64) 版</a>
+          <a class="btn btn-ghost" href="https://gitee.com/EPSDA/qq-music-lyrics-displayer/releases" target="_blank" rel="noopener">Gitee 下载</a>
+        </div>
+        <p class="hero-version" id="heroVersion" hidden>当前最新版本 <span id="latestVersion"></span></p>
+
+        <figure class="shot shot-hero reveal" data-shot="hero-taskbar.png">
+          <img src="assets/img/hero-taskbar.png" alt="任务栏歌词效果：Windows 11 任务栏上显示专辑封面、歌名与滚动歌词" width="2172" height="724">
+        </figure>
+      </div>
+    </section>
+
+    <!-- 亮点条 -->
+    <section class="highlights">
+      <div class="container highlights-grid">
+        <div class="hl reveal"><strong>C++ 原生</strong><span>无 Electron，日常使用占用内存20~80MB</span></div>
+        <div class="hl reveal"><strong>双平台</strong><span>QQ 音乐 / 网易云自动识别切换</span></div>
+        <div class="hl reveal"><strong>逐字高亮</strong><span>逐字时间轴按像素进度平滑填充</span></div>
+        <div class="hl reveal"><strong>音频频谱</strong><span>进程级回环捕获，跟随QQ/网易云音乐播放器跳动，不会识别其他媒体软件</span></div>
+      </div>
+    </section>
+
+    <!-- 功能详情 -->
+    <section class="features" id="features">
+      <div class="container">
+
+        <div class="feature-row reveal">
+          <div class="feature-text">
+            <h2>任务栏内嵌歌词</h2>
+            <p>窗口作为任务栏的子窗口，外观贴近 Windows 11 原生媒体卡片：左侧圆角封面 + 歌名/歌手，右侧当前行歌词，超长自动滚动。支持任务栏上、下、左、右四边布局，左右侧自动切换竖排歌词；双锚定位并自动避开小组件、搜索框与其他任务栏插件。</p>
+          </div>
+          <figure class="shot" data-shot="feature-lyrics.png">
+            <img src="assets/img/feature-lyrics.png" alt="任务栏内嵌歌词：封面、歌曲信息与滚动歌词显示在 Windows 11 任务栏上" width="2172" height="724">
+          </figure>
+        </div>
+
+        <div class="feature-row reverse reveal">
+          <div class="feature-text">
+            <h2>翻译、罗马音与双行歌词</h2>
+            <p>支持多格式歌词：逐字歌词平滑填充，LRC 整行高亮；外文歌曲可显示翻译或罗马音，辅助歌词可一键切换；没有辅助歌词时可开启双行模式，同时预览当前行与下一行。</p>
+          </div>
+          <figure class="shot" data-shot="feature-bilingual.png">
+            <img src="assets/img/feature-bilingual.png" alt="辅助歌词：罗马音、翻译与双行歌词效果" width="2172" height="724">
+          </figure>
+        </div>
+
+        <div class="feature-row reveal">
+          <div class="feature-text">
+            <h2>音频频谱</h2>
+            <p>基于 WASAPI 进程级回环捕获，只跟随当前播放器跳动，其他软件出声不受影响。默认、柱状图、梦幻波浪三种样式可选；梦幻波浪还能作为歌曲信息和歌词的背景波浪，颜色跟随已播放歌词。</p>
+          </div>
+          <figure class="shot" data-shot="feature-spectrum.png">
+            <img src="assets/img/feature-spectrum.png" alt="音频频谱：默认、柱状图、梦幻波浪三种样式，梦幻波浪作为歌词背景" width="2043" height="770">
+          </figure>
+        </div>
+
+        <div class="feature-row reverse reveal">
+          <div class="feature-text">
+            <h2>悬浮媒体卡片与播放控制</h2>
+            <p>悬浮或点击展开独立媒体卡片：封面、进度条、上一首/播放暂停/下一首一应俱全。磨砂玻璃背景可跟随专辑主色渐变，并依据背景明暗自动适配文字颜色。还能单独调节音乐应用的音量，不影响系统主音量。</p>
+          </div>
+          <figure class="shot" data-shot="feature-media-card.png">
+            <img src="assets/img/feature-media-card.png" alt="悬浮媒体卡片：磨砂玻璃背景、封面、进度条与播放控制" width="1564" height="1006">
+          </figure>
+        </div>
+
+        <div class="feature-row reveal">
+          <div class="feature-text">
+            <h2>切歌浮窗与动态背景</h2>
+            <p>切歌时屏幕中下方弹出封面与歌曲信息，磨砂半透明、滑入滑出，可设置停留时长与位置。任务栏内容另有落叶、星星、二进制、流光粒子四种动态背景，以及按播放进度填充的专辑色进度背景，层叠效果自由组合。</p>
+          </div>
+          <figure class="shot" data-shot="feature-toast.png">
+            <img src="assets/img/feature-toast.png" alt="切歌浮窗：屏幕中下方弹出封面与歌曲信息" width="1672" height="941">
+          </figure>
+        </div>
+
+        <div class="feature-row reverse reveal">
+          <div class="feature-text">
+            <h2>空闲时也不闲着</h2>
+            <p>没有播放音乐时，任务栏入口可以显示每日一言（一言 / 今日诗词 / 网易云热评）、自定义欢迎语、常用应用快速打开，还能同步滴答清单今日任务，点击复选框直接完成。三类卡片共用展开方式与磨砂外观，平滑切换。</p>
+          </div>
+          <figure class="shot" data-shot="feature-idle.png">
+            <img src="assets/img/feature-idle.png" alt="空闲入口：每日一言卡片与快速打开应用区域展开" width="1564" height="1006">
+          </figure>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- 更多功能 -->
+    <section class="explore" id="explore">
+      <div class="container">
+        <h2 class="section-title reveal">更多功能，等你探索</h2>
+        <div class="explore-grid">
+          <div class="explore-item reveal">
+            <h3>手动搜索歌词</h3>
+            <p>自动匹配不准时手动选词，QQ 音乐 / 网易云 / 酷狗候选，还支持进度微调。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>QQ 音乐本地歌词</h3>
+            <p>配置本地歌词路径后自动索引本地 QRC 缓存，离线也能命中，本地版与在线版随时切换。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>外观自由定制</h3>
+            <p>字体、字号、颜色、光晕与描边均可调整，深浅色模式分开配置。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>智能避让布局</h3>
+            <p>自动避开小组件与搜索框，空间不足时迁移空闲区，恢复后自动回归。</p>
+            <p class="explore-note">* Windows 10 22H2 暂不支持任务栏防遮挡</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>四档性能模式</h3>
+            <p>正常 / 低渲染 / 完全停止 / 极简，满足日常内存需求。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>运行日志面板</h3>
+            <p>播放状态、歌词来源、封面加载与资源占用，一切尽在掌握。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>开机自启动</h3>
+            <p>无需管理员权限，登录 Windows 即自动运行，开箱即用。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>自动检查更新</h3>
+            <p>GitHub / Gitee 双更新源，新版本提醒、下载与安装一步到位。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 快速开始 -->
+    <section class="quickstart" id="quickstart">
+      <div class="container">
+        <h2 class="section-title reveal">三分钟上手</h2>
+        <div class="steps">
+          <div class="step reveal">
+            <span class="step-num">1</span>
+            <h3>下载并运行</h3>
+            <p>从 <a href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">Releases</a> 下载安装包，安装后运行 QQMusicLyric.exe。</p>
+          </div>
+          <div class="step reveal">
+            <span class="step-num">2</span>
+            <h3>打开音乐</h3>
+            <p>播放 QQ 音乐或网易云音乐，歌词自动出现在任务栏。QQ 音乐需在设置中开启「显示系统媒体传输控件（SMTC）」。</p>
+          </div>
+          <div class="step reveal">
+            <span class="step-num">3</span>
+            <h3>按喜好调整</h3>
+            <p>右键托盘图标进入设置：主题、字体、频谱、悬浮卡片、切歌弹窗、每日一言，都可以自由定制。</p>
+          </div>
+        </div>
+        <p class="quickstart-note reveal">网易云音乐需额外安装 <a href="https://github.com/std-microblock/BetterNCM-Installer/releases/latest" target="_blank" rel="noopener">BetterNCM</a> 与 <a href="https://github.com/apoint123/inflink-rs/releases/latest" target="_blank" rel="noopener">InfLink-rs</a> 插件，详见 <a href="https://github.com/H0308/qq-music-lyrics-displayer#网易云音乐适配" target="_blank" rel="noopener">README</a>。</p>
+      </div>
+    </section>
+
+    <!-- 底部 CTA -->
+    <section class="cta" id="download">
+      <div class="container reveal">
+        <h2>免费、开源、原生</h2>
+        <p>Apache-2.0 许可证 · 无广告 · 无 Electron</p>
+        <a class="btn btn-primary" href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">立即下载</a>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>QQ 音乐 / 网易云任务栏歌词 · Apache-2.0</p>
+      <p class="footer-links">
+        <a href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://gitee.com/EPSDA/qq-music-lyrics-displayer" target="_blank" rel="noopener">Gitee</a>
+        <a href="https://github.com/H0308/qq-music-lyrics-displayer/issues" target="_blank" rel="noopener">问题反馈</a>
+      </p>
+    </div>
+    <div class="container footer-disclaimer">
+      <p>本页所有界面截图均为效果示意，实际显示效果可能因系统版本、主题设置与软件更新而有所不同，请以软件实际运行界面为准。</p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" type="button" aria-label="返回顶部" title="返回顶部">
+    <svg class="progress-ring" viewBox="0 0 48 48" aria-hidden="true">
+      <circle class="ring-track" cx="24" cy="24" r="21"/>
+      <circle class="ring-progress" id="ringProgress" cx="24" cy="24" r="21"/>
+    </svg>
+    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5M5 12l7-7 7 7"/>
+    </svg>
+  </button>
+
+  <script src="assets/js/main.js"></script>
+</body>
+</html>

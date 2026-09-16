@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>更新日志 — QQ 音乐 / 网易云任务栏歌词</title>
+  <meta name="description" content="QQ 音乐 / 网易云任务栏歌词的版本更新记录。">
+  <link rel="icon" type="image/png" href="assets/img/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <script>
+    // 首帧前确定主题，避免闪屏。themeMode: system | light | dark
+    (function () {
+      var saved = localStorage.getItem('theme');
+      var mode = (saved === 'light' || saved === 'dark') ? saved : 'system';
+      var resolved = mode === 'system'
+        ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : mode;
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.theme = resolved;
+    })();
+  </script>
+</head>
+<body>
+
+  <header class="site-header" id="siteHeader">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/img/logo.png" alt="logo" width="28" height="28">
+        <span>任务栏歌词</span>
+      </a>
+      <nav class="nav">
+        <a href="index.html">首页</a>
+        <a class="nav-github" href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>GitHub</a>
+        <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题模式" title="切换主题模式">
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/>
+          </svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="4"/>
+            <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>
+          </svg>
+          <svg class="icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="12" rx="2"/>
+            <path d="M8 20h8M12 16v4"/>
+          </svg>
+        </button>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="releases-hero">
+      <div class="container">
+        <h1>更新日志</h1>
+      </div>
+    </section>
+
+    <section class="releases-body">
+      <div class="container container-narrow">
+        <div class="releases-status" id="releasesStatus">正在从 GitHub 加载更新记录…</div>
+        <div class="releases-layout">
+          <aside class="releases-toc" id="releasesToc" aria-label="版本目录"></aside>
+          <div class="timeline" id="timeline"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>QQ 音乐 / 网易云任务栏歌词 · Apache-2.0</p>
+      <p class="footer-links">
+        <a href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://gitee.com/EPSDA/qq-music-lyrics-displayer" target="_blank" rel="noopener">Gitee</a>
+        <a href="https://github.com/H0308/qq-music-lyrics-displayer/issues" target="_blank" rel="noopener">问题反馈</a>
+      </p>
+    </div>
+    <div class="container footer-disclaimer">
+      <p>本页所有界面截图均为效果示意，实际显示效果可能因系统版本、主题设置与软件更新而有所不同，请以软件实际运行界面为准。</p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" type="button" aria-label="返回顶部" title="返回顶部">
+    <svg class="progress-ring" viewBox="0 0 48 48" aria-hidden="true">
+      <circle class="ring-track" cx="24" cy="24" r="21"/>
+      <circle class="ring-progress" id="ringProgress" cx="24" cy="24" r="21"/>
+    </svg>
+    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M12 19V5M5 12l7-7 7 7"/>
+    </svg>
+  </button>
+
+  <script src="assets/js/main.js"></script>
+  <script src="assets/js/releases.js"></script>
+</body>
+</html>
