@@ -87,6 +87,8 @@ constexpr float kSpectrumBarW = 5.0f;  // 频谱柱宽
 constexpr float kSpectrumGap = 3.0f;   // 频谱柱间隙
 constexpr float kSpectrumBottomPadding = 1.0f;
 constexpr float kSpectrumBarRadius = 2.0f; // 轻微圆角，保持柱状感
+constexpr float kSpectrumBarGradientDarkFactor = 0.78f;
+constexpr float kSpectrumBarGradientLightMix = 0.22f;
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylHaloWidth = 2.5f;
 constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
@@ -789,9 +791,13 @@ struct TaskbarHost::Impl {
     // 仅关闭附加视觉、媒体卡片和切歌弹窗）
     float vinylAngleDeg_ = 0.0f;
     ULONGLONG vinylTickMs_ = 0;
-    // 频谱：画刷随歌词已播放色重建（createLyricBrushes），bands 由 UI 线程每帧写入
+    // 频谱：基色由自定义色或已播放色决定（createLyricBrushes），bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
+    ID2D1LinearGradientBrush* brushSpectrumBarGradient_ = nullptr;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    COLORREF spectrumColor_ = RGB(49, 194, 124);
+    bool spectrumCustomColor_ = false;
+    bool spectrumGradient_ = false;
     bool spectrumBackground_ = false;
     int spectrumOpacityPct_ = 40;
     // 播放进度背景：与背景波浪互斥，颜色取专辑主色（无封面时回退系统强调色）
@@ -1692,6 +1698,10 @@ struct TaskbarHost::Impl {
             brushSpectrum_->Release();
             brushSpectrum_ = nullptr;
         }
+        if (brushSpectrumBarGradient_) {
+            brushSpectrumBarGradient_->Release();
+            brushSpectrumBarGradient_ = nullptr;
+        }
         auto rgb = [](COLORREF c, float a) {
             return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
                                 GetBValue(c) / 255.0f, a);
@@ -1701,8 +1711,39 @@ struct TaskbarHost::Impl {
                                   &brushLyricDim_);
         rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f), &brushLyricGlow_);
         rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
-        // 频谱柱：跟随已播放色，略降透明度与歌词文字区分层次
-        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.60f), &brushSpectrum_);
+        // 频谱默认跟随已播放色；开启自定义后只使用频谱自己的颜色，不影响歌词颜色。
+        const COLORREF spectrumBaseColor = spectrumCustomColor_ ? spectrumColor_ : lyricColor_;
+        const D2D1_COLOR_F spectrumBase = rgb(spectrumBaseColor, 0.60f);
+        rt->CreateSolidColorBrush(spectrumBase, &brushSpectrum_);
+
+        // 柱状频谱开启渐变时，沿每根柱子的高度固定分成三段：下深、中间基色、上浅。
+        const D2D1_COLOR_F spectrumDark = D2D1::ColorF(
+            spectrumBase.r * kSpectrumBarGradientDarkFactor,
+            spectrumBase.g * kSpectrumBarGradientDarkFactor,
+            spectrumBase.b * kSpectrumBarGradientDarkFactor, spectrumBase.a);
+        const D2D1_COLOR_F spectrumLight = D2D1::ColorF(
+            spectrumBase.r + (1.0f - spectrumBase.r) * kSpectrumBarGradientLightMix,
+            spectrumBase.g + (1.0f - spectrumBase.g) * kSpectrumBarGradientLightMix,
+            spectrumBase.b + (1.0f - spectrumBase.b) * kSpectrumBarGradientLightMix,
+            spectrumBase.a);
+        const D2D1_GRADIENT_STOP barGradientStops[] = {
+            {0.000f, spectrumDark},
+            {0.333f, spectrumDark},
+            {0.334f, spectrumBase},
+            {0.666f, spectrumBase},
+            {0.667f, spectrumLight},
+            {1.000f, spectrumLight},
+        };
+        ID2D1GradientStopCollection* barGradientStopCollection = nullptr;
+        if (SUCCEEDED(rt->CreateGradientStopCollection(
+                barGradientStops, _countof(barGradientStops), &barGradientStopCollection)) &&
+            barGradientStopCollection) {
+            rt->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 1.0f),
+                                                     D2D1::Point2F(0.0f, 0.0f)),
+                barGradientStopCollection, &brushSpectrumBarGradient_);
+            barGradientStopCollection->Release();
+        }
         if (albumCoverEffect_ == AlbumCoverEffect::Vinyl)
             createAlbumCoverBrushes();
         else
@@ -1922,6 +1963,22 @@ struct TaskbarHost::Impl {
         spectrumStyle_ = style;
         if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
             adjustPosition();
+        requestFrameAndFlush();
+    }
+
+    void setSpectrumColor(COLORREF color, bool customized) {
+        if (spectrumColor_ == color && spectrumCustomColor_ == customized)
+            return;
+        spectrumColor_ = color;
+        spectrumCustomColor_ = customized;
+        createLyricBrushes();
+        requestFrameAndFlush();
+    }
+
+    void setSpectrumGradient(bool on) {
+        if (spectrumGradient_ == on)
+            return;
+        spectrumGradient_ = on;
         requestFrameAndFlush();
     }
 
@@ -2368,6 +2425,33 @@ struct TaskbarHost::Impl {
         return std::clamp(spectrumBands_[index], 0.0f, 1.0f);
     }
 
+    void fillSpectrumBar(ID2D1RenderTarget* rt, const D2D1_ROUNDED_RECT& bar) {
+        if (!rt || !brushSpectrum_)
+            return;
+        if (spectrumGradient_ && brushSpectrumBarGradient_) {
+            const float centerX = (bar.rect.left + bar.rect.right) * 0.5f;
+            brushSpectrumBarGradient_->SetStartPoint(
+                D2D1::Point2F(centerX, bar.rect.bottom));
+            brushSpectrumBarGradient_->SetEndPoint(D2D1::Point2F(centerX, bar.rect.top));
+            rt->FillRoundedRectangle(bar, brushSpectrumBarGradient_);
+            return;
+        }
+        rt->FillRoundedRectangle(bar, brushSpectrum_);
+    }
+
+    D2D1_COLOR_F spectrumColorForLevel(float level, float alphaScale = 1.0f) const {
+        const D2D1_COLOR_F base = brushSpectrum_->GetColor();
+        if (!spectrumGradient_)
+            return D2D1::ColorF(base.r, base.g, base.b, base.a * alphaScale);
+
+        // 只在当前频谱基色的基础上向白色轻微提亮，波动越高提亮越多，保持同色系关系。
+        const float lift = std::clamp(level, 0.0f, 1.0f) * 0.30f;
+        return D2D1::ColorF(base.r + (1.0f - base.r) * lift,
+                            base.g + (1.0f - base.g) * lift,
+                            base.b + (1.0f - base.b) * lift,
+                            base.a * alphaScale);
+    }
+
     void drawDefaultSpectrum(float x, float h) {
         auto* rt = renderer.renderTarget();
         if (!rt || !brushSpectrum_)
@@ -2377,11 +2461,12 @@ struct TaskbarHost::Impl {
         const float maxH = h * 0.74f;
         constexpr float minH = 4.0f; // 静音时也保留小柱，不消失
         for (int i = 0; i < n; ++i) {
-            const float bh = minH + spectrumLevel(i) * (maxH - minH);
+            const float level = spectrumLevel(i);
+            const float bh = minH + level * (maxH - minH);
             D2D1_ROUNDED_RECT rr{
                 D2D1::RectF(x, cy - bh * 0.5f, x + kSpectrumBarW, cy + bh * 0.5f),
                 kSpectrumBarW * 0.5f, kSpectrumBarW * 0.5f};
-            rt->FillRoundedRectangle(rr, brushSpectrum_);
+            fillSpectrumBar(rt, rr);
             x += kSpectrumBarW + kSpectrumGap;
         }
     }
@@ -2396,11 +2481,12 @@ struct TaskbarHost::Impl {
         const float maxH = h * 0.82f;
         constexpr float minH = 3.0f;
         for (int i = 0; i < n; ++i) {
-            const float bh = minH + spectrumLevel(i) * (maxH - minH);
+            const float level = spectrumLevel(i);
+            const float bh = minH + level * (maxH - minH);
             const D2D1_ROUNDED_RECT bar{
                 D2D1::RectF(x, baseY - bh, x + kSpectrumBarW, baseY),
                 kSpectrumBarRadius, kSpectrumBarRadius};
-            rt->FillRoundedRectangle(bar, brushSpectrum_);
+            fillSpectrumBar(rt, bar);
             x += kSpectrumBarW + kSpectrumGap;
         }
     }
@@ -2466,26 +2552,49 @@ struct TaskbarHost::Impl {
         }
 
         const float originalOpacity = brushSpectrum_->GetOpacity();
-        const D2D1_COLOR_F spectrumColor = brushSpectrum_->GetColor();
-        const D2D1_GRADIENT_STOP fadeStops[] = {
-            {0.00f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b, 0.00f)},
-            {0.017f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a * 0.38f)},
-            {0.033f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a * 0.78f)},
-            {0.05f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a)},
-            {0.95f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a)},
-            {0.967f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a * 0.78f)},
-            {0.983f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b,
-                                 spectrumColor.a * 0.38f)},
-            {1.00f, D2D1::ColorF(spectrumColor.r, spectrumColor.g, spectrumColor.b, 0.00f)},
+        std::array<D2D1_GRADIENT_STOP, TaskbarHost::kSpectrumBands + 6> fadeStops{};
+        size_t fadeStopCount = 0;
+        auto addFadeStop = [&](float position, float level, float alphaScale) {
+            if (fadeStopCount >= fadeStops.size())
+                return;
+            fadeStops[fadeStopCount++] =
+                {position, spectrumColorForLevel(level, alphaScale)};
         };
+        auto levelAt = [&](float normalized) {
+            const float bandPosition =
+                std::clamp(normalized, 0.0f, 1.0f) * static_cast<float>(n - 1);
+            const int leftBand = std::min(n - 2, static_cast<int>(bandPosition));
+            const float local = bandPosition - static_cast<float>(leftBand);
+            const float smoothLocal = local * local * (3.0f - 2.0f * local);
+            return spectrumLevel(leftBand) +
+                   (spectrumLevel(leftBand + 1) - spectrumLevel(leftBand)) * smoothLocal;
+        };
+        if (spectrumGradient_) {
+            addFadeStop(0.00f, levelAt(0.0f), 0.00f);
+            addFadeStop(0.017f, levelAt(0.0f), 0.38f);
+            addFadeStop(0.033f, levelAt(0.0f), 0.78f);
+            for (int i = 0; i < n; ++i) {
+                const float position = 0.05f + 0.90f * static_cast<float>(i) /
+                                                         static_cast<float>(n - 1);
+                addFadeStop(position, spectrumLevel(i), 1.0f);
+            }
+            addFadeStop(0.967f, levelAt(1.0f), 0.78f);
+            addFadeStop(0.983f, levelAt(1.0f), 0.38f);
+            addFadeStop(1.00f, levelAt(1.0f), 0.00f);
+        } else {
+            addFadeStop(0.00f, 0.0f, 0.00f);
+            addFadeStop(0.017f, 0.0f, 0.38f);
+            addFadeStop(0.033f, 0.0f, 0.78f);
+            addFadeStop(0.05f, 0.0f, 1.0f);
+            addFadeStop(0.95f, 0.0f, 1.0f);
+            addFadeStop(0.967f, 0.0f, 0.78f);
+            addFadeStop(0.983f, 0.0f, 0.38f);
+            addFadeStop(1.00f, 0.0f, 0.00f);
+        }
         ID2D1GradientStopCollection* fadeStopCollection = nullptr;
         ID2D1LinearGradientBrush* fadeBrush = nullptr;
-        if (SUCCEEDED(rt->CreateGradientStopCollection(fadeStops, _countof(fadeStops),
+        if (SUCCEEDED(rt->CreateGradientStopCollection(fadeStops.data(),
+                                                        static_cast<UINT32>(fadeStopCount),
                                                         &fadeStopCollection)) &&
             fadeStopCollection) {
             rt->CreateLinearGradientBrush(
@@ -3025,6 +3134,7 @@ struct TaskbarHost::Impl {
         r(brushVinylBase_);
         r(brushVinylGroove_);
         r(brushSpectrum_);
+        r(brushSpectrumBarGradient_);
         r(brushProgressBg_);
         r(brushBackground_);
         r(brushIdleWarm_);
@@ -7276,6 +7386,14 @@ void TaskbarHost::setSpectrumVisible(bool on) {
 
 void TaskbarHost::setSpectrumStyle(SpectrumStyle style) {
     impl_->setSpectrumStyle(style);
+}
+
+void TaskbarHost::setSpectrumColor(COLORREF color, bool customized) {
+    impl_->setSpectrumColor(color, customized);
+}
+
+void TaskbarHost::setSpectrumGradient(bool on) {
+    impl_->setSpectrumGradient(on);
 }
 
 void TaskbarHost::setSpectrumBackground(bool on) {

@@ -750,6 +750,9 @@ struct App {
     AudioSpectrum spectrum_;
     bool spectrumOn_ = false;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
+    COLORREF spectrumColor_ = RGB(49, 194, 124);
+    bool spectrumCustomColor_ = false;
+    bool spectrumGradient_ = false;
     bool spectrumBackground_ = false;
     int spectrumOpacity_ = 40;
     // 播放进度背景：与背景波浪互斥，不透明度默认 25% 保证文字可读
@@ -974,6 +977,32 @@ struct App {
         saveSettings();
     }
 
+    void applySpectrumCustomColor(bool customized) {
+        spectrumCustomColor_ = taskbarVertical_ ? false : customized;
+        if (taskbarHost)
+            taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_);
+        logSettingBool(L"spectrum-custom-color", spectrumCustomColor_);
+        saveSettings();
+    }
+
+    void applySpectrumColor(COLORREF color) {
+        spectrumColor_ = color;
+        spectrumCustomColor_ = taskbarVertical_ ? false : true;
+        if (taskbarHost)
+            taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_);
+        runtime_log::writef(L"[action][setting] spectrum-color=#%02X%02X%02X",
+                            GetRValue(color), GetGValue(color), GetBValue(color));
+        saveSettings();
+    }
+
+    void applySpectrumGradient(bool on) {
+        spectrumGradient_ = taskbarVertical_ ? false : on;
+        if (taskbarHost)
+            taskbarHost->setSpectrumGradient(spectrumGradient_);
+        logSettingBool(L"spectrum-gradient", spectrumGradient_);
+        saveSettings();
+    }
+
     void applySpectrumBackground(bool on) {
         spectrumBackground_ = taskbarVertical_ ? false : on;
         if (taskbarHost)
@@ -1068,6 +1097,8 @@ struct App {
         taskbarHost->setAlbumCoverEffect(
             minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
         taskbarHost->setSpectrumStyle(spectrumStyle_);
+        taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_);
+        taskbarHost->setSpectrumGradient(spectrumGradient_);
         taskbarHost->setSpectrumBackground(minimal || vertical ? false : spectrumBackground_);
         taskbarHost->setSpectrumOpacity(spectrumOpacity_);
         taskbarHost->setProgressBackground(minimal ? false : progressBackground_);
@@ -3373,6 +3404,10 @@ void App::loadSettings() {
         const std::string spectrumStyleValue =
             j.value("spectrumStyle", std::string("default"));
         spectrumStyle_ = spectrumStyleFromConfig(spectrumStyleValue);
+        spectrumColor_ = static_cast<COLORREF>(
+            j.value("spectrumColor", static_cast<unsigned>(spectrumColor_)));
+        spectrumCustomColor_ = j.value("spectrumCustomColor", false);
+        spectrumGradient_ = j.value("spectrumGradient", false);
         spectrumBackground_ = j.value("spectrumBackground",
                                        spectrumStyleValue == "background-wave");
         spectrumOpacity_ = std::clamp(j.value("spectrumOpacity", 40), 0, 100);
@@ -3601,6 +3636,9 @@ void App::saveSettings() {
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
         j["spectrumStyle"] = spectrumStyleConfigName(spectrumStyle_);
+        j["spectrumColor"] = static_cast<unsigned>(spectrumColor_);
+        j["spectrumCustomColor"] = spectrumCustomColor_;
+        j["spectrumGradient"] = spectrumGradient_;
         j["spectrumBackground"] = spectrumBackground_;
         j["spectrumOpacity"] = spectrumOpacity_;
         j["progressBackground"] = progressBackground_;
@@ -4649,6 +4687,9 @@ SettingsState App::currentSettingsState() const {
     st.coverEffectVinyl = albumCoverEffect_ == AlbumCoverEffect::Vinyl;
     st.spectrumOn = vertical ? false : spectrumOn_;
     st.spectrumStyle = spectrumStyleIndex(vertical ? SpectrumStyle::Default : spectrumStyle_);
+    st.spectrumColor = spectrumColor_;
+    st.spectrumCustomColor = vertical ? false : spectrumCustomColor_;
+    st.spectrumGradient = vertical ? false : spectrumGradient_;
     st.spectrumBackground = vertical ? false : spectrumBackground_;
     st.spectrumOpacity = spectrumOpacity_;
     st.progressBackground = progressBackground_;
@@ -4719,6 +4760,11 @@ SettingsActions App::buildSettingsActions() {
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
+    act.onSpectrumCustomColor = [this](bool customized) {
+        applySpectrumCustomColor(customized);
+    };
+    act.onSpectrumColor = [this](COLORREF color) { applySpectrumColor(color); };
+    act.onSpectrumGradient = [this](bool on) { applySpectrumGradient(on); };
     act.onSpectrumBackground = [this](bool on) { applySpectrumBackground(on); };
     act.onSpectrumOpacity = [this](int percent) { applySpectrumOpacity(percent); };
     act.onProgressBackground = [this](bool on) { applyProgressBackground(on); };

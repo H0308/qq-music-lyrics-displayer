@@ -154,6 +154,8 @@ public:
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;
     void setSpectrumStyle(SpectrumStyle style);
+    void setSpectrumColor(COLORREF color, bool customized);
+    void setSpectrumGradient(bool on);
     void setSpectrumBackground(bool on);
     void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);

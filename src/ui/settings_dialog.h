@@ -33,6 +33,9 @@ struct SettingsState {
     bool coverEffectVinyl = false;
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
+    COLORREF spectrumColor = RGB(49, 194, 124);
+    bool spectrumCustomColor = false; // false 跟随已播放色，true 使用自定义色
+    bool spectrumGradient = false; // 按当前频谱基色做柱状三段渐变
     bool spectrumBackground = false; // 将梦幻波浪作为歌曲信息和歌词背景
     int spectrumOpacity = 40; // 背景波浪不透明度（0~100）
     bool progressBackground = false; // 播放进度背景（与背景波浪互斥）
@@ -92,6 +95,9 @@ struct SettingsActions {
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;
+    std::function<void(bool)> onSpectrumCustomColor;
+    std::function<void(COLORREF)> onSpectrumColor;
+    std::function<void(bool)> onSpectrumGradient;
     std::function<void(bool)> onSpectrumBackground;
     std::function<void(int)> onSpectrumOpacity;
     std::function<void(bool)> onProgressBackground;

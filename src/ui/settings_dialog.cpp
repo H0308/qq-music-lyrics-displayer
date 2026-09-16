@@ -37,6 +37,9 @@ constexpr int kIdSpectrum = 414;
 constexpr int kIdSpectrumStyle = 419;
 constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdSpectrumBackground = 428;
+constexpr int kIdSpectrumGradient = 429;
+constexpr int kIdSpectrumColorMode = 450;
+constexpr int kIdSpectrumColor = 452;
 constexpr int kIdProgressBackground = 438;
 constexpr int kIdProgressBackgroundOpacity = 439;
 constexpr int kIdTaskbarBackground = 444;
@@ -573,6 +576,9 @@ struct SettingsDialog::Impl {
         if (id == kIdFloatingCardBackgroundColor) {
             initial = state.floatingCardBackgroundColor;
             title = L"悬浮卡片背景颜色";
+        } else if (id == kIdSpectrumColor) {
+            initial = state.spectrumColor;
+            title = L"自定义频谱颜色";
         } else {
             return;
         }
@@ -587,6 +593,10 @@ struct SettingsDialog::Impl {
                 state.floatingCardBackgroundColor = color;
                 if (actions.onFloatingCardBackgroundColor)
                     actions.onFloatingCardBackgroundColor(color);
+            } else if (id == kIdSpectrumColor) {
+                state.spectrumColor = color;
+                if (actions.onSpectrumColor)
+                    actions.onSpectrumColor(color);
             }
             if (auto* row = findRow(id))
                 row->controlText = colorText(color);
@@ -842,10 +852,24 @@ struct SettingsDialog::Impl {
         Row& spectrum = addToggle(kSpectrumPage, kIdSpectrum, L"频谱",
                                   spectrumEnabled ? state.spectrumOn : false);
         spectrum.enabled = spectrumEnabled;
+        addRadio(kSpectrumPage, kIdSpectrumColorMode, L"频谱颜色",
+                 L"跟随已播放色会恢复原有频谱配色；选择自定义颜色后，频谱渐变也以该颜色为基色。",
+                 {L"跟随已播放色", L"自定义颜色"},
+                 state.spectrumCustomColor ? 1 : 0,
+                 state.spectrumOn && spectrumEnabled, kRowTallH);
+        Row& spectrumColor = addButton(
+            kSpectrumPage, kIdSpectrumColor, L"自定义频谱颜色",
+            L"只在上面选择“自定义颜色”时生效。",
+            colorText(state.spectrumColor).c_str(), kRowTallH);
+        spectrumColor.enabled = state.spectrumOn && state.spectrumCustomColor && spectrumEnabled;
         addRadio(kSpectrumPage, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, vertical ? 0 : state.spectrumStyle,
                  state.spectrumOn && spectrumEnabled,
                  kSpectrumStyleRowH);
+        Row& spectrumGradient =
+            addToggle(kSpectrumPage, kIdSpectrumGradient, L"频谱渐变色",
+                      spectrumEnabled ? state.spectrumGradient : false);
+        spectrumGradient.enabled = state.spectrumOn && spectrumEnabled;
         Row& spectrumBackground =
             addToggle(kSpectrumPage, kIdSpectrumBackground, L"背景波浪",
                       spectrumEnabled ? state.spectrumBackground : false);
@@ -3012,8 +3036,16 @@ struct SettingsDialog::Impl {
             break;
         case kIdSpectrum:
             row->checked = !row->checked;
+            if (auto* colorMode = findRow(kIdSpectrumColorMode))
+                colorMode->enabled = row->checked;
+            if (auto* color = findRow(kIdSpectrumColor))
+                color->enabled = row->checked &&
+                                 findRow(kIdSpectrumColorMode) &&
+                                 findRow(kIdSpectrumColorMode)->selected == 1;
             if (auto* style = findRow(kIdSpectrumStyle))
                 style->enabled = row->checked;
+            if (auto* gradient = findRow(kIdSpectrumGradient))
+                gradient->enabled = row->checked;
             if (auto* background = findRow(kIdSpectrumBackground))
                 background->enabled = spectrumBackgroundAvailable();
             if (auto* opacity = findRow(kIdSpectrumOpacity))
@@ -3023,6 +3055,18 @@ struct SettingsDialog::Impl {
             if (actions.onSpectrum)
                 actions.onSpectrum(row->checked);
             updateProgressBackgroundRowsEnabled();
+            break;
+        case kIdSpectrumColorMode:
+            state.spectrumCustomColor = row->selected == 1;
+            if (auto* color = findRow(kIdSpectrumColor))
+                color->enabled = state.spectrumCustomColor &&
+                                 findRow(kIdSpectrum) &&
+                                 findRow(kIdSpectrum)->checked;
+            if (actions.onSpectrumCustomColor)
+                actions.onSpectrumCustomColor(state.spectrumCustomColor);
+            break;
+        case kIdSpectrumColor:
+            openColorPicker(kIdSpectrumColor);
             break;
         case kIdSpectrumStyle:
             if (auto* background = findRow(kIdSpectrumBackground))
@@ -3034,6 +3078,11 @@ struct SettingsDialog::Impl {
             if (actions.onSpectrumStyle)
                 actions.onSpectrumStyle(row->selected);
             updateProgressBackgroundRowsEnabled();
+            break;
+        case kIdSpectrumGradient:
+            row->checked = !row->checked;
+            if (actions.onSpectrumGradient)
+                actions.onSpectrumGradient(row->checked);
             break;
         case kIdSpectrumBackground:
             row->checked = !row->checked;
@@ -3243,8 +3292,20 @@ struct SettingsDialog::Impl {
             row->checked = minimal || vertical ? false : s.spectrumOn;
             row->enabled = !minimal && !vertical;
         }
+        if (auto* row = findRow(kIdSpectrumColorMode)) {
+            row->selected = vertical ? 0 : (s.spectrumCustomColor ? 1 : 0);
+            row->enabled = s.spectrumOn && !minimal && !vertical;
+        }
+        if (auto* row = findRow(kIdSpectrumColor)) {
+            row->controlText = colorText(s.spectrumColor);
+            row->enabled = s.spectrumOn && s.spectrumCustomColor && !minimal && !vertical;
+        }
         if (auto* row = findRow(kIdSpectrumStyle)) {
             row->selected = vertical ? 0 : std::clamp(s.spectrumStyle, 0, 2);
+            row->enabled = s.spectrumOn && !minimal && !vertical;
+        }
+        if (auto* row = findRow(kIdSpectrumGradient)) {
+            row->checked = minimal || vertical ? false : s.spectrumGradient;
             row->enabled = s.spectrumOn && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumBackground)) {
