@@ -98,6 +98,7 @@ constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip
 constexpr float kNavW = 176.0f;
 constexpr float kNavIconSize = 16.0f;
 constexpr float kNavIconLeft = 18.0f;
+constexpr float kNavItemH = 40.0f;
 constexpr float kNavIconTextGap = 10.0f;
 constexpr float kRowH = 56.0f;
 constexpr float kRowTallH = 96.0f;
@@ -1167,8 +1168,8 @@ struct SettingsDialog::Impl {
 
         navRect = D2D1::RectF(12.0f, 12.0f, 12.0f + kNavW, std::max(12.0f, h - 12.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
-            navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * 32.0f,
-                                          navRect.right, navRect.top + (i + 1) * 32.0f);
+            navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * kNavItemH,
+                                          navRect.right, navRect.top + (i + 1) * kNavItemH);
             pageTitleIconRects[i] = D2D1::RectF(0, 0, 0, 0);
             pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
         }
