@@ -56,7 +56,9 @@ constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
 // 滚动文本左缘（滚出侧）的渐隐宽度
 constexpr float kLyricEdgeFadeDip = 18.0f;
-constexpr float kSongInfoLyricGap = 0.0f; // 歌曲信息与歌词之间的左侧间距
+constexpr float kSongInfoLyricGap = 8.0f; // 歌曲信息与歌词之间的分隔间距
+constexpr float kSongInfoDividerWidth = 1.0f;
+constexpr float kSongInfoDividerInset = 5.0f;
 constexpr float kCornerRadius = 8.0f;
 constexpr float kVerticalMinLengthDip = 220.0f;
 constexpr float kVerticalMaxLengthDip = 320.0f;
@@ -819,6 +821,8 @@ struct TaskbarHost::Impl {
     // 不遮挡可读区域内的文字
     ID2D1LinearGradientBrush* lyricRightFadeBrush_ = nullptr;
     ID2D1Layer* lyricRightFadeLayer_ = nullptr;
+    // 歌曲信息与歌词之间的悬浮分隔线，使用上下渐隐的主题色画刷
+    ID2D1LinearGradientBrush* songInfoDividerBrush_ = nullptr;
     media_control::Geometry controlGeometry;
     struct SceneResizeAnimation {
         WindowPlacement from{};
@@ -3044,6 +3048,7 @@ struct TaskbarHost::Impl {
         r(lyricEdgeFadeLayer_);
         r(lyricRightFadeBrush_);
         r(lyricRightFadeLayer_);
+        r(songInfoDividerBrush_);
         media_control::release(controlGeometry);
         if (coverBmp) {
             coverBmp->Release();
@@ -4725,6 +4730,63 @@ struct TaskbarHost::Impl {
         return FAILED(hr) ? nullptr : lyricEdgeFadeBrush_;
     }
 
+    ID2D1LinearGradientBrush* ensureSongInfoDividerBrush() {
+        if (songInfoDividerBrush_)
+            return songInfoDividerBrush_;
+        auto* rt = renderer.renderTarget();
+        if (!rt)
+            return nullptr;
+
+        const D2D1_COLOR_F base =
+            brushDim_ ? brushDim_->GetColor()
+                      : (lightTheme_ ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f)
+                                      : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f));
+        const float peakAlpha = std::clamp(base.a * 0.72f, 0.0f, 1.0f);
+        const D2D1_GRADIENT_STOP stops[] = {
+            {0.0f, D2D1::ColorF(base.r, base.g, base.b, 0.0f)},
+            {0.18f, D2D1::ColorF(base.r, base.g, base.b, peakAlpha * 0.42f)},
+            {0.50f, D2D1::ColorF(base.r, base.g, base.b, peakAlpha)},
+            {0.82f, D2D1::ColorF(base.r, base.g, base.b, peakAlpha * 0.42f)},
+            {1.0f, D2D1::ColorF(base.r, base.g, base.b, 0.0f)},
+        };
+        ID2D1GradientStopCollection* stopCollection = nullptr;
+        if (FAILED(rt->CreateGradientStopCollection(stops, _countof(stops),
+                                                    &stopCollection)) ||
+            !stopCollection)
+            return nullptr;
+
+        const HRESULT hr = rt->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                D2D1::Point2F(0.0f, 1.0f)),
+            D2D1::BrushProperties(), stopCollection, &songInfoDividerBrush_);
+        stopCollection->Release();
+        return FAILED(hr) ? nullptr : songInfoDividerBrush_;
+    }
+
+    void drawSongInfoDivider(float leftW, float h) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !songInfoVisible_ || scene_ == DisplayScene::Idle || h <= 2.0f ||
+            kSongInfoLyricGap <= kSongInfoDividerWidth)
+            return;
+
+        const float top = std::min(kSongInfoDividerInset, h * 0.25f);
+        const float bottom = std::max(top + kSongInfoDividerWidth, h - top);
+        if (bottom <= top)
+            return;
+        auto* brush = ensureSongInfoDividerBrush();
+        if (!brush)
+            return;
+
+        brush->SetStartPoint(D2D1::Point2F(0.0f, top));
+        brush->SetEndPoint(D2D1::Point2F(0.0f, bottom));
+        const float x = leftW + (kSongInfoLyricGap - kSongInfoDividerWidth) * 0.5f;
+        const D2D1_RECT_F rect = D2D1::RectF(x, top, x + kSongInfoDividerWidth, bottom);
+        rt->FillRoundedRectangle(
+            D2D1::RoundedRect(rect, kSongInfoDividerWidth * 0.5f,
+                              kSongInfoDividerWidth * 0.5f),
+            brush);
+    }
+
     // 区域内左缘渐隐：渐隐带宽度随滚出量从 0 长到 fadeW，且左缘处透明度恒为 0。
     // 若让整个渐隐带按滚出量淡入，则滚出不足 fadeW 时左缘仍有残余不透明度，
     // 半截字符会在边界硬裁剪处留下一条竖线
@@ -5375,8 +5437,8 @@ struct TaskbarHost::Impl {
         float offset, ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow,
         ID2D1Brush* karaokeBrush, float karaokeX, float opacity, LyricAlignment alignment,
         bool singleCopy = false) {
-        // 左缘渐隐宽度分场景：歌曲信息可见时用与交界处一致的 8 dip，且渐隐始终在
-        // 歌词区域内，文字不会画进信息区；信息区隐藏时用默认宽度
+        // 左缘渐隐宽度分场景：歌曲信息可见时用与分隔间距一致的 8 dip，且渐隐始终
+        // 在歌词区域内，文字不会画进信息区；信息区隐藏时用默认宽度
         const float leftFadeDip =
             songInfoVisible_ && scene_ != DisplayScene::Idle ? kTextPadding : 0.0f;
         // 每日一言与歌曲信息同属内容确定的无限循环跑马灯，是否滚动在内容确定时
@@ -6134,7 +6196,7 @@ struct TaskbarHost::Impl {
 
         if (songInfoVisible_ && !idleScene) {
             // 左侧歌曲信息（封面显示时位于封面右侧，整体垂直居中，超长自动滚动）
-            // 右缘渐隐带借用到与歌词区之间的留白（kTextPadding），交界处视觉连续
+            // 左右边缘都保留渐隐，右缘在分隔线前收束，避免标题/歌手撞到歌词区
             float infoX = infoStartX();
             float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
             float infoGap = 2.0f;
@@ -6142,11 +6204,13 @@ struct TaskbarHost::Impl {
             float infoY = (h - totalInfoH) * 0.5f;
             drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
                               titleScrollOffset_, brushText_, nullptr, nullptr, nullptr, 0.0f,
-                              1.0f, LyricAlignment::Center, false, kTextPadding, true);
+                              1.0f, LyricAlignment::Center, false, kTextPadding, true,
+                              kTextPadding);
             drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
                               infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_,
                               nullptr, nullptr, nullptr, 0.0f, 1.0f, LyricAlignment::Center,
-                              false, kTextPadding, true);
+                              false, kTextPadding, true, kTextPadding);
+            drawSongInfoDivider(leftW, h);
         }
 
         if (showControls) {
