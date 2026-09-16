@@ -732,6 +732,10 @@ struct SettingsDialog::Impl {
                     actions.onFloatingCardBackgroundColor(color);
             } else if (id == kIdSpectrumColor) {
                 state.spectrumColor = color;
+                state.spectrumCustomColor = true;
+                state.spectrumFollowAlbum = false;
+                if (auto* mode = findRow(kIdSpectrumColorMode))
+                    mode->selected = 2;
                 if (actions.onSpectrumColor)
                     actions.onSpectrumColor(color);
             }
@@ -990,9 +994,9 @@ struct SettingsDialog::Impl {
                                   spectrumEnabled ? state.spectrumOn : false);
         spectrum.enabled = spectrumEnabled;
         addRadio(kSpectrumPage, kIdSpectrumColorMode, L"频谱颜色",
-                 L"跟随已播放色会恢复原有频谱配色；选择自定义颜色后，频谱渐变也以该颜色为基色。",
-                 {L"跟随已播放色", L"自定义颜色"},
-                 state.spectrumCustomColor ? 1 : 0,
+                 L"跟随已播放色恢复原有配色；跟随专辑主题色与歌词设置行为一致；自定义颜色作为频谱基色。",
+                 {L"跟随已播放色", L"跟随专辑主题色", L"自定义颜色"},
+                 state.spectrumCustomColor ? 2 : state.spectrumFollowAlbum ? 1 : 0,
                  state.spectrumOn && spectrumEnabled, kRowTallH);
         Row& spectrumColor = addButton(
             kSpectrumPage, kIdSpectrumColor, L"自定义频谱颜色",
@@ -1024,7 +1028,7 @@ struct SettingsDialog::Impl {
                  {L"左对齐", L"居中", L"右对齐"},
                  vertical ? 0 : state.lyricAlignment, !vertical, kRowH);
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
-        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色与频谱颜色跟随专辑", state.followAlbum);
+        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
         addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
                   vertical ? false : state.secondaryEnabled).enabled = !vertical;
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
@@ -3225,7 +3229,7 @@ struct SettingsDialog::Impl {
             if (auto* color = findRow(kIdSpectrumColor))
                 color->enabled = row->checked &&
                                  findRow(kIdSpectrumColorMode) &&
-                                 findRow(kIdSpectrumColorMode)->selected == 1;
+                                 findRow(kIdSpectrumColorMode)->selected == 2;
             if (auto* style = findRow(kIdSpectrumStyle))
                 style->enabled = row->checked;
             if (auto* gradient = findRow(kIdSpectrumGradient))
@@ -3241,13 +3245,15 @@ struct SettingsDialog::Impl {
             updateProgressBackgroundRowsEnabled();
             break;
         case kIdSpectrumColorMode:
-            state.spectrumCustomColor = row->selected == 1;
+            row->selected = std::clamp(row->selected, 0, 2);
+            state.spectrumCustomColor = row->selected == 2;
+            state.spectrumFollowAlbum = row->selected == 1;
             if (auto* color = findRow(kIdSpectrumColor))
                 color->enabled = state.spectrumCustomColor &&
                                  findRow(kIdSpectrum) &&
                                  findRow(kIdSpectrum)->checked;
-            if (actions.onSpectrumCustomColor)
-                actions.onSpectrumCustomColor(state.spectrumCustomColor);
+            if (actions.onSpectrumColorMode)
+                actions.onSpectrumColorMode(row->selected);
             break;
         case kIdSpectrumColor:
             openColorPicker(kIdSpectrumColor);
@@ -3477,7 +3483,9 @@ struct SettingsDialog::Impl {
             row->enabled = !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumColorMode)) {
-            row->selected = vertical ? 0 : (s.spectrumCustomColor ? 1 : 0);
+            row->selected = vertical ? 0
+                                     : (s.spectrumCustomColor ? 2
+                                                               : s.spectrumFollowAlbum ? 1 : 0);
             row->enabled = s.spectrumOn && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumColor)) {

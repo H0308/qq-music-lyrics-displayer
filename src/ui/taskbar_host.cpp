@@ -791,12 +791,16 @@ struct TaskbarHost::Impl {
     // 仅关闭附加视觉、媒体卡片和切歌弹窗）
     float vinylAngleDeg_ = 0.0f;
     ULONGLONG vinylTickMs_ = 0;
-    // 频谱：基色由自定义色或已播放色决定（createLyricBrushes），bands 由 UI 线程每帧写入
+    // 频谱：基色可跟随已播放色、专辑主题色或自定义色（createLyricBrushes），
+    // bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
     ID2D1LinearGradientBrush* brushSpectrumBarGradient_ = nullptr;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
     COLORREF spectrumColor_ = RGB(49, 194, 124);
     bool spectrumCustomColor_ = false;
+    bool spectrumFollowAlbum_ = false;
+    COLORREF spectrumAlbumColor_ = RGB(49, 194, 124);
+    bool spectrumAlbumColorAvailable_ = false;
     bool spectrumGradient_ = false;
     bool spectrumBackground_ = false;
     int spectrumOpacityPct_ = 40;
@@ -1711,8 +1715,13 @@ struct TaskbarHost::Impl {
                                   &brushLyricDim_);
         rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f), &brushLyricGlow_);
         rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
-        // 频谱默认跟随已播放色；开启自定义后只使用频谱自己的颜色，不影响歌词颜色。
-        const COLORREF spectrumBaseColor = spectrumCustomColor_ ? spectrumColor_ : lyricColor_;
+        // 频谱颜色模式独立于歌词颜色设置：默认跟随已播放色，也可跟随专辑主题色或使用自定义色。
+        // 尚未提取到当前专辑主色时，专辑模式沿用歌词模式的当前有效已播放色。
+        const COLORREF spectrumBaseColor =
+            spectrumCustomColor_
+                ? spectrumColor_
+                : spectrumFollowAlbum_ && spectrumAlbumColorAvailable_ ? spectrumAlbumColor_
+                                                                         : lyricColor_;
         const D2D1_COLOR_F spectrumBase = rgb(spectrumBaseColor, 0.60f);
         rt->CreateSolidColorBrush(spectrumBase, &brushSpectrum_);
 
@@ -1966,12 +1975,24 @@ struct TaskbarHost::Impl {
         requestFrameAndFlush();
     }
 
-    void setSpectrumColor(COLORREF color, bool customized) {
-        if (spectrumColor_ == color && spectrumCustomColor_ == customized)
+    void setSpectrumColor(COLORREF color, bool customized, bool followAlbum) {
+        if (spectrumColor_ == color && spectrumCustomColor_ == customized &&
+            spectrumFollowAlbum_ == followAlbum)
             return;
         spectrumColor_ = color;
         spectrumCustomColor_ = customized;
+        spectrumFollowAlbum_ = followAlbum && !customized;
         createLyricBrushes();
+        requestFrameAndFlush();
+    }
+
+    void setSpectrumAlbumColor(COLORREF color, bool available) {
+        if (spectrumAlbumColor_ == color && spectrumAlbumColorAvailable_ == available)
+            return;
+        spectrumAlbumColor_ = color;
+        spectrumAlbumColorAvailable_ = available;
+        if (spectrumFollowAlbum_ && !spectrumCustomColor_)
+            createLyricBrushes();
         requestFrameAndFlush();
     }
 
@@ -7388,8 +7409,12 @@ void TaskbarHost::setSpectrumStyle(SpectrumStyle style) {
     impl_->setSpectrumStyle(style);
 }
 
-void TaskbarHost::setSpectrumColor(COLORREF color, bool customized) {
-    impl_->setSpectrumColor(color, customized);
+void TaskbarHost::setSpectrumColor(COLORREF color, bool customized, bool followAlbum) {
+    impl_->setSpectrumColor(color, customized, followAlbum);
+}
+
+void TaskbarHost::setSpectrumAlbumColor(COLORREF color, bool available) {
+    impl_->setSpectrumAlbumColor(color, available);
 }
 
 void TaskbarHost::setSpectrumGradient(bool on) {
