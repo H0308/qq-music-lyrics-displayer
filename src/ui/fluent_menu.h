@@ -1,5 +1,7 @@
 #pragma once
 
+#include "settings_icons.h"
+
 #include <windows.h>
 
 #include <functional>
@@ -12,6 +14,7 @@ namespace fluent {
 struct FluentMenuItem {
     int id = 0;
     std::wstring text;
+    settings_icon::Kind icon = settings_icon::Kind::None;
     bool checked = false;
     bool enabled = true;
     bool separator = false;

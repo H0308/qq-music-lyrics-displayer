@@ -361,6 +361,39 @@ void draw(ID2D1RenderTarget* target, Kind kind, const D2D1_RECT_F& bounds, ID2D1
         c.line(12.0f, 11.0f, 14.5f, 10.3f);
         c.fillEllipse(10.0f, 14.0f, 12.7f, 16.2f);
         break;
+    case Kind::Search:
+        c.ellipse(3.5f, 3.5f, 12.5f, 12.5f);
+        c.line(10.5f, 10.5f, 16.5f, 16.5f, 1.5f);
+        break;
+    case Kind::Log:
+        c.rounded(4.0f, 2.5f, 16.0f, 17.5f, 1.5f);
+        c.line(7.0f, 7.0f, 13.0f, 7.0f);
+        c.line(7.0f, 10.0f, 13.0f, 10.0f);
+        c.line(7.0f, 13.0f, 11.5f, 13.0f);
+        break;
+    case Kind::Settings:
+        c.ellipse(5.0f, 5.0f, 15.0f, 15.0f);
+        c.ellipse(8.0f, 8.0f, 12.0f, 12.0f, 1.0f);
+        c.line(10.0f, 2.5f, 10.0f, 5.0f);
+        c.line(10.0f, 15.0f, 10.0f, 17.5f);
+        c.line(2.5f, 10.0f, 5.0f, 10.0f);
+        c.line(15.0f, 10.0f, 17.5f, 10.0f);
+        c.line(4.7f, 4.7f, 6.5f, 6.5f);
+        c.line(13.5f, 13.5f, 15.3f, 15.3f);
+        c.line(15.3f, 4.7f, 13.5f, 6.5f);
+        c.line(6.5f, 13.5f, 4.7f, 15.3f);
+        break;
+    case Kind::Info:
+        c.ellipse(3.0f, 3.0f, 17.0f, 17.0f);
+        c.fillEllipse(9.0f, 5.5f, 11.0f, 7.5f);
+        c.line(10.0f, 9.0f, 10.0f, 14.0f, 1.5f);
+        break;
+    case Kind::Exit:
+        c.rounded(3.0f, 3.0f, 11.0f, 17.0f, 1.2f);
+        c.line(9.0f, 10.0f, 17.0f, 10.0f);
+        c.line(17.0f, 10.0f, 13.5f, 6.5f);
+        c.line(17.0f, 10.0f, 13.5f, 13.5f);
+        break;
     case Kind::Folder:
         c.line(2.5f, 6.0f, 7.0f, 6.0f);
         c.line(7.0f, 6.0f, 8.5f, 4.0f);

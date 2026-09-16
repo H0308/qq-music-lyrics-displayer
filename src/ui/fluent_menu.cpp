@@ -17,7 +17,12 @@ constexpr float kItemH = 30.0f;
 constexpr float kSepH = 9.0f;
 constexpr float kPadY = 4.0f;
 constexpr float kPadX = 4.0f;
-constexpr float kGutter = 28.0f; // 勾选标记区
+constexpr float kIconLeft = 12.0f;
+constexpr float kIconSize = 16.0f;
+constexpr float kIconTextGap = 8.0f;
+constexpr float kGutter = kIconLeft + kIconSize + kIconTextGap;
+constexpr float kCheckRightPad = 14.0f;
+constexpr float kSubmenuCheckRightPad = 40.0f;
 constexpr float kRightPad = 26.0f;
 constexpr float kMinWidth = 180.0f;
 constexpr UINT kTimerSubmenu = 1;
@@ -166,7 +171,7 @@ struct MenuWnd {
             const auto& it = items[i];
             if (it.separator) {
                 brush->SetColor(p.separator);
-                rt->FillRectangle(D2D1::RectF(kGutter, y + kSepH / 2.0f - 0.5f, wDip - 12.0f,
+                rt->FillRectangle(D2D1::RectF(kPadX, y + kSepH / 2.0f - 0.5f, wDip - 12.0f,
                                               y + kSepH / 2.0f + 0.5f),
                                   brush);
                 y += kSepH;
@@ -181,12 +186,25 @@ struct MenuWnd {
                     brush);
             }
             if (it.checked) {
-                // 勾选标记：手绘折线
+                // 图标已经占用左侧识别区，勾选标记移到右侧状态位，避免挤开文字。
                 brush->SetColor(it.enabled ? p.text : p.textSecondary);
-                float cx = kPadX + 10.0f, cy = y + kItemH / 2.0f;
+                const float checkRightPad = it.submenu.empty() ? kCheckRightPad
+                                                                : kSubmenuCheckRightPad;
+                const float cx = wDip - checkRightPad;
+                const float cy = y + kItemH / 2.0f;
                 rt->DrawLine(D2D1::Point2F(cx, cy), D2D1::Point2F(cx + 3.5f, cy + 3.5f), brush, 1.6f);
                 rt->DrawLine(D2D1::Point2F(cx + 3.5f, cy + 3.5f), D2D1::Point2F(cx + 9.0f, cy - 4.0f),
                              brush, 1.6f);
+            }
+            if (it.icon != settings_icon::Kind::None) {
+                brush->SetColor(it.enabled ? (it.checked ? p.accent : p.textSecondary)
+                                           : p.disabled);
+                const float iconTop = y + (kItemH - kIconSize) * 0.5f;
+                settings_icon::draw(
+                    rt, it.icon,
+                    D2D1::RectF(kIconLeft, iconTop, kIconLeft + kIconSize,
+                                iconTop + kIconSize),
+                    brush, 1.15f);
             }
             brush->SetColor(it.enabled ? p.text : p.textSecondary);
             rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,

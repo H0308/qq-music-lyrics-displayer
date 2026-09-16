@@ -20,6 +20,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_menu.h"
 #include "ui/fluent_theme.h"
+#include "ui/settings_icons.h"
 #include "ui/platform_icon.h"
 #include "media/smtc_monitor.h"
 #include "media/audio_spectrum.h"
@@ -4328,11 +4329,12 @@ LRESULT CALLBACK App::updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp
 
 void App::showTrayMenu() {
     std::vector<fluent::FluentMenuItem> items;
-    auto addItem = [&items](int id, const wchar_t* text, bool checked = false,
-                            bool enabled = true) {
+    auto addItem = [&items](int id, const wchar_t* text, settings_icon::Kind icon,
+                            bool checked = false, bool enabled = true) {
         fluent::FluentMenuItem it;
         it.id = id;
         it.text = text;
+        it.icon = icon;
         it.checked = checked;
         it.enabled = enabled;
         items.push_back(std::move(it));
@@ -4344,13 +4346,16 @@ void App::showTrayMenu() {
     };
 
     const bool taskbarEnabled = taskbarEnabledForUserAction();
-    addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词");
+    addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词",
+            settings_icon::Kind::Display);
     fluent::FluentMenuItem performance;
     performance.text = L"性能模式";
+    performance.icon = settings_icon::Kind::Performance;
     auto addRenderMode = [this, &performance](int id, const wchar_t* text, RenderMode mode) {
         fluent::FluentMenuItem it;
         it.id = id;
         it.text = text;
+        it.icon = settings_icon::Kind::RenderMode;
         it.checked = isRenderMode(mode);
         performance.submenu.push_back(std::move(it));
     };
@@ -4362,9 +4367,11 @@ void App::showTrayMenu() {
     if (taskbarEnabled) {
         fluent::FluentMenuItem pos;
         pos.text = L"任务栏位置";
+        pos.icon = settings_icon::Kind::Position;
         fluent::FluentMenuItem sub;
         sub.id = kCmdTaskbarPosNotify;
         sub.text = L"通知区域左侧";
+        sub.icon = settings_icon::Kind::Position;
         sub.checked = taskbarPosition_ == 0;
         pos.submenu.push_back(sub);
         sub.id = kCmdTaskbarPosLeft;
@@ -4378,41 +4385,46 @@ void App::showTrayMenu() {
         snap.sessionAlive && snap.player == SmtcPlayerType::QQMusic && !lyricLoading_ &&
         !currentLyrics_.empty() && qqLocalLyricsEnabled_ && !qqLocalLyricsPath_.empty() &&
         !currentLyricsFromManual_;
-    addItem(kCmdManualSearch, L"手动搜索歌词");
+    addItem(kCmdManualSearch, L"手动搜索歌词", settings_icon::Kind::Search);
     if (canSwitchLyricSource) {
         addItem(kCmdSwitchLyricSource,
-                currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词");
+                currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词",
+                settings_icon::Kind::LocalLyrics);
     }
     if (currentHasTranslation_ || currentHasRomanization_) {
         fluent::FluentMenuItem secondary;
         secondary.text = L"辅助歌词";
+        secondary.icon = settings_icon::Kind::Lyrics;
         fluent::FluentMenuItem translation;
         translation.id = kCmdSecondaryTranslation;
         translation.text = L"翻译";
+        translation.icon = settings_icon::Kind::Language;
         translation.checked = secondaryLyricEnabled_ && !preferRomanization_;
         secondary.submenu.push_back(std::move(translation));
 
         fluent::FluentMenuItem romanization;
         romanization.id = kCmdSecondaryRomanization;
         romanization.text = L"罗马音";
+        romanization.icon = settings_icon::Kind::Language;
         romanization.checked = secondaryLyricEnabled_ && preferRomanization_;
         secondary.submenu.push_back(std::move(romanization));
 
         fluent::FluentMenuItem secondaryOff;
         secondaryOff.id = kCmdSecondaryOff;
         secondaryOff.text = L"关闭显示辅助歌词";
+        secondaryOff.icon = settings_icon::Kind::Disconnect;
         secondaryOff.checked = !secondaryLyricEnabled_;
         secondary.submenu.push_back(std::move(secondaryOff));
         items.push_back(std::move(secondary));
     }
     addSeparator();
-    addItem(kCmdRuntimeLog, L"运行日志");
+    addItem(kCmdRuntimeLog, L"运行日志", settings_icon::Kind::Log);
     // 其余设置项集中到设置页
-    addItem(kCmdSettings, L"设置…");
-    addItem(kCmdAutoStart, L"开机自启动", autoStartEnabled());
+    addItem(kCmdSettings, L"设置…", settings_icon::Kind::Settings);
+    addItem(kCmdAutoStart, L"开机自启动", settings_icon::Kind::Trigger, autoStartEnabled());
     addSeparator();
-    addItem(kCmdAbout, L"关于");
-    addItem(kCmdExit, L"退出");
+    addItem(kCmdAbout, L"关于", settings_icon::Kind::Info);
+    addItem(kCmdExit, L"退出", settings_icon::Kind::Exit);
 
     POINT pt{};
     GetCursorPos(&pt);
