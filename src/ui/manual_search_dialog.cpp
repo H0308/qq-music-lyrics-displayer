@@ -30,7 +30,7 @@ constexpr int kIdPreviewTranslation = 109;
 constexpr int kIdAdvanceButton = 110;
 constexpr int kIdDelayButton = 111;
 
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 constexpr float kMinClientWidthDip = 520.0f;

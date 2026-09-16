@@ -38,7 +38,7 @@ constexpr float kCardRadius = 8.0f;
 constexpr float kCoverImageSizeDip = 40.0f;
 constexpr float kCoverToggleWidthDip = 36.0f;
 constexpr float kCoverToggleHeightDip = 20.0f;
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 constexpr int kHitChooseDirectory = 1;

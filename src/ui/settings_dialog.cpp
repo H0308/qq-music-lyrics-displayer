@@ -158,7 +158,7 @@ constexpr float kIdleQuoteBackgroundCardH = 112.0f;
 constexpr float kIdleQuoteBackgroundCardGap = 8.0f;
 constexpr float kIdleQuoteBackgroundRowH = 324.0f;
 
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
 
 float estimateRadioWidth(const std::vector<std::wstring>& options) {
