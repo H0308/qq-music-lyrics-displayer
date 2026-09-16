@@ -90,10 +90,10 @@ constexpr int kIdleAppNamesOption = -2;
 constexpr int kIdleAppEditOptionBase = 1000;
 constexpr int kIdleAppDragOptionBase = 2000;
 
-constexpr float kWindowW = 760.0f;
-constexpr float kWindowH = 552.0f;
-constexpr float kMinClientWidthDip = 600.0f;
-constexpr float kMinClientHeightDip = 552.0f;
+constexpr float kWindowW = 988.0f;
+constexpr float kWindowH = 718.0f;
+constexpr float kMinClientWidthDip = 780.0f;
+constexpr float kMinClientHeightDip = 718.0f;
 constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 constexpr float kNavW = 176.0f;
 constexpr float kNavIconSize = 16.0f;
