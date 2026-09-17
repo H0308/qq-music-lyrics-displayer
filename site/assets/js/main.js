@@ -70,11 +70,41 @@ if (utterancesBox) {
   }, 6000);
 }
 
-// 头部滚动态
+// 移动端导航：汉堡按钮开合下拉面板，点链接/点外部自动收起
+const navBurger = document.getElementById('navBurger');
+const navMenu = document.querySelector('.nav');
+if (navBurger && navMenu) {
+  navBurger.addEventListener('click', e => {
+    e.stopPropagation();
+    const open = navMenu.classList.toggle('open');
+    navBurger.setAttribute('aria-expanded', String(open));
+  });
+  navMenu.addEventListener('click', e => {
+    if (e.target.closest('a')) {
+      navMenu.classList.remove('open');
+      navBurger.setAttribute('aria-expanded', 'false');
+    }
+  });
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.nav') && !e.target.closest('.nav-burger')) {
+      navMenu.classList.remove('open');
+      navBurger.setAttribute('aria-expanded', 'false');
+    }
+  });
+}
+
+// 头部滚动态：下滑超过阈值后导航栏收缩为浮岛（仅移动端有视觉效果），滚动时收起菜单
 const header = document.getElementById('siteHeader');
-addEventListener('scroll', () => {
+function updateHeaderState() {
   header.classList.toggle('scrolled', scrollY > 8);
-}, { passive: true });
+  header.classList.toggle('shrunk', scrollY > 120);
+  if (navMenu && navMenu.classList.contains('open')) {
+    navMenu.classList.remove('open');
+    navBurger?.setAttribute('aria-expanded', 'false');
+  }
+}
+addEventListener('scroll', updateHeaderState, { passive: true });
+updateHeaderState();
 
 // 返回顶部：滚动超过一屏出现，外圈圆环显示滚动进度
 const backToTop = document.getElementById('backToTop');

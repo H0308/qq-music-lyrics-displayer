@@ -259,14 +259,16 @@ if (tocFab) {
   tocBackdrop.className = 'toc-backdrop';
   document.body.appendChild(tocBackdrop);
   tocFab.addEventListener('click', () => {
-    toc.classList.toggle('open');
-    tocBackdrop.classList.toggle('open');
+    const open = toc.classList.toggle('open');
+    tocBackdrop.classList.toggle('open', open);
+    tocFab.classList.toggle('fab-hidden', open);
   });
   tocBackdrop.addEventListener('click', closeTocDrawer);
 }
 function closeTocDrawer() {
   toc.classList.remove('open');
   if (tocBackdrop) tocBackdrop.classList.remove('open');
+  if (tocFab) tocFab.classList.remove('fab-hidden');
 }
 
 // ===== 初始化 =====
