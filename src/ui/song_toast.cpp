@@ -3,6 +3,7 @@
 #include "util/com_release.h"
 
 #include "fluent_theme.h"
+#include "logging/runtime_logger.h"
 #include "lyric_renderer.h"
 #include "platform_icon.h"
 
@@ -841,6 +842,8 @@ struct SongToast::Impl {
         releaseCom(capsule);
         releaseCom(capsuleLayer);
         if (FAILED(hr)) {
+            runtime_log::writef(L"[song-toast] EndDraw failed: 0x%08X, releasing drawing resources",
+                                static_cast<unsigned>(hr));
             releaseDrawingResources();
             return false;
         }

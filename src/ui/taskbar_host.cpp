@@ -6079,6 +6079,7 @@ struct TaskbarHost::Impl {
 
     bool finishTaskbarFrame(HRESULT hr) {
         if (hr == D2DERR_RECREATE_TARGET) {
+            runtime_log::writef(L"[taskbar] EndDraw requests device recreate, discarding device resources");
             discardDeviceResources();
             return false;
         }
@@ -6989,6 +6990,12 @@ struct TaskbarHost::Impl {
                 retryTaskbarAttach();
             return 0;
         case WM_DISPLAYCHANGE:
+            // 显示拓扑/分辨率变化（远程接入、虚拟屏开关等）是设备丢失的前置信号，
+            // 记录下来便于和随后的 device lost / 重建日志对照。
+            runtime_log::writef(L"[display] changed: %lux%lu %lubpp",
+                                static_cast<unsigned long>(LOWORD(lp)),
+                                static_cast<unsigned long>(HIWORD(lp)),
+                                static_cast<unsigned long>(wp));
             updateDisplayRefresh();
             return 0;
         case WM_ERASEBKGND:

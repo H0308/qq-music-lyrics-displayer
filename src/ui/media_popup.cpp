@@ -3104,11 +3104,10 @@ struct MediaPopup::Impl {
 
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET) {
-            releaseDrawingResources();
-            return false;
-        }
         if (FAILED(hr)) {
+            runtime_log::writef(
+                L"[media-popup] EndDraw failed: 0x%08X, releasing drawing resources",
+                static_cast<unsigned>(hr));
             releaseDrawingResources();
             return false;
         }

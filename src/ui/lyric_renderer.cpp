@@ -3,6 +3,7 @@
 #include "logging/runtime_logger.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <iterator>
 #include <memory>
@@ -23,13 +24,34 @@ struct DCompSharedDevice {
 
 namespace {
 
+// 设备重建（设备丢失或创建失败后再次尝试）的最小间隔。远程接入/虚拟屏切换、
+// 驱动重置等场景可能反复移除设备，不限频会让每帧都重建整套 D3D 设备并刷日志；
+// 期间渲染帧直接跳过，恢复后最晚延迟一个间隔重建。首次创建不受限。
+constexpr auto kDeviceRecreateInterval = std::chrono::seconds(2);
+
 std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
     static std::weak_ptr<DCompSharedDevice> weak;
     static std::mutex mutex;
+    static std::chrono::steady_clock::time_point lastAttempt;
+    static bool attempted = false;
+    static bool throttleLogged = false;
     std::lock_guard<std::mutex> lock(mutex);
 
     if (auto shared = weak.lock(); shared && !shared->invalid)
         return shared;
+
+    const auto now = std::chrono::steady_clock::now();
+    if (attempted && now - lastAttempt < kDeviceRecreateInterval) {
+        if (!throttleLogged) {
+            throttleLogged = true;
+            runtime_log::writef(L"[dcomp] device recreate throttled, retry after %ds",
+                                static_cast<int>(kDeviceRecreateInterval.count()));
+        }
+        return nullptr;
+    }
+    attempted = true;
+    lastAttempt = now;
+    throttleLogged = false;
 
     auto shared = std::make_shared<DCompSharedDevice>();
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
@@ -40,8 +62,11 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
                                    &shared->d3d, nullptr, nullptr);
     if (SUCCEEDED(hr))
         hr = shared->d3d->QueryInterface(&shared->dxgi);
-    if (FAILED(hr))
+    if (FAILED(hr)) {
+        runtime_log::writef(L"[dcomp] shared device create failed: 0x%08X",
+                            static_cast<unsigned>(hr));
         return nullptr;
+    }
 
     weak = shared;
     runtime_log::writef(L"[dcomp] shared device created");
@@ -470,10 +495,14 @@ void DCompRenderer::releaseBackBuffer() {
 }
 
 bool DCompRenderer::bind(HWND hwnd, int width, int height) {
-    if (!createFactories() || !createDevice()) {
-        runtime_log::writef(L"[dcomp] device create failed");
+    if (!createFactories()) {
+        runtime_log::writef(L"[dcomp] factory create failed");
         return false;
     }
+    // 设备创建失败/重建节流由 acquireSharedDevice 按节流节奏记录日志，
+    // 这里不能逐帧写，否则设备恢复前的等待期每帧都会刷一条。
+    if (!createDevice())
+        return false;
     if (!ensureSwapchain(hwnd, width, height)) {
         runtime_log::writef(L"[dcomp] swapchain bind failed (hwnd=%p %dx%d)", hwnd, width, height);
         return false;
@@ -487,9 +516,14 @@ bool DCompRenderer::present() {
     releaseBackBuffer(); // Present 前解绑后备缓冲
     HRESULT hr = swapchain_->Present(0, 0);
     if (FAILED(hr)) {
-        runtime_log::writef(L"[dcomp] Present failed: 0x%08X", static_cast<unsigned>(hr));
-        if (sharedDevice_ && isDeviceLost(hr))
+        if (sharedDevice_ && isDeviceLost(hr)) {
             sharedDevice_->invalid = true;
+            runtime_log::writef(
+                L"[dcomp] device lost on Present: 0x%08X, marked invalid, rebuild on next frame",
+                static_cast<unsigned>(hr));
+        } else {
+            runtime_log::writef(L"[dcomp] Present failed: 0x%08X", static_cast<unsigned>(hr));
+        }
         return false;
     }
     if (dcomp_)
