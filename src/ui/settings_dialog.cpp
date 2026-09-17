@@ -83,6 +83,7 @@ constexpr int kIdTickTickConnect = 463;
 constexpr int kIdTickTickRefresh = 464;
 constexpr int kIdTickTickDisconnect = 465;
 constexpr int kIdTickTickEnabled = 466;
+constexpr int kIdTaskbarContextMenu = 467;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -264,6 +265,8 @@ settings_icon::Kind iconForRow(int id) {
         return settings_icon::Kind::Scope;
     case kIdRenderMode:
         return settings_icon::Kind::RenderMode;
+    case kIdTaskbarContextMenu:
+        return settings_icon::Kind::Display;
     case kIdHoverControls:
         return settings_icon::Kind::Hover;
     case kIdHoverControlStyle:
@@ -844,6 +847,11 @@ struct SettingsDialog::Impl {
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
                  state.albumCoverVisible && !minimal, kCoverEffectRowH);
+        Row& taskbarContextMenu = addRow(
+            0, kIdTaskbarContextMenu, ControlKind::Toggle, L"右键显示任务栏歌词菜单",
+            L"关闭后，右键任务栏歌词不再弹出菜单；托盘图标的右键菜单不受影响。",
+            40.0f, kRowTallH);
+        taskbarContextMenu.checked = state.taskbarContextMenu;
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
             L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
@@ -3223,6 +3231,11 @@ struct SettingsDialog::Impl {
             if (actions.onCoverEffectVinyl)
                 actions.onCoverEffectVinyl(row->selected == 1);
             break;
+        case kIdTaskbarContextMenu:
+            row->checked = !row->checked;
+            if (actions.onTaskbarContextMenu)
+                actions.onTaskbarContextMenu(row->checked);
+            break;
         case kIdSpectrum:
             row->checked = !row->checked;
             if (auto* colorMode = findRow(kIdSpectrumColorMode))
@@ -3479,6 +3492,8 @@ struct SettingsDialog::Impl {
             row->selected = minimal ? 0 : (s.coverEffectVinyl ? 1 : 0);
             row->enabled = s.albumCoverVisible && !minimal;
         }
+        if (auto* row = findRow(kIdTaskbarContextMenu))
+            row->checked = s.taskbarContextMenu;
         if (auto* row = findRow(kIdSpectrum)) {
             row->checked = minimal || vertical ? false : s.spectrumOn;
             row->enabled = !minimal && !vertical;

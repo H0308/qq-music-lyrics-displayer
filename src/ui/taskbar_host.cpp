@@ -626,9 +626,11 @@ struct TaskbarHost::Impl {
     // 交互
     std::function<void()> tick;
     std::function<void(MediaControl)> onControl;
+    std::function<void(POINT)> onContextMenu;
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
     bool controlsOnHover_ = true;
+    bool contextMenuEnabled_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupTrigger floatingCardTrigger_ = MediaPopupTrigger::Hover;
     MediaPopup mediaPopup;
@@ -7060,6 +7062,27 @@ struct TaskbarHost::Impl {
                 mediaPopup.onAnchorClick();
             return 0;
         }
+        case WM_CONTEXTMENU: {
+            if (!contextMenuEnabled_ || !onContextMenu)
+                return 0;
+
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (pt.x == -1 && pt.y == -1) {
+                RECT rc{};
+                GetWindowRect(hwnd, &rc);
+                pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
+            }
+
+            // 右键菜单与悬浮媒体卡片/音量浮窗都是置顶弹窗。弹出菜单前先结束
+            // 锚点悬浮并立即收起附加窗口，避免卡片遮住菜单或继续消费鼠标输入。
+            volumeHover_ = false;
+            volumePopup_.onAnchorLeave();
+            volumePopup_.hide();
+            mediaPopup.onAnchorLeave();
+            mediaPopup.hideImmediate();
+            onContextMenu(pt);
+            return 0;
+        }
         case WM_QUERYENDSESSION:
             return TRUE;
         case WM_ENDSESSION:
@@ -7205,6 +7228,10 @@ void TaskbarHost::setIdleTaskCompleteCallback(
 
 void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
     impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
+}
+
+void TaskbarHost::setContextMenuCallback(std::function<void(POINT)> cb) {
+    impl_->onContextMenu = std::move(cb);
 }
 
 void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) {
@@ -7358,6 +7385,10 @@ void TaskbarHost::setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope) {
 
 void TaskbarHost::setControlsOnHover(bool on) {
     impl_->setControlsOnHover(on);
+}
+
+void TaskbarHost::setContextMenuEnabled(bool on) {
+    impl_->contextMenuEnabled_ = on;
 }
 
 void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {

@@ -99,6 +99,7 @@ public:
     void setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
+    void setContextMenuCallback(std::function<void(POINT)> cb);
     void setStatusTextCycleCompletedCallback(std::function<void()> cb);
     void setPlacementStatusCallback(std::function<void(TaskbarPlacementStatus)> cb);
     void setAllowOverlap(bool on);
@@ -130,6 +131,8 @@ public:
     void setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope);
     // 是否在鼠标悬浮时用播放控件替换右侧歌词，默认开启。
     void setControlsOnHover(bool on);
+    // 是否允许在任务栏歌词区域右键打开应用菜单，默认开启。
+    void setContextMenuEnabled(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
     void setHoverControlStyle(HoverControlStyle style);
     // 媒体卡片、每日一言和快捷启动卡片共用的展开方式与外观设置。

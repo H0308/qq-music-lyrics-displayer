@@ -725,6 +725,7 @@ struct App {
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
+    bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
     MediaPopupTrigger floatingCardTrigger_ = MediaPopupTrigger::Hover;
@@ -1226,6 +1227,14 @@ struct App {
         if (taskbarHost)
             taskbarHost->setControlsOnHover(on);
         logSettingBool(L"hover-playback-controls", on);
+        saveSettings();
+    }
+
+    void applyTaskbarContextMenu(bool on) {
+        taskbarContextMenuEnabled_ = on;
+        if (taskbarHost)
+            taskbarHost->setContextMenuEnabled(on);
+        logSettingBool(L"taskbar-context-menu", on);
         saveSettings();
     }
 
@@ -2232,6 +2241,8 @@ struct App {
         host->setAllowOverlap(allowOverlap);
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
+        host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
+        host->setContextMenuEnabled(taskbarContextMenuEnabled_);
         host->setAppVolumeCallback([this](int percent) {
             const bool ok = appVolume_.setVolumePercent(percent);
             runtime_log::writef(L"[action][volume] set percent=%d result=%s", percent,
@@ -2877,8 +2888,10 @@ struct App {
     bool createTrayWindow(HINSTANCE inst);
     void destroyTray();
     void updateTrayIcon();
+    std::vector<fluent::FluentMenuItem> buildMenuItems(bool fullTrayMenu);
     void showTrayMenu();
-    void onMenuCommand(int cmd);
+    void showTaskbarMenu(POINT screenPt);
+    void onMenuCommand(int cmd, const wchar_t* source);
     void showRuntimeLog();
     void initializeRuntimeLogger();
     void setLogDirectory(const std::wstring& path);
@@ -3369,6 +3382,7 @@ void App::loadSettings() {
             hasGlobalLyricAppearance_ = true;
         }
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
+        taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
         renderMode_ = static_cast<int>(RenderMode::Normal);
         hoverPlaybackControls_ = j.value("hoverPlaybackControls", true);
@@ -3618,6 +3632,7 @@ void App::saveSettings() {
             j["holidayCalendar"]["days"].push_back({
                 {"date", day.date}, {"type", day.type}, {"name", utf8Of(day.name)}});
         j["taskbarPosition"] = taskbarPosition_;
+        j["taskbarContextMenu"] = taskbarContextMenuEnabled_;
         // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
         j["hoverControlStyle"] = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
@@ -4327,7 +4342,7 @@ LRESULT CALLBACK App::updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-void App::showTrayMenu() {
+std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     std::vector<fluent::FluentMenuItem> items;
     auto addItem = [&items](int id, const wchar_t* text, settings_icon::Kind icon,
                             bool checked = false, bool enabled = true) {
@@ -4386,7 +4401,7 @@ void App::showTrayMenu() {
         !currentLyrics_.empty() && qqLocalLyricsEnabled_ && !qqLocalLyricsPath_.empty() &&
         !currentLyricsFromManual_;
     addItem(kCmdManualSearch, L"手动搜索歌词", settings_icon::Kind::Search);
-    if (canSwitchLyricSource) {
+    if (fullTrayMenu && canSwitchLyricSource) {
         addItem(kCmdSwitchLyricSource,
                 currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词",
                 settings_icon::Kind::LocalLyrics);
@@ -4418,22 +4433,34 @@ void App::showTrayMenu() {
         items.push_back(std::move(secondary));
     }
     addSeparator();
-    addItem(kCmdRuntimeLog, L"运行日志", settings_icon::Kind::Log);
-    // 其余设置项集中到设置页
+    if (fullTrayMenu)
+        addItem(kCmdRuntimeLog, L"运行日志", settings_icon::Kind::Log);
     addItem(kCmdSettings, L"设置…", settings_icon::Kind::Settings);
-    addItem(kCmdAutoStart, L"开机自启动", settings_icon::Kind::Trigger, autoStartEnabled());
-    addSeparator();
-    addItem(kCmdAbout, L"关于", settings_icon::Kind::Info);
-    addItem(kCmdExit, L"退出", settings_icon::Kind::Exit);
-
-    POINT pt{};
-    GetCursorPos(&pt);
-    fluent::FluentMenu::show(trayHwnd, pt, std::move(items),
-                             [this](int cmd) { onMenuCommand(cmd); });
+    if (fullTrayMenu) {
+        addItem(kCmdAutoStart, L"开机自启动", settings_icon::Kind::Trigger, autoStartEnabled());
+        addSeparator();
+        addItem(kCmdAbout, L"关于", settings_icon::Kind::Info);
+        addItem(kCmdExit, L"退出", settings_icon::Kind::Exit);
+    }
+    return items;
 }
 
-void App::onMenuCommand(int cmd) {
-    runtime_log::writef(L"[action][tray] command=%s id=%d", trayCommandName(cmd), cmd);
+void App::showTrayMenu() {
+    POINT pt{};
+    GetCursorPos(&pt);
+    fluent::FluentMenu::show(trayHwnd, pt, buildMenuItems(true),
+                             [this](int cmd) { onMenuCommand(cmd, L"tray"); });
+}
+
+void App::showTaskbarMenu(POINT screenPt) {
+    if (!taskbarContextMenuEnabled_)
+        return;
+    fluent::FluentMenu::show(trayHwnd, screenPt, buildMenuItems(false),
+                             [this](int cmd) { onMenuCommand(cmd, L"taskbar-menu"); });
+}
+
+void App::onMenuCommand(int cmd, const wchar_t* source) {
+    runtime_log::writef(L"[action][%s] command=%s id=%d", source, trayCommandName(cmd), cmd);
     switch (cmd) {
     case kCmdToggleTaskbar:
         toggleTaskbar();
@@ -4724,6 +4751,7 @@ SettingsState App::currentSettingsState() const {
     st.taskbarBackground = taskbarBackground_;
     st.coverBackgroundOpacity = coverBackgroundOpacity_;
     st.renderMode = renderMode_;
+    st.taskbarContextMenu = taskbarContextMenuEnabled_;
     st.hoverControls = hoverPlaybackControls_;
     st.hoverControlStyle = hoverControlStyle_ == HoverControlStyle::Popup ? 1 : 0;
     st.floatingCardTrigger = floatingCardTrigger_ == MediaPopupTrigger::Click ? 1 : 0;
@@ -4801,6 +4829,7 @@ SettingsActions App::buildSettingsActions() {
         applyCoverBackgroundOpacity(percent);
     };
     act.onRenderMode = [this](int mode) { applyRenderMode(mode); };
+    act.onTaskbarContextMenu = [this](bool on) { applyTaskbarContextMenu(on); };
     act.onHoverControls = [this](bool on) { applyHoverControls(on); };
     act.onHoverControlStyle = [this](int style) { applyHoverControlStyle(style); };
     act.onFloatingCardTrigger = [this](int mode) { applyFloatingCardTrigger(mode); };
