@@ -822,12 +822,16 @@ h1, h2, h3 { line-height: 1.3; font-weight: 700; }
   font-size: 0.9rem;
   margin-bottom: 36px;
 }
-.feedback-box {
+/* 评论框容器：默认无卡片样式，加载成功后才出现白框 */
+.feedback-box { text-align: center; }
+.feedback-box.loaded {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 24px;
+  text-align: left;
 }
+.feedback-loading { color: var(--text-dim); padding: 16px 0; }
 /* Utterances iframe 宽度自适应 */
 .feedback-box .utterances { max-width: none; }
 .feedback-fallback {

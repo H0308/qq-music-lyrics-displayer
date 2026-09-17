@@ -40,7 +40,7 @@ systemLight.addEventListener('change', () => {
 
 applyThemeMode(root.dataset.themeMode || 'system');
 
-// 首页意见反馈：按当前主题加载 Utterances
+// 意见反馈页：按当前主题加载 Utterances
 const utterancesBox = document.getElementById('utterancesBox');
 if (utterancesBox) {
   const s = document.createElement('script');
@@ -52,12 +52,21 @@ if (utterancesBox) {
   s.async = true;
   utterancesBox.appendChild(s);
 
+  // iframe 出现即视为加载成功：清掉加载提示并套用卡片样式
+  const loadCheck = setInterval(() => {
+    if (!utterancesBox.querySelector('.utterances-frame')) return;
+    clearInterval(loadCheck);
+    utterancesBox.querySelector('.feedback-loading')?.remove();
+    utterancesBox.classList.add('loaded');
+  }, 400);
+
   // 超时未加载（本地预览 / 未安装 Utterances App / 网络问题）时给出兜底指引
   setTimeout(() => {
-    if (utterancesBox.querySelector('.utterances-frame')) return;
+    clearInterval(loadCheck);
+    if (utterancesBox.classList.contains('loaded')) return;
     utterancesBox.innerHTML =
-      '<p class="feedback-fallback">评论组件暂时加载不出来（本地预览或未安装 Utterances App 都会导致此问题）。' +
-      '也可以直接前往 <a href="https://github.com/H0308/qq-music-lyrics-displayer/issues" target="_blank" rel="noopener">GitHub Issues</a> 提交反馈。</p>';
+      '<p class="feedback-fallback">评论组件加载失败，可能是网络问题或组件服务暂时不可用。' +
+      '可以直接前往 <a href="https://github.com/H0308/qq-music-lyrics-displayer/issues" target="_blank" rel="noopener">GitHub Issues</a> 提交反馈。</p>';
   }, 6000);
 }
 
