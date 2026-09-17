@@ -100,6 +100,8 @@ public:
     void setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
     void setContextMenuCallback(std::function<void(POINT)> cb);
+    // 拖动歌词并吸附到另一有效锚点后通知应用层持久化位置。
+    void setPositionModeChangedCallback(std::function<void(int)> cb);
     void setStatusTextCycleCompletedCallback(std::function<void()> cb);
     void setPlacementStatusCallback(std::function<void(TaskbarPlacementStatus)> cb);
     void setAllowOverlap(bool on);

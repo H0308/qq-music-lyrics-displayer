@@ -2242,6 +2242,14 @@ struct App {
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
+        host->setPositionModeChangedCallback([this](int mode) {
+            mode = mode == 1 ? 1 : 0;
+            if (taskbarPosition_ == mode)
+                return;
+            taskbarPosition_ = mode;
+            logSettingInt(L"taskbar-position-drag", taskbarPosition_);
+            saveSettings();
+        });
         host->setContextMenuEnabled(taskbarContextMenuEnabled_);
         host->setAppVolumeCallback([this](int percent) {
             const bool ok = appVolume_.setVolumePercent(percent);

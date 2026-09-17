@@ -54,6 +54,7 @@ constexpr float kCompressedMinWidthRatio = 0.5f;
 constexpr float kLeftRatio = 0.38f;
 constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
+constexpr wchar_t kDragPreviewText[] = L"松手固定到这里";
 // 滚动文本左缘（滚出侧）的渐隐宽度
 constexpr float kLyricEdgeFadeDip = 18.0f;
 constexpr float kSongInfoLyricGap = 8.0f; // 歌曲信息与歌词之间的分隔间距
@@ -417,6 +418,7 @@ struct TaskbarHost::Impl {
         int y = 0;
         int width = 0;
         int height = 0;
+        int availableMajor = 0;
     };
 
     struct InvalidationSnapshot {
@@ -627,8 +629,15 @@ struct TaskbarHost::Impl {
     std::function<void()> tick;
     std::function<void(MediaControl)> onControl;
     std::function<void(POINT)> onContextMenu;
+    std::function<void(int)> onPositionModeChanged;
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
+    bool dragPress_ = false;
+    bool lyricDragging_ = false;
+    POINT dragPressScreen_{};
+    POINT dragCursorScreen_{};
+    int dragCandidateMode_ = 0;
+    int dragPreviewMajorPx_ = 0;
     bool controlsOnHover_ = true;
     bool contextMenuEnabled_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
@@ -697,6 +706,7 @@ struct TaskbarHost::Impl {
     IDWriteTextFormat* fmtLyric_ = nullptr;
     IDWriteTextFormat* fmtNextLyric_ = nullptr;
     IDWriteTextFormat* fmtSecondary_ = nullptr;
+    IDWriteTextFormat* fmtDragPreview_ = nullptr;
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
@@ -818,6 +828,7 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
     ID2D1SolidColorBrush* brushIdleCool_ = nullptr;
     ID2D1SolidColorBrush* brushIdleAccent_ = nullptr;
+    ID2D1StrokeStyle* dragPreviewStroke_ = nullptr;
     ID2D1Effect* coverBlurFx_ = nullptr;
     ID2D1Effect* coverScaleFx_ = nullptr;
     ID2D1Bitmap* coverBlurInput_ = nullptr; // 模糊链当前绑定的封面（不持有引用，仅用于比较）
@@ -1339,9 +1350,14 @@ struct TaskbarHost::Impl {
         mediaPopup.hideImmediate();
     }
 
-    TaskbarPlacementStatus calculateWindowPlacement(WindowPlacement& placement) {
+    TaskbarPlacementStatus calculateWindowPlacement(WindowPlacement& placement,
+                                                     int positionMode = -1,
+                                                     bool updateStatus = true) {
+        auto finishStatus = [&](TaskbarPlacementStatus status) {
+            return updateStatus ? setPlacementStatus(status) : status;
+        };
         if (!hwnd || !taskbar_)
-            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
+            return finishStatus(TaskbarPlacementStatus::Unavailable);
 
         updateRects();
 
@@ -1352,7 +1368,9 @@ struct TaskbarHost::Impl {
         if (crossPx < 16)
             crossPx = taskbarCross;
         if (crossPx <= 0)
-            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
+            return finishStatus(TaskbarPlacementStatus::Unavailable);
+
+        const int effectivePositionMode = positionMode < 0 ? positionMode_ : positionMode;
 
         int gap = std::max(4, (int)std::lround(4.0f * scale()));
         float minWidthDip = vertical ? kVerticalMinLengthDip : kMinWidthDip;
@@ -1402,11 +1420,13 @@ struct TaskbarHost::Impl {
         auto usableMajor = [gap](const Span& s) { return s.r - s.l - gap * 2; };
 
         int pxMajor = 0;
+        int availableMajor = 0;
         int x = 0;
         int y = 0;
         auto place = [&](const Span& s, int w) {
+            availableMajor = std::max(1, usableMajor(s));
             pxMajor = std::min(w, std::max(1, majorEnd - majorStart));
-            int major = positionMode_ == 1 ? s.l + gap : s.r - gap - pxMajor;
+            int major = effectivePositionMode == 1 ? s.l + gap : s.r - gap - pxMajor;
             if (pxMajor <= majorEnd - majorStart)
                 major = std::clamp(major, majorStart, majorEnd - pxMajor);
             else
@@ -1423,7 +1443,7 @@ struct TaskbarHost::Impl {
         TaskbarPlacementStatus result = TaskbarPlacementStatus::Unavailable;
         if (spans.empty()) {
             if (!allowOverlap_)
-                return setPlacementStatus(TaskbarPlacementStatus::NoSpace);
+                return finishStatus(TaskbarPlacementStatus::NoSpace);
             const Span full{majorStart, majorEnd};
             // 用户明确选择继续开启时，也沿用压缩后的最小主轴尺寸，
             // 不再恢复为标准最小尺寸，尽量降低对任务栏的遮挡。
@@ -1432,7 +1452,7 @@ struct TaskbarHost::Impl {
         } else {
             // 原位优先：模式 0 锚定通知区域之前的主轴末端空闲区，模式 1 锚定
             // 任务栏起始端空闲区。横向对应右/左，纵向对应下/上。
-            const Span& pref = positionMode_ == 1 ? spans.front() : spans.back();
+            const Span& pref = effectivePositionMode == 1 ? spans.front() : spans.back();
             if (usableMajor(pref) >= compressedMinW) {
                 place(pref, std::min(usableMajor(pref), maxW)); // 原位优先：被挤压先收缩长度
                 result = usableMajor(pref) < minW ? TaskbarPlacementStatus::Compressed
@@ -1455,7 +1475,7 @@ struct TaskbarHost::Impl {
                     place(pref, compressedMinW);
                     result = TaskbarPlacementStatus::ForcedOverlap;
                 } else {
-                    return setPlacementStatus(TaskbarPlacementStatus::NoSpace);
+                    return finishStatus(TaskbarPlacementStatus::NoSpace);
                 }
             }
         }
@@ -1472,9 +1492,10 @@ struct TaskbarHost::Impl {
         placement.y = y;
         placement.width = vertical ? crossPx : pxMajor;
         placement.height = vertical ? pxMajor : crossPx;
+        placement.availableMajor = availableMajor;
         if (placement.width <= 0 || placement.height <= 0)
-            return setPlacementStatus(TaskbarPlacementStatus::Unavailable);
-        return setPlacementStatus(result);
+            return finishStatus(TaskbarPlacementStatus::Unavailable);
+        return finishStatus(result);
     }
 
     void applyWindowPlacement(const WindowPlacement& placement, bool bringToFront = true,
@@ -1499,6 +1520,8 @@ struct TaskbarHost::Impl {
     }
 
     void adjustPosition() {
+        if (lyricDragging_)
+            return;
         cancelSceneWindowResize();
         WindowPlacement placement;
         const TaskbarPlacementStatus status = calculateWindowPlacement(placement);
@@ -1524,6 +1547,131 @@ struct TaskbarHost::Impl {
         placement.width = rect.right - rect.left;
         placement.height = rect.bottom - rect.top;
         return true;
+    }
+
+    static bool usableDragPlacement(TaskbarPlacementStatus status) {
+        return status != TaskbarPlacementStatus::Unavailable &&
+               status != TaskbarPlacementStatus::NoSpace;
+    }
+
+    int dragPreviewMajorPixels(const WindowPlacement& anchor) const {
+        const int anchorMajor = anchor.availableMajor > 0
+                                    ? anchor.availableMajor
+                                    : (isVerticalTaskbar() ? anchor.height : anchor.width);
+        const int currentMajor = dragPreviewMajorPx_ > 0
+                                     ? dragPreviewMajorPx_
+                                     : (isVerticalTaskbar() ? anchor.height : anchor.width);
+        return std::clamp(currentMajor, 1, std::max(1, anchorMajor));
+    }
+
+    WindowPlacement dragPreviewFromAnchor(const WindowPlacement& anchor, int mode) const {
+        WindowPlacement preview = anchor;
+        const int previewMajor = dragPreviewMajorPixels(anchor);
+        if (isVerticalTaskbar()) {
+            preview.height = previewMajor;
+            if (mode == 0)
+                preview.y = anchor.y + anchor.height - preview.height;
+        } else {
+            preview.width = previewMajor;
+            if (mode == 0)
+                preview.x = anchor.x + anchor.width - preview.width;
+        }
+        return preview;
+    }
+
+    bool dragPreviewPlacementAt(POINT cursorScreen, WindowPlacement& placement, int& mode) {
+        bool found = false;
+        long long bestDistance = 0;
+        const int cursorMajor = isVerticalTaskbar() ? cursorScreen.y : cursorScreen.x;
+        for (int candidateMode = 0; candidateMode <= 1; ++candidateMode) {
+            WindowPlacement anchor;
+            const TaskbarPlacementStatus status =
+                calculateWindowPlacement(anchor, candidateMode, false);
+            if (!usableDragPlacement(status))
+                continue;
+
+            const WindowPlacement preview = dragPreviewFromAnchor(anchor, candidateMode);
+            const int previewStart = isVerticalTaskbar() ? preview.y : preview.x;
+            const int previewLength = isVerticalTaskbar() ? preview.height : preview.width;
+            const long long distance =
+                std::llabs(static_cast<long long>(cursorMajor) * 2 -
+                           (static_cast<long long>(previewStart) * 2 + previewLength));
+            if (!found || distance < bestDistance ||
+                (distance == bestDistance && candidateMode == positionMode_)) {
+                found = true;
+                bestDistance = distance;
+                placement = preview;
+                mode = candidateMode;
+            }
+        }
+        return found;
+    }
+
+    bool updateDragPreviewPlacement() {
+        if (!lyricDragging_)
+            return false;
+        WindowPlacement placement;
+        int mode = positionMode_;
+        if (!dragPreviewPlacementAt(dragCursorScreen_, placement, mode))
+            return false;
+
+        dragCandidateMode_ = mode;
+        WindowPlacement current;
+        if (currentWindowPlacement(current) && current.x == placement.x &&
+            current.y == placement.y && current.width == placement.width &&
+            current.height == placement.height)
+            return false;
+        applyWindowPlacement(placement, true, true);
+        return true;
+    }
+
+    void beginLyricDrag() {
+        if (lyricDragging_)
+            return;
+        WindowPlacement current;
+        // 预览表达的是用户此刻看到的整个任务栏歌词宿主，而非单独歌词文本：
+        // 当前 HWND 主轴尺寸已包含封面、歌曲信息、歌词区和独立频谱。
+        dragPreviewMajorPx_ = currentWindowPlacement(current)
+                                  ? (isVerticalTaskbar() ? current.height : current.width)
+                                  : 0;
+        lyricDragging_ = true;
+        dragCandidateMode_ = positionMode_;
+        cancelSceneWindowResize();
+        setSongTransitionPending(false);
+        renderer.resetRoot();
+        renderer.clearLyricTransitionLayers();
+        clearLyricDCompState();
+        mouseOver_ = false;
+        trackingLeave_ = false;
+        volumeHover_ = false;
+        volumePopup_.hide();
+        mediaPopup.onAnchorLeave();
+        mediaPopup.hideImmediate();
+        updateDragPreviewPlacement();
+        requestFrameAndFlush();
+    }
+
+    void finishLyricDrag(bool commit) {
+        const bool wasDragging = lyricDragging_;
+        const int committedMode = dragCandidateMode_;
+        dragPress_ = false;
+        lyricDragging_ = false;
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+
+        if (!wasDragging)
+            return;
+        trackingLeave_ = false;
+        mouseOver_ = false;
+        if (commit)
+            positionMode_ = committedMode;
+        requestInvalidation(RenderInvalidation::Layout);
+        adjustPosition();
+        requestFrameAndFlush();
+        if (commit && onPositionModeChanged)
+            onPositionModeChanged(positionMode_);
+        dragPreviewMajorPx_ = 0;
     }
 
     bool detectChanges() {
@@ -1636,6 +1784,29 @@ struct TaskbarHost::Impl {
         rt->CreateLayer(&lyricEdgeFadeLayer_);
         rt->CreateLayer(&lyricRightFadeLayer_);
         recreateFormats();
+        if (auto* dwrite = renderer.dwrite()) {
+            dwrite->CreateTextFormat(
+                fluent::uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"zh-cn",
+                &fmtDragPreview_);
+            if (fmtDragPreview_) {
+                fmtDragPreview_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                fmtDragPreview_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                fmtDragPreview_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                fluent::applyUiFontFallback(fmtDragPreview_);
+            }
+        }
+        if (auto* factory = renderer.d2d()) {
+            D2D1_STROKE_STYLE_PROPERTIES props{};
+            props.startCap = D2D1_CAP_STYLE_FLAT;
+            props.endCap = D2D1_CAP_STYLE_FLAT;
+            props.dashCap = D2D1_CAP_STYLE_FLAT;
+            props.lineJoin = D2D1_LINE_JOIN_ROUND;
+            props.miterLimit = 10.0f;
+            props.dashStyle = D2D1_DASH_STYLE_DASH;
+            props.dashOffset = 0.0f;
+            factory->CreateStrokeStyle(props, nullptr, 0, &dragPreviewStroke_);
+        }
         renderState_.setDeviceResourcePhase(
             brushBg_ ? RenderState::DeviceResourcePhase::Ready
                      : RenderState::DeviceResourcePhase::Uninitialized);
@@ -3016,6 +3187,7 @@ struct TaskbarHost::Impl {
     }
 
     void setPositionMode(int mode) {
+        mode = mode == 1 ? 1 : 0;
         if (positionMode_ == mode)
             return;
         positionMode_ = mode;
@@ -3131,6 +3303,7 @@ struct TaskbarHost::Impl {
         r(fmtLyric_);
         r(fmtNextLyric_);
         r(fmtSecondary_);
+        r(fmtDragPreview_);
         r(titleLayout_);
         r(artistLayout_);
         r(lyricLayout_);
@@ -3163,6 +3336,7 @@ struct TaskbarHost::Impl {
         r(brushIdleWarm_);
         r(brushIdleCool_);
         r(brushIdleAccent_);
+        r(dragPreviewStroke_);
         r(coverBlurFx_);
         r(coverScaleFx_);
         coverBlurInput_ = nullptr;
@@ -6171,6 +6345,44 @@ struct TaskbarHost::Impl {
         return finishTaskbarFrame(rt->EndDraw());
     }
 
+    bool renderDragPreview(float w, float h) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !brushBackground_ || !brushDim_ || !brushText_ || !fmtDragPreview_ ||
+            w <= 0.0f || h <= 0.0f)
+            return false;
+
+        rt->BeginDraw();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+
+        const float inset = 1.5f;
+        const float radius = std::max(
+            1.0f, std::min(kCornerRadius, std::min(w, h) * 0.5f - inset));
+        const D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(
+            D2D1::RectF(inset, inset, std::max(inset, w - inset),
+                        std::max(inset, h - inset)),
+            radius, radius);
+        brushBackground_->SetColor(lightTheme_
+                                       ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.88f)
+                                       : D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.82f));
+        rt->FillRoundedRectangle(preview, brushBackground_);
+        rt->DrawRoundedRectangle(preview, brushDim_, 1.25f, dragPreviewStroke_);
+
+        const float textInset = 8.0f;
+        const D2D1_RECT_F textRect = D2D1::RectF(
+            textInset, textInset, std::max(textInset, w - textInset),
+            std::max(textInset, h - textInset));
+        if (isVerticalTaskbar()) {
+            constexpr wchar_t verticalText[] = L"松\n手\n固\n定\n到\n这\n里";
+            rt->DrawTextW(verticalText, _countof(verticalText) - 1, fmtDragPreview_, textRect,
+                          brushText_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        } else {
+            rt->DrawTextW(kDragPreviewText, _countof(kDragPreviewText) - 1, fmtDragPreview_,
+                          textRect, brushText_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+        return finishTaskbarFrame(rt->EndDraw());
+    }
+
     void render() {
         if (!isWindowVisible() || !hwnd)
             return;
@@ -6180,7 +6392,8 @@ struct TaskbarHost::Impl {
 
         // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
         // 把刚刚收缩/扩展的窗口尺寸恢复回去。
-        if (isInvalidated(RenderInvalidation::Layout) && !isSceneResizeActive()) {
+        if (isInvalidated(RenderInvalidation::Layout) && !isSceneResizeActive() &&
+            !lyricDragging_) {
             adjustPosition();
             if (!isWindowVisible())
                 return;
@@ -6222,6 +6435,33 @@ struct TaskbarHost::Impl {
         // 预处理和资源创建阶段可能追加失效项；从这里开始才捕获本次提交快照，
         // 避免把本帧刚处理的尺寸/字体失效错误地留到下一帧。
         const InvalidationSnapshot invalidation = renderState_.beginInvalidation();
+
+        if (lyricDragging_) {
+            if (isInvalidated(RenderInvalidation::Text) ||
+                isInvalidated(RenderInvalidation::SongInfo))
+                buildTextLayouts(0.0f, 0.0f);
+            if (updateDragPreviewPlacement()) {
+                clientPixelSize(pxW, pxH);
+                if (pxW <= 0 || pxH <= 0 || !renderer.bind(hwnd, pxW, pxH))
+                    return;
+                rt = renderer.renderTarget();
+                if (!rt)
+                    return;
+                renderer.setDpi(dpi_);
+            }
+            if (renderDragPreview(dip(pxW), dip(pxH))) {
+                // 预览只消费本帧实际处理过的文字/布局/绘制失效；封面、图标与普通
+                // 内容几何继续保留，松手恢复歌词后再由完整渲染链处理。
+                InvalidationSnapshot previewInvalidation = invalidation;
+                previewInvalidation.mask &=
+                    toMask(RenderInvalidation::Paint) |
+                    toMask(RenderInvalidation::Text) |
+                    toMask(RenderInvalidation::SongInfo) |
+                    toMask(RenderInvalidation::Layout);
+                renderState_.commitInvalidation(previewInvalidation);
+            }
+            return;
+        }
 
         ensureGeometry();
         if (isInvalidated(RenderInvalidation::Cover))
@@ -7005,7 +7245,30 @@ struct TaskbarHost::Impl {
         case WM_NCHITTEST:
             // 整个窗口区域都视为客户区，让透明背景也能接收鼠标消息
             return HTCLIENT;
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT && (dragPress_ || lyricDragging_)) {
+                SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                return TRUE;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_MOUSEMOVE: {
+            POINT cursor{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ClientToScreen(hwnd, &cursor);
+            if (dragPress_) {
+                dragCursorScreen_ = cursor;
+                if (!lyricDragging_) {
+                    const int thresholdX = std::max(GetSystemMetrics(SM_CXDRAG),
+                                                    (int)std::lround(6.0f * scale()));
+                    const int thresholdY = std::max(GetSystemMetrics(SM_CYDRAG),
+                                                    (int)std::lround(6.0f * scale()));
+                    if (std::abs(cursor.x - dragPressScreen_.x) >= thresholdX ||
+                        std::abs(cursor.y - dragPressScreen_.y) >= thresholdY)
+                        beginLyricDrag();
+                }
+                if (lyricDragging_ && updateDragPreviewPlacement())
+                    requestFrameAndFlush();
+                return 0;
+            }
             bool wasOver = mouseOver_;
             mouseOver_ = true;
             if (mediaPopupEnabledForScene())
@@ -7030,6 +7293,8 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case WM_MOUSELEAVE:
+            if (dragPress_ || lyricDragging_)
+                return 0;
             mouseOver_ = false;
             trackingLeave_ = false;
             volumeHover_ = false;
@@ -7050,7 +7315,31 @@ struct TaskbarHost::Impl {
             }
             return 0;
         }
+        case WM_LBUTTONDOWN: {
+            // 点击与拖动从同一次按下并行识别：未越过系统拖动阈值仍按原按钮/卡片
+            // 点击处理，越过阈值后才取消点击并进入位置拖拽。
+            dragPress_ = true;
+            GetCursorPos(&dragPressScreen_);
+            dragCursorScreen_ = dragPressScreen_;
+            dragCandidateMode_ = positionMode_;
+            SetCapture(hwnd);
+            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+            return 0;
+        }
         case WM_LBUTTONUP: {
+            const bool hadPress = dragPress_ || lyricDragging_;
+            const bool wasDragging = lyricDragging_;
+            if (hadPress)
+                finishLyricDrag(true);
+            if (wasDragging)
+                return 0;
+            if (hadPress) {
+                RECT client{};
+                POINT releasePoint{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                GetClientRect(hwnd, &client);
+                if (!PtInRect(&client, releasePoint))
+                    return 0;
+            }
             float mx = static_cast<float>(GET_X_LPARAM(lp));
             float my = static_cast<float>(GET_Y_LPARAM(lp));
             int btn = hitButton(mx, my);
@@ -7062,6 +7351,14 @@ struct TaskbarHost::Impl {
                 mediaPopup.onAnchorClick();
             return 0;
         }
+        case WM_CAPTURECHANGED:
+            if (dragPress_ || lyricDragging_)
+                finishLyricDrag(false);
+            return 0;
+        case WM_CANCELMODE:
+            if (dragPress_ || lyricDragging_)
+                finishLyricDrag(false);
+            return 0;
         case WM_CONTEXTMENU: {
             if (!contextMenuEnabled_ || !onContextMenu)
                 return 0;
@@ -7106,6 +7403,8 @@ struct TaskbarHost::Impl {
             stopFrameTimer();
             stopPlacementTimer();
             stopProbe();
+            dragPress_ = false;
+            lyricDragging_ = false;
             volumePopup_.destroy();
             mediaPopup.destroy();
             releaseAll();
@@ -7232,6 +7531,10 @@ void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
 
 void TaskbarHost::setContextMenuCallback(std::function<void(POINT)> cb) {
     impl_->onContextMenu = std::move(cb);
+}
+
+void TaskbarHost::setPositionModeChangedCallback(std::function<void(int)> cb) {
+    impl_->onPositionModeChanged = std::move(cb);
 }
 
 void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) {
