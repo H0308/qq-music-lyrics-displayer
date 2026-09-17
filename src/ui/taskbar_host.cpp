@@ -55,6 +55,7 @@ constexpr float kLeftRatio = 0.38f;
 constexpr float kCoverPadding = 4.0f;
 constexpr float kTextPadding = 8.0f;
 constexpr wchar_t kDragPreviewText[] = L"松手固定到这里";
+constexpr float kLyricDragThresholdDip = 6.0f;
 // 滚动文本左缘（滚出侧）的渐隐宽度
 constexpr float kLyricEdgeFadeDip = 18.0f;
 constexpr float kSongInfoLyricGap = 8.0f; // 歌曲信息与歌词之间的分隔间距
@@ -1635,6 +1636,7 @@ struct TaskbarHost::Impl {
                                   ? (isVerticalTaskbar() ? current.height : current.width)
                                   : 0;
         lyricDragging_ = true;
+        SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
         dragCandidateMode_ = positionMode_;
         cancelSceneWindowResize();
         setSongTransitionPending(false);
@@ -7246,7 +7248,7 @@ struct TaskbarHost::Impl {
             // 整个窗口区域都视为客户区，让透明背景也能接收鼠标消息
             return HTCLIENT;
         case WM_SETCURSOR:
-            if (LOWORD(lp) == HTCLIENT && (dragPress_ || lyricDragging_)) {
+            if (LOWORD(lp) == HTCLIENT && lyricDragging_) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
                 return TRUE;
             }
@@ -7258,9 +7260,9 @@ struct TaskbarHost::Impl {
                 dragCursorScreen_ = cursor;
                 if (!lyricDragging_) {
                     const int thresholdX = std::max(GetSystemMetrics(SM_CXDRAG),
-                                                    (int)std::lround(6.0f * scale()));
+                                                    (int)std::lround(kLyricDragThresholdDip * scale()));
                     const int thresholdY = std::max(GetSystemMetrics(SM_CYDRAG),
-                                                    (int)std::lround(6.0f * scale()));
+                                                    (int)std::lround(kLyricDragThresholdDip * scale()));
                     if (std::abs(cursor.x - dragPressScreen_.x) >= thresholdX ||
                         std::abs(cursor.y - dragPressScreen_.y) >= thresholdY)
                         beginLyricDrag();
@@ -7323,7 +7325,6 @@ struct TaskbarHost::Impl {
             dragCursorScreen_ = dragPressScreen_;
             dragCandidateMode_ = positionMode_;
             SetCapture(hwnd);
-            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             return 0;
         }
         case WM_LBUTTONUP: {
