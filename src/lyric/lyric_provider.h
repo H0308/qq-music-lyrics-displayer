@@ -55,6 +55,7 @@ public:
     using SearchCallback = std::function<void(const std::vector<SearchCandidate>&)>;
     using FetchCallback = std::function<void(bool ok, const std::vector<LyricLine>& lines,
                                              const SongInfo& info)>;
+    using SongInfoCallback = std::function<void(const SongInfo& info)>;
 
     LyricProvider();
     ~LyricProvider();
@@ -75,6 +76,10 @@ public:
     void requestNeteaseAsync(const std::wstring& songId, const std::wstring& title,
                              const std::wstring& artist, int64_t durationMs,
                              ReadyCallback cb);
+
+    // 仅按当前元数据查询 QQ songmid/albummid，不读取或替换当前歌词。
+    void requestQqSongInfoAsync(const std::wstring& title, const std::wstring& artist,
+                                int64_t durationMs, SongInfoCallback cb);
 
     // 手动搜索候选（网易云 YRC/LRC、QQ QRC/KRC/LRC 各最多 5 条），结果在 UI 线程回调
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,

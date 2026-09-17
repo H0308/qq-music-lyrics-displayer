@@ -2642,7 +2642,7 @@ int LyricProvider::findLine(const std::vector<LyricLine>& lines, int64_t positio
 }
 
 void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
-                                          SearchCallback cb) {
+                                           SearchCallback cb) {
     runtime_log::writef(L"[action][manual-search] request title=\"%ls\" artist=\"%ls\"",
                         title.c_str(), artist.c_str());
     Impl* impl = impl_.get();
@@ -2702,6 +2702,37 @@ void LyricProvider::searchCandidatesAsync(const std::wstring& title, const std::
         if (cb)
             cb(std::move(result));
     });
+    std::lock_guard<std::mutex> lk(impl_->mtx);
+    impl_->sweepFinished();
+    impl_->workers.push_back(std::move(worker));
+}
+
+void LyricProvider::requestQqSongInfoAsync(const std::wstring& title,
+                                           const std::wstring& artist,
+                                           int64_t durationMs,
+                                           SongInfoCallback cb) {
+    runtime_log::writef(L"[cover][QQ] song-info request title=\"%ls\" artist=\"%ls\" "
+                        L"duration=%lldms",
+                        title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
+    Impl* impl = impl_.get();
+    Impl::Worker worker;
+    auto done = worker.done;
+    worker.thread = std::thread(
+        [impl, title, artist, durationMs, cb = std::move(cb), done]() mutable {
+            DoneFlag flag{done};
+            SongInfo info;
+            CURL* curl = curl_easy_init();
+            if (curl) {
+                impl->fillSongInfo(curl, title, artist, durationMs, info);
+                curl_easy_cleanup(curl);
+            }
+            runtime_log::writef(L"[cover][QQ] song-info result title=\"%ls\" artist=\"%ls\" "
+                                L"albummid=%ls",
+                                title.c_str(), artist.c_str(),
+                                info.albummid.empty() ? L"(empty)" : info.albummid.c_str());
+            if (cb)
+                cb(info);
+        });
     std::lock_guard<std::mutex> lk(impl_->mtx);
     impl_->sweepFinished();
     impl_->workers.push_back(std::move(worker));

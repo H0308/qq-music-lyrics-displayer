@@ -70,6 +70,7 @@ constexpr UINT kMsgHolidayReady = WM_APP + 8;
 constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
 constexpr UINT kMsgTickTickTaskCompleteReady = WM_APP + 10;
 constexpr UINT kMsgTaskbarNoSpace = WM_APP + 11;
+constexpr UINT kMsgQqCoverInfoReady = WM_APP + 12;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -170,10 +171,28 @@ const wchar_t* trayCommandName(int command) {
     }
 }
 
+enum class CoverSource { Smtc, QqApi, NeteaseApi };
+
+const wchar_t* coverSourceName(CoverSource source) {
+    switch (source) {
+    case CoverSource::Smtc: return L"smtc";
+    case CoverSource::QqApi: return L"qq-api";
+    case CoverSource::NeteaseApi: return L"netease-api";
+    default: return L"unknown";
+    }
+}
+
 struct CoverPayload {
     std::wstring key;
     uint64_t requestGeneration = 0;
+    CoverSource source = CoverSource::Smtc;
     std::shared_ptr<const std::vector<uint8_t>> cover;
+};
+
+struct QqCoverInfoPayload {
+    std::wstring key;
+    uint64_t requestGeneration = 0;
+    std::wstring albummid;
 };
 
 struct LyricPayload {
@@ -863,11 +882,55 @@ struct App {
         updateLyricCapabilities({});
     }
 
-    void logCoverCreated(const wchar_t* source,
+    void logCoverCreated(CoverSource source,
                          const std::shared_ptr<const std::vector<uint8_t>>& cover) {
-        if (cover && !cover->empty())
-            runtime_log::writef(L"[resource][event] cover-created source=%s bytes=%zu", source,
-                                cover->size());
+        if (!cover || cover->empty())
+            return;
+        const wchar_t* sourceName = coverSourceName(source);
+        runtime_log::writef(L"[resource][event] cover-created source=%s bytes=%zu", sourceName,
+                            cover->size());
+        runtime_log::writef(L"[cover] selected source=%s track=%s bytes=%zu", sourceName,
+                            currentKey.c_str(), cover->size());
+    }
+
+    CoverProvider::ReadyCallback coverReadyCallback(CoverSource source) {
+        const std::wstring key = currentKey;
+        const uint64_t generation = requestGeneration_;
+        return [this, key, generation, source](
+                   std::shared_ptr<const std::vector<uint8_t>> cover) {
+            if (!cover || cover->empty())
+                return;
+            auto* payload = new CoverPayload{key, generation, source, std::move(cover)};
+            if (!PostThreadMessageW(mainThread, kMsgCoverReady, 1,
+                                    reinterpret_cast<LPARAM>(payload)))
+                delete payload;
+        };
+    }
+
+    void requestQqCoverFallback(const std::wstring& albummid) {
+        if (!albummid.empty())
+            coverProvider.requestAsync(albummid, coverReadyCallback(CoverSource::QqApi));
+    }
+
+    void requestQqCoverInfoFallback(const SmtcSnapshot& snap) {
+        const std::wstring key = currentKey;
+        const uint64_t generation = requestGeneration_;
+        const DWORD targetThread = mainThread;
+        const int64_t durationMs = snap.timelineStale ? 0 : snap.durationMs;
+        provider.requestQqSongInfoAsync(
+            snap.title, snap.artist, durationMs,
+            [targetThread, key, generation](const SongInfo& info) {
+                auto* payload = new QqCoverInfoPayload{key, generation, info.albummid};
+                if (!PostThreadMessageW(targetThread, kMsgQqCoverInfoReady, 0,
+                                        reinterpret_cast<LPARAM>(payload)))
+                    delete payload;
+            });
+    }
+
+    void requestNeteaseCoverFallback(const std::wstring& songId) {
+        if (!songId.empty())
+            coverProvider.requestNeteaseAsync(songId,
+                                              coverReadyCallback(CoverSource::NeteaseApi));
     }
 
     void releaseCurrentCover() {
@@ -2488,21 +2551,14 @@ struct App {
             publishPresentationFrame(snap, true, true);
             runtime_log::writef(L"[lyric] manual override applied: %s", currentKey.c_str());
             updateRuntimeLogState(snap);
-            // 手动选择后同样兜底封面
+            // 手动选择后同样兜底封面；网易云不依赖手动候选，仍使用当前播放歌曲 ID。
             if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
-                const std::wstring albummid = provider.songInfo().albummid;
-                if (!albummid.empty()) {
-                    const std::wstring key = currentKey;
-                    const uint64_t generation = requestGeneration_;
-                    coverProvider.requestAsync(albummid,
-                        [this, key, generation](std::shared_ptr<const std::vector<uint8_t>> cover) {
-                            if (!cover || cover->empty()) return;
-                            auto* payload = new CoverPayload{key, generation, std::move(cover)};
-                            if (!PostThreadMessageW(mainThread, kMsgCoverReady, 1,
-                                                    reinterpret_cast<LPARAM>(payload)))
-                                delete payload;
-                        });
-                }
+                if (snap.player == SmtcPlayerType::NetEase)
+                    requestNeteaseCoverFallback(snap.neteaseSongId);
+                else if (!provider.songInfo().albummid.empty())
+                    requestQqCoverFallback(provider.songInfo().albummid);
+                else
+                    requestQqCoverInfoFallback(snap);
             }
         });
         manualSearchDialog->show();
@@ -2711,7 +2767,7 @@ struct App {
             }
             if (snap.thumbnail && !snap.thumbnail->empty()) {
                 lastCover_ = snap.thumbnail;
-                logCoverCreated(L"smtc", lastCover_);
+                logCoverCreated(CoverSource::Smtc, lastCover_);
             }
             if (!durationOnlyTrackUpdate)
                 hasAlbumColor_ = false;
@@ -2721,6 +2777,8 @@ struct App {
             if (snap.player == SmtcPlayerType::NetEase) {
                 cancelLyricDebounce();
                 startLyricRequest(snap);
+                if (!snap.thumbnail || snap.thumbnail->empty())
+                    requestNeteaseCoverFallback(snap.neteaseSongId);
             } else if (trayHwnd) {
                 // QQ：等 SMTC 切歌事件批合并后再请求；期间 lyricLoading_ 保持 true，
                 // 界面停留在「歌词加载中…」而不是闪「暂无歌词」。
@@ -2747,7 +2805,7 @@ struct App {
                         L"[resource][event] cover-released source=api bytes=%zu",
                         lastCover_->size());
                 }
-                logCoverCreated(L"smtc", snap.thumbnail);
+                logCoverCreated(CoverSource::Smtc, snap.thumbnail);
             }
             if (snap.thumbnail && !snap.thumbnail->empty())
                 lastCover_ = snap.thumbnail;
@@ -2783,6 +2841,7 @@ struct App {
             return;
 
         lyricLoading_ = false;
+        std::wstring coverAlbummid;
         if (payload->ok) {
             currentLyrics_ = provider.lines();
             currentLyricsFromLocal_ = snap.player == SmtcPlayerType::QQMusic &&
@@ -2794,26 +2853,7 @@ struct App {
                                  : currentLyricsFromLocal_ ? L"local" : L"online");
             runtime_log::writef(L"[lyric] loaded %zu lines: %s", currentLyrics_.size(),
                                 currentKey.c_str());
-            // 仅 QQ 继续使用现有封面兜底；网易云阶段一不把 QQ albummid 接口当作其数据源。
-            if (snap.player == SmtcPlayerType::QQMusic &&
-                (!lastSmtcThumbnail || lastSmtcThumbnail->empty())) {
-                const std::wstring albummid = provider.songInfo().albummid;
-                if (albummid.empty()) {
-                    runtime_log::writef(L"[cover] no albummid from search: %s",
-                                        currentKey.c_str());
-                } else {
-                    const std::wstring key = currentKey;
-                    const uint64_t generation = requestGeneration_;
-                    coverProvider.requestAsync(albummid, [this, key, generation](
-                                                   std::shared_ptr<const std::vector<uint8_t>> cover) {
-                        if (!cover || cover->empty()) return;
-                        auto* payload = new CoverPayload{key, generation, std::move(cover)};
-                        if (!PostThreadMessageW(mainThread, kMsgCoverReady, 1,
-                                                reinterpret_cast<LPARAM>(payload)))
-                            delete payload;
-                    });
-                }
-            }
+            coverAlbummid = provider.songInfo().albummid;
         } else {
             if (lyricRequestStale_) {
                 // 时间线不可信期间发出的请求：失败大概率是旧时长触发候选的 15 秒
@@ -2827,8 +2867,35 @@ struct App {
             releaseCurrentLyrics();
             runtime_log::writef(L"[lyric] not found: %s", currentKey.c_str());
         }
+        // QQ 封面标识与歌词来源解耦：在线歌词已带 albummid 时直接使用；本地歌词或
+        // 歌词未命中时单独复用 QQ 匹配规则查询，不替换当前歌词。
+        if (snap.player == SmtcPlayerType::QQMusic &&
+            (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) &&
+            (!lastCover_ || lastCover_->empty())) {
+            if (!coverAlbummid.empty())
+                requestQqCoverFallback(coverAlbummid);
+            else
+                requestQqCoverInfoFallback(snap);
+        }
         publishPresentationFrame(snap, true, true);
         updateRuntimeLogState(snap);
+    }
+
+    void onQqCoverInfoReady(std::unique_ptr<QqCoverInfoPayload> payload) {
+        if (!payload || payload->key != currentKey ||
+            payload->requestGeneration != requestGeneration_)
+            return;
+        SmtcSnapshot snap = monitor.snapshot();
+        if (!snapshotMatchesTrackKey(snap, currentKey) ||
+            (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) ||
+            (lastCover_ && !lastCover_->empty()))
+            return;
+        if (payload->albummid.empty()) {
+            runtime_log::writef(L"[cover][QQ] no albummid from song-info: %s",
+                                currentKey.c_str());
+            return;
+        }
+        requestQqCoverFallback(payload->albummid);
     }
 
     void onCoverReady(std::unique_ptr<CoverPayload> payload) {
@@ -2839,9 +2906,8 @@ struct App {
         if (!snapshotMatchesTrackKey(snap, currentKey))
             return;
         if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
-        runtime_log::writef(L"[cover] loaded from API: %s", currentKey.c_str());
         lastCover_ = payload->cover;
-        logCoverCreated(L"api", lastCover_);
+        logCoverCreated(payload->source, lastCover_);
         publishPresentationFrame(snap, true);
         tryExtractAlbumColor();
         updateRuntimeLogState(snap);
@@ -5188,6 +5254,10 @@ int main() {
             else if (msg.message == kMsgCoverReady) {
                 app.onCoverReady(std::unique_ptr<CoverPayload>(
                     reinterpret_cast<CoverPayload*>(msg.lParam)));
+            }
+            else if (msg.message == kMsgQqCoverInfoReady) {
+                app.onQqCoverInfoReady(std::unique_ptr<QqCoverInfoPayload>(
+                    reinterpret_cast<QqCoverInfoPayload*>(msg.lParam)));
             }
             else if (msg.message == kMsgQqLocalFolderReady) {
                 auto payload = std::unique_ptr<QqLocalFolderPayload>(

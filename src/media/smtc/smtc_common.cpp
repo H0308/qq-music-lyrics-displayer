@@ -4,8 +4,38 @@
 #include <mutex>
 
 #include <winrt/Windows.Storage.Streams.h>
+#include <wincodec.h>
 
 namespace smtc {
+
+namespace {
+
+bool isDecodableImage(const std::vector<uint8_t>& data) {
+    if (data.empty())
+        return false;
+
+    winrt::com_ptr<IWICImagingFactory> factory;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                __uuidof(IWICImagingFactory), factory.put_void())))
+        return false;
+    winrt::com_ptr<IWICStream> stream;
+    if (FAILED(factory->CreateStream(stream.put())) ||
+        FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(data.data()),
+                                            static_cast<DWORD>(data.size()))))
+        return false;
+    winrt::com_ptr<IWICBitmapDecoder> decoder;
+    if (FAILED(factory->CreateDecoderFromStream(stream.get(), nullptr, WICDecodeMetadataCacheOnLoad,
+                                                decoder.put())))
+        return false;
+    winrt::com_ptr<IWICBitmapFrameDecode> frame;
+    if (FAILED(decoder->GetFrame(0, frame.put())))
+        return false;
+    UINT width = 0;
+    UINT height = 0;
+    return SUCCEEDED(frame->GetSize(&width, &height)) && width > 0 && height > 0;
+}
+
+} // namespace
 
 int64_t nowUtcMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -77,6 +107,8 @@ std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
             return nullptr;
         loadOp.get();
         reader.ReadBytes(winrt::array_view<uint8_t>(buffer->data(), (uint32_t)buffer->size()));
+        if (!isDecodableImage(*buffer))
+            return nullptr;
         return buffer;
     } catch (...) {
         return nullptr;
