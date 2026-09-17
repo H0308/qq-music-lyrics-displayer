@@ -4475,7 +4475,8 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
         !currentLyrics_.empty() && qqLocalLyricsEnabled_ && !qqLocalLyricsPath_.empty() &&
         !currentLyricsFromManual_;
     addItem(kCmdManualSearch, L"手动搜索歌词", settings_icon::Kind::Search);
-    if (fullTrayMenu && canSwitchLyricSource) {
+    // 歌词来源切换与当前播放内容直接相关，托盘菜单和任务栏歌词右键菜单都应提供。
+    if (canSwitchLyricSource) {
         addItem(kCmdSwitchLyricSource,
                 currentLyricsFromLocal_ ? L"切换到在线版歌词" : L"切换到本地版歌词",
                 settings_icon::Kind::LocalLyrics);
