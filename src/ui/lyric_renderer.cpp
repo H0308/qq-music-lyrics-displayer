@@ -137,8 +137,12 @@ bool LyricRenderer::createRenderTarget() {
         return true;
     if (!d2d_)
         return false;
+    // DC 渲染目标必须用软件光栅：DEFAULT（硬件优先）会让 D2D 为窗口所在显示器创建
+    // 内部 D3D 设备，在无渲染硬件的虚拟屏（远程桌面虚拟适配器等）上回退 WARP，
+    // 进程内拉起按核数扩张的线程池和与窗口像素尺寸成正比的软件表面，内存可飙至
+    // 数百 MB。这些界面只有圆角矩形和文字，CPU 光栅足够，还省掉 GPU→CPU 回传。
     auto props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
     HRESULT hr = d2d_->CreateDCRenderTarget(&props, &rt_);
     if (FAILED(hr)) {
