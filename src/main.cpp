@@ -32,6 +32,8 @@
 #include <windowsx.h>
 #include <winrt/Windows.Foundation.h>
 #include <dwmapi.h>
+#include <propkey.h>
+#include <propsys.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -55,6 +57,7 @@
 #include <string>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -629,6 +632,51 @@ fluent::NativeMenuIcon shellIconForPath(const std::wstring& path) {
     return ownMenuIcon(info.hIcon);
 }
 
+std::wstring windowAppUserModelId(HWND window) {
+    if (!window)
+        return {};
+
+    IPropertyStore* store = nullptr;
+    if (FAILED(SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&store))) || !store)
+        return {};
+
+    PROPVARIANT value{};
+    PropVariantInit(&value);
+    std::wstring appUserModelId;
+    if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value))) {
+        if (value.vt == VT_LPWSTR && value.pwszVal)
+            appUserModelId = value.pwszVal;
+        else if (value.vt == VT_BSTR && value.bstrVal)
+            appUserModelId = value.bstrVal;
+    }
+    PropVariantClear(&value);
+    store->Release();
+    return appUserModelId;
+}
+
+fluent::NativeMenuIcon packagedAppMenuIcon(HWND window) {
+    const std::wstring appUserModelId = windowAppUserModelId(window);
+    if (appUserModelId.empty())
+        return {};
+
+    // 打包应用图标由 Shell 解析，按 AUMID 缓存，避免每次打开应用收纳都重复查询。
+    static std::unordered_map<std::wstring, fluent::NativeMenuIcon> cache;
+    if (const auto it = cache.find(appUserModelId); it != cache.end())
+        return it->second;
+
+    std::wstring shellPath = L"shell:AppsFolder\\";
+    shellPath += appUserModelId;
+    SHFILEINFOW info{};
+    if (SHGetFileInfoW(shellPath.c_str(), 0, &info, sizeof(info),
+                       SHGFI_ICON | SHGFI_SMALLICON) == 0 ||
+        !info.hIcon)
+        return {};
+
+    auto icon = ownMenuIcon(info.hIcon);
+    cache.emplace(appUserModelId, icon);
+    return icon;
+}
+
 std::wstring processImagePath(DWORD processId) {
     if (processId == 0)
         return {};
@@ -645,30 +693,54 @@ std::wstring processImagePath(DWORD processId) {
     return path;
 }
 
+fluent::NativeMenuIcon processMenuIcon(DWORD processId) {
+    const std::wstring path = processImagePath(processId);
+    if (path.empty())
+        return {};
+
+    HICON largeIcon = nullptr;
+    HICON smallIcon = nullptr;
+    if (ExtractIconExW(path.c_str(), 0, &largeIcon, &smallIcon, 1) <= 0) {
+        if (largeIcon)
+            DestroyIcon(largeIcon);
+        if (smallIcon)
+            DestroyIcon(smallIcon);
+        return {};
+    }
+
+    HICON source = smallIcon ? smallIcon : largeIcon;
+    HICON copy = source ? CopyIcon(source) : nullptr;
+    if (largeIcon)
+        DestroyIcon(largeIcon);
+    if (smallIcon)
+        DestroyIcon(smallIcon);
+    return ownMenuIcon(copy);
+}
+
 fluent::NativeMenuIcon windowMenuIcon(HWND window, DWORD processId) {
+    // 菜单打开运行在主 UI 线程。先读类图标，再以很短的上限读取窗口图标，
+    // 避免无响应的目标窗口把菜单长时间卡住；最后按经典 EXE / 打包应用分别回退。
+    HICON borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
+    if (!borrowed)
+        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
     auto queryWindowIcon = [window](WPARAM kind) -> HICON {
         DWORD_PTR result = 0;
         if (!SendMessageTimeoutW(window, WM_GETICON, kind, 0,
-                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &result))
+                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, 5, &result))
             return nullptr;
         return reinterpret_cast<HICON>(result);
     };
-
-    // 优先取较大的源图标，菜单在高 DPI 下缩放到 16 DIP 时仍保持清晰。
-    HICON borrowed = queryWindowIcon(ICON_BIG);
     if (!borrowed)
         borrowed = queryWindowIcon(ICON_SMALL2);
     if (!borrowed)
-        borrowed = queryWindowIcon(ICON_SMALL);
-    if (!borrowed)
-        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
-    if (!borrowed)
-        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+        borrowed = queryWindowIcon(ICON_BIG);
     if (borrowed) {
         if (HICON copy = CopyIcon(borrowed))
             return ownMenuIcon(copy);
     }
-    return shellIconForPath(processImagePath(processId));
+    if (auto icon = processMenuIcon(processId))
+        return icon;
+    return packagedAppMenuIcon(window);
 }
 
 struct RunningTaskbarApp {

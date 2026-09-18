@@ -27,7 +27,9 @@ constexpr float kSubmenuCheckRightPad = 40.0f;
 constexpr float kRightPad = 26.0f;
 constexpr float kMinWidth = 180.0f;
 constexpr UINT kTimerSubmenu = 1;
-constexpr UINT kSubmenuDelayMs = 350;
+// 子菜单只保留很短的防误触延迟；菜单内容已经在 UI 线程准备完成，
+// 过长的延迟会被感知为打开卡顿。
+constexpr UINT kSubmenuDelayMs = 150;
 // 链外点击关闭菜单（由 WH_MOUSE_LL 钩子投递）
 constexpr UINT kMsgOutsideClick = WM_APP + 30;
 
