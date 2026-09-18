@@ -43,6 +43,8 @@ void setThemeModes(ThemeMode taskbarMode, ThemeMode windowMode);
 // 解析后的主题：无参数版本兼容普通窗口，任务栏使用显式 target。
 bool isDarkMode();
 bool isDarkMode(ThemeTarget target);
+// 直接读取 Windows 个性化中的“应用模式”，不受应用内主题选择器影响。
+bool isWindowsAppDarkMode();
 
 // 系统强调色（取不到时回退 Win11 默认蓝）
 COLORREF accentColor();

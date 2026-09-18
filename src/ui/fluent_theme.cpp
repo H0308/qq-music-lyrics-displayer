@@ -233,6 +233,10 @@ bool isDarkMode(ThemeTarget target) {
                                                          : gWindowThemeMode);
 }
 
+bool isWindowsAppDarkMode() {
+    return detectAppDarkMode();
+}
+
 COLORREF accentColor() {
     try {
         // 缓存 UISettings 对象，避免每次调用都重新激活运行时类；

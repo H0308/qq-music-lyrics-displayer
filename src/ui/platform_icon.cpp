@@ -481,6 +481,10 @@ std::wstring fallbackExeName(const std::wstring& path) {
 
 namespace platform_icon {
 
+bool readHiconPixels(HICON icon, std::vector<BYTE>& pixels, UINT& width, UINT& height) {
+    return readIconPixels(icon, pixels, width, height);
+}
+
 bool readSourceIconPixels(const std::wstring& sourceAppUserModelId,
                           std::vector<BYTE>& pixels, UINT& width, UINT& height) {
     const std::wstring path = resolveSourceIconPath(sourceAppUserModelId);

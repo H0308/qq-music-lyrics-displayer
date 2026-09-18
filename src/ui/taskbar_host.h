@@ -66,6 +66,13 @@ enum class IdleQuoteBackgroundScope {
     All,
 };
 
+// 任务栏歌词的承载方式。嵌入模式只占用任务栏中的一段空闲区，沉浸模式
+// 覆盖当前任务栏客户区；两者共用同一套歌词与媒体渲染状态。
+enum class TaskbarViewMode {
+    Embedded,
+    Immersive,
+};
+
 // 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
 // 数值保持与 settings.json 中已有的 0/1/2 语义一致，Minimal 追加为 3。
 enum class RenderMode {
@@ -92,6 +99,8 @@ public:
     void applySpectrumPatch(const SpectrumPatch& patch) override;
     void setMediaInfo(const OverlayMediaInfo& info) override;
     void setControlCallback(std::function<void(MediaControl)> cb) override;
+    // 沉浸模式专属退出回调，不受普通任务栏歌词内嵌控件设置影响。
+    void setImmersiveExitCallback(std::function<void()> cb);
     void setAppVolume(const AppVolumeState& state) override;
     void setAppVolumeCallback(std::function<void(int percent)> cb) override;
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
@@ -100,6 +109,8 @@ public:
     void setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
     void setContextMenuCallback(std::function<void(POINT)> cb);
+    // 沉浸模式应用收纳按钮：由应用层实时枚举并显示运行中/已固定应用。
+    void setAppCollectionCallback(std::function<void(POINT)> cb);
     // 拖动歌词并吸附到另一有效锚点后通知应用层持久化位置。
     void setPositionModeChangedCallback(std::function<void(int)> cb);
     void setStatusTextCycleCompletedCallback(std::function<void()> cb);
@@ -175,6 +186,10 @@ public:
     // 任务栏歌词背景：封面模糊（不透明度可调）或跟随深浅色的纯色，画在最底层
     void setBackground(TaskbarBackground mode);
     void setCoverBackgroundOpacity(int percent);
+
+    // 沉浸模式：覆盖当前任务栏客户区，颜色跟随 Windows 应用模式，透明度可调。
+    void setViewMode(TaskbarViewMode mode);
+    void setImmersiveMaskOpacity(int opacityPercent);
 
     void show() override;
     void hide() override;

@@ -31,6 +31,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <winrt/Windows.Foundation.h>
+#include <dwmapi.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -124,6 +125,8 @@ constexpr UINT kCmdRenderModeLow = 131;
 constexpr UINT kCmdRenderModeStopped = 132;
 constexpr UINT kCmdRenderModeMinimal = 133;
 constexpr UINT kCmdSecondaryOff = 134;
+constexpr UINT kCmdTaskbarImmersive = 135;
+constexpr int kTaskbarAppCommandBase = 20000;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
@@ -163,6 +166,7 @@ const wchar_t* trayCommandName(int command) {
     case kCmdRenderModeStopped: return L"render-mode-stopped";
     case kCmdRenderModeMinimal: return L"render-mode-minimal";
     case kCmdSecondaryOff: return L"secondary-off";
+    case kCmdTaskbarImmersive: return L"taskbar-immersive";
     case kCmdPickFont: return L"pick-font";
     case kCmdFontColorEffect: return L"font-color-effect";
     case kCmdManualSearch: return L"manual-search";
@@ -607,7 +611,224 @@ bool snapshotMatchesTrackKey(const SmtcSnapshot& snap, const std::wstring& key) 
     return key.empty() || makeTrackKey(snap) == key;
 }
 
+fluent::NativeMenuIcon ownMenuIcon(HICON icon) {
+    return fluent::NativeMenuIcon(icon, [](std::remove_pointer_t<HICON>* value) {
+        if (value)
+            DestroyIcon(value);
+    });
+}
+
+fluent::NativeMenuIcon shellIconForPath(const std::wstring& path) {
+    if (path.empty())
+        return {};
+    SHFILEINFOW info{};
+    if (SHGetFileInfoW(path.c_str(), 0, &info, sizeof(info),
+                       SHGFI_ICON | SHGFI_SMALLICON) == 0 ||
+        !info.hIcon)
+        return {};
+    return ownMenuIcon(info.hIcon);
+}
+
+std::wstring processImagePath(DWORD processId) {
+    if (processId == 0)
+        return {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (!process)
+        return {};
+    std::wstring path(32768, L'\0');
+    DWORD length = static_cast<DWORD>(path.size());
+    const bool queried = QueryFullProcessImageNameW(process, 0, path.data(), &length) != FALSE;
+    CloseHandle(process);
+    if (!queried || length == 0)
+        return {};
+    path.resize(length);
+    return path;
+}
+
+fluent::NativeMenuIcon windowMenuIcon(HWND window, DWORD processId) {
+    auto queryWindowIcon = [window](WPARAM kind) -> HICON {
+        DWORD_PTR result = 0;
+        if (!SendMessageTimeoutW(window, WM_GETICON, kind, 0,
+                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &result))
+            return nullptr;
+        return reinterpret_cast<HICON>(result);
+    };
+
+    // 优先取较大的源图标，菜单在高 DPI 下缩放到 16 DIP 时仍保持清晰。
+    HICON borrowed = queryWindowIcon(ICON_BIG);
+    if (!borrowed)
+        borrowed = queryWindowIcon(ICON_SMALL2);
+    if (!borrowed)
+        borrowed = queryWindowIcon(ICON_SMALL);
+    if (!borrowed)
+        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
+    if (!borrowed)
+        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+    if (borrowed) {
+        if (HICON copy = CopyIcon(borrowed))
+            return ownMenuIcon(copy);
+    }
+    return shellIconForPath(processImagePath(processId));
+}
+
+struct RunningTaskbarApp {
+    HWND window = nullptr;
+    std::wstring title;
+    fluent::NativeMenuIcon icon;
+};
+
+struct PinnedTaskbarApp {
+    std::wstring shortcutPath;
+    std::wstring title;
+    fluent::NativeMenuIcon icon;
+    size_t taskbarOrder = 0;
+};
+
+std::wstring trimTaskbarAppTitle(std::wstring value) {
+    const auto first = std::find_if_not(value.begin(), value.end(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    });
+    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](wchar_t ch) {
+        return std::iswspace(ch) != 0;
+    }).base();
+    if (first >= last)
+        return {};
+    value = std::wstring(first, last);
+    constexpr size_t kMaxMenuTitleLength = 48;
+    if (value.size() > kMaxMenuTitleLength) {
+        value.resize(kMaxMenuTitleLength - 1);
+        value += L'…';
+    }
+    return value;
+}
+
+std::vector<RunningTaskbarApp> enumerateRunningTaskbarApps() {
+    std::vector<RunningTaskbarApp> apps;
+    EnumWindows(
+        [](HWND window, LPARAM param) -> BOOL {
+            auto& result = *reinterpret_cast<std::vector<RunningTaskbarApp>*>(param);
+            if (!IsWindowVisible(window) || window == GetShellWindow())
+                return TRUE;
+
+            const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+            const bool forceTaskbar = (exStyle & WS_EX_APPWINDOW) != 0;
+            if (!forceTaskbar &&
+                ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0 ||
+                 GetWindow(window, GW_OWNER) != nullptr))
+                return TRUE;
+
+            BOOL cloaked = FALSE;
+            if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked,
+                                                sizeof(cloaked))) &&
+                cloaked)
+                return TRUE;
+
+            DWORD processId = 0;
+            GetWindowThreadProcessId(window, &processId);
+            if (processId == 0 || processId == GetCurrentProcessId())
+                return TRUE;
+
+            const int titleLength = GetWindowTextLengthW(window);
+            if (titleLength <= 0)
+                return TRUE;
+            std::wstring title(static_cast<size_t>(titleLength) + 1, L'\0');
+            const int copied = GetWindowTextW(window, title.data(), titleLength + 1);
+            if (copied <= 0)
+                return TRUE;
+            title.resize(static_cast<size_t>(copied));
+            title = trimTaskbarAppTitle(std::move(title));
+            if (!title.empty())
+                result.push_back(
+                    {window, std::move(title), windowMenuIcon(window, processId)});
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&apps));
+    return apps;
+}
+
+std::vector<BYTE> readTaskbandFavorites() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband",
+                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
+        return {};
+
+    DWORD type = 0;
+    DWORD size = 0;
+    LONG status = RegQueryValueExW(key, L"Favorites", nullptr, &type, nullptr, &size);
+    if (status != ERROR_SUCCESS || type != REG_BINARY || size == 0) {
+        RegCloseKey(key);
+        return {};
+    }
+
+    std::vector<BYTE> value(size);
+    status = RegQueryValueExW(key, L"Favorites", nullptr, &type, value.data(), &size);
+    RegCloseKey(key);
+    if (status != ERROR_SUCCESS || type != REG_BINARY)
+        return {};
+    value.resize(size);
+    return value;
+}
+
+size_t taskbandFavoriteOrder(const std::vector<BYTE>& favorites,
+                             const std::wstring& shortcutFileName) {
+    if (favorites.empty() || shortcutFileName.empty())
+        return std::wstring::npos;
+    const auto* nameBegin = reinterpret_cast<const BYTE*>(shortcutFileName.data());
+    const auto* nameEnd = nameBegin + shortcutFileName.size() * sizeof(wchar_t);
+    const auto match = std::search(favorites.begin(), favorites.end(), nameBegin, nameEnd);
+    if (match == favorites.end())
+        return std::wstring::npos;
+    return static_cast<size_t>(std::distance(favorites.begin(), match));
+}
+
+std::vector<PinnedTaskbarApp> enumeratePinnedTaskbarApps() {
+    std::vector<PinnedTaskbarApp> apps;
+    const std::vector<BYTE> favorites = readTaskbandFavorites();
+    if (favorites.empty())
+        return apps;
+
+    wchar_t appData[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
+                                appData)))
+        return apps;
+
+    const std::filesystem::path taskbarPins =
+        std::filesystem::path(appData) / L"Microsoft" / L"Internet Explorer" /
+        L"Quick Launch" / L"User Pinned" / L"TaskBar";
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it(taskbarPins, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec))
+            continue;
+        const std::wstring extension = it->path().extension().wstring();
+        if (_wcsicmp(extension.c_str(), L".lnk") != 0 &&
+            _wcsicmp(extension.c_str(), L".url") != 0)
+            continue;
+        const size_t taskbarOrder =
+            taskbandFavoriteOrder(favorites, it->path().filename().wstring());
+        if (taskbarOrder == std::wstring::npos)
+            continue;
+        std::wstring title = trimTaskbarAppTitle(it->path().stem().wstring());
+        if (!title.empty()) {
+            const std::wstring shortcutPath = it->path().wstring();
+            apps.push_back(
+                {shortcutPath, std::move(title), shellIconForPath(shortcutPath),
+                 taskbarOrder});
+        }
+    }
+    std::sort(apps.begin(), apps.end(), [](const auto& left, const auto& right) {
+        return left.taskbarOrder < right.taskbarOrder;
+    });
+    return apps;
+}
+
 struct App {
+    struct TaskbarAppAction {
+        HWND window = nullptr;
+        std::wstring shortcutPath;
+    };
+
     DWORD mainThread = GetCurrentThreadId();
     runtime_log::RuntimeLogger runtimeLogger_;
     SmtcMonitor monitor;
@@ -658,6 +879,7 @@ struct App {
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
     HWND trayHwnd = nullptr;
+    std::vector<TaskbarAppAction> taskbarAppActions_;
     UINT taskbarCreatedMsg_ = 0; // Explorer 重启广播（只有顶层窗口收得到，托盘窗口不能用 HWND_MESSAGE）
     bool shutdownRequested_ = false;
 
@@ -744,6 +966,8 @@ struct App {
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
+    bool taskbarImmersive_ = false;
+    int immersiveMaskOpacity_ = 88;
     bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
@@ -1124,6 +1348,37 @@ struct App {
         saveSettings();
     }
 
+    bool taskbarImmersiveVisibleFor(const SmtcSnapshot& snap) const {
+        return taskbarImmersive_ && !taskbarVertical_ && snap.sessionAlive;
+    }
+
+    void syncTaskbarImmersiveView(const SmtcSnapshot& snap) {
+        if (!taskbarHost)
+            return;
+        taskbarHost->setViewMode(taskbarImmersiveVisibleFor(snap)
+                                     ? TaskbarViewMode::Immersive
+                                     : TaskbarViewMode::Embedded);
+    }
+
+    void applyTaskbarImmersive(bool on) {
+        taskbarImmersive_ = on;
+        if (taskbarHost) {
+            taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
+            syncTaskbarImmersiveView(monitor.snapshot());
+        }
+        logSettingBool(L"taskbar-immersive", taskbarImmersive_);
+        saveSettings();
+        refreshSettingsDialog(true);
+    }
+
+    void applyImmersiveMaskOpacity(int percent) {
+        immersiveMaskOpacity_ = std::clamp(percent, 0, 100);
+        if (taskbarHost)
+            taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
+        logSettingInt(L"immersive-mask-opacity", immersiveMaskOpacity_);
+        saveSettings();
+    }
+
     bool isRenderMode(RenderMode mode) const {
         return renderMode_ == static_cast<int>(mode);
     }
@@ -1180,6 +1435,8 @@ struct App {
             minimal ? TaskbarBackground::None
                     : static_cast<TaskbarBackground>(taskbarBackground_));
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+        taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
+        syncTaskbarImmersiveView(monitor.snapshot());
     }
 
     // 频谱实际启停 = 用户开关 && 横向任务栏 && 正常渲染模式 && 宿主存在；
@@ -1286,6 +1543,8 @@ struct App {
     }
 
     void applyHoverControls(bool on) {
+        if (taskbarImmersive_ && !taskbarVertical_)
+            return;
         hoverPlaybackControls_ = on;
         if (taskbarHost)
             taskbarHost->setControlsOnHover(on);
@@ -1302,6 +1561,8 @@ struct App {
     }
 
     void applyHoverControlStyle(int style) {
+        if (taskbarImmersive_ && !taskbarVertical_)
+            return;
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
         if (taskbarHost)
             taskbarHost->setHoverControlStyle(
@@ -1499,6 +1760,8 @@ struct App {
     }
 
     void applyLyricAlignment(int alignment) {
+        if (taskbarImmersive_ && !taskbarVertical_)
+            return;
         lyricAlignment_ = alignment == 1 ? LyricAlignment::Center
                           : alignment == 2 ? LyricAlignment::Right
                                            : LyricAlignment::Left;
@@ -2304,6 +2567,8 @@ struct App {
         host->setAllowOverlap(allowOverlap);
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
+        host->setImmersiveExitCallback([this] { applyTaskbarImmersive(false); });
+        host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
         host->setPositionModeChangedCallback([this](int mode) {
             mode = mode == 1 ? 1 : 0;
@@ -2672,6 +2937,7 @@ struct App {
     // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
     void onSmtcChanged() {
         SmtcSnapshot snap = monitor.snapshot();
+        syncTaskbarImmersiveView(snap);
         syncAppVolumeTarget(snap);
         if (snap.sessionAlive) {
             // 媒体会话优先于启动任务播报；即使任务请求先返回，也不能覆盖已经在播放的歌词。
@@ -2965,6 +3231,9 @@ struct App {
     std::vector<fluent::FluentMenuItem> buildMenuItems(bool fullTrayMenu);
     void showTrayMenu();
     void showTaskbarMenu(POINT screenPt);
+    void showTaskbarApps(POINT screenPt);
+    std::vector<fluent::FluentMenuItem> buildTaskbarAppItems();
+    void onTaskbarAppCommand(int command);
     void onMenuCommand(int cmd, const wchar_t* source);
     void showRuntimeLog();
     void initializeRuntimeLogger();
@@ -3456,6 +3725,8 @@ void App::loadSettings() {
             hasGlobalLyricAppearance_ = true;
         }
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
+        taskbarImmersive_ = j.value("taskbarImmersive", false);
+        immersiveMaskOpacity_ = std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
         renderMode_ = static_cast<int>(RenderMode::Normal);
@@ -3706,6 +3977,10 @@ void App::saveSettings() {
             j["holidayCalendar"]["days"].push_back({
                 {"date", day.date}, {"type", day.type}, {"name", utf8Of(day.name)}});
         j["taskbarPosition"] = taskbarPosition_;
+        j["taskbarImmersive"] = taskbarImmersive_;
+        j["immersiveMaskOpacity"] = immersiveMaskOpacity_;
+        j.erase("immersiveMaskCustomColor");
+        j.erase("immersiveMaskColor");
         j["taskbarContextMenu"] = taskbarContextMenuEnabled_;
         // 性能模式不写入配置，重启后由 loadSettings() 恢复正常模式。
         j["hoverPlaybackControls"] = hoverPlaybackControls_;
@@ -4435,6 +4710,7 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     };
 
     const bool taskbarEnabled = taskbarEnabledForUserAction();
+    const bool taskbarImmersiveActive = taskbarImmersiveVisibleFor(monitor.snapshot());
     addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词",
             settings_icon::Kind::Display);
     fluent::FluentMenuItem performance;
@@ -4454,20 +4730,26 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     addRenderMode(kCmdRenderModeMinimal, L"极简", RenderMode::Minimal);
     items.push_back(std::move(performance));
     if (taskbarEnabled) {
-        fluent::FluentMenuItem pos;
-        pos.text = L"任务栏位置";
-        pos.icon = settings_icon::Kind::Position;
-        fluent::FluentMenuItem sub;
-        sub.id = kCmdTaskbarPosNotify;
-        sub.text = L"通知区域左侧";
-        sub.icon = settings_icon::Kind::Position;
-        sub.checked = taskbarPosition_ == 0;
-        pos.submenu.push_back(sub);
-        sub.id = kCmdTaskbarPosLeft;
-        sub.text = L"任务栏最左侧";
-        sub.checked = taskbarPosition_ == 1;
-        pos.submenu.push_back(sub);
-        items.push_back(std::move(pos));
+        if (!taskbarImmersiveActive) {
+            fluent::FluentMenuItem pos;
+            pos.text = L"任务栏位置";
+            pos.icon = settings_icon::Kind::Position;
+            fluent::FluentMenuItem sub;
+            sub.id = kCmdTaskbarPosNotify;
+            sub.text = L"通知区域左侧";
+            sub.icon = settings_icon::Kind::Position;
+            sub.checked = taskbarPosition_ == 0;
+            pos.submenu.push_back(sub);
+            sub.id = kCmdTaskbarPosLeft;
+            sub.text = L"任务栏最左侧";
+            sub.checked = taskbarPosition_ == 1;
+            pos.submenu.push_back(sub);
+            items.push_back(std::move(pos));
+        }
+        addItem(kCmdTaskbarImmersive,
+                taskbarImmersive_ ? L"关闭任务栏沉浸模式" : L"开启任务栏沉浸模式",
+                settings_icon::Kind::Display, false,
+                !taskbarVertical_);
     }
     const SmtcSnapshot snap = monitor.snapshot();
     const bool canSwitchLyricSource =
@@ -4528,10 +4810,90 @@ void App::showTrayMenu() {
 }
 
 void App::showTaskbarMenu(POINT screenPt) {
-    if (!taskbarContextMenuEnabled_)
-        return;
     fluent::FluentMenu::show(trayHwnd, screenPt, buildMenuItems(false),
                              [this](int cmd) { onMenuCommand(cmd, L"taskbar-menu"); });
+}
+
+std::vector<fluent::FluentMenuItem> App::buildTaskbarAppItems() {
+    taskbarAppActions_.clear();
+
+    auto addAction = [this](fluent::FluentMenuItem& group, const std::wstring& title,
+                            settings_icon::Kind icon, fluent::NativeMenuIcon nativeIcon,
+                            TaskbarAppAction action) {
+        fluent::FluentMenuItem item;
+        item.id = kTaskbarAppCommandBase + static_cast<int>(taskbarAppActions_.size());
+        item.text = title;
+        item.icon = icon;
+        item.nativeIcon = std::move(nativeIcon);
+        group.submenu.push_back(std::move(item));
+        taskbarAppActions_.push_back(std::move(action));
+    };
+    auto addEmpty = [](fluent::FluentMenuItem& group, const wchar_t* text) {
+        fluent::FluentMenuItem item;
+        item.text = text;
+        item.enabled = false;
+        group.submenu.push_back(std::move(item));
+    };
+
+    const auto runningApps = enumerateRunningTaskbarApps();
+    fluent::FluentMenuItem running;
+    running.text = L"正在运行（" + std::to_wstring(runningApps.size()) + L"）";
+    running.icon = settings_icon::Kind::Apps;
+    for (const auto& app : runningApps)
+        addAction(running, app.title, settings_icon::Kind::Apps, app.icon,
+                  TaskbarAppAction{app.window, {}});
+    if (running.submenu.empty())
+        addEmpty(running, L"暂无正在运行的应用");
+
+    const auto pinnedApps = enumeratePinnedTaskbarApps();
+    fluent::FluentMenuItem pinned;
+    pinned.text = L"已固定（" + std::to_wstring(pinnedApps.size()) + L"）";
+    pinned.icon = settings_icon::Kind::Persist;
+    for (const auto& app : pinnedApps)
+        addAction(pinned, app.title, settings_icon::Kind::Persist, app.icon,
+                  TaskbarAppAction{nullptr, app.shortcutPath});
+    if (pinned.submenu.empty())
+        addEmpty(pinned, L"暂无可读取的固定应用");
+
+    std::vector<fluent::FluentMenuItem> items;
+    items.push_back(std::move(running));
+    items.push_back(std::move(pinned));
+    return items;
+}
+
+void App::showTaskbarApps(POINT screenPt) {
+    fluent::FluentMenu::show(trayHwnd, screenPt, buildTaskbarAppItems(),
+                             [this](int command) { onTaskbarAppCommand(command); });
+}
+
+void App::onTaskbarAppCommand(int command) {
+    const int index = command - kTaskbarAppCommandBase;
+    if (index < 0 || static_cast<size_t>(index) >= taskbarAppActions_.size())
+        return;
+
+    const TaskbarAppAction action = taskbarAppActions_[static_cast<size_t>(index)];
+    bool opened = false;
+    if (action.window) {
+        if (IsWindow(action.window)) {
+            HWND target = GetLastActivePopup(action.window);
+            if (!target || !IsWindowVisible(target))
+                target = action.window;
+            ShowWindowAsync(target, IsIconic(target) ? SW_RESTORE : SW_SHOW);
+            BringWindowToTop(target);
+            opened = SetForegroundWindow(target) != FALSE;
+        }
+        runtime_log::writef(L"[action][taskbar-apps] activate hwnd=%p result=%s",
+                            action.window, opened ? L"ok" : L"failed");
+        return;
+    }
+
+    if (!action.shortcutPath.empty()) {
+        const HINSTANCE result = ShellExecuteW(trayHwnd, L"open", action.shortcutPath.c_str(),
+                                               nullptr, nullptr, SW_SHOWNORMAL);
+        opened = reinterpret_cast<INT_PTR>(result) > 32;
+        runtime_log::writef(L"[action][taskbar-apps] launch shortcut=%s result=%s",
+                            action.shortcutPath.c_str(), opened ? L"ok" : L"failed");
+    }
 }
 
 void App::onMenuCommand(int cmd, const wchar_t* source) {
@@ -4555,11 +4917,16 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
         break;
     case kCmdTaskbarPosNotify:
     case kCmdTaskbarPosLeft:
+        if (taskbarImmersiveVisibleFor(monitor.snapshot()))
+            break;
         taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
         logSettingInt(L"taskbar-position", taskbarPosition_);
         if (taskbarHost)
             taskbarHost->setPositionMode(taskbarPosition_);
         saveSettings();
+        break;
+    case kCmdTaskbarImmersive:
+        applyTaskbarImmersive(!taskbarImmersive_);
         break;
     case kCmdSpectrum:
         applySpectrumOn(!spectrumOn_);
@@ -4809,6 +5176,8 @@ SettingsState App::currentSettingsState() const {
     st.tickTickSyncing = tickTickTasksLoading_ || !tickTickCompletingTaskId_.empty();
     st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
+    st.taskbarImmersive = vertical ? false : taskbarImmersive_;
+    st.immersiveMaskOpacity = immersiveMaskOpacity_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
     st.platformIconVisible = platformIconVisible_;
@@ -4888,6 +5257,9 @@ SettingsActions App::buildSettingsActions() {
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
+    act.onTaskbarImmersive = [this](bool on) { applyTaskbarImmersive(on); };
+    act.onImmersiveMaskOpacity =
+        [this](int percent) { applyImmersiveMaskOpacity(percent); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
     act.onSpectrumColorMode = [this](int mode) { applySpectrumColorMode(mode); };

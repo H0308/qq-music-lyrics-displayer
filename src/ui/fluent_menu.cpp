@@ -1,7 +1,8 @@
 #include "fluent_menu.h"
 
-#include "ui/lyric_renderer.h"
 #include "ui/fluent_theme.h"
+#include "ui/lyric_renderer.h"
+#include "ui/platform_icon.h"
 
 #include <windowsx.h>
 #include <shellscalingapi.h> // GetDpiForMonitor
@@ -40,6 +41,7 @@ struct MenuWnd {
     LyricRenderer renderer;
     ID2D1SolidColorBrush* brush = nullptr;
     IDWriteTextFormat* fmt = nullptr;
+    std::vector<ID2D1Bitmap*> nativeIconBitmaps;
 
     MenuWnd* root() {
         MenuWnd* m = this;
@@ -65,6 +67,42 @@ struct MenuWnd {
     void closeChainFrom();// 关闭自身及子链（退回父菜单）
     void openSubmenu();   // 为当前悬停行打开子菜单
     LRESULT handleMsg(UINT msg, WPARAM wp, LPARAM lp);
+
+    void releaseNativeIconBitmaps() {
+        for (auto*& bitmap : nativeIconBitmaps) {
+            if (bitmap) {
+                bitmap->Release();
+                bitmap = nullptr;
+            }
+        }
+        nativeIconBitmaps.clear();
+    }
+
+    void ensureNativeIconBitmaps(ID2D1RenderTarget* target) {
+        if (!target)
+            return;
+        if (nativeIconBitmaps.size() != items.size()) {
+            releaseNativeIconBitmaps();
+            nativeIconBitmaps.resize(items.size(), nullptr);
+        }
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (nativeIconBitmaps[i] || !items[i].nativeIcon)
+                continue;
+            std::vector<BYTE> pixels;
+            UINT width = 0;
+            UINT height = 0;
+            if (!platform_icon::readHiconPixels(items[i].nativeIcon.get(), pixels, width,
+                                                height))
+                continue;
+
+            const auto properties = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+                                  D2D1_ALPHA_MODE_PREMULTIPLIED),
+                96.0f, 96.0f);
+            target->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4,
+                                 &properties, &nativeIconBitmaps[i]);
+        }
+    }
 
     bool selectable(int row) const {
         return row >= 0 && row < static_cast<int>(items.size()) && !items[row].separator &&
@@ -159,6 +197,7 @@ struct MenuWnd {
         }
         if (!brush || !fmt)
             return;
+        ensureNativeIconBitmaps(rt);
 
         const Palette& p = palette();
         rt->BeginDraw();
@@ -196,14 +235,18 @@ struct MenuWnd {
                 rt->DrawLine(D2D1::Point2F(cx + 3.5f, cy + 3.5f), D2D1::Point2F(cx + 9.0f, cy - 4.0f),
                              brush, 1.6f);
             }
-            if (it.icon != settings_icon::Kind::None) {
+            const float iconTop = y + (kItemH - kIconSize) * 0.5f;
+            const D2D1_RECT_F iconRect =
+                D2D1::RectF(kIconLeft, iconTop, kIconLeft + kIconSize,
+                            iconTop + kIconSize);
+            if (i < static_cast<int>(nativeIconBitmaps.size()) && nativeIconBitmaps[i]) {
+                rt->DrawBitmap(nativeIconBitmaps[i], iconRect, it.enabled ? 1.0f : 0.45f,
+                               D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            } else if (it.icon != settings_icon::Kind::None) {
                 brush->SetColor(it.enabled ? (it.checked ? p.accent : p.textSecondary)
                                            : p.disabled);
-                const float iconTop = y + (kItemH - kIconSize) * 0.5f;
                 settings_icon::draw(
-                    rt, it.icon,
-                    D2D1::RectF(kIconLeft, iconTop, kIconLeft + kIconSize,
-                                iconTop + kIconSize),
+                    rt, it.icon, iconRect,
                     brush, 1.15f);
             }
             brush->SetColor(it.enabled ? p.text : p.textSecondary);
@@ -220,9 +263,10 @@ struct MenuWnd {
         }
 
         HRESULT hr = rt->EndDraw();
-        if (hr == D2DERR_RECREATE_TARGET)
+        if (hr == D2DERR_RECREATE_TARGET) {
+            releaseNativeIconBitmaps();
             renderer.discard();
-        else {
+        } else {
             HDC hdc = GetDC(hwnd);
             renderer.copyToDC(hdc, w, h);
             ReleaseDC(hwnd, hdc);
@@ -508,6 +552,7 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
             fmt->Release();
             fmt = nullptr;
         }
+        releaseNativeIconBitmaps();
         MenuWnd* self = this;
         if (self == g_root)
             g_root = nullptr;

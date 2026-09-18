@@ -31,6 +31,8 @@ struct SettingsState {
     bool albumCoverVisible = true;
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
+    bool taskbarImmersive = false;
+    int immersiveMaskOpacity = 88;
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
     COLORREF spectrumColor = RGB(49, 194, 124);
@@ -95,6 +97,8 @@ struct SettingsActions {
     std::function<void(bool)> onAlbumCoverVisible;
     std::function<void(bool)> onPlatformIconVisible;
     std::function<void(bool)> onCoverEffectVinyl;
+    std::function<void(bool)> onTaskbarImmersive;
+    std::function<void(int)> onImmersiveMaskOpacity;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;
     std::function<void(int)> onSpectrumColorMode; // 0 已播放色 1 专辑主题色 2 自定义色

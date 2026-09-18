@@ -20,13 +20,14 @@
 
 namespace {
 
-constexpr int kSettingsPageCount = 8;
-constexpr int kPerformancePage = 1;
-constexpr int kFloatingCardPage = 2;
-constexpr int kMediaPopupPage = 3;
-constexpr int kSpectrumPage = 4;
-constexpr int kLyricsPage = 5;
-constexpr int kSongToastPage = 6;
+constexpr int kSettingsPageCount = 9;
+constexpr int kTaskbarImmersivePage = 1;
+constexpr int kPerformancePage = 2;
+constexpr int kFloatingCardPage = 3;
+constexpr int kMediaPopupPage = 4;
+constexpr int kSpectrumPage = 5;
+constexpr int kLyricsPage = 6;
+constexpr int kSongToastPage = 7;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kRenderModeMinimal = 3;
@@ -84,6 +85,8 @@ constexpr int kIdTickTickRefresh = 464;
 constexpr int kIdTickTickDisconnect = 465;
 constexpr int kIdTickTickEnabled = 466;
 constexpr int kIdTaskbarContextMenu = 467;
+constexpr int kIdTaskbarImmersive = 468;
+constexpr int kIdImmersiveMaskOpacity = 471;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -219,18 +222,20 @@ settings_icon::Kind iconForPage(int page) {
     case 0:
         return settings_icon::Kind::Display;
     case 1:
-        return settings_icon::Kind::Performance;
+        return settings_icon::Kind::Background;
     case 2:
-        return settings_icon::Kind::Card;
+        return settings_icon::Kind::Performance;
     case 3:
-        return settings_icon::Kind::Media;
+        return settings_icon::Kind::Card;
     case 4:
-        return settings_icon::Kind::Spectrum;
+        return settings_icon::Kind::Media;
     case 5:
-        return settings_icon::Kind::Lyrics;
+        return settings_icon::Kind::Spectrum;
     case 6:
-        return settings_icon::Kind::Toast;
+        return settings_icon::Kind::Lyrics;
     case 7:
+        return settings_icon::Kind::Toast;
+    case 8:
         return settings_icon::Kind::Idle;
     default:
         return settings_icon::Kind::None;
@@ -266,7 +271,10 @@ settings_icon::Kind iconForRow(int id) {
     case kIdRenderMode:
         return settings_icon::Kind::RenderMode;
     case kIdTaskbarContextMenu:
+    case kIdTaskbarImmersive:
         return settings_icon::Kind::Display;
+    case kIdImmersiveMaskOpacity:
+        return settings_icon::Kind::Opacity;
     case kIdHoverControls:
         return settings_icon::Kind::Hover;
     case kIdHoverControlStyle:
@@ -402,11 +410,11 @@ struct SettingsDialog::Impl {
     fluent::FluentDialogSurface surface;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
-        L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言与更多"};
+        L"显示", L"任务栏沉浸", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词",
+        L"切歌弹窗", L"每日一言与更多"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
-        L"显示", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词", L"切歌弹窗",
-        L"每日一言与更多"};
+        L"显示", L"任务栏沉浸", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词",
+        L"切歌弹窗", L"每日一言与更多"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
@@ -584,6 +592,23 @@ struct SettingsDialog::Impl {
                            findRow(kIdProgressBackground)->checked;
     }
 
+    void updateImmersiveRowsEnabled() {
+        const auto* immersive = findRow(kIdTaskbarImmersive);
+        const bool immersiveEnabled = immersive && immersive->checked && !state.verticalTaskbar;
+        if (auto* row = findRow(kIdTaskbarImmersive))
+            row->enabled = !state.verticalTaskbar;
+        if (auto* row = findRow(kIdImmersiveMaskOpacity))
+            row->enabled = immersiveEnabled;
+        auto* controls = findRow(kIdHoverControls);
+        if (controls)
+            controls->enabled = !immersiveEnabled;
+        if (auto* row = findRow(kIdHoverControlStyle))
+            row->enabled = !immersiveEnabled && controls && controls->checked &&
+                           !minimalModeActive();
+        if (auto* row = findRow(kIdAlignment))
+            row->enabled = !immersiveEnabled && !state.verticalTaskbar;
+    }
+
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height) {
         Row& row = addRow(page, id, ControlKind::Radio, text, hint,
@@ -745,6 +770,7 @@ struct SettingsDialog::Impl {
             }
             if (auto* row = findRow(id))
                 row->controlText = colorText(color);
+            updateImmersiveRowsEnabled();
             surface.invalidate();
         });
         colorPicker->show();
@@ -852,6 +878,15 @@ struct SettingsDialog::Impl {
             L"关闭后，右键任务栏歌词不再弹出菜单；托盘图标的右键菜单不受影响。",
             40.0f, kRowTallH);
         taskbarContextMenu.checked = state.taskbarContextMenu;
+        addHeader(kTaskbarImmersivePage, L"沉浸模式");
+        Row& taskbarImmersive = addRow(
+            kTaskbarImmersivePage, kIdTaskbarImmersive, ControlKind::Toggle, L"任务栏沉浸模式",
+            L"覆盖整个任务栏客户区，显示封面、歌曲信息、歌词和任务栏频谱",
+            40.0f, kRowTallH);
+        taskbarImmersive.checked = vertical ? false : state.taskbarImmersive;
+        taskbarImmersive.enabled = !vertical;
+        addSlider(kTaskbarImmersivePage, kIdImmersiveMaskOpacity, L"沉浸遮罩不透明度",
+                  state.immersiveMaskOpacity, !vertical && state.taskbarImmersive);
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
             L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
@@ -1035,7 +1070,9 @@ struct SettingsDialog::Impl {
                   vertical ? false : state.doubleLineLyrics).enabled = !vertical;
         addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
                  {L"左对齐", L"居中", L"右对齐"},
-                 vertical ? 0 : state.lyricAlignment, !vertical, kRowH);
+                 !vertical && state.taskbarImmersive ? 1
+                                                     : (vertical ? 0 : state.lyricAlignment),
+                 !vertical && !state.taskbarImmersive, kRowH);
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
         addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
         addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
@@ -1064,6 +1101,7 @@ struct SettingsDialog::Impl {
         Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
+        updateImmersiveRowsEnabled();
     }
 
     float measureTextHeight(fluent::FluentDialogSurface::Painter& painter,
@@ -3236,6 +3274,17 @@ struct SettingsDialog::Impl {
             if (actions.onTaskbarContextMenu)
                 actions.onTaskbarContextMenu(row->checked);
             break;
+        case kIdTaskbarImmersive:
+            row->checked = !row->checked;
+            state.taskbarImmersive = row->checked;
+            updateImmersiveRowsEnabled();
+            if (actions.onTaskbarImmersive)
+                actions.onTaskbarImmersive(row->checked);
+            break;
+        case kIdImmersiveMaskOpacity:
+            if (actions.onImmersiveMaskOpacity)
+                actions.onImmersiveMaskOpacity(row->value);
+            break;
         case kIdSpectrum:
             row->checked = !row->checked;
             if (auto* colorMode = findRow(kIdSpectrumColorMode))
@@ -3494,6 +3543,14 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdTaskbarContextMenu))
             row->checked = s.taskbarContextMenu;
+        if (auto* row = findRow(kIdTaskbarImmersive)) {
+            row->checked = vertical ? false : s.taskbarImmersive;
+            row->enabled = !vertical;
+        }
+        if (auto* row = findRow(kIdImmersiveMaskOpacity)) {
+            row->value = std::clamp(s.immersiveMaskOpacity, 0, 100);
+            row->enabled = !vertical && s.taskbarImmersive;
+        }
         if (auto* row = findRow(kIdSpectrum)) {
             row->checked = minimal || vertical ? false : s.spectrumOn;
             row->enabled = !minimal && !vertical;
@@ -3592,8 +3649,8 @@ struct SettingsDialog::Impl {
             row->enabled = !vertical;
         }
         if (auto* row = findRow(kIdAlignment)) {
-            row->selected = vertical ? 0 : s.lyricAlignment;
-            row->enabled = !vertical;
+            row->selected = !vertical && s.taskbarImmersive ? 1 : (vertical ? 0 : s.lyricAlignment);
+            row->enabled = !vertical && !s.taskbarImmersive;
         }
         if (auto* row = findRow(kIdSecondaryOn)) {
             row->checked = vertical ? false : s.secondaryEnabled;
@@ -3623,6 +3680,7 @@ struct SettingsDialog::Impl {
             row->height = row->minHeight;
             row->enabled = s.qqLocalLyricsEnabled;
         }
+        updateImmersiveRowsEnabled();
         layout();
         surface.invalidate();
     }
