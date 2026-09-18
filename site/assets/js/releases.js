@@ -187,9 +187,9 @@ function renderToc(releases) {
     `<a href="#rel-${r.tag_name}" data-tag="${r.tag_name}">${escapeHtml(r.tag_name)}</a>`
   ).join('') + `
     <div class="toc-pager">
-      <button type="button" data-nav="prev" ${tocPage === 1 ? 'disabled' : ''}>‹ 上一页</button>
+      <button type="button" data-nav="prev" ${tocPage === 1 ? 'disabled' : ''}>上一页</button>
       <span>第 ${tocPage} 页</span>
-      <button type="button" data-nav="next" ${tocExhausted ? 'disabled' : ''}>下一页 ›</button>
+      <button type="button" data-nav="next" ${tocExhausted ? 'disabled' : ''}>下一页</button>
     </div>`;
 }
 
