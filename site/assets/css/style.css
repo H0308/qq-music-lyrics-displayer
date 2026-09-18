@@ -205,6 +205,24 @@ h1, h2, h3 { line-height: 1.3; font-weight: 700; }
   background-clip: text;
   color: transparent;
 }
+/* 标题打字机：幽灵文本原位占位，打字层覆盖其上，过程布局不抖动；
+   nowrap 防止文字+光标超出幽灵宽度时被挤换行（会导致缺字/错位） */
+.tw-line { position: relative; display: inline-block; white-space: nowrap; }
+.tw-ghost { visibility: hidden; }
+.tw-typed { position: absolute; inset: 0; text-align: left; }
+.tw-caret {
+  display: inline-block;
+  width: 0.07em;
+  height: 0.95em;
+  margin-left: 0.06em;
+  vertical-align: -0.1em;
+  background: var(--accent);
+  animation: tw-caret-blink 0.9s step-end infinite;
+}
+/* 打完后光标眨三下再淡出退场 */
+.tw-caret.done { animation: tw-caret-blink 0.9s step-end 3, tw-caret-out 0.3s ease 2.7s forwards; }
+@keyframes tw-caret-blink { 50% { opacity: 0; } }
+@keyframes tw-caret-out { to { opacity: 0; } }
 .hero-sub {
   margin: 24px auto 36px;
   max-width: 640px;

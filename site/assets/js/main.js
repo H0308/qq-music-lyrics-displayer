@@ -138,6 +138,56 @@ if (finePointer) {
   });
 }
 
+// Hero 标题打字机：每次加载逐字打出；减少动态时跳过，标题直接完整显示
+const heroTitle = document.querySelector('.hero h1');
+if (heroTitle && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  // 按 <br> 拆行，记录渐变行
+  const lines = [];
+  heroTitle.childNodes.forEach(node => {
+    if (node.nodeName === 'BR') { lines.push(null); return; }
+    const text = node.textContent.trim();
+    if (!text) return;
+    lines.push({ text, accent: node.nodeType === 1 && node.classList.contains('accent') });
+  });
+
+  heroTitle.textContent = '';
+  heroTitle.setAttribute('aria-label', lines.filter(Boolean).map(l => l.text).join(' '));
+
+  const queue = [];
+  for (const line of lines) {
+    if (!line) { heroTitle.appendChild(document.createElement('br')); continue; }
+    const wrap = document.createElement('span');
+    wrap.className = 'tw-line';
+    wrap.setAttribute('aria-hidden', 'true');
+    const ghost = document.createElement('span');
+    ghost.className = 'tw-ghost';
+    ghost.textContent = line.text;
+    const typed = document.createElement('span');
+    typed.className = 'tw-typed' + (line.accent ? ' accent' : '');
+    wrap.append(ghost, typed);
+    heroTitle.appendChild(wrap);
+    queue.push({ el: typed, chars: Array.from(line.text) });
+  }
+
+  const caret = document.createElement('span');
+  caret.className = 'tw-caret';
+
+  const TYPE_INTERVAL = 80; // 逐字间隔
+  const LINE_PAUSE = 350;   // 换行停顿
+  let li = 0, ci = 0;
+  function tick() {
+    const cur = queue[li];
+    if (!cur) { caret.classList.add('done'); return; }
+    if (ci === 0) cur.el.appendChild(caret);
+    cur.el.insertBefore(document.createTextNode(cur.chars[ci]), caret);
+    ci++;
+    let delay = TYPE_INTERVAL;
+    if (ci >= cur.chars.length) { li++; ci = 0; delay = LINE_PAUSE; }
+    setTimeout(tick, delay);
+  }
+  setTimeout(tick, 250);
+}
+
 // GitHub API 响应缓存（30 分钟），避免刷新/重复访问消耗未认证限流额度（60 次/小时/IP）
 function ghCacheGet(key) {
   try {
