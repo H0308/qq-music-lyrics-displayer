@@ -659,6 +659,7 @@ struct TaskbarHost::Impl {
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
     int immersiveControlHover_ = -1;
+    int immersiveControlPressed_ = -1;
     bool dragPress_ = false;
     bool lyricDragging_ = false;
     POINT dragPressScreen_{};
@@ -2341,8 +2342,12 @@ struct TaskbarHost::Impl {
         if (viewMode_ == mode)
             return;
 
+        const bool hadImmersivePress = immersiveControlPressed_ >= 0;
         if (dragPress_ || lyricDragging_)
             finishLyricDrag(false);
+        immersiveControlPressed_ = -1;
+        if (hadImmersivePress && GetCapture() == hwnd)
+            ReleaseCapture();
         renderer.resetRoot();
         clearImmersiveSongContentTransition();
         viewMode_ = mode;
@@ -8265,8 +8270,14 @@ struct TaskbarHost::Impl {
         case WM_LBUTTONDOWN: {
             // 点击与拖动从同一次按下并行识别：未越过系统拖动阈值仍按原按钮/卡片
             // 点击处理，越过阈值后才取消点击并进入位置拖拽。
-            if (viewMode_ == TaskbarViewMode::Immersive)
+            if (viewMode_ == TaskbarViewMode::Immersive) {
+                immersiveControlPressed_ =
+                    hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
+                                        static_cast<float>(GET_Y_LPARAM(lp)));
+                if (immersiveControlPressed_ >= 0)
+                    SetCapture(hwnd);
                 return 0;
+            }
             dragPress_ = true;
             GetCursorPos(&dragPressScreen_);
             dragCursorScreen_ = dragPressScreen_;
@@ -8276,9 +8287,17 @@ struct TaskbarHost::Impl {
         }
         case WM_LBUTTONUP: {
             if (viewMode_ == TaskbarViewMode::Immersive) {
-                activateImmersiveControl(
+                const int pressed = immersiveControlPressed_;
+                const int released =
                     hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
-                                        static_cast<float>(GET_Y_LPARAM(lp))));
+                                        static_cast<float>(GET_Y_LPARAM(lp)));
+                immersiveControlPressed_ = -1;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                // 沉浸层可能在一次任务栏点击的按下与松开之间出现。只有本窗口
+                // 确实收到同一控件的按下事件，才把随后到达的松开解释为点击。
+                if (pressed >= 0 && pressed == released)
+                    activateImmersiveControl(pressed);
                 return 0;
             }
             const bool hadPress = dragPress_ || lyricDragging_;
@@ -8306,13 +8325,19 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case WM_CAPTURECHANGED:
+            immersiveControlPressed_ = -1;
             if (dragPress_ || lyricDragging_)
                 finishLyricDrag(false);
             return 0;
-        case WM_CANCELMODE:
+        case WM_CANCELMODE: {
+            const bool hadImmersivePress = immersiveControlPressed_ >= 0;
+            immersiveControlPressed_ = -1;
+            if (hadImmersivePress && GetCapture() == hwnd)
+                ReleaseCapture();
             if (dragPress_ || lyricDragging_)
                 finishLyricDrag(false);
             return 0;
+        }
         case WM_CONTEXTMENU: {
             if (!contextMenuEnabled_ || !onContextMenu)
                 return 0;
