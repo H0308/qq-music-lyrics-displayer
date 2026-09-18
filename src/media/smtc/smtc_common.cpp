@@ -1,5 +1,7 @@
 #include "media/smtc/smtc_common.h"
 
+#include <unknwn.h>
+
 #include <chrono>
 #include <mutex>
 
@@ -61,10 +63,9 @@ bool sameSession(const Session& left, const Session& right) noexcept {
         return false;
     try {
         // GetCurrentSession() 和 GetSessions() 可能返回同一逻辑会话的不同
-        // WinRT 对象实例，因此还要比较来源标识。
-        auto leftSource = left.SourceAppUserModelId();
-        auto rightSource = right.SourceAppUserModelId();
-        return !leftSource.empty() && leftSource == rightSource;
+        // WinRT 包装对象，比较 IUnknown 身份可以兼容这种情况；不能只比较
+        // SourceAppUserModelId，否则播放器重启后的新旧会话会被误认为同一会话。
+        return winrt::get_unknown(left) == winrt::get_unknown(right);
     } catch (...) {
         return false;
     }

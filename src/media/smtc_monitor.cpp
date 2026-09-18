@@ -4,7 +4,10 @@
 #include "media/smtc/qq_music_smtc_adapter.h"
 #include "media/smtc/smtc_common.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -28,6 +31,7 @@ struct SmtcMonitor::Impl {
     Session session{ nullptr };
 
     mutable std::mutex mtx;
+    std::mutex updateMtx;
     std::mutex attachMtx;
     SmtcSnapshot snap;
     SmtcMonitor::ChangeCallback onChange;
@@ -44,9 +48,26 @@ struct SmtcMonitor::Impl {
     // 新播放器只需实现一个适配器并在这里注册，监控器本身不再增加播放器分支。
     std::vector<std::unique_ptr<smtc::SmtcPlayerAdapter>> adapters;
 
+    // 某些播放器被强制退出时，系统不会及时投递 SessionsChanged；
+    // 用后台健康检查重新读取会话列表，避免必须点击控制按钮才能清理旧会话。
+    std::mutex pollMtx;
+    std::condition_variable pollCv;
+    bool pollStopping = false;
+    std::thread pollThread;
+
     Impl() {
         adapters.emplace_back(std::make_unique<smtc::QqMusicSmtcAdapter>());
         adapters.emplace_back(std::make_unique<smtc::NeteaseSmtcAdapter>());
+    }
+
+    ~Impl() {
+        {
+            std::lock_guard<std::mutex> lk(pollMtx);
+            pollStopping = true;
+        }
+        pollCv.notify_all();
+        if (pollThread.joinable())
+            pollThread.join();
     }
 
     smtc::SmtcPlayerAdapter* adapterFor(SmtcPlayerType player) const {
@@ -251,6 +272,27 @@ struct SmtcMonitor::Impl {
         notify();
     }
 
+    static bool isResponsivePlaybackStatus(
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus status) noexcept {
+        using Status = GlobalSystemMediaTransportControlsSessionPlaybackStatus;
+        // QQ 音乐切歌时会先短暂上报 Stopped，再提交下一首的媒体属性。
+        // 只要 PlaybackInfo 仍可读取，Stopped 表示会话仍在，而不是会话已撤销。
+        return status == Status::Opened || status == Status::Changing ||
+               status == Status::Playing || status == Status::Paused ||
+               status == Status::Stopped;
+    }
+
+    bool isResponsiveSession(const Session& candidate) const {
+        if (!candidate)
+            return false;
+        try {
+            auto info = candidate.GetPlaybackInfo();
+            return info && isResponsivePlaybackStatus(info.PlaybackStatus());
+        } catch (...) {
+            return false;
+        }
+    }
+
     void attach(const Session& selected) {
         std::lock_guard<std::mutex> attachLock(attachMtx);
         try {
@@ -274,8 +316,8 @@ struct SmtcMonitor::Impl {
             timelineRevoker = selected.TimelinePropertiesChanged(winrt::auto_revoke,
                 [this, watched = selected](auto&&, auto&&) { refreshTimeline(watched); });
         } catch (...) {
-            // 会话可能在绑定监听前已经被播放器撤销；下一次 SessionsChanged
-            // 或 CurrentSessionChanged 会重新尝试绑定。
+            // 会话可能在绑定监听前已经被播放器撤销；下一次系统事件或后台健康检查
+            // 会重新尝试绑定。
         }
     }
 
@@ -308,6 +350,7 @@ struct SmtcMonitor::Impl {
     }
 
     void updateSession(bool rebuildWatchers = false) {
+        std::lock_guard<std::mutex> updateLock(updateMtx);
         Session found{ nullptr };
         Session selectedSession{ nullptr };
         bool selectedSessionAlive = false;
@@ -335,14 +378,18 @@ struct SmtcMonitor::Impl {
                 }
 
                 smtc::SmtcSessionIdentity currentIdentity;
+                bool currentSessionResponsive = false;
                 if (current && currentListed) {
                     currentIdentity = identifySession(current);
                     if (currentIdentity.player != SmtcPlayerType::Unknown) {
                         try {
                             auto info = current.GetPlaybackInfo();
-                            if (info &&
-                                smtc::mapStatus(info.PlaybackStatus()) == PlaybackStatus::Playing)
-                                found = current;
+                            if (info) {
+                                const auto status = info.PlaybackStatus();
+                                currentSessionResponsive = isResponsivePlaybackStatus(status);
+                                if (smtc::mapStatus(status) == PlaybackStatus::Playing)
+                                    found = current;
+                            }
                         } catch (...) {
                         }
                     }
@@ -370,19 +417,20 @@ struct SmtcMonitor::Impl {
                     }
                 }
 
-                // 暂停不是切换理由：已选中的会话仍存在时保持选中。否则网易云暂停后，
+                // 暂停或停止不是切换理由：已选中的会话仍存在时保持选中。否则网易云暂停后，
                 // Windows 当前会话若指向另一个暂停的播放器（如 QQ 音乐），显示会跳走，
                 // 后续控制按钮也会作用到错误的会话上。
                 if (!found && selectedSessionAlive && sessions) {
                     for (auto const& candidate : sessions) {
-                        if (smtc::sameSession(selectedSession, candidate)) {
+                        if (smtc::sameSession(selectedSession, candidate) &&
+                            isResponsiveSession(candidate)) {
                             found = candidate;
                             break;
                         }
                     }
                 }
 
-                if (!found && currentListed &&
+                if (!found && currentListed && currentSessionResponsive &&
                     currentIdentity.player != SmtcPlayerType::Unknown)
                     found = current;
 
@@ -441,9 +489,41 @@ struct SmtcMonitor::Impl {
                 refreshAll();
             } catch (...) {
                 // 会话切换与属性读取发生在播放器生命周期边界，失败时保持
-                // 当前快照，等待下一次系统媒体会话事件重试。
+                // 当前快照，等待下一次系统媒体会话事件或后台健康检查重试。
             }
         }
+    }
+
+    void startPolling() {
+        {
+            std::lock_guard<std::mutex> lk(pollMtx);
+            if (pollThread.joinable())
+                return;
+            pollStopping = false;
+        }
+
+        pollThread = std::thread([this] {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            } catch (...) {
+                return;
+            }
+
+            for (;;) {
+                std::unique_lock<std::mutex> lk(pollMtx);
+                if (pollCv.wait_for(lk, std::chrono::seconds(1),
+                                    [this] { return pollStopping; }))
+                    break;
+                lk.unlock();
+
+                try {
+                    updateSession();
+                } catch (...) {
+                }
+            }
+
+            winrt::uninit_apartment();
+        });
     }
 };
 
@@ -464,6 +544,7 @@ void SmtcMonitor::start(ChangeCallback onChange) {
         impl_->currentSessionRevoker = impl_->manager.CurrentSessionChanged(winrt::auto_revoke,
             [this](auto&&, auto&&) { impl_->updateSession(); });
         impl_->updateSession(true);
+        impl_->startPolling();
     } catch (...) {
         // 没有可用媒体会话或系统媒体控制能力时，监控器保持空快照，
         // 不让启动阶段的 HRESULT 终止主程序。
