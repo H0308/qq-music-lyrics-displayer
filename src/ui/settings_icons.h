@@ -38,6 +38,7 @@ enum class Kind {
     Language,
     Refresh,
     Apps,
+    Tray,
     Api,
     Connect,
     Sync,

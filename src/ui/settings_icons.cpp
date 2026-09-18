@@ -292,6 +292,13 @@ void draw(ID2D1RenderTarget* target, Kind kind, const D2D1_RECT_F& bounds, ID2D1
         c.fillRounded(3.0f, 12.0f, 8.0f, 17.0f, 1.0f);
         c.fillRounded(12.0f, 12.0f, 17.0f, 17.0f, 1.0f);
         break;
+    case Kind::Tray:
+        c.rounded(2.5f, 4.0f, 17.5f, 16.5f, 1.8f);
+        c.line(2.5f, 8.0f, 17.5f, 8.0f);
+        c.fillEllipse(6.0f, 10.5f, 7.8f, 12.3f);
+        c.fillEllipse(9.1f, 10.5f, 10.9f, 12.3f);
+        c.fillEllipse(12.2f, 10.5f, 14.0f, 12.3f);
+        break;
     case Kind::Api:
         c.ellipse(3.0f, 6.0f, 9.0f, 12.0f);
         c.line(8.0f, 10.0f, 16.5f, 10.0f);

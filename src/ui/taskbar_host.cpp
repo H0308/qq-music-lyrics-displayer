@@ -25,6 +25,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -87,7 +88,8 @@ constexpr int kImmersiveControlVolume = 3;
 constexpr int kImmersiveControlExit = 4;
 constexpr int kImmersiveControlApps = 5;
 constexpr int kImmersiveControlMenu = 6;
-constexpr int kImmersiveControlCount = 7;
+constexpr int kImmersiveControlTray = 7;
+constexpr int kImmersiveControlCount = 8;
 constexpr float kImmersiveControlRadiusFactor = 0.24f;
 constexpr float kImmersiveControlMinRadius = 8.0f;
 constexpr float kImmersiveControlMaxRadius = 12.0f;
@@ -393,6 +395,282 @@ void queryTaskbarButtonsUia(IUIAutomation* uia, HWND taskbar, std::vector<RECT>&
     arr->Release();
 }
 
+bool containsCaseInsensitive(const std::wstring& value, const wchar_t* token) {
+    if (value.empty() || !token || !*token)
+        return false;
+
+    std::wstring normalized = value;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
+        return static_cast<wchar_t>(std::towlower(static_cast<wint_t>(ch)));
+    });
+    std::wstring normalizedToken = token;
+    std::transform(normalizedToken.begin(), normalizedToken.end(), normalizedToken.begin(),
+                   [](wchar_t ch) {
+                       return static_cast<wchar_t>(std::towlower(static_cast<wint_t>(ch)));
+                   });
+    return normalized.find(normalizedToken) != std::wstring::npos;
+}
+
+bool isTaskbarTrayOverflowElement(IUIAutomationElement* element) {
+    if (!element)
+        return false;
+
+    BSTR automationIdValue = nullptr;
+    BSTR nameValue = nullptr;
+    CONTROLTYPEID controlType = 0;
+    element->get_CurrentAutomationId(&automationIdValue);
+    element->get_CurrentName(&nameValue);
+    element->get_CurrentControlType(&controlType);
+    const std::wstring automationId = automationIdValue ? automationIdValue : L"";
+    const std::wstring name = nameValue ? nameValue : L"";
+    SysFreeString(automationIdValue);
+    SysFreeString(nameValue);
+
+    const bool byAutomationId = containsCaseInsensitive(automationId, L"OverflowTrayIconsList") ||
+                                containsCaseInsensitive(automationId, L"overflow");
+    const bool isButton = controlType == UIA_ButtonControlTypeId;
+    const bool byName = isButton &&
+                        (containsCaseInsensitive(name, L"show hidden icon") ||
+                         containsCaseInsensitive(name, L"hidden icon") ||
+                         containsCaseInsensitive(name, L"overflow") ||
+                         containsCaseInsensitive(name, L"隐藏图标") ||
+                         containsCaseInsensitive(name, L"溢出"));
+    if (!byAutomationId && !byName)
+        return false;
+
+    BOOL offscreen = FALSE;
+    if (SUCCEEDED(element->get_CurrentIsOffscreen(&offscreen)) && offscreen)
+        return false;
+    BOOL enabled = TRUE;
+    if (SUCCEEDED(element->get_CurrentIsEnabled(&enabled)) && !enabled)
+        return false;
+    RECT bounds{};
+    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&bounds)) &&
+        (bounds.right <= bounds.left || bounds.bottom <= bounds.top))
+        return false;
+    return true;
+}
+
+IUIAutomationElement* findTaskbarTrayOverflowElement(IUIAutomation* uia, HWND taskbar) {
+    if (!uia || !taskbar)
+        return nullptr;
+
+    IUIAutomationElement* root = nullptr;
+    if (FAILED(uia->ElementFromHandle(taskbar, &root)) || !root)
+        return nullptr;
+
+    IUIAutomationCondition* condition = nullptr;
+    uia->CreateTrueCondition(&condition);
+    IUIAutomationElementArray* elements = nullptr;
+    if (condition) {
+        root->FindAll(TreeScope_Descendants, condition, &elements);
+        condition->Release();
+    }
+    root->Release();
+    if (!elements)
+        return nullptr;
+
+    IUIAutomationElement* result = nullptr;
+    int count = 0;
+    elements->get_Length(&count);
+    for (int i = 0; i < count; ++i) {
+        IUIAutomationElement* element = nullptr;
+        elements->GetElement(i, &element);
+        if (!element)
+            continue;
+        if (isTaskbarTrayOverflowElement(element)) {
+            result = element;
+            break;
+        }
+        element->Release();
+    }
+    elements->Release();
+    return result;
+}
+
+bool invokeTaskbarTrayOverflowElement(IUIAutomationElement* element) {
+    if (!element)
+        return false;
+
+    IUnknown* unknown = nullptr;
+    if (SUCCEEDED(element->GetCurrentPattern(UIA_InvokePatternId, &unknown)) && unknown) {
+        IUIAutomationInvokePattern* pattern = nullptr;
+        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
+        unknown->Release();
+        if (SUCCEEDED(query) && pattern) {
+            const HRESULT result = pattern->Invoke();
+            pattern->Release();
+            if (SUCCEEDED(result))
+                return true;
+        }
+    }
+
+    unknown = nullptr;
+    if (SUCCEEDED(element->GetCurrentPattern(UIA_TogglePatternId, &unknown)) && unknown) {
+        IUIAutomationTogglePattern* pattern = nullptr;
+        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
+        unknown->Release();
+        if (SUCCEEDED(query) && pattern) {
+            const HRESULT result = pattern->Toggle();
+            pattern->Release();
+            if (SUCCEEDED(result))
+                return true;
+        }
+    }
+
+    unknown = nullptr;
+    if (SUCCEEDED(element->GetCurrentPattern(UIA_ExpandCollapsePatternId, &unknown)) &&
+        unknown) {
+        IUIAutomationExpandCollapsePattern* pattern = nullptr;
+        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
+        unknown->Release();
+        if (SUCCEEDED(query) && pattern) {
+            const HRESULT result = pattern->Expand();
+            pattern->Release();
+            if (SUCCEEDED(result))
+                return true;
+        }
+    }
+
+    unknown = nullptr;
+    if (SUCCEEDED(element->GetCurrentPattern(UIA_LegacyIAccessiblePatternId, &unknown)) &&
+        unknown) {
+        IUIAutomationLegacyIAccessiblePattern* pattern = nullptr;
+        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
+        unknown->Release();
+        if (SUCCEEDED(query) && pattern) {
+            const HRESULT result = pattern->DoDefaultAction();
+            pattern->Release();
+            if (SUCCEEDED(result))
+                return true;
+        }
+    }
+    return false;
+}
+
+struct TrayOverflowWindowSearch {
+    DWORD explorerProcessId = 0;
+    HWND result = nullptr;
+};
+
+BOOL CALLBACK findTrayOverflowWindowProc(HWND window, LPARAM parameter) {
+    auto* search = reinterpret_cast<TrayOverflowWindowSearch*>(parameter);
+    if (!search || !IsWindowVisible(window))
+        return TRUE;
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (processId != search->explorerProcessId)
+        return TRUE;
+
+    wchar_t className[128] = {};
+    GetClassNameW(window, className, static_cast<int>(std::size(className)));
+    if (containsCaseInsensitive(className, L"overflow"))
+        search->result = window;
+    return search->result ? FALSE : TRUE;
+}
+
+HWND findTrayOverflowWindow(HWND taskbar) {
+    if (!taskbar)
+        return nullptr;
+
+    TrayOverflowWindowSearch search;
+    GetWindowThreadProcessId(taskbar, &search.explorerProcessId);
+    if (!search.explorerProcessId)
+        return nullptr;
+    EnumWindows(findTrayOverflowWindowProc, reinterpret_cast<LPARAM>(&search));
+    return search.result;
+}
+
+void positionTrayOverflowWindow(HWND overflow, HWND taskbar, POINT anchor, UINT taskbarEdge) {
+    if (!overflow || !taskbar)
+        return;
+
+    RECT panel{};
+    RECT taskbarRect{};
+    if (!GetWindowRect(overflow, &panel) || !GetWindowRect(taskbar, &taskbarRect))
+        return;
+    const int width = panel.right - panel.left;
+    const int height = panel.bottom - panel.top;
+    if (width <= 0 || height <= 0)
+        return;
+
+    const UINT dpi = std::max<UINT>(96, GetDpiForWindow(taskbar));
+    const int gap = std::max(4, MulDiv(6, static_cast<int>(dpi), 96));
+    int x = panel.left;
+    int y = panel.top;
+    switch (taskbarEdge) {
+    case ABE_TOP:
+        x = anchor.x - width / 2;
+        y = taskbarRect.bottom + gap;
+        break;
+    case ABE_LEFT:
+        x = taskbarRect.right + gap;
+        y = anchor.y - height / 2;
+        break;
+    case ABE_RIGHT:
+        x = taskbarRect.left - width - gap;
+        y = anchor.y - height / 2;
+        break;
+    case ABE_BOTTOM:
+    default:
+        x = anchor.x - width / 2;
+        y = taskbarRect.top - height - gap;
+        break;
+    }
+
+    HMONITOR monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
+        const RECT& work = monitorInfo.rcWork;
+        const int workLeft = static_cast<int>(work.left);
+        const int workTop = static_cast<int>(work.top);
+        const int workRight = static_cast<int>(work.right);
+        const int workBottom = static_cast<int>(work.bottom);
+        x = std::clamp(x, workLeft, std::max(workLeft, workRight - width));
+        y = std::clamp(y, workTop, std::max(workTop, workBottom - height));
+    }
+
+    SetWindowPos(overflow, nullptr, x, y, 0, 0,
+                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW);
+}
+
+bool invokeTaskbarTrayOverflow(HWND taskbar, POINT anchor, UINT taskbarEdge) {
+    if (!taskbar || !IsWindow(taskbar))
+        return false;
+
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(init) && init != RPC_E_CHANGED_MODE)
+        return false;
+
+    bool invoked = false;
+    IUIAutomation* uia = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                   IID_PPV_ARGS(&uia)))) {
+        IUIAutomationElement* element = findTaskbarTrayOverflowElement(uia, taskbar);
+        if (element) {
+            invoked = invokeTaskbarTrayOverflowElement(element);
+            element->Release();
+        }
+        uia->Release();
+    }
+
+    if (invoked) {
+        for (int attempt = 0; attempt < 50; ++attempt) {
+            if (HWND overflow = findTrayOverflowWindow(taskbar)) {
+                positionTrayOverflowWindow(overflow, taskbar, anchor, taskbarEdge);
+                break;
+            }
+            Sleep(10);
+        }
+    }
+
+    if (SUCCEEDED(init))
+        CoUninitialize();
+    return invoked;
+}
+
 bool sameLyricLine(const LyricLine& a, const LyricLine& b) {
     if (a.ms != b.ms || a.text != b.text || a.translation != b.translation ||
         a.romanization != b.romanization || a.chars.size() != b.chars.size())
@@ -622,6 +900,9 @@ struct TaskbarHost::Impl {
     std::atomic<bool> probeFast_{false};
     std::atomic<ProbeResult*> probeOut_{nullptr};
     std::atomic<HWND> taskbarAtomic_{nullptr}; // taskbar_ 的线程安全副本（探测线程读）
+    // 系统托盘溢出按钮的 UIA 查询放到独立线程，避免 Explorer 的跨进程调用阻塞歌词 UI。
+    std::shared_ptr<std::atomic<bool>> trayOverflowOpening_ =
+        std::make_shared<std::atomic<bool>>(false);
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -5178,7 +5459,11 @@ struct TaskbarHost::Impl {
                                 ? media.canNext
                                 : i == kImmersiveControlApps
                                       ? static_cast<bool>(onAppCollection)
-                                      : true;
+                                      : i == kImmersiveControlMenu
+                                            ? static_cast<bool>(onContextMenu)
+                                            : i == kImmersiveControlTray
+                                                  ? static_cast<bool>(taskbar_)
+                                                  : true;
             if (!enabled)
                 continue;
             if (std::hypot(logicalX - centers[i].x, logicalY - centers[i].y) <= r + 4.0f)
@@ -5235,6 +5520,13 @@ struct TaskbarHost::Impl {
                     brushBtn_);
             }
         }
+        settings_icon::draw(
+            rt, settings_icon::Kind::Tray,
+            D2D1::RectF(centers[kImmersiveControlTray].x - r * 0.82f,
+                        centers[kImmersiveControlTray].y - r * 0.82f,
+                        centers[kImmersiveControlTray].x + r * 0.82f,
+                        centers[kImmersiveControlTray].y + r * 0.82f),
+            brushBtn_, 1.2f);
     }
 
     void drawVolumeButton(const D2D1_POINT_2F& c, float r) {
@@ -5334,6 +5626,30 @@ struct TaskbarHost::Impl {
         onContextMenu(screenPoint);
     }
 
+    void openSystemTrayOverflow(POINT anchor) {
+        if (!taskbar_ || !IsWindow(taskbar_))
+            return;
+
+        bool expected = false;
+        if (!trayOverflowOpening_->compare_exchange_strong(expected, true))
+            return;
+        prepareForExternalPopup();
+        const HWND taskbar = taskbar_;
+        const UINT taskbarEdge = taskbarEdge_;
+        const auto opening = trayOverflowOpening_;
+        try {
+            std::thread([taskbar, anchor, taskbarEdge, opening] {
+                try {
+                    invokeTaskbarTrayOverflow(taskbar, anchor, taskbarEdge);
+                } catch (...) {
+                }
+                opening->store(false);
+            }).detach();
+        } catch (...) {
+            opening->store(false);
+        }
+    }
+
     void openAppCollection(POINT screenPoint) {
         if (!onAppCollection)
             return;
@@ -5379,6 +5695,17 @@ struct TaskbarHost::Impl {
             }
             // 菜单按钮是沉浸模式的固定入口，不受“右键显示任务栏歌词菜单”开关影响。
             openTaskbarMenu(pt);
+            break;
+        }
+        case kImmersiveControlTray: {
+            // 这里打开 Windows 自己的“隐藏图标/托盘溢出”面板，不是应用内 FluentMenu。
+            POINT pt{};
+            if (!GetCursorPos(&pt)) {
+                RECT rc{};
+                GetWindowRect(hwnd, &rc);
+                pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
+            }
+            openSystemTrayOverflow(pt);
             break;
         }
         default:
