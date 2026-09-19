@@ -1083,6 +1083,7 @@ struct App {
     // 3 极简（不降低歌词刷新率，只关闭附加视觉与弹窗）
     int renderMode_ = 0;
     bool taskbarVertical_ = false; // 当前任务栏是否为左右侧的竖向布局
+    bool mediaSessionAlive_ = false; // 用于同步依赖播放会话的设置可用态
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
     AudioSpectrum spectrum_;
@@ -3071,6 +3072,8 @@ struct App {
         SmtcSnapshot snap = monitor.snapshot();
         syncTaskbarView(snap);
         syncAppVolumeTarget(snap);
+        const bool mediaSessionChanged = mediaSessionAlive_ != snap.sessionAlive;
+        mediaSessionAlive_ = snap.sessionAlive;
         if (snap.sessionAlive) {
             // 媒体会话优先于启动任务播报；即使任务请求先返回，也不能覆盖已经在播放的歌词。
             startupTaskSummaryPending_ = false;
@@ -3100,6 +3103,8 @@ struct App {
             if (songToast_)
                 songToast_->hideImmediate();
             updateRuntimeLogState(snap);
+            if (mediaSessionChanged)
+                refreshSettingsDialog(true);
             return;
         }
         const SmtcPlayerType previousPlayer = lastPlayer_;
@@ -3231,6 +3236,8 @@ struct App {
         }
         tryExtractAlbumColor();
         updateRuntimeLogState(snap);
+        if (mediaSessionChanged)
+            refreshSettingsDialog(true);
     }
 
     void onLyricReady(std::unique_ptr<LyricPayload> payload) {
@@ -4855,6 +4862,7 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
         items.push_back(std::move(it));
     };
 
+    const SmtcSnapshot snap = monitor.snapshot();
     const bool taskbarEnabled = taskbarEnabledForUserAction();
     addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词",
             settings_icon::Kind::Display);
@@ -4905,8 +4913,10 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
             viewMode.submenu.push_back(std::move(sub));
         };
         addViewMode(kCmdTaskbarModeEmbedded, L"内嵌", TaskbarViewMode::Embedded);
-        addViewMode(kCmdTaskbarModeImmersive, L"沉浸", TaskbarViewMode::Immersive,
-                    !taskbarVertical_);
+        if (snap.sessionAlive) {
+            addViewMode(kCmdTaskbarModeImmersive, L"沉浸", TaskbarViewMode::Immersive,
+                        !taskbarVertical_);
+        }
         addViewMode(kCmdTaskbarModeAppBar, L"Dock 模式", TaskbarViewMode::AppBar);
         items.push_back(std::move(viewMode));
         if (taskbarViewMode_ == TaskbarViewMode::AppBar) {
@@ -4926,7 +4936,6 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
             items.push_back(std::move(edge));
         }
     }
-    const SmtcSnapshot snap = monitor.snapshot();
     const bool canSwitchLyricSource =
         snap.sessionAlive && snap.player == SmtcPlayerType::QQMusic && !lyricLoading_ &&
         !currentLyrics_.empty() && qqLocalLyricsEnabled_ && !qqLocalLyricsPath_.empty() &&
@@ -5108,7 +5117,7 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
         applyTaskbarViewMode(0);
         break;
     case kCmdTaskbarModeImmersive:
-        if (!taskbarVertical_)
+        if (!taskbarVertical_ && monitor.snapshot().sessionAlive)
             applyTaskbarViewMode(1);
         break;
     case kCmdTaskbarModeAppBar:
@@ -5369,6 +5378,7 @@ SettingsState App::currentSettingsState() const {
     st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
     st.taskbarViewMode = static_cast<int>(taskbarViewMode_);
+    st.mediaSessionAlive = monitor.snapshot().sessionAlive;
     st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
     st.immersiveMaskOpacity = immersiveMaskOpacity_;
     st.dockMaskOpacity = dockMaskOpacity_;

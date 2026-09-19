@@ -219,6 +219,14 @@ const wchar_t* idleQuoteSourceHint(int source) {
     return L"默认使用一言获取每日一言。";
 }
 
+const wchar_t* taskbarViewModeHint(bool mediaSessionAlive, bool verticalTaskbar) {
+    if (!mediaSessionAlive)
+        return L"当前没有音乐播放，沉浸模式暂不可用；开始播放后即可选择。Dock 模式仍可使用。";
+    if (verticalTaskbar)
+        return L"侧边任务栏不支持沉浸模式；Dock 模式以独立顶栏或底栏占用桌面工作区。";
+    return L"沉浸模式覆盖 Windows 任务栏；Dock 模式以独立顶栏或底栏占用桌面工作区。";
+}
+
 settings_icon::Kind iconForPage(int page) {
     switch (page) {
     case 0:
@@ -376,6 +384,7 @@ struct SettingsDialog::Impl {
         std::wstring valueText;
         std::wstring controlText;
         std::vector<std::wstring> options;
+        std::vector<bool> optionEnabled;
         bool showHint = false;
         bool checked = false;
         bool enabled = true;
@@ -521,6 +530,10 @@ struct SettingsDialog::Impl {
         return nullptr;
     }
 
+    static bool isOptionEnabled(const Row& row, size_t option) {
+        return option >= row.optionEnabled.size() || row.optionEnabled[option];
+    }
+
     bool minimalModeActive() const {
         if (state.renderMode == kRenderModeMinimal)
             return true;
@@ -598,17 +611,22 @@ struct SettingsDialog::Impl {
     }
 
     void updateImmersiveRowsEnabled() {
-        const auto* mode = findRow(kIdTaskbarViewMode);
+        auto* mode = findRow(kIdTaskbarViewMode);
         const int selectedMode = mode ? std::clamp(mode->selected, 0, 2) : 0;
+        const bool immersiveEnabled = state.mediaSessionAlive && !state.verticalTaskbar;
         const bool appBarEnabled = selectedMode == 2;
         const bool expandedEnabled = appBarEnabled ||
-                                     (selectedMode == 1 && !state.verticalTaskbar);
-        if (auto* row = findRow(kIdTaskbarViewMode))
-            row->enabled = true;
+                                     (selectedMode == 1 && immersiveEnabled);
+        if (mode) {
+            mode->enabled = true;
+            mode->optionEnabled.assign(mode->options.size(), true);
+            if (mode->optionEnabled.size() > 1)
+                mode->optionEnabled[1] = immersiveEnabled;
+        }
         if (auto* row = findRow(kIdAppBarEdge))
             row->enabled = appBarEnabled;
         if (auto* row = findRow(kIdImmersiveMaskOpacity))
-            row->enabled = selectedMode == 1 && !state.verticalTaskbar;
+            row->enabled = selectedMode == 1 && immersiveEnabled;
         if (auto* row = findRow(kIdDockMaskOpacity))
             row->enabled = appBarEnabled;
         auto* controls = findRow(kIdHoverControls);
@@ -626,6 +644,7 @@ struct SettingsDialog::Impl {
         Row& row = addRow(page, id, ControlKind::Radio, text, hint,
                           estimateRadioWidth(options), height);
         row.options = std::move(options);
+        row.optionEnabled.assign(row.options.size(), true);
         row.selected = selected;
         row.enabled = enabled;
         return row;
@@ -892,7 +911,7 @@ struct SettingsDialog::Impl {
         taskbarContextMenu.checked = state.taskbarContextMenu;
         addHeader(kTaskbarModePage, L"展示模式");
         addRadio(kTaskbarModePage, kIdTaskbarViewMode, L"任务栏歌词展示模式",
-                 L"沉浸模式覆盖 Windows 任务栏；Dock 模式以独立顶栏或底栏占用桌面工作区。",
+                 taskbarViewModeHint(state.mediaSessionAlive, vertical),
                  {L"内嵌", L"沉浸", L"Dock 模式"}, std::clamp(state.taskbarViewMode, 0, 2),
                  true, kRowTallH);
         addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
@@ -2749,14 +2768,16 @@ struct SettingsDialog::Impl {
         float x = row.controlRect.left;
         row.optionRects.clear();
         for (size_t i = 0; i < row.options.size(); ++i) {
+            const bool optionEnabled = row.enabled && isOptionEnabled(row, i);
             const bool selected = static_cast<int>(i) == row.selected;
-            const bool hovered = row.enabled && hoverId == row.id && hoverOption == static_cast<int>(i);
-            const bool pressed = row.enabled && pressedId == row.id &&
-                                 pressedOption == static_cast<int>(i);
+            const bool hovered = optionEnabled && hoverId == row.id &&
+                                 hoverOption == static_cast<int>(i);
+            const bool pressed = optionEnabled && pressedId == row.id &&
+                                  pressedOption == static_cast<int>(i);
             const float textW = painter.measureTextWidth(row.options[i], format);
             D2D1_ELLIPSE circle{D2D1::Point2F(x + kCircle * 0.5f, cy), kCircle * 0.5f,
                                 kCircle * 0.5f};
-            if (!row.enabled) {
+            if (!optionEnabled) {
                 if (auto* br = painter.brush(p.disabled)) {
                     painter.target()->DrawEllipse(circle, br, 1.0f);
                     if (selected)
@@ -2778,7 +2799,7 @@ struct SettingsDialog::Impl {
                              D2D1::RectF(x + kCircle + kTextGap, row.controlRect.top,
                                          x + kCircle + kTextGap + textW + 1.0f,
                                          row.controlRect.bottom),
-                             row.enabled ? p.text : p.disabled);
+                              optionEnabled ? p.text : p.disabled);
             row.optionRects.push_back(D2D1::RectF(
                 x, row.controlRect.top, x + kCircle + kTextGap + textW,
                 row.controlRect.bottom));
@@ -3102,6 +3123,8 @@ struct SettingsDialog::Impl {
             if (option && (row.kind == ControlKind::Radio || row.kind == ControlKind::ModeGrid)) {
                 for (size_t i = 0; i < row.optionRects.size(); ++i) {
                     if (contains(row.optionRects[i], x, y)) {
+                        if (!isOptionEnabled(row, i))
+                            return 0;
                         *option = static_cast<int>(i);
                         break;
                     }
@@ -3290,12 +3313,12 @@ struct SettingsDialog::Impl {
                 actions.onTaskbarContextMenu(row->checked);
             break;
         case kIdTaskbarViewMode:
-            if (row->selected == 1 && state.verticalTaskbar) {
-                row->selected = 0;
-                state.taskbarViewMode = 0;
-            } else {
-                state.taskbarViewMode = std::clamp(row->selected, 0, 2);
+            if (row->selected == 1 &&
+                (!state.mediaSessionAlive || state.verticalTaskbar)) {
+                row->selected = std::clamp(state.taskbarViewMode, 0, 2);
+                break;
             }
+            state.taskbarViewMode = std::clamp(row->selected, 0, 2);
             updateImmersiveRowsEnabled();
             if (actions.onTaskbarViewMode)
                 actions.onTaskbarViewMode(state.taskbarViewMode);
@@ -3571,8 +3594,11 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdTaskbarContextMenu))
             row->checked = s.taskbarContextMenu;
-        if (auto* row = findRow(kIdTaskbarViewMode))
+        if (auto* row = findRow(kIdTaskbarViewMode)) {
             row->selected = std::clamp(s.taskbarViewMode, 0, 2);
+            row->hint = taskbarViewModeHint(s.mediaSessionAlive, vertical);
+            row->showHint = true;
+        }
         if (auto* row = findRow(kIdAppBarEdge)) {
             row->selected = std::clamp(s.appBarEdge, 0, 1);
             row->enabled = s.taskbarViewMode == 2;
@@ -3924,7 +3950,8 @@ struct SettingsDialog::Impl {
                 if (row && row->enabled) {
                     if (row->kind == ControlKind::Radio || row->kind == ControlKind::ModeGrid) {
                         if (pressedOptionValue >= 0 && pressedOptionValue == option &&
-                            pressedOptionValue != row->selected) {
+                            pressedOptionValue != row->selected &&
+                            isOptionEnabled(*row, static_cast<size_t>(pressedOptionValue))) {
                             row->selected = pressedOptionValue;
                             onCommand(pressed);
                         }
@@ -4049,11 +4076,15 @@ struct SettingsDialog::Impl {
                         else if (direction > 0 && column == 0)
                             ++next;
                     } else {
-                        next = (row->selected + direction +
-                                static_cast<int>(row->options.size())) %
-                               static_cast<int>(row->options.size());
+                        const int optionCount = static_cast<int>(row->options.size());
+                        for (int attempt = 0; attempt < optionCount; ++attempt) {
+                            next = (next + direction + optionCount) % optionCount;
+                            if (isOptionEnabled(*row, static_cast<size_t>(next)))
+                                break;
+                        }
                     }
-                    if (next != row->selected) {
+                    if (next != row->selected &&
+                        isOptionEnabled(*row, static_cast<size_t>(next))) {
                         row->selected = next;
                         onCommand(row->id);
                     }
