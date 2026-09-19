@@ -361,6 +361,7 @@ struct RuntimeLogDialog::Impl {
                        const D2D1_RECT_F& rect,
                        bool playbackActive,
                        bool coverLoaded,
+                       const std::wstring& coverSource,
                        const std::shared_ptr<const std::vector<uint8_t>>& image) {
         const auto& p = fluent::palette();
         painter.fillRoundRect(p.cardFill, rect, kCardRadius);
@@ -373,19 +374,28 @@ struct RuntimeLogDialog::Impl {
         drawCoverToggle(painter, showCover);
 
         if (!showCover) {
+            const bool hasSource = coverLoaded && !coverSource.empty();
             painter.drawText(!playbackActive ? L"未加载"
                                              : coverLoaded ? L"加载成功" : L"加载失败",
                              painter.textFormat(15.0f, 500, true, true),
                              D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f,
-                                         rect.right - 14.0f, rect.bottom - 10.0f),
+                                         rect.right - 14.0f,
+                                         hasSource ? rect.top + 52.0f
+                                                   : rect.bottom - 10.0f),
                              p.text);
+            if (hasSource)
+                painter.drawTrimmedText(
+                    coverSource, painter.textFormat(12.0f, 400, false, true),
+                    D2D1::RectF(rect.left + 14.0f, rect.top + 52.0f,
+                                rect.right - 14.0f, rect.bottom - 6.0f),
+                    p.textSecondary);
             return;
         }
 
         const float imageSize = std::min(
             kCoverImageSizeDip,
             std::min(rect.right - rect.left - 28.0f, rect.bottom - rect.top - 36.0f));
-        const float imageLeft = rect.left + (rect.right - rect.left - imageSize) * 0.5f;
+        const float imageLeft = rect.left + 14.0f;
         const float imageTop = rect.bottom - imageSize - 6.0f;
         const UINT targetPx = std::max(
             1u, static_cast<UINT>(std::ceil(imageSize * surface.dipScale())));
@@ -399,14 +409,28 @@ struct RuntimeLogDialog::Impl {
                                     imageTop + imageSize),
                 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             bitmap->Release();
+            if (!coverSource.empty())
+                painter.drawTrimmedText(
+                    coverSource, painter.textFormat(12.0f, 400, false, true),
+                    D2D1::RectF(imageLeft + imageSize + 10.0f, rect.top + 32.0f,
+                                rect.right - 14.0f, rect.bottom - 8.0f),
+                    p.textSecondary);
             return;
         }
 
+        const bool hasSource = coverLoaded && !coverSource.empty();
         painter.drawText(playbackActive ? L"加载失败" : L"未加载",
                          painter.textFormat(15.0f, 500, true, true),
                          D2D1::RectF(rect.left + 14.0f, rect.top + 32.0f, rect.right - 14.0f,
-                                     rect.bottom - 10.0f),
+                                     hasSource ? rect.top + 52.0f
+                                               : rect.bottom - 10.0f),
                          p.text);
+        if (hasSource)
+            painter.drawTrimmedText(
+                coverSource, painter.textFormat(12.0f, 400, false, true),
+                D2D1::RectF(rect.left + 14.0f, rect.top + 52.0f,
+                            rect.right - 14.0f, rect.bottom - 6.0f),
+                p.textSecondary);
     }
 
     void paint(fluent::FluentDialogSurface::Painter& painter, float width, float height) {
@@ -449,7 +473,7 @@ struct RuntimeLogDialog::Impl {
         drawCard(painter, card(1, 0), L"歌词来源", snapshot.playbackActive ? snapshot.lyricSource
                                                                          : L"未加载");
         drawCoverCard(painter, card(2, 0), snapshot.playbackActive, snapshot.coverLoaded,
-                      snapshot.coverImage);
+                      snapshot.coverSource, snapshot.coverImage);
         drawCard(painter, card(0, 1), L"CPU", percentText(snapshot.cpuPercent));
         drawCard(painter, card(1, 1), L"GPU", percentText(snapshot.gpuPercent));
         drawCard(painter, card(2, 1), L"专用内存", memoryText(snapshot.memoryBytes));

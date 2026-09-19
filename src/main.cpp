@@ -178,14 +178,24 @@ const wchar_t* trayCommandName(int command) {
     }
 }
 
-enum class CoverSource { Smtc, QqApi, NeteaseApi };
+enum class CoverSource { None, Smtc, QqApi, NeteaseApi };
 
 const wchar_t* coverSourceName(CoverSource source) {
     switch (source) {
+    case CoverSource::None: return L"none";
     case CoverSource::Smtc: return L"smtc";
     case CoverSource::QqApi: return L"qq-api";
     case CoverSource::NeteaseApi: return L"netease-api";
     default: return L"unknown";
+    }
+}
+
+const wchar_t* coverSourceDisplayName(CoverSource source) {
+    switch (source) {
+    case CoverSource::Smtc: return L"系统 SMTC";
+    case CoverSource::QqApi: return L"QQ 音乐接口";
+    case CoverSource::NeteaseApi: return L"网易云音乐接口";
+    default: return L"";
     }
 }
 
@@ -983,6 +993,7 @@ struct App {
     bool hasAlbumColor_ = false; // 当前曲目是否已提取到主色调（切歌后失效）
     COLORREF albumColor_ = RGB(49, 194, 124);
     std::shared_ptr<const std::vector<uint8_t>> lastCover_; // 当前曲目有效封面（SMTC 优先，API 兜底）
+    CoverSource lastCoverSource_ = CoverSource::None;
 
     // 每日一言任务栏入口：句子缓存与应用图标属于播放链路之外的独立状态。
     bool idleEntryEnabled_ = true;
@@ -1151,11 +1162,15 @@ struct App {
         else
             runtimeLogger_.setLyricSource(L"暂无歌词");
         std::shared_ptr<const std::vector<uint8_t>> cover;
-        if (lastSmtcThumbnail && !lastSmtcThumbnail->empty())
+        CoverSource coverSource = CoverSource::None;
+        if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) {
             cover = lastSmtcThumbnail;
-        else if (lastCover_ && !lastCover_->empty())
+            coverSource = CoverSource::Smtc;
+        } else if (lastCover_ && !lastCover_->empty()) {
             cover = lastCover_;
-        runtimeLogger_.setCoverImage(cover);
+            coverSource = lastCoverSource_;
+        }
+        runtimeLogger_.setCoverImage(cover, coverSourceDisplayName(coverSource));
     }
 
     void logLyricsCreated(const wchar_t* source) {
@@ -1230,16 +1245,14 @@ struct App {
     }
 
     void releaseCurrentCover() {
-        const bool hasSmtcCover = lastSmtcThumbnail && !lastSmtcThumbnail->empty();
-        const bool hasApiCover = lastCover_ && !lastCover_->empty() &&
-                                 (!lastSmtcThumbnail || lastCover_ != lastSmtcThumbnail);
-        if (hasSmtcCover)
+        if (lastCover_ && !lastCover_->empty())
+            runtime_log::writef(L"[resource][event] cover-released source=%s bytes=%zu",
+                                coverSourceName(lastCoverSource_), lastCover_->size());
+        else if (lastSmtcThumbnail && !lastSmtcThumbnail->empty())
             runtime_log::writef(L"[resource][event] cover-released source=smtc bytes=%zu",
                                 lastSmtcThumbnail->size());
-        if (hasApiCover)
-            runtime_log::writef(L"[resource][event] cover-released source=api bytes=%zu",
-                                lastCover_->size());
         lastCover_.reset();
+        lastCoverSource_ = CoverSource::None;
         lastSmtcThumbnail.reset();
     }
 
@@ -3105,6 +3118,7 @@ struct App {
             }
             if (snap.thumbnail && !snap.thumbnail->empty()) {
                 lastCover_ = snap.thumbnail;
+                lastCoverSource_ = CoverSource::Smtc;
                 logCoverCreated(CoverSource::Smtc, lastCover_);
             }
             if (!durationOnlyTrackUpdate)
@@ -3140,13 +3154,15 @@ struct App {
                         lastSmtcThumbnail->size());
                 } else if (lastCover_ && !lastCover_->empty() && lastCover_ != snap.thumbnail) {
                     runtime_log::writef(
-                        L"[resource][event] cover-released source=api bytes=%zu",
-                        lastCover_->size());
+                        L"[resource][event] cover-released source=%s bytes=%zu",
+                        coverSourceName(lastCoverSource_), lastCover_->size());
                 }
                 logCoverCreated(CoverSource::Smtc, snap.thumbnail);
             }
-            if (snap.thumbnail && !snap.thumbnail->empty())
+            if (snap.thumbnail && !snap.thumbnail->empty()) {
                 lastCover_ = snap.thumbnail;
+                lastCoverSource_ = CoverSource::Smtc;
+            }
         }
         lastSmtcThumbnail = snap.thumbnail;
         // 时间线从残留恢复可信（stale 1→0）：若当前歌词请求是在不可信期间发出的
@@ -3245,6 +3261,7 @@ struct App {
             return;
         if (lastSmtcThumbnail && !lastSmtcThumbnail->empty()) return; // SMTC 已提供有效封面，优先使用
         lastCover_ = payload->cover;
+        lastCoverSource_ = payload->source;
         logCoverCreated(payload->source, lastCover_);
         publishPresentationFrame(snap, true);
         tryExtractAlbumColor();

@@ -16,6 +16,7 @@ struct RuntimeLogSnapshot {
     int64_t durationMs = 0;
     std::wstring lyricSource = L"未加载";
     bool coverLoaded = false;
+    std::wstring coverSource;
     std::shared_ptr<const std::vector<uint8_t>> coverImage;
 
     // -1 表示当前系统没有提供对应的采样值。
@@ -54,7 +55,8 @@ public:
     void setPlayback(const std::wstring& title, const std::wstring& artist,
                      int64_t durationMs, bool active);
     void setLyricSource(const std::wstring& source);
-    void setCoverImage(const std::shared_ptr<const std::vector<uint8_t>>& cover);
+    void setCoverImage(const std::shared_ptr<const std::vector<uint8_t>>& cover,
+                       const std::wstring& source = {});
     void setCoverLoaded(bool loaded);
     RuntimeLogSnapshot snapshot() const;
 
