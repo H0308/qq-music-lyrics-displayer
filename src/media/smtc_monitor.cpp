@@ -4,8 +4,12 @@
 #include "media/smtc/qq_music_smtc_adapter.h"
 #include "media/smtc/smtc_common.h"
 
+#include <windows.h>
+#include <tlhelp32.h>
+
 #include <chrono>
 #include <condition_variable>
+#include <cwchar>
 #include <mutex>
 #include <thread>
 #include <utility>
@@ -18,6 +22,44 @@
 using Session = smtc::Session;
 using namespace winrt;
 using namespace winrt::Windows::Media::Control;
+
+namespace {
+
+bool processAlive(const wchar_t* executableName) {
+    if (!executableName || !*executableName)
+        return false;
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    bool found = false;
+    if (Process32FirstW(snapshot, &entry)) {
+        do {
+            if (_wcsicmp(entry.szExeFile, executableName) == 0) {
+                found = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return found;
+}
+
+bool playerProcessAlive(SmtcPlayerType player) {
+    switch (player) {
+    case SmtcPlayerType::QQMusic:
+        return processAlive(L"QQMusic.exe");
+    case SmtcPlayerType::NetEase:
+        return processAlive(L"cloudmusic.exe");
+    default:
+        return false;
+    }
+}
+
+} // namespace
 
 // 成员顺序有意为之：revoker 最后声明、析构时最先退订，避免回调访问已销毁成员。
 struct SmtcMonitor::Impl {
@@ -54,6 +96,13 @@ struct SmtcMonitor::Impl {
     std::condition_variable pollCv;
     bool pollStopping = false;
     std::thread pollThread;
+
+    // Windows 在其他 SMTC 应用成为当前会话时，可能从枚举结果中漏掉
+    // 已暂停的音乐会话。只要该会话所属的音乐播放器仍在运行，就保留暂停快照；
+    // 播放器退出后再等待一个稳定窗口，避免生命周期边界的瞬时空列表。
+    std::chrono::steady_clock::time_point sessionLossCandidateSince;
+    bool sessionSelectionHeld = false;
+    static constexpr auto kSessionLossStabilityWindow = std::chrono::milliseconds(1500);
 
     Impl() {
         adapters.emplace_back(std::make_unique<smtc::QqMusicSmtcAdapter>());
@@ -354,10 +403,12 @@ struct SmtcMonitor::Impl {
         Session found{ nullptr };
         Session selectedSession{ nullptr };
         bool selectedSessionAlive = false;
+        SmtcPlayerType selectedPlayer = SmtcPlayerType::Unknown;
         {
             std::lock_guard<std::mutex> lk(mtx);
             selectedSession = session;
             selectedSessionAlive = snap.sessionAlive;
+            selectedPlayer = snap.player;
         }
         if (manager) {
             try {
@@ -478,6 +529,26 @@ struct SmtcMonitor::Impl {
             }
         }
 
+        bool recoveredHeldSession = false;
+        if (!found && selectedSessionAlive && selectedSession) {
+            sessionSelectionHeld = true;
+            if (playerProcessAlive(selectedPlayer)) {
+                sessionLossCandidateSince = {};
+                return;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (sessionLossCandidateSince == std::chrono::steady_clock::time_point{})
+                sessionLossCandidateSince = now;
+            if (now - sessionLossCandidateSince < kSessionLossStabilityWindow)
+                return;
+            sessionSelectionHeld = false;
+            sessionLossCandidateSince = {};
+        } else {
+            recoveredHeldSession = found && sessionSelectionHeld;
+            sessionSelectionHeld = false;
+            sessionLossCandidateSince = {};
+        }
+
         Session currentSession{ nullptr };
         {
             std::lock_guard<std::mutex> lk(mtx);
@@ -491,6 +562,10 @@ struct SmtcMonitor::Impl {
                 // 会话切换与属性读取发生在播放器生命周期边界，失败时保持
                 // 当前快照，等待下一次系统媒体会话事件或后台健康检查重试。
             }
+        } else if (recoveredHeldSession) {
+            // 保留期内会话可能已发生暂停/恢复或属性变化，而它短暂从
+            // 枚举结果中消失时监听器也可能被重建。恢复后主动补读一次完整快照。
+            refreshAll();
         }
     }
 
