@@ -7040,8 +7040,14 @@ struct TaskbarHost::Impl {
         else if (const float centerAnchor = immersiveLyricCenterX(); centerAnchor >= 0.0f)
             anchorX = centerAnchor;
         const D2D1_POINT_2F anchor = D2D1::Point2F(anchorX, y + textH * 0.5f);
-        // visibleW 是转场期间随进度收敛的可见右边界（文本坐标）；缩放轴与歌词
-        // 的实际居中锚点保持一致，避免新旧两句在入场时发生横向漂移。
+        // 外层裁剪先在最终窗口坐标中固定下来，再缩放文字。否则裁剪矩形会和文字
+        // 一起围绕任务栏中心缩放；沉浸 / Dock 的歌词安全区左右不对称时，右边界
+        // 会短暂移入频谱、时钟和控件区域，转场结束恢复普通裁剪时形成闪烁。
+        const D2D1_RECT_F safeClip =
+            D2D1::RectF(x, y, x + areaW + kTextPadding, y + textH);
+        rt->PushAxisAlignedClip(safeClip, D2D1_ANTIALIAS_MODE_ALIASED);
+        // visibleW 是转场期间可见的文本坐标宽度；缩放轴与歌词的实际居中锚点
+        // 保持一致，避免新旧两句在入场时发生横向漂移。
         const float drawW = visibleW > 0.0f ? visibleW : areaW;
         D2D1_MATRIX_3X2_F previous{};
         rt->GetTransform(&previous);
@@ -7049,6 +7055,7 @@ struct TaskbarHost::Impl {
         drawLyricScrollingText(layout, textW, textH, drawW, x, y, offset, brush, outline, glow,
                                 karaokeBrush, karaokeX, opacity, singleCopy);
         rt->SetTransform(previous);
+        rt->PopAxisAlignedClip();
     }
 
     void drawDoubleLineLyrics(float lyricAreaX, float lyricAreaW, float h,
@@ -7104,10 +7111,10 @@ struct TaskbarHost::Impl {
             // 随转场进度收敛到核心行可视宽，避免动画第一帧尾部瞬间消失。
             float incomingVisibleW = 0.0f;
             if (lyricWidth_ > lyricAreaW) {
-                const float previewRightW =
-                    std::min(lyricWidth_, lyricAreaW / kLyricPreviewScale);
-                incomingVisibleW =
-                    previewRightW + (lyricAreaW - previewRightW) * movementT;
+                // 当前缩放比例下恰好覆盖歌词安全区所需的文本坐标宽度。
+                // 使用实时比例而不是对两个宽度线性插值，避免中间帧的可见宽度
+                // 反而大于安全区，并由外层固定裁剪保证不会侵入右侧固定内容。
+                incomingVisibleW = std::min(lyricWidth_, lyricAreaW / incomingScale);
             }
 
             // 下一行在转场前已经位于核心行下方；转场从这个位置接入核心，避免跳变。
@@ -8832,7 +8839,22 @@ struct TaskbarHost::Impl {
             updateDisplayRefresh();
             if (isAppBarView() && appBarRegistered_)
                 updateAppBarPosition();
+            else
+                adjustPosition();
+            // 不等待歌词、频谱等下一次内容变化才发现客户区尺寸已改变。立即按新
+            // 任务栏几何重算安全区，并让 renderer.bind() 在下一帧同步交换链尺寸。
+            requestInvalidation(toMask(RenderInvalidation::Layout) |
+                                toMask(RenderInvalidation::Geometry));
+            requestFrameAndFlush();
             return 0;
+        case WM_SIZE:
+            if (wp != SIZE_MINIMIZED) {
+                // SetWindowPos/Explorer/AppBar 都可能直接改变客户区；显式唤醒一帧，
+                // 避免 DXGI_SCALING_STRETCH 暂时拉伸旧帧直到下一句歌词出现。
+                requestInvalidation(RenderInvalidation::Geometry);
+                requestFrame();
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_DPICHANGED:
             if (isAppBarView() && appBarRegistered_) {
                 dpi_ = HIWORD(wp) ? HIWORD(wp) : LOWORD(wp);
