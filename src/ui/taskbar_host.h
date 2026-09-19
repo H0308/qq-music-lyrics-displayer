@@ -109,6 +109,7 @@ public:
     void setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb);
     void setMediaPopupOpenedCallback(std::function<void()> cb);
     void setContextMenuCallback(std::function<void(POINT)> cb);
+    void setImmersiveMenuCallback(std::function<void(POINT)> cb);
     // 沉浸模式应用收纳按钮：由应用层实时枚举并显示运行中/已固定应用。
     void setAppCollectionCallback(std::function<void(POINT)> cb);
     // 拖动歌词并吸附到另一有效锚点后通知应用层持久化位置。

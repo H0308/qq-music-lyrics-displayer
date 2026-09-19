@@ -2654,6 +2654,7 @@ struct App {
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setImmersiveExitCallback([this] { applyTaskbarImmersive(false); });
         host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
+        host->setImmersiveMenuCallback([this](POINT pt) { showTrayMenu(pt); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
         host->setPositionModeChangedCallback([this](int mode) {
             mode = mode == 1 ? 1 : 0;
@@ -3319,6 +3320,7 @@ struct App {
     void updateTrayIcon();
     std::vector<fluent::FluentMenuItem> buildMenuItems(bool fullTrayMenu);
     void showTrayMenu();
+    void showTrayMenu(POINT screenPt);
     void showTaskbarMenu(POINT screenPt);
     void showTaskbarApps(POINT screenPt);
     std::vector<fluent::FluentMenuItem> buildTaskbarAppItems();
@@ -4894,7 +4896,11 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
 void App::showTrayMenu() {
     POINT pt{};
     GetCursorPos(&pt);
-    fluent::FluentMenu::show(trayHwnd, pt, buildMenuItems(true),
+    showTrayMenu(pt);
+}
+
+void App::showTrayMenu(POINT screenPt) {
+    fluent::FluentMenu::show(trayHwnd, screenPt, buildMenuItems(true),
                              [this](int cmd) { onMenuCommand(cmd, L"tray"); });
 }
 

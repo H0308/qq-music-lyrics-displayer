@@ -935,6 +935,7 @@ struct TaskbarHost::Impl {
     std::function<void(MediaControl)> onControl;
     std::function<void()> onImmersiveExit;
     std::function<void(POINT)> onContextMenu;
+    std::function<void(POINT)> onImmersiveMenu;
     std::function<void(POINT)> onAppCollection;
     std::function<void(int)> onPositionModeChanged;
     bool mouseOver_ = false;
@@ -5460,7 +5461,7 @@ struct TaskbarHost::Impl {
                                 : i == kImmersiveControlApps
                                       ? static_cast<bool>(onAppCollection)
                                       : i == kImmersiveControlMenu
-                                            ? static_cast<bool>(onContextMenu)
+                                            ? static_cast<bool>(onImmersiveMenu)
                                             : i == kImmersiveControlTray
                                                   ? static_cast<bool>(taskbar_)
                                                   : true;
@@ -5626,6 +5627,13 @@ struct TaskbarHost::Impl {
         onContextMenu(screenPoint);
     }
 
+    void openImmersiveMenu(POINT screenPoint) {
+        if (!onImmersiveMenu)
+            return;
+        prepareForExternalPopup();
+        onImmersiveMenu(screenPoint);
+    }
+
     void openSystemTrayOverflow(POINT anchor) {
         if (!taskbar_ || !IsWindow(taskbar_))
             return;
@@ -5693,8 +5701,9 @@ struct TaskbarHost::Impl {
                 GetWindowRect(hwnd, &rc);
                 pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
             }
-            // 菜单按钮是沉浸模式的固定入口，不受“右键显示任务栏歌词菜单”开关影响。
-            openTaskbarMenu(pt);
+            // 菜单按钮是完整托盘菜单的固定入口，不受“右键显示
+            // 任务栏歌词菜单”开关影响，也不复用任务栏歌词的精简菜单。
+            openImmersiveMenu(pt);
             break;
         }
         case kImmersiveControlTray: {
@@ -8834,6 +8843,10 @@ void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
 
 void TaskbarHost::setContextMenuCallback(std::function<void(POINT)> cb) {
     impl_->onContextMenu = std::move(cb);
+}
+
+void TaskbarHost::setImmersiveMenuCallback(std::function<void(POINT)> cb) {
+    impl_->onImmersiveMenu = std::move(cb);
 }
 
 void TaskbarHost::setAppCollectionCallback(std::function<void(POINT)> cb) {
