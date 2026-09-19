@@ -31,7 +31,8 @@ struct SettingsState {
     bool albumCoverVisible = true;
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
-    bool taskbarImmersive = false;
+    int taskbarViewMode = 0; // 0 内嵌 1 沉浸 2 AppBar
+    int appBarEdge = 0; // 0 顶部 1 底部
     int immersiveMaskOpacity = 88;
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
@@ -97,7 +98,8 @@ struct SettingsActions {
     std::function<void(bool)> onAlbumCoverVisible;
     std::function<void(bool)> onPlatformIconVisible;
     std::function<void(bool)> onCoverEffectVinyl;
-    std::function<void(bool)> onTaskbarImmersive;
+    std::function<void(int)> onTaskbarViewMode;
+    std::function<void(int)> onAppBarEdge;
     std::function<void(int)> onImmersiveMaskOpacity;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;

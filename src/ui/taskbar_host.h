@@ -67,10 +67,16 @@ enum class IdleQuoteBackgroundScope {
 };
 
 // 任务栏歌词的承载方式。嵌入模式只占用任务栏中的一段空闲区，沉浸模式
-// 覆盖当前任务栏客户区；两者共用同一套歌词与媒体渲染状态。
+// 覆盖当前任务栏客户区，AppBar 作为独立顶栏/底栏保留桌面工作区。
 enum class TaskbarViewMode {
     Embedded,
     Immersive,
+    AppBar,
+};
+
+enum class AppBarEdge {
+    Top,
+    Bottom,
 };
 
 // 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
@@ -82,9 +88,9 @@ enum class RenderMode {
     Minimal = 3,
 };
 
-// 任务栏内嵌歌词宿主：窗口作为 Shell_TrayWnd 的子窗口，锚定在通知区左侧。
-// 横向任务栏显示圆角封面、歌名/歌手和当前行歌词（超长自动滚动），鼠标悬浮
-// 时歌词区可切换为播放控制；侧边任务栏改用窄栏封面、逐字竖排歌词和纵向控件。
+// 任务栏歌词宿主：内嵌/沉浸时作为 Shell_TrayWnd 的子窗口，AppBar 时切换为
+// Shell 管理的独立顶层窗口。横向显示封面、歌曲信息和当前歌词；内嵌侧边任务栏
+// 改用窄栏封面、逐字竖排歌词和纵向控件。
 class TaskbarHost : public ILyricHost {
 public:
     TaskbarHost();
@@ -99,7 +105,7 @@ public:
     void applySpectrumPatch(const SpectrumPatch& patch) override;
     void setMediaInfo(const OverlayMediaInfo& info) override;
     void setControlCallback(std::function<void(MediaControl)> cb) override;
-    // 沉浸模式专属退出回调，不受普通任务栏歌词内嵌控件设置影响。
+    // 沉浸/AppBar 展开视图的退出回调，不受普通内嵌控件设置影响。
     void setImmersiveExitCallback(std::function<void()> cb);
     void setAppVolume(const AppVolumeState& state) override;
     void setAppVolumeCallback(std::function<void(int percent)> cb) override;
@@ -110,7 +116,7 @@ public:
     void setMediaPopupOpenedCallback(std::function<void()> cb);
     void setContextMenuCallback(std::function<void(POINT)> cb);
     void setImmersiveMenuCallback(std::function<void(POINT)> cb);
-    // 沉浸模式应用收纳按钮：由应用层实时枚举并显示运行中/已固定应用。
+    // 沉浸模式应用收纳按钮：由应用层实时枚举并显示运行中/已固定应用；AppBar 不显示。
     void setAppCollectionCallback(std::function<void(POINT)> cb);
     // 拖动歌词并吸附到另一有效锚点后通知应用层持久化位置。
     void setPositionModeChangedCallback(std::function<void(int)> cb);
@@ -190,6 +196,8 @@ public:
 
     // 沉浸模式：覆盖当前任务栏客户区，颜色跟随 Windows 应用模式，透明度可调。
     void setViewMode(TaskbarViewMode mode);
+    // AppBar 仅支持水平顶部/底部；位置变更会立即重新向 Shell 协商工作区。
+    void setAppBarEdge(AppBarEdge edge);
     void setImmersiveMaskOpacity(int opacityPercent);
 
     void show() override;

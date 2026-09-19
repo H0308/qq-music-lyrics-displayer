@@ -44,6 +44,7 @@ constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~1
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr UINT kTaskbarAttachRetryMs = 250;
 constexpr UINT_PTR kPlacementTimerId = 4;
+constexpr UINT kAppBarCallbackMessage = WM_APP + 40;
 constexpr UINT kPlacementTimerMs = 500; // 隐藏时只拾取避让结果，不运行完整渲染帧
 constexpr UINT kProbeIntervalMs = 3000;
 constexpr UINT kNoSpaceProbeIntervalMs = 1000;
@@ -90,6 +91,8 @@ constexpr int kImmersiveControlApps = 5;
 constexpr int kImmersiveControlMenu = 6;
 constexpr int kImmersiveControlTray = 7;
 constexpr int kImmersiveControlCount = 8;
+constexpr int kAppBarControlCount = 6;
+constexpr float kAppBarHeightDip = 48.0f;
 constexpr float kImmersiveControlRadiusFactor = 0.24f;
 constexpr float kImmersiveControlMinRadius = 8.0f;
 constexpr float kImmersiveControlMaxRadius = 12.0f;
@@ -871,6 +874,9 @@ struct TaskbarHost::Impl {
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
     bool taskbarEmbedded_ = false;
+    bool appBarRegistered_ = false;
+    bool appBarFullscreenOpen_ = false;
+    AppBarEdge appBarEdge_ = AppBarEdge::Top;
     HWND notify_ = nullptr;
     HWND start_ = nullptr;
     RECT rcTaskbar_{};   // 任务栏屏幕坐标（缓存）
@@ -1143,7 +1149,7 @@ struct TaskbarHost::Impl {
     TaskbarBackground background_ = TaskbarBackground::None;
     int coverBackgroundOpacityPct_ = 60;
     ID2D1SolidColorBrush* brushBackground_ = nullptr; // 纯色填充与模糊遮罩共用（每帧 SetColor）
-    // 沉浸模式使用完整任务栏客户区，不参与普通嵌入模式的空闲区避让计算。
+    // 沉浸模式使用完整任务栏客户区；AppBar 使用独立的 Shell 工作区协议。
     TaskbarViewMode viewMode_ = TaskbarViewMode::Embedded;
     int immersiveMaskOpacityPct_ = 88;
     ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
@@ -1275,7 +1281,7 @@ struct TaskbarHost::Impl {
     }
 
     bool immersiveSongContentLayerActive() const {
-        return viewMode_ == TaskbarViewMode::Immersive && songContentTransition_ &&
+        return isExpandedView() && songContentTransition_ &&
                songContentTransition_->compositorLayer;
     }
 
@@ -1305,6 +1311,24 @@ struct TaskbarHost::Impl {
         flushRenderRequest();
     }
 
+    bool isExpandedView() const {
+        return viewMode_ == TaskbarViewMode::Immersive ||
+               viewMode_ == TaskbarViewMode::AppBar;
+    }
+
+    bool isAppBarView() const { return viewMode_ == TaskbarViewMode::AppBar; }
+
+    int expandedControlCount() const {
+        return isAppBarView() ? kAppBarControlCount : kImmersiveControlCount;
+    }
+
+    bool expandedControlVisible(int index) const {
+        if (!isAppBarView())
+            return index >= 0 && index < kImmersiveControlCount;
+        return (index >= kImmersiveControlPrevious && index <= kImmersiveControlExit) ||
+               index == kImmersiveControlMenu;
+    }
+
     bool shouldShowWindow() const {
         if (!hwnd || isStoppedMode() || !isSessionVisible() ||
             renderState_.visibilitySuppressed())
@@ -1317,12 +1341,22 @@ struct TaskbarHost::Impl {
 
     bool reconcileWindowVisibility(bool prewarmBeforeShow = false) {
         const bool wantVisible = shouldShowWindow();
-        if (wantVisible == isWindowVisible())
+        const bool nativeVisible = hwnd && IsWindowVisible(hwnd);
+        const bool appBarRegistrationMismatch =
+            isAppBarView() && (wantVisible != appBarRegistered_);
+        if (wantVisible == isWindowVisible() && wantVisible == nativeVisible &&
+            !appBarRegistrationMismatch)
             return false;
 
         renderState_.setWindowPhase(wantVisible ? RenderState::WindowPhase::Visible
                                                 : RenderState::WindowPhase::Hidden);
         if (wantVisible) {
+            if (isAppBarView() && !registerAppBar()) {
+                renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
+                ShowWindow(hwnd, SW_HIDE);
+                setPlacementStatus(TaskbarPlacementStatus::Unavailable);
+                return false;
+            }
             // 完全停止模式会释放 DComp 设备链。先在原生窗口仍隐藏时完成首帧，
             // 让设备/交换链/字体和位图资源的重建成本不落到用户可见的第一帧。
             if (prewarmBeforeShow)
@@ -1335,6 +1369,8 @@ struct TaskbarHost::Impl {
             clearImmersiveSongContentTransition();
             if (hwnd)
                 ShowWindow(hwnd, SW_HIDE);
+            if (isAppBarView())
+                unregisterAppBar();
         }
         return true;
     }
@@ -1346,7 +1382,9 @@ struct TaskbarHost::Impl {
     }
     float dip(int px) const { return static_cast<float>(px) / scale(); }
 
-    bool isVerticalTaskbar() const { return isVerticalTaskbarEdge(taskbarEdge_); }
+    bool isVerticalTaskbar() const {
+        return !isAppBarView() && isVerticalTaskbarEdge(taskbarEdge_);
+    }
 
     void clientPixelSize(int& width, int& height) const {
         width = 0;
@@ -1483,6 +1521,151 @@ struct TaskbarHost::Impl {
         return true;
     }
 
+    bool detachFromTaskbar() {
+        if (!hwnd)
+            return false;
+        cancelTaskbarAttachRetry();
+        const HWND originalParent = GetParent(hwnd);
+        const LONG_PTR originalStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if (originalParent) {
+            SetLastError(ERROR_SUCCESS);
+            const HWND previousParent = SetParent(hwnd, nullptr);
+            const DWORD error = GetLastError();
+            if (!previousParent && error != ERROR_SUCCESS) {
+                runtime_log::writef(L"[appbar] detach failed: error=%lu",
+                                    static_cast<unsigned long>(error));
+                return false;
+            }
+        }
+
+        // SetParent 不会自动切换 WS_CHILD/WS_POPUP。仍带 WS_CHILD 时，桌面窗口会被
+        // GetParent 返回为父窗口，因此必须先完成顶层样式切换，再校验是否真正脱离。
+        SetLastError(ERROR_SUCCESS);
+        const LONG_PTR popupStyle =
+            (originalStyle & ~static_cast<LONG_PTR>(WS_CHILD)) |
+            static_cast<LONG_PTR>(WS_POPUP);
+        if (SetWindowLongPtrW(hwnd, GWL_STYLE, popupStyle) == 0 &&
+            GetLastError() != ERROR_SUCCESS) {
+            runtime_log::writef(L"[appbar] popup style failed: error=%lu",
+                                static_cast<unsigned long>(GetLastError()));
+            return false;
+        }
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                         SWP_FRAMECHANGED);
+        if (GetParent(hwnd) != nullptr) {
+            runtime_log::writef(L"[appbar] detach verification failed: parent=%p",
+                                GetParent(hwnd));
+            return false;
+        }
+        taskbarEmbedded_ = false;
+        return true;
+    }
+
+    HMONITOR appBarMonitor() const {
+        if (taskbar_ && IsWindow(taskbar_))
+            return MonitorFromWindow(taskbar_, MONITOR_DEFAULTTOPRIMARY);
+        if (hwnd)
+            return MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+        return MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    }
+
+    void updateAppBarZOrder() {
+        if (!hwnd || !appBarRegistered_)
+            return;
+        // Shell 只会通过 ABN_FULLSCREENAPP 报告真正的全屏打开/关闭；最大化窗口
+        // 不进入该状态。全屏期间按 AppBar 规范降到 Z 序底部，退出后恢复置顶。
+        SetWindowPos(hwnd, appBarFullscreenOpen_ ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    bool updateAppBarPosition() {
+        if (!hwnd || !appBarRegistered_)
+            return false;
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        if (!GetMonitorInfoW(appBarMonitor(), &monitor))
+            return false;
+
+        UINT nextDpi = GetDpiForWindow(hwnd);
+        if (nextDpi == 0 && taskbar_)
+            nextDpi = GetDpiForWindow(taskbar_);
+        if (nextDpi == 0)
+            nextDpi = 96;
+        if (dpi_ != nextDpi) {
+            dpi_ = nextDpi;
+            renderer.setDpi(dpi_);
+            requestInvalidation(toMask(RenderInvalidation::Layout) |
+                                toMask(RenderInvalidation::Text) |
+                                toMask(RenderInvalidation::Cover));
+        }
+
+        APPBARDATA data{};
+        data.cbSize = sizeof(data);
+        data.hWnd = hwnd;
+        data.uEdge = appBarEdge_ == AppBarEdge::Top ? ABE_TOP : ABE_BOTTOM;
+        data.rc = monitor.rcMonitor;
+        const LONG height = std::max<LONG>(1, static_cast<LONG>(std::lround(
+                                                   kAppBarHeightDip * dpi_ / 96.0f)));
+        if (data.uEdge == ABE_TOP)
+            data.rc.bottom = data.rc.top + height;
+        else
+            data.rc.top = data.rc.bottom - height;
+        SHAppBarMessage(ABM_QUERYPOS, &data);
+
+        if (data.uEdge == ABE_TOP)
+            data.rc.bottom = data.rc.top + height;
+        else
+            data.rc.top = data.rc.bottom - height;
+        SHAppBarMessage(ABM_SETPOS, &data);
+        if (data.rc.right <= data.rc.left || data.rc.bottom <= data.rc.top)
+            return false;
+
+        SetWindowPos(hwnd, appBarFullscreenOpen_ ? HWND_BOTTOM : HWND_TOPMOST,
+                     data.rc.left, data.rc.top,
+                     data.rc.right - data.rc.left, data.rc.bottom - data.rc.top,
+                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        mediaPopup.setAnchor(hwnd);
+        setPlacementStatus(TaskbarPlacementStatus::Safe);
+        return true;
+    }
+
+    bool registerAppBar() {
+        if (!isAppBarView() || !hwnd)
+            return false;
+        if (appBarRegistered_)
+            return updateAppBarPosition();
+        if (!detachFromTaskbar())
+            return false;
+        APPBARDATA data{};
+        data.cbSize = sizeof(data);
+        data.hWnd = hwnd;
+        data.uCallbackMessage = kAppBarCallbackMessage;
+        if (!SHAppBarMessage(ABM_NEW, &data)) {
+            runtime_log::writef(L"[appbar] ABM_NEW failed");
+            return false;
+        }
+        appBarRegistered_ = true;
+        if (!updateAppBarPosition()) {
+            unregisterAppBar();
+            return false;
+        }
+        runtime_log::writef(L"[appbar] registered edge=%s",
+                            appBarEdge_ == AppBarEdge::Top ? L"top" : L"bottom");
+        return true;
+    }
+
+    void unregisterAppBar() {
+        if (!appBarRegistered_ || !hwnd)
+            return;
+        appBarRegistered_ = false;
+        APPBARDATA data{};
+        data.cbSize = sizeof(data);
+        data.hWnd = hwnd;
+        SHAppBarMessage(ABM_REMOVE, &data);
+        runtime_log::writef(L"[appbar] unregistered");
+    }
+
     void retryTaskbarAttach() {
         if (!hwnd)
             return;
@@ -1530,8 +1713,13 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         app_icon::applyTaskbarIcon(hwnd);
-        if (!attachToTaskbar(h))
+        if (isAppBarView()) {
+            taskbarEmbedded_ = false;
+            renderState_.setVisibilitySuppressed(false);
+            setPlacementStatus(TaskbarPlacementStatus::Safe);
+        } else if (!attachToTaskbar(h)) {
             scheduleTaskbarAttachRetry();
+        }
         if (!mediaPopup.create(inst, hwnd))
             runtime_log::writef(L"[taskbar] media popup creation failed");
         if (!volumePopup_.create(inst))
@@ -1664,6 +1852,14 @@ struct TaskbarHost::Impl {
     }
 
     void show() {
+        if (isAppBarView()) {
+            renderState_.setVisibilitySuppressed(false);
+            setPlacementStatus(TaskbarPlacementStatus::Safe);
+            renderState_.setSessionVisible(true);
+            reconcileWindowVisibility();
+            requestFrameAndFlush();
+            return;
+        }
         if (renderState_.visibilitySuppressed() && !allowOverlap_)
             return;
         if ((placementStatus_ == TaskbarPlacementStatus::NoSpace ||
@@ -1890,6 +2086,11 @@ struct TaskbarHost::Impl {
         if (lyricDragging_)
             return;
         cancelSceneWindowResize();
+        if (isAppBarView()) {
+            if (appBarRegistered_)
+                updateAppBarPosition();
+            return;
+        }
         WindowPlacement placement;
         const TaskbarPlacementStatus status = calculateWindowPlacement(placement);
         if (status != TaskbarPlacementStatus::Unavailable &&
@@ -1993,7 +2194,7 @@ struct TaskbarHost::Impl {
     }
 
     void beginLyricDrag() {
-        if (viewMode_ == TaskbarViewMode::Immersive || lyricDragging_)
+        if (isExpandedView() || lyricDragging_)
             return;
         WindowPlacement current;
         // 预览表达的是用户此刻看到的整个任务栏歌词宿主，而非单独歌词文本：
@@ -2429,7 +2630,7 @@ struct TaskbarHost::Impl {
     }
 
     bool mediaPopupEnabledForScene() const {
-        if (viewMode_ == TaskbarViewMode::Immersive || isMinimalMode() || isStoppedMode())
+        if (isExpandedView() || isMinimalMode() || isStoppedMode())
             return false;
         if (scene_ == DisplayScene::Idle)
             return isSessionVisible() && idle.quickStartEnabled;
@@ -2624,6 +2825,9 @@ struct TaskbarHost::Impl {
         if (viewMode_ == mode)
             return;
 
+        const TaskbarViewMode previousMode = viewMode_;
+        if (hwnd && IsWindowVisible(hwnd))
+            ShowWindow(hwnd, SW_HIDE);
         const bool hadImmersivePress = immersiveControlPressed_ >= 0;
         if (dragPress_ || lyricDragging_)
             finishLyricDrag(false);
@@ -2632,6 +2836,8 @@ struct TaskbarHost::Impl {
             ReleaseCapture();
         renderer.resetRoot();
         clearImmersiveSongContentTransition();
+        if (previousMode == TaskbarViewMode::AppBar)
+            unregisterAppBar();
         viewMode_ = mode;
         volumeHover_ = false;
         immersiveControlHover_ = -1;
@@ -2640,17 +2846,38 @@ struct TaskbarHost::Impl {
         mediaPopup.hideImmediate();
         syncMediaPopupEnabled();
         cancelSceneWindowResize();
+        if (mode == TaskbarViewMode::AppBar) {
+            detachFromTaskbar();
+            renderState_.setVisibilitySuppressed(false);
+            stopPlacementTimer();
+            setPlacementStatus(TaskbarPlacementStatus::Safe);
+        } else {
+            findTaskbar();
+            if (!attachToTaskbar(hwnd))
+                scheduleTaskbarAttachRetry();
+        }
         // 沉浸模式仍需要完成首次真实探测，才能解除创建阶段的显示抑制；
         // 探测完成且窗口已可见后才停止避让定时器。否则重启时会一直隐藏。
         if (mode == TaskbarViewMode::Immersive && probeReady_ &&
             !renderState_.visibilitySuppressed())
             stopPlacementTimer();
-        else if (!isStoppedMode())
+        else if (mode != TaskbarViewMode::AppBar && !isStoppedMode())
             startPlacementTimer();
         requestInvalidation(toMask(RenderInvalidation::Layout) |
                             toMask(RenderInvalidation::Paint) |
                             toMask(RenderInvalidation::Text));
         adjustPosition();
+        reconcileWindowVisibility();
+        requestFrameAndFlush();
+    }
+
+    void setAppBarEdge(AppBarEdge edge) {
+        if (appBarEdge_ == edge)
+            return;
+        appBarEdge_ = edge;
+        if (isAppBarView() && appBarRegistered_)
+            updateAppBarPosition();
+        requestInvalidation(RenderInvalidation::Layout);
         requestFrameAndFlush();
     }
 
@@ -2968,7 +3195,7 @@ struct TaskbarHost::Impl {
     }
 
     bool horizontalImmersiveMode() const {
-        return viewMode_ == TaskbarViewMode::Immersive && !isVerticalTaskbar();
+        return isExpandedView() && !isVerticalTaskbar();
     }
 
     // 沉浸模式把频谱提升为右侧固定视觉区，长任务栏自动给它更多空间。
@@ -3025,7 +3252,7 @@ struct TaskbarHost::Impl {
     }
 
     bool sceneWidthPolicyDiffers(DisplayScene from, DisplayScene to) const {
-        if (isVerticalTaskbar() || viewMode_ == TaskbarViewMode::Immersive)
+        if (isVerticalTaskbar() || isExpandedView())
             return false;
         return sceneUsesCompactWidth(from) != sceneUsesCompactWidth(to) ||
                spectrumExtraForScene(from) != spectrumExtraForScene(to);
@@ -3036,7 +3263,7 @@ struct TaskbarHost::Impl {
     }
 
     bool beginSceneWindowResize() {
-        if (viewMode_ == TaskbarViewMode::Immersive)
+        if (isExpandedView())
             return false;
         WindowPlacement from;
         WindowPlacement to;
@@ -3796,21 +4023,32 @@ struct TaskbarHost::Impl {
                             timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
-                if (!attachToTaskbar(hwnd))
-                    scheduleTaskbarAttachRetry();
-                else
+                if (isAppBarView()) {
+                    // Explorer 重启后 Shell 的 AppBar 注册表已丢失，本地标记不再可信。
+                    appBarRegistered_ = false;
                     cancelTaskbarAttachRetry();
+                    if (isSessionVisible() && !isStoppedMode())
+                        registerAppBar();
+                } else if (!attachToTaskbar(hwnd)) {
+                    scheduleTaskbarAttachRetry();
+                } else {
+                    cancelTaskbarAttachRetry();
+                }
                 adjustPosition();
                 reconcileWindowVisibility();
                 requestFrameAndFlush();
             } else {
                 taskbarEmbedded_ = false;
-                scheduleTaskbarAttachRetry();
+                if (!isAppBarView())
+                    scheduleTaskbarAttachRetry();
             }
             return;
         }
         hwnd = nullptr;
         taskbarEmbedded_ = false;
+        // Explorer 强制退出时旧窗口可能没有走 WM_DESTROY，Shell 侧与本地的
+        // AppBar 注册状态都必须按已失效处理，避免重建窗口跳过 ABM_NEW。
+        appBarRegistered_ = false;
         // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
         // timerRunning_ 可能残留为 true，但定时器已随旧窗口消失；重建时同样
         // 等待新任务栏的首个探测结果，避免按旧矩形先显示一帧。
@@ -3821,6 +4059,10 @@ struct TaskbarHost::Impl {
         probeReady_ = false;
         delete probeOut_.exchange(nullptr);
         if (createWindow(inst)) {
+            if (isAppBarView()) {
+                renderState_.setVisibilitySuppressed(false);
+                setPlacementStatus(TaskbarPlacementStatus::Safe);
+            }
             reconcileWindowVisibility();
             if (isWindowVisible())
                 requestFrameAndFlush();
@@ -5078,7 +5320,7 @@ struct TaskbarHost::Impl {
         const float radius = immersiveControlRadius(heightDip);
         const float pitch = radius * kImmersiveControlPitchFactor;
         const float groupWidth =
-            pitch * static_cast<float>(kImmersiveControlCount - 1) + radius * 2.0f;
+            pitch * static_cast<float>(expandedControlCount() - 1) + radius * 2.0f;
         return groupWidth + kTextPadding * 2.0f;
     }
 
@@ -5161,7 +5403,7 @@ struct TaskbarHost::Impl {
         LayoutMetrics m;
         m.w = dip(pxW);
         m.h = dip(pxH);
-        const bool immersiveControls = viewMode_ == TaskbarViewMode::Immersive &&
+        const bool immersiveControls = isExpandedView() &&
                                        !isVerticalTaskbar();
         m.immersiveControlsW = immersiveControls ? immersiveControlsWidth(m.h) : 0.0f;
         if (scene == DisplayScene::Idle) {
@@ -5175,7 +5417,7 @@ struct TaskbarHost::Impl {
         const float contentW = std::max(
             1.0f, effW - m.immersiveControlsW -
                       (immersiveControls ? immersiveStart : 0.0f));
-        if (viewMode_ == TaskbarViewMode::Immersive && songInfoVisible_) {
+        if (isExpandedView() && songInfoVisible_) {
             // 沉浸模式的宽度来自整个任务栏，歌曲信息只保留稳定的左侧栏，
             // 把主要空间留给歌词和右侧频谱，避免 1920px 任务栏出现过宽信息区。
             const float available = contentW;
@@ -5184,7 +5426,7 @@ struct TaskbarHost::Impl {
                                       : 140.0f;
             const float preferred = std::clamp(available * 0.24f, 180.0f, 280.0f);
             m.leftW = std::min(available, std::max(minimum, preferred));
-        } else if (viewMode_ == TaskbarViewMode::Immersive) {
+        } else if (isExpandedView()) {
             // 没有歌曲信息时，只有实际显示的封面需要占用左侧安全区。
             // 这样切换封面不会改变歌词的中心锚点，也不会给控件留下无意义的空洞。
             m.leftW = albumCoverVisible_ ? coverSlotWidth(m.h) : 0.0f;
@@ -5219,7 +5461,7 @@ struct TaskbarHost::Impl {
     // 操作控件、频谱及时钟只参与安全区和裁剪；当空间不足时由绘制路径
     // 把文字约束在安全区内，不能反过来改变正常歌词的中心位置。
     float immersiveLyricCenterX() const {
-        if (viewMode_ != TaskbarViewMode::Immersive || isVerticalTaskbar())
+        if (!isExpandedView() || isVerticalTaskbar())
             return -1.0f;
         int pxW = 0;
         int pxH = 0;
@@ -5415,7 +5657,7 @@ struct TaskbarHost::Impl {
     // 的悬浮控件开关和样式设置影响。控件组的几何区域也会从歌词区预先扣除。
     bool immersiveControlsLayout(D2D1_POINT_2F centers[kImmersiveControlCount], float& cy,
                                  float& r) const {
-        if (viewMode_ != TaskbarViewMode::Immersive || isVerticalTaskbar())
+        if (!isExpandedView() || isVerticalTaskbar())
             return false;
 
         int pxW = 0;
@@ -5431,12 +5673,17 @@ struct TaskbarHost::Impl {
         r = immersiveControlRadius(layout.h);
         const float pitch = r * kImmersiveControlPitchFactor;
         const float groupW =
-            pitch * static_cast<float>(kImmersiveControlCount - 1) + r * 2.0f;
+            pitch * static_cast<float>(expandedControlCount() - 1) + r * 2.0f;
         const float groupLeft = layout.leftW + start +
                                 std::max(0.0f, (layout.immersiveControlsW - groupW) * 0.5f);
         cy = layout.h * 0.5f;
-        for (int i = 0; i < kImmersiveControlCount; ++i)
-            centers[i] = D2D1::Point2F(groupLeft + r + i * pitch, cy);
+        int visibleIndex = 0;
+        for (int i = 0; i < kImmersiveControlCount; ++i) {
+            if (!expandedControlVisible(i))
+                continue;
+            centers[i] = D2D1::Point2F(groupLeft + r + visibleIndex * pitch, cy);
+            ++visibleIndex;
+        }
         return true;
     }
 
@@ -5451,6 +5698,8 @@ struct TaskbarHost::Impl {
         float logicalY = 0.0f;
         clientPointToLogicalDip(x, y, logicalX, logicalY);
         for (int i = 0; i < kImmersiveControlCount; ++i) {
+            if (!expandedControlVisible(i))
+                continue;
             const bool enabled =
                 i == kImmersiveControlPrevious
                     ? media.canPrev
@@ -5523,7 +5772,7 @@ struct TaskbarHost::Impl {
 
         if (brushHover_) {
             for (int i = 0; i < kImmersiveControlCount; ++i) {
-                if (immersiveControlHover_ == i)
+                if (expandedControlVisible(i) && immersiveControlHover_ == i)
                     rt->FillEllipse(D2D1::Ellipse(centers[i], r + 4.0f, r + 4.0f),
                                     brushHover_);
             }
@@ -5533,13 +5782,15 @@ struct TaskbarHost::Impl {
         drawButton(kImmersiveControlNext, centers[kImmersiveControlNext], r);
         drawVolumeButton(centers[kImmersiveControlVolume], r);
         drawExitImmersiveButton(centers[kImmersiveControlExit], r);
-        settings_icon::draw(
-            rt, settings_icon::Kind::Apps,
-            D2D1::RectF(centers[kImmersiveControlApps].x - r * 0.82f,
-                        centers[kImmersiveControlApps].y - r * 0.82f,
-                        centers[kImmersiveControlApps].x + r * 0.82f,
-                        centers[kImmersiveControlApps].y + r * 0.82f),
-            brushBtn_, 1.2f);
+        if (expandedControlVisible(kImmersiveControlApps)) {
+            settings_icon::draw(
+                rt, settings_icon::Kind::Apps,
+                D2D1::RectF(centers[kImmersiveControlApps].x - r * 0.82f,
+                            centers[kImmersiveControlApps].y - r * 0.82f,
+                            centers[kImmersiveControlApps].x + r * 0.82f,
+                            centers[kImmersiveControlApps].y + r * 0.82f),
+                brushBtn_, 1.2f);
+        }
         if (brushBtn_) {
             const float dotRadius = std::clamp(r * 0.13f, 1.0f, 1.6f);
             const float dotPitch = r * 0.48f;
@@ -5552,13 +5803,15 @@ struct TaskbarHost::Impl {
                     brushBtn_);
             }
         }
-        settings_icon::draw(
-            rt, settings_icon::Kind::Tray,
-            D2D1::RectF(centers[kImmersiveControlTray].x - r * 0.82f,
-                        centers[kImmersiveControlTray].y - r * 0.82f,
-                        centers[kImmersiveControlTray].x + r * 0.82f,
-                        centers[kImmersiveControlTray].y + r * 0.82f),
-            brushBtn_, 1.2f);
+        if (expandedControlVisible(kImmersiveControlTray)) {
+            settings_icon::draw(
+                rt, settings_icon::Kind::Tray,
+                D2D1::RectF(centers[kImmersiveControlTray].x - r * 0.82f,
+                            centers[kImmersiveControlTray].y - r * 0.82f,
+                            centers[kImmersiveControlTray].x + r * 0.82f,
+                            centers[kImmersiveControlTray].y + r * 0.82f),
+                brushBtn_, 1.2f);
+        }
     }
 
     void drawVolumeButton(const D2D1_POINT_2F& c, float r) {
@@ -5574,7 +5827,7 @@ struct TaskbarHost::Impl {
     }
 
     bool hitVolumeButton(float x, float y) const {
-        if (viewMode_ == TaskbarViewMode::Immersive)
+        if (isExpandedView())
             return hitImmersiveControl(x, y) == kImmersiveControlVolume;
         if (isVerticalTaskbar()) {
             const VerticalLayout layout = verticalLayout();
@@ -5602,7 +5855,7 @@ struct TaskbarHost::Impl {
 
     // 音量按钮的屏幕坐标矩形（音量滑块浮窗的锚点）
     RECT volumeButtonScreenRect() const {
-        if (viewMode_ == TaskbarViewMode::Immersive) {
+        if (isExpandedView()) {
             D2D1_POINT_2F centers[kImmersiveControlCount]{};
             float cy = 0.0f;
             float r = 0.0f;
@@ -5828,7 +6081,7 @@ struct TaskbarHost::Impl {
     }
 
     void beginImmersiveSongContentTransition() {
-        if (viewMode_ != TaskbarViewMode::Immersive || isMinimalMode() ||
+        if (!isExpandedView() || isMinimalMode() ||
             !isSongTransitionPending() || songContentTransition_)
             return;
         songContentTransition_ = SongContentTransition{monotonicNowMs()};
@@ -5857,7 +6110,7 @@ struct TaskbarHost::Impl {
     // D2D 回退路径：沉浸模式的遮罩、控件和频谱保持静止，只把封面、歌曲信息
     // 和歌词作为一组内容在 D2D 坐标系内滑入。
     bool applyImmersiveSongContentTransform(ID2D1DeviceContext* rt) {
-        if (!rt || viewMode_ != TaskbarViewMode::Immersive || !songContentTransition_ ||
+        if (!rt || !isExpandedView() || !songContentTransition_ ||
             songContentTransition_->compositorLayer)
             return false;
 
@@ -6713,14 +6966,14 @@ struct TaskbarHost::Impl {
     LyricAlignment activeLyricAlignment() const {
         if (scene_ == DisplayScene::Idle)
             return idleQuoteAlignment_;
-        return viewMode_ == TaskbarViewMode::Immersive ? LyricAlignment::Center
+        return isExpandedView() ? LyricAlignment::Center
                                                         : lyricAlignment_;
     }
 
     LyricAlignment lyricAlignmentForScene(DisplayScene scene) const {
         if (scene == DisplayScene::Idle)
             return idleQuoteAlignment_;
-        return viewMode_ == TaskbarViewMode::Immersive ? LyricAlignment::Center
+        return isExpandedView() ? LyricAlignment::Center
                                                         : lyricAlignment_;
     }
 
@@ -7248,7 +7501,7 @@ struct TaskbarHost::Impl {
                 drawVolumeButton(D2D1::Point2F(centers[3], cy), r);
             }
         } else {
-            if (showSpectrum && viewMode_ != TaskbarViewMode::Immersive) {
+            if (showSpectrum && !isExpandedView()) {
                 const float spectrumW = spectrumContentWForScene(scene_, w);
                 drawSpectrum(w - spectrumW - kTextPadding, h, spectrumW);
             }
@@ -7364,10 +7617,10 @@ struct TaskbarHost::Impl {
 
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         const D2D1_ROUNDED_RECT bg = taskbarBackgroundRect(w, h);
-        if (viewMode_ == TaskbarViewMode::Immersive) {
+        if (isExpandedView()) {
             if (brushBackground_) {
-                // 沉浸遮罩直接跟随 Windows 的“应用模式”，不受任务栏歌词自身的
-                // 主题选择器影响；不透明度完全由沉浸模式设置控制。
+                // 沉浸 / Dock 遮罩直接跟随 Windows 的“应用模式”，不受任务栏歌词
+                // 自身的主题选择器影响；不透明度完全由对应设置控制。
                 const bool appDark = fluent::isWindowsAppDarkMode();
                 D2D1_COLOR_F mask = fluent::toD2D(
                     appDark ? RGB(32, 32, 32) : RGB(243, 243, 243));
@@ -7404,7 +7657,7 @@ struct TaskbarHost::Impl {
             rt->FillRoundedRectangle(bg, brushBackground_);
         }
 
-        if (viewMode_ != TaskbarViewMode::Immersive) {
+        if (!isExpandedView()) {
             rt->FillRoundedRectangle(bg, brushBg_);
             if (mouseOver_ && brushHover_)
                 rt->FillRoundedRectangle(bg, brushHover_);
@@ -7435,6 +7688,21 @@ struct TaskbarHost::Impl {
 
         if (taskbarDynamicBackgroundVisible())
             drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+
+        if (isAppBarView() && brushBackground_) {
+            // 与 Windows 任务栏一致，只在 Dock 面向工作区的一侧保留 1 个物理像素
+            // 的分隔线：顶部 Dock 画下边缘，底部 Dock 镜像到上边缘。
+            const bool appDark = fluent::isWindowsAppDarkMode();
+            brushBackground_->SetColor(appDark
+                                           ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f)
+                                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.16f));
+            const float pixel = 1.0f / std::max(scale(), 1.0f);
+            const float top = appBarEdge_ == AppBarEdge::Top
+                                  ? std::max(0.0f, h - pixel)
+                                  : 0.0f;
+            rt->FillRectangle(D2D1::RectF(0.0f, top, w, std::min(h, top + pixel)),
+                              brushBackground_);
+        }
     }
 
     bool finishTaskbarFrame(HRESULT hr) {
@@ -7446,11 +7714,11 @@ struct TaskbarHost::Impl {
         if (SUCCEEDED(hr)) {
             const bool startSongTransition = isSongTransitionPending();
             const bool immersiveLayerActive =
-                viewMode_ == TaskbarViewMode::Immersive && songContentTransition_ &&
+                isExpandedView() && songContentTransition_ &&
                 songContentTransition_->compositorLayer;
             if (startSongTransition) {
                 renderer.resetRoot();
-                if (!isMinimalMode() && viewMode_ != TaskbarViewMode::Immersive) {
+                if (!isMinimalMode() && !isExpandedView()) {
                     const float travel = kSongTransitionTravelDip * scale();
                     const bool vertical = isVerticalTaskbar();
                     const float fromX = vertical ? 0.0f : travel;
@@ -7584,7 +7852,7 @@ struct TaskbarHost::Impl {
         if (!isWindowVisible() || !hwnd)
             return;
 
-        if (viewMode_ == TaskbarViewMode::Immersive && isSceneResizeActive())
+        if (isExpandedView() && isSceneResizeActive())
             cancelSceneWindowResize();
         if (isSceneResizeActive())
             updateSceneWindowResize(monotonicNowMs());
@@ -7716,7 +7984,7 @@ struct TaskbarHost::Impl {
         // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
         bool showControls = mouseOver_ && controlsOnHover_ &&
                             hoverControlStyle_ == HoverControlStyle::Inline && !idleScene &&
-                            viewMode_ != TaskbarViewMode::Immersive &&
+                            !isExpandedView() &&
                             !(lyricTransitionKind_ == LyricTransitionKind::Scene &&
                               isLyricTransitionActive());
         const bool backgroundSpectrum =
@@ -7734,7 +8002,7 @@ struct TaskbarHost::Impl {
         bool compositorSongContent =
             songContentTransition_ && songContentTransition_->compositorLayer;
         bool compositorSongContentPending = false;
-        if (viewMode_ == TaskbarViewMode::Immersive && songContentTransition_ &&
+        if (isExpandedView() && songContentTransition_ &&
             !songContentTransition_->compositorLayer) {
             // 歌词行转场也使用 lyricLayers_。整首歌切换时先交给歌曲内容层，
             // 保证封面、歌曲信息和歌词成为同一张快照，避免两套合成层互相抢占。
@@ -7767,7 +8035,7 @@ struct TaskbarHost::Impl {
 
         // 沉浸模式的操作组、频谱和时钟都属于固定遮罩层内容，必须在歌曲内容
         // 过渡变换之前绘制；切歌时只让封面、歌曲信息和歌词内容移动。
-        if (viewMode_ == TaskbarViewMode::Immersive) {
+        if (isExpandedView()) {
             drawImmersiveControls();
             drawImmersiveRightSide(w, h, showSpectrum);
         }
@@ -7834,7 +8102,7 @@ struct TaskbarHost::Impl {
                 drawVolumeButton(D2D1::Point2F(centers[3], cy), r);
             }
         } else {
-            if (showSpectrum && viewMode_ != TaskbarViewMode::Immersive) {
+            if (showSpectrum && !isExpandedView()) {
                 const float spectrumW = spectrumContentWForScene(scene_, w);
                 drawSpectrum(w - spectrumW - kTextPadding, h, spectrumW);
             }
@@ -7977,7 +8245,7 @@ struct TaskbarHost::Impl {
                     const float waveW = std::max(1.0f, waveRight - waveX);
                     drawBackgroundWaveSpectrum(waveX, h, waveW);
                 }
-                if (viewMode_ == TaskbarViewMode::Immersive) {
+                if (isExpandedView()) {
                     drawImmersiveControls();
                     drawImmersiveRightSide(w, h, showSpectrum);
                 }
@@ -8344,11 +8612,16 @@ struct TaskbarHost::Impl {
         const bool wasMinimal = isMinimalMode();
         renderState_.setMode(mode);
         if (leavingStopped) {
-            // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
-            // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
-            renderState_.setVisibilitySuppressed(true);
-            probeReady_ = false;
-            delete probeOut_.exchange(nullptr);
+            if (isAppBarView()) {
+                renderState_.setVisibilitySuppressed(false);
+                setPlacementStatus(TaskbarPlacementStatus::Safe);
+            } else {
+                // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
+                // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
+                renderState_.setVisibilitySuppressed(true);
+                probeReady_ = false;
+                delete probeOut_.exchange(nullptr);
+            }
             stopFrameTimer();
             stopPlacementTimer();
             reconcileWindowVisibility();
@@ -8406,7 +8679,7 @@ struct TaskbarHost::Impl {
                 timerMs_ = wantMs;
             }
         }
-        if (renderState_.visibilitySuppressed() && !timerRunning_)
+        if (!isAppBarView() && renderState_.visibilitySuppressed() && !timerRunning_)
             startPlacementTimer();
         // 从完全停止恢复：按最近会话可见性立即还原窗口；设备链由 render() 惰性重建
         reconcileWindowVisibility();
@@ -8543,7 +8816,38 @@ struct TaskbarHost::Impl {
                                 static_cast<unsigned long>(HIWORD(lp)),
                                 static_cast<unsigned long>(wp));
             updateDisplayRefresh();
+            if (isAppBarView() && appBarRegistered_)
+                updateAppBarPosition();
             return 0;
+        case WM_DPICHANGED:
+            if (isAppBarView() && appBarRegistered_) {
+                dpi_ = HIWORD(wp) ? HIWORD(wp) : LOWORD(wp);
+                renderer.setDpi(dpi_);
+                requestInvalidation(toMask(RenderInvalidation::Layout) |
+                                    toMask(RenderInvalidation::Text) |
+                                    toMask(RenderInvalidation::Cover));
+                updateAppBarPosition();
+                requestFrameAndFlush();
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_ACTIVATE:
+            if (appBarRegistered_) {
+                APPBARDATA data{};
+                data.cbSize = sizeof(data);
+                data.hWnd = hwnd;
+                data.lParam = LOWORD(wp) != WA_INACTIVE;
+                SHAppBarMessage(ABM_ACTIVATE, &data);
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_WINDOWPOSCHANGED:
+            if (appBarRegistered_) {
+                APPBARDATA data{};
+                data.cbSize = sizeof(data);
+                data.hWnd = hwnd;
+                SHAppBarMessage(ABM_WINDOWPOSCHANGED, &data);
+            }
+            return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_ERASEBKGND:
             return 1;
         case WM_NCHITTEST:
@@ -8582,7 +8886,7 @@ struct TaskbarHost::Impl {
             trackMouseLeave();
             const float mouseX = static_cast<float>(GET_X_LPARAM(lp));
             const float mouseY = static_cast<float>(GET_Y_LPARAM(lp));
-            const int immersiveHover = viewMode_ == TaskbarViewMode::Immersive
+            const int immersiveHover = isExpandedView()
                                            ? hitImmersiveControl(mouseX, mouseY)
                                            : -1;
             if (immersiveHover != immersiveControlHover_) {
@@ -8590,7 +8894,7 @@ struct TaskbarHost::Impl {
                 requestFrameAndFlush();
             }
             // 内嵌控件的音量按钮：悬停弹出音量滑块浮窗
-            const bool volHover = viewMode_ == TaskbarViewMode::Immersive
+            const bool volHover = isExpandedView()
                                       ? immersiveHover == kImmersiveControlVolume
                                       : hitVolumeButton(mouseX, mouseY);
             if (volHover != volumeHover_) {
@@ -8620,7 +8924,7 @@ struct TaskbarHost::Impl {
             // 滚轮消息使用屏幕坐标；音量图标上滚动直接调整应用音量（每格 ±2）
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            const bool volumeHit = viewMode_ == TaskbarViewMode::Immersive
+            const bool volumeHit = isExpandedView()
                                        ? hitImmersiveControl(static_cast<float>(pt.x),
                                                              static_cast<float>(pt.y)) ==
                                              kImmersiveControlVolume
@@ -8637,7 +8941,7 @@ struct TaskbarHost::Impl {
         case WM_LBUTTONDOWN: {
             // 点击与拖动从同一次按下并行识别：未越过系统拖动阈值仍按原按钮/卡片
             // 点击处理，越过阈值后才取消点击并进入位置拖拽。
-            if (viewMode_ == TaskbarViewMode::Immersive) {
+            if (isExpandedView()) {
                 immersiveControlPressed_ =
                     hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
                                         static_cast<float>(GET_Y_LPARAM(lp)));
@@ -8653,7 +8957,7 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case WM_LBUTTONUP: {
-            if (viewMode_ == TaskbarViewMode::Immersive) {
+            if (isExpandedView()) {
                 const int pressed = immersiveControlPressed_;
                 const int released =
                     hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
@@ -8687,7 +8991,7 @@ struct TaskbarHost::Impl {
                 onControl(static_cast<MediaControl>(btn));
             // 卡片的当前页面自己判断是否为点击展开；这样无播放时的每日一言卡片
             // 可以独立于媒体控件样式使用点击展开。
-            else if (!isMinimalMode() && viewMode_ != TaskbarViewMode::Immersive)
+            else if (!isMinimalMode() && !isExpandedView())
                 mediaPopup.onAnchorClick();
             return 0;
         }
@@ -8719,6 +9023,33 @@ struct TaskbarHost::Impl {
             openTaskbarMenu(pt);
             return 0;
         }
+        case kAppBarCallbackMessage:
+            if (!appBarRegistered_)
+                return 0;
+            switch (wp) {
+            case ABN_POSCHANGED:
+                updateAppBarPosition();
+                break;
+            case ABN_FULLSCREENAPP:
+                appBarFullscreenOpen_ = lp != FALSE;
+                runtime_log::writef(L"[dock] fullscreen %s; z-order=%s",
+                                    appBarFullscreenOpen_ ? L"opened" : L"closed",
+                                    appBarFullscreenOpen_ ? L"bottom" : L"topmost");
+                updateAppBarZOrder();
+                break;
+            case ABN_STATECHANGE:
+                updateAppBarZOrder();
+                break;
+            case ABN_WINDOWARRANGE:
+                if (lp)
+                    ShowWindow(hwnd, SW_HIDE);
+                else if (shouldShowWindow())
+                    ShowWindow(hwnd, SW_SHOWNA);
+                break;
+            default:
+                break;
+            }
+            return 0;
         case WM_QUERYENDSESSION:
             return TRUE;
         case WM_ENDSESSION:
@@ -8737,6 +9068,7 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)",
                                 isWindowVisible() ? 1 : 0);
             renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
+            unregisterAppBar();
             KillTimer(hwnd, kTaskbarAttachTimerId);
             taskbarEmbedded_ = false;
             stopFrameTimer();
@@ -9139,6 +9471,10 @@ void TaskbarHost::setCoverBackgroundOpacity(int percent) {
 
 void TaskbarHost::setViewMode(TaskbarViewMode mode) {
     impl_->setViewMode(mode);
+}
+
+void TaskbarHost::setAppBarEdge(AppBarEdge edge) {
+    impl_->setAppBarEdge(edge);
 }
 
 void TaskbarHost::setImmersiveMaskOpacity(int opacityPercent) {

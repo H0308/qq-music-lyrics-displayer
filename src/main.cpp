@@ -128,7 +128,11 @@ constexpr UINT kCmdRenderModeLow = 131;
 constexpr UINT kCmdRenderModeStopped = 132;
 constexpr UINT kCmdRenderModeMinimal = 133;
 constexpr UINT kCmdSecondaryOff = 134;
-constexpr UINT kCmdTaskbarImmersive = 135;
+constexpr UINT kCmdTaskbarModeEmbedded = 135;
+constexpr UINT kCmdTaskbarModeImmersive = 136;
+constexpr UINT kCmdTaskbarModeAppBar = 137;
+constexpr UINT kCmdAppBarTop = 138;
+constexpr UINT kCmdAppBarBottom = 139;
 constexpr int kTaskbarAppCommandBase = 20000;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
@@ -169,7 +173,11 @@ const wchar_t* trayCommandName(int command) {
     case kCmdRenderModeStopped: return L"render-mode-stopped";
     case kCmdRenderModeMinimal: return L"render-mode-minimal";
     case kCmdSecondaryOff: return L"secondary-off";
-    case kCmdTaskbarImmersive: return L"taskbar-immersive";
+    case kCmdTaskbarModeEmbedded: return L"taskbar-mode-embedded";
+    case kCmdTaskbarModeImmersive: return L"taskbar-mode-immersive";
+    case kCmdTaskbarModeAppBar: return L"taskbar-mode-appbar";
+    case kCmdAppBarTop: return L"appbar-top";
+    case kCmdAppBarBottom: return L"appbar-bottom";
     case kCmdPickFont: return L"pick-font";
     case kCmdFontColorEffect: return L"font-color-effect";
     case kCmdManualSearch: return L"manual-search";
@@ -1049,7 +1057,8 @@ struct App {
 
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
-    bool taskbarImmersive_ = false;
+    TaskbarViewMode taskbarViewMode_ = TaskbarViewMode::Embedded;
+    AppBarEdge appBarEdge_ = AppBarEdge::Top;
     int immersiveMaskOpacity_ = 88;
     bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
@@ -1433,25 +1442,43 @@ struct App {
         saveSettings();
     }
 
-    bool taskbarImmersiveVisibleFor(const SmtcSnapshot& snap) const {
-        return taskbarImmersive_ && !taskbarVertical_ && snap.sessionAlive;
+    bool taskbarExpandedConfigured() const {
+        return taskbarViewMode_ != TaskbarViewMode::Embedded;
     }
 
-    void syncTaskbarImmersiveView(const SmtcSnapshot& snap) {
+    TaskbarViewMode effectiveTaskbarViewMode(const SmtcSnapshot& snap) const {
+        if (taskbarViewMode_ == TaskbarViewMode::Immersive)
+            return !taskbarVertical_ && snap.sessionAlive ? TaskbarViewMode::Immersive
+                                                          : TaskbarViewMode::Embedded;
+        return taskbarViewMode_;
+    }
+
+    void syncTaskbarView(const SmtcSnapshot& snap) {
         if (!taskbarHost)
             return;
-        taskbarHost->setViewMode(taskbarImmersiveVisibleFor(snap)
-                                     ? TaskbarViewMode::Immersive
-                                     : TaskbarViewMode::Embedded);
+        taskbarHost->setAppBarEdge(appBarEdge_);
+        taskbarHost->setViewMode(effectiveTaskbarViewMode(snap));
     }
 
-    void applyTaskbarImmersive(bool on) {
-        taskbarImmersive_ = on;
+    void applyTaskbarViewMode(int mode) {
+        mode = std::clamp(mode, 0, 2);
+        taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
         if (taskbarHost) {
             taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
-            syncTaskbarImmersiveView(monitor.snapshot());
+            syncTaskbarView(monitor.snapshot());
+            syncTaskbarOrientation();
+            applyEffectiveTaskbarSettings();
         }
-        logSettingBool(L"taskbar-immersive", taskbarImmersive_);
+        logSettingInt(L"taskbar-view-mode", mode);
+        saveSettings();
+        refreshSettingsDialog(true);
+    }
+
+    void applyAppBarEdge(int edge) {
+        appBarEdge_ = edge == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
+        if (taskbarHost)
+            taskbarHost->setAppBarEdge(appBarEdge_);
+        logSettingInt(L"appbar-edge", appBarEdge_ == AppBarEdge::Bottom ? 1 : 0);
         saveSettings();
         refreshSettingsDialog(true);
     }
@@ -1483,7 +1510,7 @@ struct App {
         if (!taskbarHost)
             return;
         const bool minimal = isMinimalRenderMode();
-        const bool vertical = taskbarVertical_;
+        const bool vertical = taskbarVertical_ && taskbarViewMode_ != TaskbarViewMode::AppBar;
         taskbarHost->setSecondaryLyricMode(
             vertical ? false : (secondaryLyricEnabled_ && !preferRomanization_),
             vertical ? false : (secondaryLyricEnabled_ && preferRomanization_));
@@ -1521,7 +1548,7 @@ struct App {
                     : static_cast<TaskbarBackground>(taskbarBackground_));
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
         taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
-        syncTaskbarImmersiveView(monitor.snapshot());
+        syncTaskbarView(monitor.snapshot());
     }
 
     // 频谱实际启停 = 用户开关 && 横向任务栏 && 正常渲染模式 && 宿主存在；
@@ -1628,7 +1655,7 @@ struct App {
     }
 
     void applyHoverControls(bool on) {
-        if (taskbarImmersive_ && !taskbarVertical_)
+        if (taskbarExpandedConfigured() && !taskbarVertical_)
             return;
         hoverPlaybackControls_ = on;
         if (taskbarHost)
@@ -1646,7 +1673,7 @@ struct App {
     }
 
     void applyHoverControlStyle(int style) {
-        if (taskbarImmersive_ && !taskbarVertical_)
+        if (taskbarExpandedConfigured() && !taskbarVertical_)
             return;
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
         if (taskbarHost)
@@ -1845,7 +1872,7 @@ struct App {
     }
 
     void applyLyricAlignment(int alignment) {
-        if (taskbarImmersive_ && !taskbarVertical_)
+        if (taskbarExpandedConfigured() && !taskbarVertical_)
             return;
         lyricAlignment_ = alignment == 1 ? LyricAlignment::Center
                           : alignment == 2 ? LyricAlignment::Right
@@ -2652,7 +2679,7 @@ struct App {
         host->setAllowOverlap(allowOverlap);
         host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
-        host->setImmersiveExitCallback([this] { applyTaskbarImmersive(false); });
+        host->setImmersiveExitCallback([this] { applyTaskbarViewMode(0); });
         host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
         host->setImmersiveMenuCallback([this](POINT pt) { showTrayMenu(pt); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
@@ -2708,6 +2735,10 @@ struct App {
         host->setRenderMode(static_cast<RenderMode>(renderMode_));
         taskbarHost = std::move(host);
         taskbarAllowOverlap_ = allowOverlap;
+        // 在推送首帧和同步任务栏方向前先确定承载模式。AppBar 始终横向，
+        // 不能因系统任务栏在侧边而先把频谱等横向配置关闭。
+        taskbarHost->setAppBarEdge(appBarEdge_);
+        taskbarHost->setViewMode(effectiveTaskbarViewMode(monitor.snapshot()));
         syncHost(taskbarHost.get());
         if (hasUserFont_)
             taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
@@ -2787,6 +2818,10 @@ struct App {
         if (status == TaskbarPlacementStatus::NoSpace ||
             status == TaskbarPlacementStatus::Unavailable)
             return false;
+        // AppBar 在无媒体且关闭空闲入口时会主动隐藏并释放工作区，
+        // 但宿主与用户选择仍是开启状态，托盘操作不能把它误判为关闭。
+        if (taskbarViewMode_ == TaskbarViewMode::AppBar)
+            return true;
         if (taskbarHost->isDisplayed()) {
             taskbarEnabledBeforeStopped_ = false;
             return true;
@@ -3023,7 +3058,7 @@ struct App {
     // 状态机：无会话(隐藏) -> 播放中(滚动渲染) <-> 暂停(静止显示)
     void onSmtcChanged() {
         SmtcSnapshot snap = monitor.snapshot();
-        syncTaskbarImmersiveView(snap);
+        syncTaskbarView(snap);
         syncAppVolumeTarget(snap);
         if (snap.sessionAlive) {
             // 媒体会话优先于启动任务播报；即使任务请求先返回，也不能覆盖已经在播放的歌词。
@@ -3816,7 +3851,11 @@ void App::loadSettings() {
             hasGlobalLyricAppearance_ = true;
         }
         taskbarPosition_ = std::clamp(j.value("taskbarPosition", 0), 0, 1);
-        taskbarImmersive_ = j.value("taskbarImmersive", false);
+        const int savedViewMode = j.contains("taskbarViewMode")
+                                      ? j.value("taskbarViewMode", 0)
+                                      : (j.value("taskbarImmersive", false) ? 1 : 0);
+        taskbarViewMode_ = static_cast<TaskbarViewMode>(std::clamp(savedViewMode, 0, 2));
+        appBarEdge_ = j.value("appBarEdge", 0) == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
         immersiveMaskOpacity_ = std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
@@ -4068,7 +4107,9 @@ void App::saveSettings() {
             j["holidayCalendar"]["days"].push_back({
                 {"date", day.date}, {"type", day.type}, {"name", utf8Of(day.name)}});
         j["taskbarPosition"] = taskbarPosition_;
-        j["taskbarImmersive"] = taskbarImmersive_;
+        j["taskbarViewMode"] = static_cast<int>(taskbarViewMode_);
+        j["appBarEdge"] = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
+        j.erase("taskbarImmersive");
         j["immersiveMaskOpacity"] = immersiveMaskOpacity_;
         j.erase("immersiveMaskCustomColor");
         j.erase("immersiveMaskColor");
@@ -4801,7 +4842,6 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     };
 
     const bool taskbarEnabled = taskbarEnabledForUserAction();
-    const bool taskbarImmersiveActive = taskbarImmersiveVisibleFor(monitor.snapshot());
     addItem(kCmdToggleTaskbar, taskbarEnabled ? L"关闭任务栏歌词" : L"开启任务栏歌词",
             settings_icon::Kind::Display);
     fluent::FluentMenuItem performance;
@@ -4821,7 +4861,7 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     addRenderMode(kCmdRenderModeMinimal, L"极简", RenderMode::Minimal);
     items.push_back(std::move(performance));
     if (taskbarEnabled) {
-        if (!taskbarImmersiveActive) {
+        if (taskbarViewMode_ == TaskbarViewMode::Embedded) {
             fluent::FluentMenuItem pos;
             pos.text = L"任务栏位置";
             pos.icon = settings_icon::Kind::Position;
@@ -4837,10 +4877,40 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
             pos.submenu.push_back(sub);
             items.push_back(std::move(pos));
         }
-        addItem(kCmdTaskbarImmersive,
-                taskbarImmersive_ ? L"关闭任务栏沉浸模式" : L"开启任务栏沉浸模式",
-                settings_icon::Kind::Display, false,
-                !taskbarVertical_);
+        fluent::FluentMenuItem viewMode;
+        viewMode.text = L"展示模式";
+        viewMode.icon = settings_icon::Kind::Display;
+        auto addViewMode = [this, &viewMode](int id, const wchar_t* text,
+                                             TaskbarViewMode mode, bool enabled = true) {
+            fluent::FluentMenuItem sub;
+            sub.id = id;
+            sub.text = text;
+            sub.icon = settings_icon::Kind::Display;
+            sub.checked = taskbarViewMode_ == mode;
+            sub.enabled = enabled;
+            viewMode.submenu.push_back(std::move(sub));
+        };
+        addViewMode(kCmdTaskbarModeEmbedded, L"内嵌", TaskbarViewMode::Embedded);
+        addViewMode(kCmdTaskbarModeImmersive, L"沉浸", TaskbarViewMode::Immersive,
+                    !taskbarVertical_);
+        addViewMode(kCmdTaskbarModeAppBar, L"Dock 模式", TaskbarViewMode::AppBar);
+        items.push_back(std::move(viewMode));
+        if (taskbarViewMode_ == TaskbarViewMode::AppBar) {
+            fluent::FluentMenuItem edge;
+            edge.text = L"Dock 位置";
+            edge.icon = settings_icon::Kind::Position;
+            fluent::FluentMenuItem sub;
+            sub.id = kCmdAppBarTop;
+            sub.text = L"顶部";
+            sub.icon = settings_icon::Kind::Position;
+            sub.checked = appBarEdge_ == AppBarEdge::Top;
+            edge.submenu.push_back(sub);
+            sub.id = kCmdAppBarBottom;
+            sub.text = L"底部";
+            sub.checked = appBarEdge_ == AppBarEdge::Bottom;
+            edge.submenu.push_back(sub);
+            items.push_back(std::move(edge));
+        }
     }
     const SmtcSnapshot snap = monitor.snapshot();
     const bool canSwitchLyricSource =
@@ -5012,7 +5082,7 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
         break;
     case kCmdTaskbarPosNotify:
     case kCmdTaskbarPosLeft:
-        if (taskbarImmersiveVisibleFor(monitor.snapshot()))
+        if (taskbarViewMode_ != TaskbarViewMode::Embedded)
             break;
         taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
         logSettingInt(L"taskbar-position", taskbarPosition_);
@@ -5020,8 +5090,21 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
             taskbarHost->setPositionMode(taskbarPosition_);
         saveSettings();
         break;
-    case kCmdTaskbarImmersive:
-        applyTaskbarImmersive(!taskbarImmersive_);
+    case kCmdTaskbarModeEmbedded:
+        applyTaskbarViewMode(0);
+        break;
+    case kCmdTaskbarModeImmersive:
+        if (!taskbarVertical_)
+            applyTaskbarViewMode(1);
+        break;
+    case kCmdTaskbarModeAppBar:
+        applyTaskbarViewMode(2);
+        break;
+    case kCmdAppBarTop:
+        applyAppBarEdge(0);
+        break;
+    case kCmdAppBarBottom:
+        applyAppBarEdge(1);
         break;
     case kCmdSpectrum:
         applySpectrumOn(!spectrumOn_);
@@ -5271,7 +5354,8 @@ SettingsState App::currentSettingsState() const {
     st.tickTickSyncing = tickTickTasksLoading_ || !tickTickCompletingTaskId_.empty();
     st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
-    st.taskbarImmersive = vertical ? false : taskbarImmersive_;
+    st.taskbarViewMode = static_cast<int>(taskbarViewMode_);
+    st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
     st.immersiveMaskOpacity = immersiveMaskOpacity_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -5352,7 +5436,8 @@ SettingsActions App::buildSettingsActions() {
     act.onAlbumCoverVisible = [this](bool on) { applyAlbumCoverVisible(on); };
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
-    act.onTaskbarImmersive = [this](bool on) { applyTaskbarImmersive(on); };
+    act.onTaskbarViewMode = [this](int mode) { applyTaskbarViewMode(mode); };
+    act.onAppBarEdge = [this](int edge) { applyAppBarEdge(edge); };
     act.onImmersiveMaskOpacity =
         [this](int percent) { applyImmersiveMaskOpacity(percent); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
