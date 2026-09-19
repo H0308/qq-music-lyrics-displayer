@@ -5,6 +5,7 @@
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
 #include "media_popup.h"
+#include "monitor/resource_monitor.h"
 #include "platform_icon.h"
 #include "settings_icons.h"
 #include "volume_popup.h"
@@ -117,6 +118,13 @@ constexpr float kImmersiveClockZoneRatio = 0.045f;
 constexpr float kImmersiveClockZoneMinW = 80.0f;
 constexpr float kImmersiveClockZoneMaxW = 96.0f;
 constexpr float kImmersiveSpectrumClockGap = 10.0f;
+constexpr float kDockResourceZoneRatio = 0.12f;
+constexpr float kDockResourceZoneMinW = 172.0f;
+constexpr float kDockResourceZoneMaxW = 180.0f;
+constexpr float kDockResourceZoneGap = 10.0f;
+constexpr float kDockResourceMetricColumnW = 72.0f;
+constexpr float kDockResourceRightPadding = 3.0f;
+constexpr UINT kResourceSnapshotPollMs = 250;
 constexpr float kSpectrumBarGradientDarkFactor = 0.78f;
 constexpr float kSpectrumBarGradientLightMix = 0.22f;
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
@@ -1008,6 +1016,13 @@ struct TaskbarHost::Impl {
     std::wstring clockTimeText_;
     std::wstring clockDateText_;
     uint64_t clockMinuteKey_ = 0;
+    system_monitor::ResourceMonitor resourceMonitor_;
+    uint64_t resourceSnapshotRevision_ = 0;
+    ULONGLONG nextResourceSnapshotPollMs_ = 0;
+    std::wstring resourceCpuText_ = L"—";
+    std::wstring resourceMemoryText_ = L"—";
+    std::wstring resourceDownloadText_ = L"—";
+    std::wstring resourceUploadText_ = L"—";
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -1727,6 +1742,8 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] volume popup creation failed");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
+        if (isAppBarView() && !isStoppedMode())
+            startResourceMonitoring();
         if (renderState_.visibilitySuppressed() && !isStoppedMode())
             startPlacementTimer();
         return true;
@@ -2839,6 +2856,8 @@ struct TaskbarHost::Impl {
         clearImmersiveSongContentTransition();
         if (previousMode == TaskbarViewMode::AppBar)
             unregisterAppBar();
+        if (previousMode == TaskbarViewMode::AppBar)
+            stopResourceMonitoring();
         viewMode_ = mode;
         volumeHover_ = false;
         immersiveControlHover_ = -1;
@@ -2852,6 +2871,8 @@ struct TaskbarHost::Impl {
             renderState_.setVisibilitySuppressed(false);
             stopPlacementTimer();
             setPlacementStatus(TaskbarPlacementStatus::Safe);
+            if (!isStoppedMode())
+                startResourceMonitoring();
         } else {
             findTaskbar();
             if (!attachToTaskbar(hwnd))
@@ -3224,6 +3245,13 @@ struct TaskbarHost::Impl {
                           kImmersiveClockZoneMinW, kImmersiveClockZoneMaxW);
     }
 
+    float dockResourceZoneW(float hostW) const {
+        if (!isAppBarView() || hostW <= 0.0f)
+            return 0.0f;
+        return std::clamp(hostW * kDockResourceZoneRatio,
+                          kDockResourceZoneMinW, kDockResourceZoneMaxW);
+    }
+
     int immersiveSpectrumBarCount(float visualW) const {
         const int target = visualW >= kImmersiveSpectrumWideZoneThreshold
                                ? kImmersiveSpectrumWideBarCount
@@ -3241,7 +3269,7 @@ struct TaskbarHost::Impl {
     }
 
     // 嵌入模式只在独立频谱开启时预留 12 柱宽度；沉浸模式始终保留右侧
-    // “频谱 + 时钟”固定区，避免开关频谱时歌词安全区发生变化。
+    // “频谱 + 时钟/资源状态”固定区，避免开关频谱时歌词安全区发生变化。
     float spectrumExtraForScene(DisplayScene scene, float hostW = -1.0f) const {
         if (hostW <= 0.0f) {
             int pxW = 0;
@@ -3251,8 +3279,13 @@ struct TaskbarHost::Impl {
         }
         // 沉浸模式的最右侧始终保留给频谱和时钟；关闭频谱只隐藏其可视内容，
         // 不让歌词安全区或居中效果跟着变化。
-        if (horizontalImmersiveMode())
-            return immersiveSpectrumZoneW(hostW) + kTextPadding;
+        if (horizontalImmersiveMode()) {
+            const float rightPadding = isAppBarView() ? kDockResourceRightPadding : kTextPadding;
+            float extra = immersiveSpectrumZoneW(hostW) + rightPadding;
+            if (isAppBarView())
+                extra += dockResourceZoneW(hostW) + kDockResourceZoneGap;
+            return extra;
+        }
         if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled())
             return 0.0f;
         return spectrumContentWForScene(scene, hostW) + kTextPadding;
@@ -3656,11 +3689,77 @@ struct TaskbarHost::Impl {
         return changed;
     }
 
+    static std::wstring formatResourcePercent(double percent) {
+        wchar_t text[16]{};
+        swprintf_s(text, L"%.0f%%", std::clamp(percent, 0.0, 100.0));
+        return text;
+    }
+
+    static std::wstring formatNetworkRate(uint64_t bytesPerSecond) {
+        static constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s"};
+        double value = static_cast<double>(bytesPerSecond);
+        size_t unit = 0;
+        while (value >= 1024.0 && unit + 1 < std::size(units)) {
+            value /= 1024.0;
+            ++unit;
+        }
+
+        wchar_t text[32]{};
+        if (unit == 0 || value >= 100.0)
+            swprintf_s(text, L"%.0f%ls", value, units[unit]);
+        else
+            swprintf_s(text, L"%.1f%ls", value, units[unit]);
+        return text;
+    }
+
+    void startResourceMonitoring() {
+        resourceCpuText_ = L"—";
+        resourceMemoryText_ = L"—";
+        resourceDownloadText_ = L"—";
+        resourceUploadText_ = L"—";
+        resourceSnapshotRevision_ = UINT64_MAX;
+        nextResourceSnapshotPollMs_ = 0;
+        resourceMonitor_.start();
+    }
+
+    void stopResourceMonitoring() {
+        resourceMonitor_.stop();
+        nextResourceSnapshotPollMs_ = 0;
+    }
+
+    bool refreshResourceSnapshot() {
+        if (!isAppBarView())
+            return false;
+
+        const ULONGLONG now = monotonicNowMs();
+        if (now < nextResourceSnapshotPollMs_)
+            return false;
+        nextResourceSnapshotPollMs_ = now + kResourceSnapshotPollMs;
+
+        const system_monitor::ResourceSnapshot snapshot = resourceMonitor_.snapshot();
+        if (snapshot.revision == resourceSnapshotRevision_)
+            return false;
+        resourceSnapshotRevision_ = snapshot.revision;
+        resourceCpuText_ = snapshot.cpuAvailable ? formatResourcePercent(snapshot.cpuPercent)
+                                                  : L"—";
+        resourceMemoryText_ = snapshot.memoryAvailable
+                                  ? formatResourcePercent(snapshot.memoryPercent)
+                                  : L"—";
+        resourceDownloadText_ = snapshot.networkAvailable
+                                    ? formatNetworkRate(snapshot.downloadBytesPerSecond)
+                                    : L"—";
+        resourceUploadText_ = snapshot.networkAvailable
+                                  ? formatNetworkRate(snapshot.uploadBytesPerSecond)
+                                  : L"—";
+        return true;
+    }
+
     void drawImmersiveClock(float x, float h, float width) {
         auto* rt = renderer.renderTarget();
         if (!rt || width <= 0.0f || !fmtClockTime_ || !fmtClockDate_ || !brushText_ ||
             !brushDim_)
             return;
+        fmtClockTime_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
         const float blockH = std::min(35.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
@@ -3674,22 +3773,58 @@ struct TaskbarHost::Impl {
                       DWRITE_MEASURING_MODE_NATURAL);
     }
 
+    void drawDockResourceStatus(float x, float h, float width) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !isAppBarView() || width <= 0.0f || !fmtClockTime_ || !brushText_)
+            return;
+
+        fmtClockTime_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        const std::wstring cells[] = {L"CPU: " + resourceCpuText_,
+                                      L"内存: " + resourceMemoryText_,
+                                      L"下行: " + resourceDownloadText_,
+                                      L"上行: " + resourceUploadText_};
+        const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
+        const float top = std::max(0.0f, (h - blockH) * 0.5f);
+        const float rowH = blockH * 0.5f;
+        // 左列只按 CPU/内存文本所需宽度占位，剩余空间给网络列，避免两列之间
+        // 因各占一半而形成明显空洞；列间距与频谱到资源区的间距保持一致。
+        const float leftColumnW = std::min(kDockResourceMetricColumnW,
+                                           std::max(1.0f, width - kDockResourceZoneGap));
+        const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
+        const float rightColumnW = std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
+        for (size_t i = 0; i < std::size(cells); ++i) {
+            // 左列保持 CPU/内存上下排列，右列保持下行/上行上下排列。
+            const bool rightColumn = i >= 2;
+            const float left = rightColumn ? rightColumnX : x;
+            const float columnW = rightColumn ? rightColumnW : leftColumnW;
+            const float rowTop = top + (i % 2) * rowH;
+            rt->DrawTextW(cells[i].c_str(), static_cast<UINT32>(cells[i].size()), fmtClockTime_,
+                          D2D1::RectF(left, rowTop, left + columnW, rowTop + rowH), brushText_,
+                          D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        }
+    }
+
     void drawImmersiveRightSide(float w, float h, bool showSpectrum) {
         if (!horizontalImmersiveMode())
             return;
 
         const float zoneW = immersiveSpectrumZoneW(w);
-        const float clockW = std::min(zoneW, immersiveClockZoneW(w));
-        const float zoneX = w - zoneW - kTextPadding;
+        const bool dock = isAppBarView();
+        const float resourceW = dock ? dockResourceZoneW(w) : 0.0f;
+        const float resourceX = w - resourceW -
+                                (dock ? kDockResourceRightPadding : kTextPadding);
+        const float zoneX = dock ? resourceX - kDockResourceZoneGap - zoneW
+                                 : w - zoneW - kTextPadding;
+        const float clockW = dock ? 0.0f : std::min(zoneW, immersiveClockZoneW(w));
         const float clockX = w - clockW - kTextPadding;
-        const float spectrumRight = clockX - kImmersiveSpectrumClockGap;
+        const float spectrumRight = dock ? resourceX - kDockResourceZoneGap
+                                         : clockX - kImmersiveSpectrumClockGap;
         const float spectrumW = std::max(0.0f, spectrumRight - zoneX);
         if (showSpectrum && spectrumW > 0.0f) {
             if (spectrumStyle_ == SpectrumStyle::DreamyWave) {
                 drawDreamyWaveSpectrum(zoneX, h, spectrumW);
             } else {
-                // 先按原始宽频谱区确定柱数和中心；只有与紧凑时钟真正冲突时
-                // 才向左做最小避让，长任务栏上的频谱位置因此保持不变。
+                // 先按原始频谱区确定柱数；Dock 贴右对齐，普通沉浸模式仍按原逻辑居中。
                 const int availableCount = std::max(
                     1, static_cast<int>(std::floor((spectrumW + kSpectrumGap) /
                                                    (kSpectrumBarW + kSpectrumGap))));
@@ -3697,15 +3832,32 @@ struct TaskbarHost::Impl {
                     std::min(immersiveSpectrumBarCount(zoneW), availableCount);
                 const float clusterW = spectrumVisualClusterW(visualCount);
                 const float naturalX = zoneX + std::max(0.0f, (zoneW - clusterW) * 0.5f);
-                const float clusterX =
-                    std::max(zoneX, std::min(naturalX, spectrumRight - clusterW));
+                // Dock 模式将频谱簇贴到右边界，保证它与资源区之间只保留
+                // kDockResourceZoneGap；普通沉浸模式继续保持原有居中位置。
+                const float clusterX = dock
+                                           ? std::max(zoneX, spectrumRight - clusterW)
+                                           : std::max(zoneX, std::min(naturalX,
+                                                                       spectrumRight - clusterW));
                 if (spectrumStyle_ == SpectrumStyle::Bars)
                     drawBarSpectrum(clusterX, h, visualCount);
                 else
                     drawDefaultSpectrum(clusterX, h, visualCount);
             }
         }
-        drawImmersiveClock(clockX, h, clockW);
+        if (dock)
+            drawDockResourceStatus(resourceX, h, resourceW);
+        else
+            drawImmersiveClock(clockX, h, clockW);
+    }
+
+    float backgroundWaveRight(float w) const {
+        if (!horizontalImmersiveMode())
+            return w - kTextPadding;
+        if (isAppBarView()) {
+            return w - dockResourceZoneW(w) - kDockResourceRightPadding -
+                   kDockResourceZoneGap;
+        }
+        return w - immersiveClockZoneW(w) - kImmersiveSpectrumClockGap - kTextPadding;
     }
 
     bool taskbarDynamicBackgroundVisible() const {
@@ -7977,7 +8129,8 @@ struct TaskbarHost::Impl {
         }
 
         // 时钟按本地分钟缓存；首帧在这里同步，后续由帧定时器仅在分钟变化时重绘。
-        refreshImmersiveClockText();
+        if (!isAppBarView())
+            refreshImmersiveClockText();
 
         LayoutMetrics layout = layoutMetrics(logicalPxW, logicalPxH);
         float w = layout.w;
@@ -8046,10 +8199,7 @@ struct TaskbarHost::Impl {
 
         if (backgroundSpectrum) {
             const float waveX = infoStartX();
-            const float waveRight = horizontalImmersiveMode()
-                                        ? w - immersiveClockZoneW(w) -
-                                              kImmersiveSpectrumClockGap - kTextPadding
-                                        : w - kTextPadding;
+            const float waveRight = backgroundWaveRight(w);
             const float waveW = std::max(1.0f, waveRight - waveX);
             drawBackgroundWaveSpectrum(waveX, h, waveW);
         }
@@ -8259,10 +8409,7 @@ struct TaskbarHost::Impl {
                                       coverBlurChain);
                 if (backgroundSpectrum) {
                     const float waveX = infoStartX();
-                    const float waveRight = horizontalImmersiveMode()
-                                                ? w - immersiveClockZoneW(w) -
-                                                      kImmersiveSpectrumClockGap - kTextPadding
-                                                : w - kTextPadding;
+                    const float waveRight = backgroundWaveRight(w);
                     const float waveW = std::max(1.0f, waveRight - waveX);
                     drawBackgroundWaveSpectrum(waveX, h, waveW);
                 }
@@ -8636,6 +8783,7 @@ struct TaskbarHost::Impl {
             if (isAppBarView()) {
                 renderState_.setVisibilitySuppressed(false);
                 setPlacementStatus(TaskbarPlacementStatus::Safe);
+                startResourceMonitoring();
             } else {
                 // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
                 // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
@@ -8689,6 +8837,7 @@ struct TaskbarHost::Impl {
             mediaPopup.setEnabled(false);
             reconcileWindowVisibility();
             stopPlacementTimer();
+            stopResourceMonitoring();
             releaseAll();
             return;
         }
@@ -8779,13 +8928,15 @@ struct TaskbarHost::Impl {
         }
         frameNowMs_ = monotonicNowMs();
         updateVinylRotation();
+        if (refreshResourceSnapshot())
+            requestFrame();
         // 任务栏位置/DPI/主题跟踪与避让探测结果拾取，放到慢速分支，不跟 60fps 走
         if (++slowTick_ >= kSlowTickInterval) {
             slowTick_ = 0;
             processPlacementProbe();
         }
         updateScroll();
-        if (refreshImmersiveClockText())
+        if (!isAppBarView() && refreshImmersiveClockText())
             requestFrame();
         const bool statusCycleCallbackHandled = statusTextCycleCallbackPending_;
         if (statusTextCycleCallbackPending_) {
@@ -9110,6 +9261,7 @@ struct TaskbarHost::Impl {
             stopFrameTimer();
             stopPlacementTimer();
             stopProbe();
+            stopResourceMonitoring();
             dragPress_ = false;
             lyricDragging_ = false;
             volumePopup_.destroy();

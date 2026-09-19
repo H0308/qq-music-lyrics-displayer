@@ -61,6 +61,7 @@ add_executable(QQMusicLyric
     src/media/smtc/netease_smtc_adapter.cpp
     src/media/audio_spectrum.cpp
     src/media/app_volume.cpp
+    src/monitor/resource_monitor.cpp
     src/idle/idle_quote_provider.cpp
     src/idle/ticktick_provider.cpp
     src/lyric/lyric_provider.cpp
@@ -133,6 +134,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     advapi32
     pdh
     psapi
+    iphlpapi
     winmm
     version
 )
