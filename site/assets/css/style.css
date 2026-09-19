@@ -450,11 +450,18 @@ h1, h2, h3 { line-height: 1.3; font-weight: 700; }
 }
 .explore-item h3 { font-size: 1rem; margin-bottom: 8px; }
 .explore-item p { color: var(--text-dim); font-size: 0.88rem; }
-.explore-note {
-  margin-top: 8px;
-  font-size: 0.78rem !important;
-  opacity: 0.65;
+.feature-footnote {
+  position: relative;
+  top: -0.35em;
+  margin-left: 3px;
+  font-size: 0.68em;
+  line-height: 0;
 }
+.feature-footnote a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.feature-footnote a:hover { text-decoration: underline; }
 /* 区块收尾注：声明功能列表未完，但不做成卡片/占位框 */
 .explore-more {
   display: flex;
@@ -591,6 +598,26 @@ h1, h2, h3 { line-height: 1.3; font-weight: 700; }
 .cta h2 { font-size: 2rem; margin-bottom: 12px; }
 .cta p { color: var(--text-dim); margin-bottom: 32px; }
 
+/* ===== 兼容性提示 ===== */
+.site-notice { padding: 0 0 32px; }
+.site-notice-inner {
+  margin: 0;
+  padding: 16px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--accent);
+  text-align: left;
+  font-size: 0.82rem;
+  line-height: 1.7;
+}
+.site-notice-list {
+  margin: 0;
+  padding-left: 1.5em;
+}
+.site-notice-list li { padding-left: 0.25em; }
+#windows10-note { scroll-margin-top: 96px; }
+
 /* ===== 页脚 ===== */
 .site-footer {
   border-top: 1px solid var(--border);
@@ -614,6 +641,7 @@ h1, h2, h3 { line-height: 1.3; font-weight: 700; }
   font-size: 0.82rem;
   opacity: 0.75;
 }
+.footer-disclaimer p { margin: 0; }
 
 /* ===== 更新日志时间线 ===== */
 .releases-hero {
