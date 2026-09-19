@@ -5473,6 +5473,43 @@ struct TaskbarHost::Impl {
         return -1;
     }
 
+    void drawExitImmersiveButton(const D2D1_POINT_2F& center, float radius) {
+        auto* rt = renderer.renderTarget();
+        if (!rt || !brushBtn_)
+            return;
+
+        // 视图边框配合两支向内收起的箭头，明确表达“退出沉浸模式”，
+        // 同时避开托盘“退出程序”所使用的门与外向箭头语义。
+        const float frame = radius * 0.74f;
+        const float start = radius * 0.50f;
+        const float end = radius * 0.08f;
+        const float head = radius * 0.22f;
+        const float stroke = std::clamp(radius * 0.14f, 1.1f, 1.7f);
+
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(center.x - frame, center.y - frame,
+                            center.x + frame, center.y + frame),
+                radius * 0.15f, radius * 0.15f),
+            brushBtn_, stroke);
+
+        const auto topLeftEnd = D2D1::Point2F(center.x - end, center.y - end);
+        rt->DrawLine(D2D1::Point2F(center.x - start, center.y - start),
+                     topLeftEnd, brushBtn_, stroke);
+        rt->DrawLine(topLeftEnd,
+                     D2D1::Point2F(topLeftEnd.x - head, topLeftEnd.y), brushBtn_, stroke);
+        rt->DrawLine(topLeftEnd,
+                     D2D1::Point2F(topLeftEnd.x, topLeftEnd.y - head), brushBtn_, stroke);
+
+        const auto bottomRightEnd = D2D1::Point2F(center.x + end, center.y + end);
+        rt->DrawLine(D2D1::Point2F(center.x + start, center.y + start),
+                     bottomRightEnd, brushBtn_, stroke);
+        rt->DrawLine(bottomRightEnd,
+                     D2D1::Point2F(bottomRightEnd.x + head, bottomRightEnd.y), brushBtn_, stroke);
+        rt->DrawLine(bottomRightEnd,
+                     D2D1::Point2F(bottomRightEnd.x, bottomRightEnd.y + head), brushBtn_, stroke);
+    }
+
     void drawImmersiveControls() {
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -5495,13 +5532,7 @@ struct TaskbarHost::Impl {
         drawButton(kImmersiveControlPlayPause, centers[kImmersiveControlPlayPause], r);
         drawButton(kImmersiveControlNext, centers[kImmersiveControlNext], r);
         drawVolumeButton(centers[kImmersiveControlVolume], r);
-        settings_icon::draw(
-            rt, settings_icon::Kind::Exit,
-            D2D1::RectF(centers[kImmersiveControlExit].x - r * 0.85f,
-                        centers[kImmersiveControlExit].y - r * 0.85f,
-                        centers[kImmersiveControlExit].x + r * 0.85f,
-                        centers[kImmersiveControlExit].y + r * 0.85f),
-            brushBtn_, 1.2f);
+        drawExitImmersiveButton(centers[kImmersiveControlExit], r);
         settings_icon::draw(
             rt, settings_icon::Kind::Apps,
             D2D1::RectF(centers[kImmersiveControlApps].x - r * 0.82f,
