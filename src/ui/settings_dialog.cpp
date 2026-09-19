@@ -88,6 +88,7 @@ constexpr int kIdTaskbarContextMenu = 467;
 constexpr int kIdTaskbarViewMode = 468;
 constexpr int kIdAppBarEdge = 469;
 constexpr int kIdImmersiveMaskOpacity = 471;
+constexpr int kIdDockMaskOpacity = 472;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -277,6 +278,7 @@ settings_icon::Kind iconForRow(int id) {
     case kIdAppBarEdge:
         return settings_icon::Kind::Position;
     case kIdImmersiveMaskOpacity:
+    case kIdDockMaskOpacity:
         return settings_icon::Kind::Opacity;
     case kIdHoverControls:
         return settings_icon::Kind::Hover;
@@ -606,7 +608,9 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdAppBarEdge))
             row->enabled = appBarEnabled;
         if (auto* row = findRow(kIdImmersiveMaskOpacity))
-            row->enabled = expandedEnabled;
+            row->enabled = selectedMode == 1 && !state.verticalTaskbar;
+        if (auto* row = findRow(kIdDockMaskOpacity))
+            row->enabled = appBarEnabled;
         auto* controls = findRow(kIdHoverControls);
         if (controls)
             controls->enabled = !expandedEnabled;
@@ -894,9 +898,10 @@ struct SettingsDialog::Impl {
         addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
                  L"当前仅支持水平顶部和底部。", {L"顶部", L"底部"},
                  std::clamp(state.appBarEdge, 0, 1), state.taskbarViewMode == 2, kRowH);
-        addSlider(kTaskbarModePage, kIdImmersiveMaskOpacity, L"沉浸 / Dock 遮罩不透明度",
-                  state.immersiveMaskOpacity,
-                  state.taskbarViewMode == 2 || (!vertical && state.taskbarViewMode == 1));
+        addSlider(kTaskbarModePage, kIdImmersiveMaskOpacity, L"沉浸模式遮罩不透明度",
+                  state.immersiveMaskOpacity, !vertical && state.taskbarViewMode == 1);
+        addSlider(kTaskbarModePage, kIdDockMaskOpacity, L"Dock 模式遮罩不透明度",
+                  state.dockMaskOpacity, state.taskbarViewMode == 2);
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
             L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
@@ -3304,6 +3309,10 @@ struct SettingsDialog::Impl {
             if (actions.onImmersiveMaskOpacity)
                 actions.onImmersiveMaskOpacity(row->value);
             break;
+        case kIdDockMaskOpacity:
+            if (actions.onDockMaskOpacity)
+                actions.onDockMaskOpacity(row->value);
+            break;
         case kIdSpectrum:
             row->checked = !row->checked;
             if (auto* colorMode = findRow(kIdSpectrumColorMode))
@@ -3570,7 +3579,11 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdImmersiveMaskOpacity)) {
             row->value = std::clamp(s.immersiveMaskOpacity, 0, 100);
-            row->enabled = s.taskbarViewMode == 2 || (!vertical && s.taskbarViewMode == 1);
+            row->enabled = !vertical && s.taskbarViewMode == 1;
+        }
+        if (auto* row = findRow(kIdDockMaskOpacity)) {
+            row->value = std::clamp(s.dockMaskOpacity, 0, 100);
+            row->enabled = s.taskbarViewMode == 2;
         }
         if (auto* row = findRow(kIdSpectrum)) {
             row->checked = minimal || vertical ? false : s.spectrumOn;

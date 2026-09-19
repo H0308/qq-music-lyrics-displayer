@@ -1152,6 +1152,7 @@ struct TaskbarHost::Impl {
     // 沉浸模式使用完整任务栏客户区；AppBar 使用独立的 Shell 工作区协议。
     TaskbarViewMode viewMode_ = TaskbarViewMode::Embedded;
     int immersiveMaskOpacityPct_ = 88;
+    int dockMaskOpacityPct_ = 88;
     ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
     ID2D1SolidColorBrush* brushIdleCool_ = nullptr;
     ID2D1SolidColorBrush* brushIdleAccent_ = nullptr;
@@ -2886,7 +2887,17 @@ struct TaskbarHost::Impl {
         if (immersiveMaskOpacityPct_ == nextOpacity)
             return;
         immersiveMaskOpacityPct_ = nextOpacity;
-        requestFrameAndFlush();
+        if (viewMode_ == TaskbarViewMode::Immersive)
+            requestFrameAndFlush();
+    }
+
+    void setDockMaskOpacity(int opacityPercent) {
+        const int nextOpacity = std::clamp(opacityPercent, 0, 100);
+        if (dockMaskOpacityPct_ == nextOpacity)
+            return;
+        dockMaskOpacityPct_ = nextOpacity;
+        if (viewMode_ == TaskbarViewMode::AppBar)
+            requestFrameAndFlush();
     }
 
     void setSpectrumVisible(bool on) {
@@ -7624,7 +7635,10 @@ struct TaskbarHost::Impl {
                 const bool appDark = fluent::isWindowsAppDarkMode();
                 D2D1_COLOR_F mask = fluent::toD2D(
                     appDark ? RGB(32, 32, 32) : RGB(243, 243, 243));
-                mask.a = std::clamp(immersiveMaskOpacityPct_, 0, 100) / 100.0f;
+                const int opacityPct = viewMode_ == TaskbarViewMode::AppBar
+                                           ? dockMaskOpacityPct_
+                                           : immersiveMaskOpacityPct_;
+                mask.a = std::clamp(opacityPct, 0, 100) / 100.0f;
                 brushBackground_->SetColor(mask);
                 // 沉浸遮罩是完整任务栏客户区的矩形底，不继承普通嵌入模式的圆角。
                 rt->FillRectangle(bg.rect, brushBackground_);
@@ -9479,6 +9493,10 @@ void TaskbarHost::setAppBarEdge(AppBarEdge edge) {
 
 void TaskbarHost::setImmersiveMaskOpacity(int opacityPercent) {
     impl_->setImmersiveMaskOpacity(opacityPercent);
+}
+
+void TaskbarHost::setDockMaskOpacity(int opacityPercent) {
+    impl_->setDockMaskOpacity(opacityPercent);
 }
 
 void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {

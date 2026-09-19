@@ -194,11 +194,13 @@ public:
     void setBackground(TaskbarBackground mode);
     void setCoverBackgroundOpacity(int percent);
 
-    // 沉浸模式：覆盖当前任务栏客户区，颜色跟随 Windows 应用模式，透明度可调。
+    // 沉浸模式：覆盖当前任务栏客户区；Dock 模式作为独立 AppBar。两者的遮罩
+    // 颜色都跟随 Windows 应用模式，不透明度分别配置。
     void setViewMode(TaskbarViewMode mode);
     // AppBar 仅支持水平顶部/底部；位置变更会立即重新向 Shell 协商工作区。
     void setAppBarEdge(AppBarEdge edge);
     void setImmersiveMaskOpacity(int opacityPercent);
+    void setDockMaskOpacity(int opacityPercent);
 
     void show() override;
     void hide() override;

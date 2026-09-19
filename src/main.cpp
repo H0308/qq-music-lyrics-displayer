@@ -1060,6 +1060,7 @@ struct App {
     TaskbarViewMode taskbarViewMode_ = TaskbarViewMode::Embedded;
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
     int immersiveMaskOpacity_ = 88;
+    int dockMaskOpacity_ = 88;
     bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
@@ -1465,6 +1466,7 @@ struct App {
         taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
         if (taskbarHost) {
             taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
+            taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
             syncTaskbarView(monitor.snapshot());
             syncTaskbarOrientation();
             applyEffectiveTaskbarSettings();
@@ -1488,6 +1490,14 @@ struct App {
         if (taskbarHost)
             taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
         logSettingInt(L"immersive-mask-opacity", immersiveMaskOpacity_);
+        saveSettings();
+    }
+
+    void applyDockMaskOpacity(int percent) {
+        dockMaskOpacity_ = std::clamp(percent, 0, 100);
+        if (taskbarHost)
+            taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
+        logSettingInt(L"dock-mask-opacity", dockMaskOpacity_);
         saveSettings();
     }
 
@@ -1548,6 +1558,7 @@ struct App {
                     : static_cast<TaskbarBackground>(taskbarBackground_));
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
         taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
+        taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
         syncTaskbarView(monitor.snapshot());
     }
 
@@ -3857,6 +3868,8 @@ void App::loadSettings() {
         taskbarViewMode_ = static_cast<TaskbarViewMode>(std::clamp(savedViewMode, 0, 2));
         appBarEdge_ = j.value("appBarEdge", 0) == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
         immersiveMaskOpacity_ = std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
+        dockMaskOpacity_ = std::clamp(
+            j.value("dockMaskOpacity", immersiveMaskOpacity_), 0, 100);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
         renderMode_ = static_cast<int>(RenderMode::Normal);
@@ -4111,6 +4124,7 @@ void App::saveSettings() {
         j["appBarEdge"] = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
         j.erase("taskbarImmersive");
         j["immersiveMaskOpacity"] = immersiveMaskOpacity_;
+        j["dockMaskOpacity"] = dockMaskOpacity_;
         j.erase("immersiveMaskCustomColor");
         j.erase("immersiveMaskColor");
         j["taskbarContextMenu"] = taskbarContextMenuEnabled_;
@@ -5357,6 +5371,7 @@ SettingsState App::currentSettingsState() const {
     st.taskbarViewMode = static_cast<int>(taskbarViewMode_);
     st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
     st.immersiveMaskOpacity = immersiveMaskOpacity_;
+    st.dockMaskOpacity = dockMaskOpacity_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
     st.platformIconVisible = platformIconVisible_;
@@ -5440,6 +5455,7 @@ SettingsActions App::buildSettingsActions() {
     act.onAppBarEdge = [this](int edge) { applyAppBarEdge(edge); };
     act.onImmersiveMaskOpacity =
         [this](int percent) { applyImmersiveMaskOpacity(percent); };
+    act.onDockMaskOpacity = [this](int percent) { applyDockMaskOpacity(percent); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
     act.onSpectrumColorMode = [this](int mode) { applySpectrumColorMode(mode); };
