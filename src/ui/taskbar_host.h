@@ -124,6 +124,8 @@ public:
     void setImmersiveMenuCallback(std::function<void(POINT)> cb);
     // 沉浸模式应用收纳按钮：由应用层实时枚举并显示运行中/已固定应用；AppBar 不显示。
     void setAppCollectionCallback(std::function<void(POINT)> cb);
+    // Dock 模式快捷应用按钮：显示每日一言“快捷启动”配置中的应用；沉浸模式不显示。
+    void setDockQuickAppsCallback(std::function<void(POINT)> cb);
     // 拖动歌词并吸附到另一有效锚点后通知应用层持久化位置。
     void setPositionModeChangedCallback(std::function<void(int)> cb);
     void setStatusTextCycleCompletedCallback(std::function<void()> cb);

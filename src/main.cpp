@@ -134,6 +134,7 @@ constexpr UINT kCmdTaskbarModeAppBar = 137;
 constexpr UINT kCmdAppBarTop = 138;
 constexpr UINT kCmdAppBarBottom = 139;
 constexpr int kTaskbarAppCommandBase = 20000;
+constexpr int kDockQuickAppCommandBase = 21000;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
 constexpr int kUpdatePromptDownload = 2;
@@ -970,6 +971,7 @@ struct App {
 
     HWND trayHwnd = nullptr;
     std::vector<TaskbarAppAction> taskbarAppActions_;
+    std::vector<std::wstring> dockQuickAppActions_;
     UINT taskbarCreatedMsg_ = 0; // Explorer 重启广播（只有顶层窗口收得到，托盘窗口不能用 HWND_MESSAGE）
     bool shutdownRequested_ = false;
 
@@ -2719,6 +2721,7 @@ struct App {
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setImmersiveExitCallback([this] { applyTaskbarViewMode(0); });
         host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
+        host->setDockQuickAppsCallback([this](POINT pt) { showDockQuickApps(pt); });
         host->setImmersiveMenuCallback([this](POINT pt) { showTrayMenu(pt); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
         host->setPositionModeChangedCallback([this](int mode) {
@@ -2744,19 +2747,7 @@ struct App {
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
         host->setIdleAppOpenCallback([this](const std::wstring& path) {
-            const bool ok = platform_icon::launchConfiguredExe(path);
-            runtime_log::writef(L"[action][idle-entry] app-open path=%s result=%s", path.c_str(),
-                                ok ? L"ok" : L"failed");
-            if (!ok) {
-                for (auto& app : idleApps_) {
-                    if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
-                        app.pathValid = validExePath(app.path);
-                        break;
-                    }
-                }
-                refreshSettingsDialog();
-                publishPresentationFrame(monitor.snapshot(), false, true);
-            }
+            launchIdleApp(path);
         });
         host->setIdleTaskOpenCallback([this](const IdleTaskInfo& task) {
             openTickTickTask(task);
@@ -3404,6 +3395,10 @@ struct App {
     void showTaskbarApps(POINT screenPt);
     std::vector<fluent::FluentMenuItem> buildTaskbarAppItems();
     void onTaskbarAppCommand(int command);
+    void showDockQuickApps(POINT screenPt);
+    std::vector<fluent::FluentMenuItem> buildDockQuickAppItems();
+    void onDockQuickAppCommand(int command);
+    void launchIdleApp(const std::wstring& path);
     void onMenuCommand(int cmd, const wchar_t* source);
     void showRuntimeLog();
     void initializeRuntimeLogger();
@@ -5114,6 +5109,68 @@ void App::onTaskbarAppCommand(int command) {
         opened = reinterpret_cast<INT_PTR>(result) > 32;
         runtime_log::writef(L"[action][taskbar-apps] launch shortcut=%s result=%s",
                             action.shortcutPath.c_str(), opened ? L"ok" : L"failed");
+    }
+}
+
+std::vector<fluent::FluentMenuItem> App::buildDockQuickAppItems() {
+    dockQuickAppActions_.clear();
+
+    std::vector<fluent::FluentMenuItem> items;
+    fluent::FluentMenuItem header;
+    header.text = L"快捷应用";
+    header.icon = settings_icon::Kind::QuickLaunch;
+    header.enabled = false;
+    items.push_back(std::move(header));
+
+    fluent::FluentMenuItem separator;
+    separator.separator = true;
+    items.push_back(std::move(separator));
+
+    for (const auto& app : idleApps_) {
+        fluent::FluentMenuItem item;
+        item.id = kDockQuickAppCommandBase + static_cast<int>(dockQuickAppActions_.size());
+        item.text = app.name.empty() ? fallbackExeName(app.path) : app.name;
+        item.icon = settings_icon::Kind::QuickLaunch;
+        item.nativeIcon = shellIconForPath(app.path);
+        item.enabled = app.pathValid;
+        items.push_back(std::move(item));
+        dockQuickAppActions_.push_back(app.path);
+    }
+
+    if (dockQuickAppActions_.empty()) {
+        fluent::FluentMenuItem empty;
+        empty.text = L"请在“每日一言与应用速启”中添加应用";
+        empty.enabled = false;
+        items.push_back(std::move(empty));
+    }
+    return items;
+}
+
+void App::showDockQuickApps(POINT screenPt) {
+    fluent::FluentMenu::show(trayHwnd, screenPt, buildDockQuickAppItems(),
+                             [this](int command) { onDockQuickAppCommand(command); });
+}
+
+void App::onDockQuickAppCommand(int command) {
+    const int index = command - kDockQuickAppCommandBase;
+    if (index < 0 || static_cast<size_t>(index) >= dockQuickAppActions_.size())
+        return;
+    launchIdleApp(dockQuickAppActions_[static_cast<size_t>(index)]);
+}
+
+void App::launchIdleApp(const std::wstring& path) {
+    const bool ok = platform_icon::launchConfiguredExe(path);
+    runtime_log::writef(L"[action][idle-entry] app-open path=%s result=%s", path.c_str(),
+                        ok ? L"ok" : L"failed");
+    if (!ok) {
+        for (auto& app : idleApps_) {
+            if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
+                app.pathValid = validExePath(app.path);
+                break;
+            }
+        }
+        refreshSettingsDialog();
+        publishPresentationFrame(monitor.snapshot(), false, true);
     }
 }
 

@@ -88,11 +88,14 @@ constexpr int kImmersiveControlPlayPause = 1;
 constexpr int kImmersiveControlNext = 2;
 constexpr int kImmersiveControlVolume = 3;
 constexpr int kImmersiveControlExit = 4;
-constexpr int kImmersiveControlApps = 5;
-constexpr int kImmersiveControlMenu = 6;
-constexpr int kImmersiveControlTray = 7;
-constexpr int kImmersiveControlCount = 8;
-constexpr int kAppBarControlCount = 6;
+// Dock 的快捷应用入口使用独立图标和命中项；不能复用沉浸模式的应用收纳入口。
+constexpr int kDockControlQuickApps = 5;
+constexpr int kImmersiveControlApps = 6;
+constexpr int kImmersiveControlMenu = 7;
+constexpr int kImmersiveControlTray = 8;
+constexpr int kImmersiveControlCount = 8; // 沉浸模式显示 8 个，索引 5 保留给 Dock 入口
+constexpr int kExpandedControlCount = 9;
+constexpr int kAppBarControlCount = 7;
 constexpr float kAppBarHeightDip = 48.0f;
 constexpr float kImmersiveControlRadiusFactor = 0.24f;
 constexpr float kImmersiveControlMinRadius = 8.0f;
@@ -951,6 +954,7 @@ struct TaskbarHost::Impl {
     std::function<void(POINT)> onContextMenu;
     std::function<void(POINT)> onImmersiveMenu;
     std::function<void(POINT)> onAppCollection;
+    std::function<void(POINT)> onDockQuickApps;
     std::function<void(int)> onPositionModeChanged;
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
@@ -1348,8 +1352,9 @@ struct TaskbarHost::Impl {
 
     bool expandedControlVisible(int index) const {
         if (!isAppBarView())
-            return index >= 0 && index < kImmersiveControlCount;
-        return (index >= kImmersiveControlPrevious && index <= kImmersiveControlExit) ||
+            return index >= 0 && index < kExpandedControlCount &&
+                   index != kDockControlQuickApps;
+        return (index >= kImmersiveControlPrevious && index <= kDockControlQuickApps) ||
                index == kImmersiveControlMenu;
     }
 
@@ -5943,7 +5948,7 @@ struct TaskbarHost::Impl {
 
     // 沉浸模式专属控件：始终显示在歌曲信息分隔线右侧，不受普通任务栏歌词
     // 的悬浮控件开关和样式设置影响。控件组的几何区域也会从歌词区预先扣除。
-    bool immersiveControlsLayout(D2D1_POINT_2F centers[kImmersiveControlCount], float& cy,
+    bool immersiveControlsLayout(D2D1_POINT_2F centers[kExpandedControlCount], float& cy,
                                  float& r) const {
         if (!isExpandedView() || isVerticalTaskbar())
             return false;
@@ -5966,7 +5971,7 @@ struct TaskbarHost::Impl {
                                 std::max(0.0f, (layout.immersiveControlsW - groupW) * 0.5f);
         cy = layout.h * 0.5f;
         int visibleIndex = 0;
-        for (int i = 0; i < kImmersiveControlCount; ++i) {
+        for (int i = 0; i < kExpandedControlCount; ++i) {
             if (!expandedControlVisible(i))
                 continue;
             centers[i] = D2D1::Point2F(groupLeft + r + visibleIndex * pitch, cy);
@@ -5976,7 +5981,7 @@ struct TaskbarHost::Impl {
     }
 
     int hitImmersiveControl(float x, float y) const {
-        D2D1_POINT_2F centers[kImmersiveControlCount]{};
+        D2D1_POINT_2F centers[kExpandedControlCount]{};
         float cy = 0.0f;
         float r = 0.0f;
         if (!immersiveControlsLayout(centers, cy, r))
@@ -5985,23 +5990,35 @@ struct TaskbarHost::Impl {
         float logicalX = 0.0f;
         float logicalY = 0.0f;
         clientPointToLogicalDip(x, y, logicalX, logicalY);
-        for (int i = 0; i < kImmersiveControlCount; ++i) {
+        for (int i = 0; i < kExpandedControlCount; ++i) {
             if (!expandedControlVisible(i))
                 continue;
-            const bool enabled =
-                i == kImmersiveControlPrevious
-                    ? media.canPrev
-                    : i == kImmersiveControlPlayPause
-                          ? media.canPlayPause
-                          : i == kImmersiveControlNext
-                                ? media.canNext
-                                : i == kImmersiveControlApps
-                                      ? static_cast<bool>(onAppCollection)
-                                      : i == kImmersiveControlMenu
-                                            ? static_cast<bool>(onImmersiveMenu)
-                                            : i == kImmersiveControlTray
-                                                  ? static_cast<bool>(taskbar_)
-                                                  : true;
+            bool enabled = true;
+            switch (i) {
+            case kImmersiveControlPrevious:
+                enabled = media.canPrev;
+                break;
+            case kImmersiveControlPlayPause:
+                enabled = media.canPlayPause;
+                break;
+            case kImmersiveControlNext:
+                enabled = media.canNext;
+                break;
+            case kDockControlQuickApps:
+                enabled = static_cast<bool>(onDockQuickApps);
+                break;
+            case kImmersiveControlApps:
+                enabled = static_cast<bool>(onAppCollection);
+                break;
+            case kImmersiveControlMenu:
+                enabled = static_cast<bool>(onImmersiveMenu);
+                break;
+            case kImmersiveControlTray:
+                enabled = static_cast<bool>(taskbar_);
+                break;
+            default:
+                break;
+            }
             if (!enabled)
                 continue;
             if (std::hypot(logicalX - centers[i].x, logicalY - centers[i].y) <= r + 4.0f)
@@ -6052,14 +6069,14 @@ struct TaskbarHost::Impl {
         if (!rt)
             return;
 
-        D2D1_POINT_2F centers[kImmersiveControlCount]{};
+        D2D1_POINT_2F centers[kExpandedControlCount]{};
         float cy = 0.0f;
         float r = 0.0f;
         if (!immersiveControlsLayout(centers, cy, r))
             return;
 
         if (brushHover_) {
-            for (int i = 0; i < kImmersiveControlCount; ++i) {
+            for (int i = 0; i < kExpandedControlCount; ++i) {
                 if (expandedControlVisible(i) && immersiveControlHover_ == i)
                     rt->FillEllipse(D2D1::Ellipse(centers[i], r + 4.0f, r + 4.0f),
                                     brushHover_);
@@ -6070,6 +6087,15 @@ struct TaskbarHost::Impl {
         drawButton(kImmersiveControlNext, centers[kImmersiveControlNext], r);
         drawVolumeButton(centers[kImmersiveControlVolume], r);
         drawExitImmersiveButton(centers[kImmersiveControlExit], r);
+        if (expandedControlVisible(kDockControlQuickApps)) {
+            settings_icon::draw(
+                rt, settings_icon::Kind::QuickLaunch,
+                D2D1::RectF(centers[kDockControlQuickApps].x - r * 0.82f,
+                            centers[kDockControlQuickApps].y - r * 0.82f,
+                            centers[kDockControlQuickApps].x + r * 0.82f,
+                            centers[kDockControlQuickApps].y + r * 0.82f),
+                onDockQuickApps ? brushBtn_ : brushBtnDisabled_, 1.45f);
+        }
         if (expandedControlVisible(kImmersiveControlApps)) {
             settings_icon::draw(
                 rt, settings_icon::Kind::Apps,
@@ -6144,7 +6170,7 @@ struct TaskbarHost::Impl {
     // 音量按钮的屏幕坐标矩形（音量滑块浮窗的锚点）
     RECT volumeButtonScreenRect() const {
         if (isExpandedView()) {
-            D2D1_POINT_2F centers[kImmersiveControlCount]{};
+            D2D1_POINT_2F centers[kExpandedControlCount]{};
             float cy = 0.0f;
             float r = 0.0f;
             if (immersiveControlsLayout(centers, cy, r)) {
@@ -6237,6 +6263,13 @@ struct TaskbarHost::Impl {
         onAppCollection(screenPoint);
     }
 
+    void openDockQuickApps(POINT screenPoint) {
+        if (!isAppBarView() || !onDockQuickApps)
+            return;
+        prepareForExternalPopup();
+        onDockQuickApps(screenPoint);
+    }
+
     void activateImmersiveControl(int index) {
         switch (index) {
         case kImmersiveControlPrevious:
@@ -6256,6 +6289,16 @@ struct TaskbarHost::Impl {
             if (onImmersiveExit)
                 onImmersiveExit();
             break;
+        case kDockControlQuickApps: {
+            POINT pt{};
+            if (!GetCursorPos(&pt)) {
+                RECT rc{};
+                GetWindowRect(hwnd, &rc);
+                pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
+            }
+            openDockQuickApps(pt);
+            break;
+        }
         case kImmersiveControlApps: {
             POINT pt{};
             if (!GetCursorPos(&pt)) {
@@ -9534,6 +9577,10 @@ void TaskbarHost::setImmersiveMenuCallback(std::function<void(POINT)> cb) {
 
 void TaskbarHost::setAppCollectionCallback(std::function<void(POINT)> cb) {
     impl_->onAppCollection = std::move(cb);
+}
+
+void TaskbarHost::setDockQuickAppsCallback(std::function<void(POINT)> cb) {
+    impl_->onDockQuickApps = std::move(cb);
 }
 
 void TaskbarHost::setPositionModeChangedCallback(std::function<void(int)> cb) {

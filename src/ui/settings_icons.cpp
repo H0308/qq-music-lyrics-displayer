@@ -292,6 +292,15 @@ void draw(ID2D1RenderTarget* target, Kind kind, const D2D1_RECT_F& bounds, ID2D1
         c.fillRounded(3.0f, 12.0f, 8.0f, 17.0f, 1.0f);
         c.fillRounded(12.0f, 12.0f, 17.0f, 17.0f, 1.0f);
         break;
+    case Kind::QuickLaunch:
+        // 小窗口叠加斜向启动箭头，和“应用收纳”的四宫格、托盘图标保持区分。
+        c.rounded(2.0f, 2.5f, 12.5f, 17.5f, 1.7f);
+        c.line(4.5f, 6.0f, 10.5f, 6.0f);
+        c.line(4.5f, 10.0f, 9.5f, 10.0f);
+        c.line(9.0f, 15.5f, 17.5f, 7.0f, 1.5f);
+        c.line(13.5f, 7.0f, 17.5f, 7.0f, 1.5f);
+        c.line(17.5f, 7.0f, 17.5f, 11.0f, 1.5f);
+        break;
     case Kind::Tray:
         c.rounded(2.5f, 4.0f, 17.5f, 16.5f, 1.8f);
         c.line(2.5f, 8.0f, 17.5f, 8.0f);
