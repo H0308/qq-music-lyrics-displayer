@@ -135,6 +135,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     pdh
     psapi
     iphlpapi
+    powrprof
     winmm
     version
 )

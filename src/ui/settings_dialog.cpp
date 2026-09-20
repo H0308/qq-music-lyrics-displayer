@@ -89,6 +89,8 @@ constexpr int kIdTaskbarViewMode = 468;
 constexpr int kIdAppBarEdge = 469;
 constexpr int kIdImmersiveMaskOpacity = 471;
 constexpr int kIdDockMaskOpacity = 472;
+constexpr int kIdDockResourceGpuUsage = 473;
+constexpr int kIdDockResourceCpuFrequency = 477;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -288,6 +290,9 @@ settings_icon::Kind iconForRow(int id) {
     case kIdImmersiveMaskOpacity:
     case kIdDockMaskOpacity:
         return settings_icon::Kind::Opacity;
+    case kIdDockResourceGpuUsage:
+    case kIdDockResourceCpuFrequency:
+        return settings_icon::Kind::Performance;
     case kIdHoverControls:
         return settings_icon::Kind::Hover;
     case kIdHoverControlStyle:
@@ -629,6 +634,10 @@ struct SettingsDialog::Impl {
             row->enabled = selectedMode == 1 && immersiveEnabled;
         if (auto* row = findRow(kIdDockMaskOpacity))
             row->enabled = appBarEnabled;
+        if (auto* row = findRow(kIdDockResourceGpuUsage))
+            row->enabled = appBarEnabled;
+        if (auto* row = findRow(kIdDockResourceCpuFrequency))
+            row->enabled = appBarEnabled;
         auto* controls = findRow(kIdHoverControls);
         if (controls)
             controls->enabled = !expandedEnabled;
@@ -921,6 +930,21 @@ struct SettingsDialog::Impl {
                   state.immersiveMaskOpacity, !vertical && state.taskbarViewMode == 1);
         addSlider(kTaskbarModePage, kIdDockMaskOpacity, L"Dock 模式遮罩不透明度",
                   state.dockMaskOpacity, state.taskbarViewMode == 2);
+        addHeader(kTaskbarModePage, L"Dock 资源监视");
+        Row& dockResourceGpu = addRow(
+            kTaskbarModePage, kIdDockResourceGpuUsage, ControlKind::Toggle,
+            L"显示 GPU 使用率", L"示例：GPU: 7%；没有可用 GPU 性能计数器时显示“—”。",
+            40.0f, kRowTallH);
+        dockResourceGpu.checked = state.dockResourceGpuUsage;
+        Row& dockResourceCpuFrequency = addRow(
+            kTaskbarModePage, kIdDockResourceCpuFrequency, ControlKind::Toggle,
+            L"显示 CPU 频率", L"示例：频率: 3.6GHz；系统未提供当前频率时显示“—”。",
+            40.0f, kRowTallH);
+        dockResourceCpuFrequency.checked = state.dockResourceCpuFrequency;
+        if (auto* row = findRow(kIdDockResourceGpuUsage))
+            row->enabled = state.taskbarViewMode == 2;
+        if (auto* row = findRow(kIdDockResourceCpuFrequency))
+            row->enabled = state.taskbarViewMode == 2;
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
             L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
@@ -3336,6 +3360,16 @@ struct SettingsDialog::Impl {
             if (actions.onDockMaskOpacity)
                 actions.onDockMaskOpacity(row->value);
             break;
+        case kIdDockResourceGpuUsage:
+            row->checked = !row->checked;
+            if (actions.onDockResourceGpuUsage)
+                actions.onDockResourceGpuUsage(row->checked);
+            break;
+        case kIdDockResourceCpuFrequency:
+            row->checked = !row->checked;
+            if (actions.onDockResourceCpuFrequency)
+                actions.onDockResourceCpuFrequency(row->checked);
+            break;
         case kIdSpectrum:
             row->checked = !row->checked;
             if (auto* colorMode = findRow(kIdSpectrumColorMode))
@@ -3609,6 +3643,14 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdDockMaskOpacity)) {
             row->value = std::clamp(s.dockMaskOpacity, 0, 100);
+            row->enabled = s.taskbarViewMode == 2;
+        }
+        if (auto* row = findRow(kIdDockResourceGpuUsage)) {
+            row->checked = s.dockResourceGpuUsage;
+            row->enabled = s.taskbarViewMode == 2;
+        }
+        if (auto* row = findRow(kIdDockResourceCpuFrequency)) {
+            row->checked = s.dockResourceCpuFrequency;
             row->enabled = s.taskbarViewMode == 2;
         }
         if (auto* row = findRow(kIdSpectrum)) {

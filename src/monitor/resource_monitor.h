@@ -2,6 +2,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -11,17 +12,27 @@ struct ResourceSnapshot {
     bool cpuAvailable = false;
     bool memoryAvailable = false;
     bool networkAvailable = false;
+    bool gpuAvailable = false;
+    bool diskAvailable = false;
+    bool batteryAvailable = false;
+    bool cpuFrequencyAvailable = false;
     double cpuPercent = 0.0;
+    double gpuPercent = 0.0;
     unsigned memoryPercent = 0;
     uint64_t downloadBytesPerSecond = 0;
     uint64_t uploadBytesPerSecond = 0;
+    uint64_t diskReadBytesPerSecond = 0;
+    uint64_t diskWriteBytesPerSecond = 0;
+    unsigned batteryPercent = 0;
+    bool batteryCharging = false;
+    double cpuFrequencyGHz = 0.0;
     uint64_t revision = 0;
 };
 
 // 系统资源采样器。所有系统查询都在独立线程执行，UI 线程只读取最近一次快照。
 class ResourceMonitor {
 public:
-    ResourceMonitor() = default;
+    ResourceMonitor();
     ~ResourceMonitor();
 
     ResourceMonitor(const ResourceMonitor&) = delete;
@@ -32,6 +43,8 @@ public:
     ResourceSnapshot snapshot() const;
 
 private:
+    struct PerformanceCounters;
+
     void run();
     ResourceSnapshot sample();
 
@@ -51,6 +64,8 @@ private:
     uint64_t previousNetworkIn_ = 0;
     uint64_t previousNetworkOut_ = 0;
     uint64_t previousNetworkTickMs_ = 0;
+
+    std::unique_ptr<PerformanceCounters> performanceCounters_;
 };
 
 } // namespace system_monitor

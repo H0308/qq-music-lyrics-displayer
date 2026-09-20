@@ -1023,6 +1023,14 @@ struct TaskbarHost::Impl {
     std::wstring resourceMemoryText_ = L"—";
     std::wstring resourceDownloadText_ = L"—";
     std::wstring resourceUploadText_ = L"—";
+    std::wstring resourceGpuText_ = L"—";
+    std::wstring resourceCpuFrequencyText_ = L"—";
+    DockResourceVisibility dockResourceVisibility_{};
+    struct DockResourceRow {
+        std::wstring left;
+        std::wstring right;
+    };
+    size_t dockResourcePage_ = 0;
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -2859,6 +2867,7 @@ struct TaskbarHost::Impl {
         if (previousMode == TaskbarViewMode::AppBar)
             stopResourceMonitoring();
         viewMode_ = mode;
+        dockResourcePage_ = 0;
         volumeHover_ = false;
         immersiveControlHover_ = -1;
         volumePopup_.hide();
@@ -2919,6 +2928,20 @@ struct TaskbarHost::Impl {
         dockMaskOpacityPct_ = nextOpacity;
         if (viewMode_ == TaskbarViewMode::AppBar)
             requestFrameAndFlush();
+    }
+
+    void setDockResourceVisibility(const DockResourceVisibility& visibility) {
+        if (dockResourceVisibility_.gpuUsage == visibility.gpuUsage &&
+            dockResourceVisibility_.cpuFrequency == visibility.cpuFrequency)
+            return;
+        dockResourceVisibility_ = visibility;
+        dockResourcePage_ = 0;
+        requestInvalidation(toMask(RenderInvalidation::Layout) |
+                            toMask(RenderInvalidation::Paint) |
+                            toMask(RenderInvalidation::Text));
+        if (isAppBarView())
+            adjustPosition();
+        requestFrameAndFlush();
     }
 
     void setSpectrumVisible(bool on) {
@@ -3245,11 +3268,67 @@ struct TaskbarHost::Impl {
                           kImmersiveClockZoneMinW, kImmersiveClockZoneMaxW);
     }
 
+    bool dockResourceExtrasVisible() const {
+        return dockResourceVisibility_.gpuUsage || dockResourceVisibility_.cpuFrequency;
+    }
+
+    std::vector<DockResourceRow> dockResourceExtraRows() const {
+        std::vector<std::wstring> cells;
+        if (dockResourceVisibility_.gpuUsage)
+            cells.push_back(L"GPU: " + resourceGpuText_);
+        if (dockResourceVisibility_.cpuFrequency)
+            cells.push_back(L"频率: " + resourceCpuFrequencyText_);
+
+        std::vector<DockResourceRow> rows;
+        for (size_t i = 0; i < cells.size(); i += 2)
+            rows.push_back({cells[i], i + 1 < cells.size() ? cells[i + 1] : L""});
+        return rows;
+    }
+
+    size_t dockResourcePageCount() const {
+        const auto rows = dockResourceExtraRows();
+        return 1 + (rows.size() + 1) / 2;
+    }
+
     float dockResourceZoneW(float hostW) const {
         if (!isAppBarView() || hostW <= 0.0f)
             return 0.0f;
         return std::clamp(hostW * kDockResourceZoneRatio,
                           kDockResourceZoneMinW, kDockResourceZoneMaxW);
+    }
+
+    bool hitDockResourceArea(float clientX, float clientY) const {
+        if (!isAppBarView() || !horizontalImmersiveMode() || !dockResourceExtrasVisible())
+            return false;
+
+        float x = 0.0f;
+        float y = 0.0f;
+        clientPointToLogicalDip(clientX, clientY, x, y);
+        int pxW = 0;
+        int pxH = 0;
+        logicalClientPixelSize(pxW, pxH);
+        const float width = dip(pxW);
+        const float height = dip(pxH);
+        const float resourceW = dockResourceZoneW(width);
+        const float resourceX = width - resourceW - kDockResourceRightPadding;
+        return x >= resourceX && x <= width - kDockResourceRightPadding && y >= 0.0f &&
+               y <= height;
+    }
+
+    void advanceDockResourcePage(int steps) {
+        const size_t pageCount = dockResourcePageCount();
+        if (pageCount <= 1 || steps == 0)
+            return;
+
+        const long long count = static_cast<long long>(pageCount);
+        long long next = static_cast<long long>(dockResourcePage_) + steps;
+        next %= count;
+        if (next < 0)
+            next += count;
+        dockResourcePage_ = static_cast<size_t>(next);
+        requestInvalidation(toMask(RenderInvalidation::Paint) |
+                            toMask(RenderInvalidation::Text));
+        requestFrameAndFlush();
     }
 
     int immersiveSpectrumBarCount(float visualW) const {
@@ -3712,11 +3791,21 @@ struct TaskbarHost::Impl {
         return text;
     }
 
+    static std::wstring formatFrequency(bool available, double gigahertz) {
+        if (!available)
+            return L"—";
+        wchar_t text[24]{};
+        swprintf_s(text, L"%.1fGHz", std::clamp(gigahertz, 0.0, 99.0));
+        return text;
+    }
+
     void startResourceMonitoring() {
         resourceCpuText_ = L"—";
         resourceMemoryText_ = L"—";
         resourceDownloadText_ = L"—";
         resourceUploadText_ = L"—";
+        resourceGpuText_ = L"—";
+        resourceCpuFrequencyText_ = L"—";
         resourceSnapshotRevision_ = UINT64_MAX;
         nextResourceSnapshotPollMs_ = 0;
         resourceMonitor_.start();
@@ -3751,6 +3840,10 @@ struct TaskbarHost::Impl {
         resourceUploadText_ = snapshot.networkAvailable
                                   ? formatNetworkRate(snapshot.uploadBytesPerSecond)
                                   : L"—";
+        resourceGpuText_ = snapshot.gpuAvailable ? formatResourcePercent(snapshot.gpuPercent)
+                                                  : L"—";
+        resourceCpuFrequencyText_ =
+            formatFrequency(snapshot.cpuFrequencyAvailable, snapshot.cpuFrequencyGHz);
         return true;
     }
 
@@ -3778,29 +3871,61 @@ struct TaskbarHost::Impl {
         if (!rt || !isAppBarView() || width <= 0.0f || !fmtClockTime_ || !brushText_)
             return;
 
-        fmtClockTime_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        const std::wstring cells[] = {L"CPU: " + resourceCpuText_,
-                                      L"内存: " + resourceMemoryText_,
-                                      L"下行: " + resourceDownloadText_,
-                                      L"上行: " + resourceUploadText_};
+        IDWriteTextFormat* resourceFormat = fmtClockTime_;
+        resourceFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        const std::wstring baseCells[] = {L"CPU: " + resourceCpuText_,
+                                          L"内存: " + resourceMemoryText_,
+                                          L"下行: " + resourceDownloadText_,
+                                          L"上行: " + resourceUploadText_};
+        const auto extraRows = dockResourceExtraRows();
+        const size_t pageCount = 1 + (extraRows.size() + 1) / 2;
+        const size_t page = std::min(dockResourcePage_, pageCount - 1);
+
+        std::array<DockResourceRow, 2> visibleRows{};
+        if (page == 0) {
+            visibleRows[0] = {baseCells[0], baseCells[2]};
+            visibleRows[1] = {baseCells[1], baseCells[3]};
+        } else {
+            const size_t start = (page - 1) * 2;
+            if (start < extraRows.size())
+                visibleRows[0] = extraRows[start];
+            if (start + 1 < extraRows.size())
+                visibleRows[1] = extraRows[start + 1];
+        }
+
         const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
         const float rowH = blockH * 0.5f;
-        // 左列只按 CPU/内存文本所需宽度占位，剩余空间给网络列，避免两列之间
-        // 因各占一半而形成明显空洞；列间距与频谱到资源区的间距保持一致。
         const float leftColumnW = std::min(kDockResourceMetricColumnW,
                                            std::max(1.0f, width - kDockResourceZoneGap));
         const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
-        const float rightColumnW = std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
-        for (size_t i = 0; i < std::size(cells); ++i) {
-            // 左列保持 CPU/内存上下排列，右列保持下行/上行上下排列。
-            const bool rightColumn = i >= 2;
-            const float left = rightColumn ? rightColumnX : x;
-            const float columnW = rightColumn ? rightColumnW : leftColumnW;
-            const float rowTop = top + (i % 2) * rowH;
-            rt->DrawTextW(cells[i].c_str(), static_cast<UINT32>(cells[i].size()), fmtClockTime_,
-                          D2D1::RectF(left, rowTop, left + columnW, rowTop + rowH), brushText_,
-                          D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        const float rightColumnW =
+            std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
+
+        IDWriteFactory* dwrite = renderer.dwrite();
+        auto drawResourceCell = [&](const std::wstring& text, float left, float rowTop,
+                                    float cellW) {
+            if (!dwrite || cellW <= 0.0f)
+                return;
+            IDWriteTextLayout* layout = nullptr;
+            const D2D1_RECT_F rect = D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH);
+            if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+                                                resourceFormat, cellW, rowH, &layout)) ||
+                !layout)
+                return;
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            layout->SetTrimming(&trimming, nullptr);
+            rt->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, brushText_,
+                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            layout->Release();
+        };
+        for (size_t row = 0; row < visibleRows.size(); ++row) {
+            const auto& current = visibleRows[row];
+            const float rowTop = top + row * rowH;
+            drawResourceCell(current.left, x, rowTop, leftColumnW);
+            if (!current.right.empty())
+                drawResourceCell(current.right, rightColumnX, rowTop, rightColumnW);
         }
     }
 
@@ -9123,6 +9248,13 @@ struct TaskbarHost::Impl {
                     onAppVolume(std::clamp(appVolume_.percent + steps * 2, 0, 100));
                 return 0;
             }
+            if (dockResourceExtrasVisible() &&
+                hitDockResourceArea(static_cast<float>(pt.x), static_cast<float>(pt.y))) {
+                const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+                if (steps != 0)
+                    advanceDockResourcePage(steps);
+                return 0;
+            }
             return 0;
         }
         case WM_LBUTTONDOWN: {
@@ -9671,6 +9803,10 @@ void TaskbarHost::setImmersiveMaskOpacity(int opacityPercent) {
 
 void TaskbarHost::setDockMaskOpacity(int opacityPercent) {
     impl_->setDockMaskOpacity(opacityPercent);
+}
+
+void TaskbarHost::setDockResourceVisibility(const DockResourceVisibility& visibility) {
+    impl_->setDockResourceVisibility(visibility);
 }
 
 void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {

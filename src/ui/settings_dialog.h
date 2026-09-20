@@ -36,6 +36,8 @@ struct SettingsState {
     int appBarEdge = 0; // 0 顶部 1 底部
     int immersiveMaskOpacity = 88;
     int dockMaskOpacity = 88;
+    bool dockResourceGpuUsage = false;
+    bool dockResourceCpuFrequency = false;
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
     COLORREF spectrumColor = RGB(49, 194, 124);
@@ -104,6 +106,8 @@ struct SettingsActions {
     std::function<void(int)> onAppBarEdge;
     std::function<void(int)> onImmersiveMaskOpacity;
     std::function<void(int)> onDockMaskOpacity;
+    std::function<void(bool)> onDockResourceGpuUsage;
+    std::function<void(bool)> onDockResourceCpuFrequency;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;
     std::function<void(int)> onSpectrumColorMode; // 0 已播放色 1 专辑主题色 2 自定义色

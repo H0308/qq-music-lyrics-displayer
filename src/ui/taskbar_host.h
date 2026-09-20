@@ -49,6 +49,12 @@ enum class TaskbarPlacementStatus {
     ForcedOverlap,
 };
 
+// Dock 资源区的扩展指标开关；CPU、内存、下行和上行始终保留。
+struct DockResourceVisibility {
+    bool gpuUsage = false;
+    bool cpuFrequency = false;
+};
+
 // 任务栏内容动态背景；绘制在歌词等内容区域下方，不侵入独立频谱容器或悬浮卡片。
 enum class IdleQuoteBackground {
     None,
@@ -201,6 +207,7 @@ public:
     void setAppBarEdge(AppBarEdge edge);
     void setImmersiveMaskOpacity(int opacityPercent);
     void setDockMaskOpacity(int opacityPercent);
+    void setDockResourceVisibility(const DockResourceVisibility& visibility);
 
     void show() override;
     void hide() override;

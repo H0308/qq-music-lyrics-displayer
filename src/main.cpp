@@ -1061,6 +1061,8 @@ struct App {
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
     int immersiveMaskOpacity_ = 88;
     int dockMaskOpacity_ = 88;
+    bool dockResourceGpuUsage_ = false;
+    bool dockResourceCpuFrequency_ = false;
     bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
     HoverControlStyle hoverControlStyle_ = HoverControlStyle::Inline;
@@ -1502,6 +1504,29 @@ struct App {
         saveSettings();
     }
 
+    void applyDockResourceVisibility() {
+        if (!taskbarHost)
+            return;
+        DockResourceVisibility visibility;
+        visibility.gpuUsage = dockResourceGpuUsage_;
+        visibility.cpuFrequency = dockResourceCpuFrequency_;
+        taskbarHost->setDockResourceVisibility(visibility);
+    }
+
+    void applyDockResourceGpuUsage(bool on) {
+        dockResourceGpuUsage_ = on;
+        applyDockResourceVisibility();
+        logSettingBool(L"dock-resource-gpu", on);
+        saveSettings();
+    }
+
+    void applyDockResourceCpuFrequency(bool on) {
+        dockResourceCpuFrequency_ = on;
+        applyDockResourceVisibility();
+        logSettingBool(L"dock-resource-cpu-frequency", on);
+        saveSettings();
+    }
+
     bool isRenderMode(RenderMode mode) const {
         return renderMode_ == static_cast<int>(mode);
     }
@@ -1560,6 +1585,7 @@ struct App {
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
         taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
         taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
+        applyDockResourceVisibility();
         syncTaskbarView(monitor.snapshot());
     }
 
@@ -3877,6 +3903,8 @@ void App::loadSettings() {
         immersiveMaskOpacity_ = std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
         dockMaskOpacity_ = std::clamp(
             j.value("dockMaskOpacity", immersiveMaskOpacity_), 0, 100);
+        dockResourceGpuUsage_ = j.value("dockResourceGpu", false);
+        dockResourceCpuFrequency_ = j.value("dockResourceCpuFrequency", false);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
         renderMode_ = static_cast<int>(RenderMode::Normal);
@@ -4132,6 +4160,11 @@ void App::saveSettings() {
         j.erase("taskbarImmersive");
         j["immersiveMaskOpacity"] = immersiveMaskOpacity_;
         j["dockMaskOpacity"] = dockMaskOpacity_;
+        j["dockResourceGpu"] = dockResourceGpuUsage_;
+        j.erase("dockResourceDisk");
+        j.erase("dockResourceBattery");
+        j.erase("dockResourceTemperature");
+        j["dockResourceCpuFrequency"] = dockResourceCpuFrequency_;
         j.erase("immersiveMaskCustomColor");
         j.erase("immersiveMaskColor");
         j["taskbarContextMenu"] = taskbarContextMenuEnabled_;
@@ -5382,6 +5415,8 @@ SettingsState App::currentSettingsState() const {
     st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
     st.immersiveMaskOpacity = immersiveMaskOpacity_;
     st.dockMaskOpacity = dockMaskOpacity_;
+    st.dockResourceGpuUsage = dockResourceGpuUsage_;
+    st.dockResourceCpuFrequency = dockResourceCpuFrequency_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
     st.platformIconVisible = platformIconVisible_;
@@ -5466,6 +5501,10 @@ SettingsActions App::buildSettingsActions() {
     act.onImmersiveMaskOpacity =
         [this](int percent) { applyImmersiveMaskOpacity(percent); };
     act.onDockMaskOpacity = [this](int percent) { applyDockMaskOpacity(percent); };
+    act.onDockResourceGpuUsage =
+        [this](bool on) { applyDockResourceGpuUsage(on); };
+    act.onDockResourceCpuFrequency =
+        [this](bool on) { applyDockResourceCpuFrequency(on); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };
     act.onSpectrumStyle = [this](int style) { applySpectrumStyle(style); };
     act.onSpectrumColorMode = [this](int mode) { applySpectrumColorMode(mode); };

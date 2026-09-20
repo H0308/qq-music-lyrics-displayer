@@ -5,13 +5,29 @@
 #include <windows.h>
 #include <iphlpapi.h>
 #include <netioapi.h>
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <powrprof.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <vector>
 
 namespace system_monitor {
 namespace {
+
+// 当前 Windows SDK 的 powrprof.h 不总是公开这个结构体，但
+// CallNtPowerInformation(ProcessorInformation) 仍要求使用该固定布局。
+struct ProcessorPowerInformation {
+    ULONG number = 0;
+    ULONG maxMhz = 0;
+    ULONG currentMhz = 0;
+    ULONG mhzLimit = 0;
+    ULONG maxIdleState = 0;
+    ULONG currentIdleState = 0;
+};
 
 uint64_t fileTimeValue(const FILETIME& value) {
     ULARGE_INTEGER combined{};
@@ -49,6 +65,118 @@ bool readNetworkTotals(uint64_t& received, uint64_t& sent) {
 }
 
 } // namespace
+
+struct ResourceMonitor::PerformanceCounters {
+    HQUERY query = nullptr;
+    HCOUNTER gpuUsage = nullptr;
+    HCOUNTER diskRead = nullptr;
+    HCOUNTER diskWrite = nullptr;
+    bool primed = false;
+
+    ~PerformanceCounters() {
+        if (query)
+            PdhCloseQuery(query);
+    }
+
+    void open() {
+        if (PdhOpenQueryW(nullptr, 0, &query) != ERROR_SUCCESS)
+            return;
+
+        PdhAddEnglishCounterW(query, L"\\GPU Engine(*)\\Utilization Percentage", 0,
+                              &gpuUsage);
+        PdhAddEnglishCounterW(query, L"\\PhysicalDisk(_Total)\\Disk Read Bytes/sec", 0,
+                              &diskRead);
+        PdhAddEnglishCounterW(query, L"\\PhysicalDisk(_Total)\\Disk Write Bytes/sec", 0,
+                              &diskWrite);
+    }
+
+    static bool readCounter(HCOUNTER counter, double& value) {
+        if (!counter)
+            return false;
+        PDH_FMT_COUNTERVALUE formatted{};
+        if (PdhGetFormattedCounterValue(counter, PDH_FMT_DOUBLE, nullptr, &formatted) !=
+                ERROR_SUCCESS ||
+            formatted.CStatus != ERROR_SUCCESS || !std::isfinite(formatted.doubleValue))
+            return false;
+        value = formatted.doubleValue;
+        return true;
+    }
+
+    static bool readMaximum(HCOUNTER counter, double& value) {
+        if (!counter)
+            return false;
+
+        DWORD bufferSize = 0;
+        DWORD itemCount = 0;
+        PDH_STATUS status = PdhGetFormattedCounterArrayW(
+            counter, PDH_FMT_DOUBLE, &bufferSize, &itemCount, nullptr);
+        if (status != PDH_MORE_DATA || bufferSize == 0 || itemCount == 0)
+            return false;
+
+        std::vector<std::uint8_t> buffer(bufferSize);
+        auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+        status = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, &bufferSize, &itemCount,
+                                              items);
+        if (status != ERROR_SUCCESS)
+            return false;
+
+        bool found = false;
+        double maximum = 0.0;
+        for (DWORD i = 0; i < itemCount; ++i) {
+            const auto& item = items[i];
+            if (item.FmtValue.CStatus != ERROR_SUCCESS ||
+                !std::isfinite(item.FmtValue.doubleValue))
+                continue;
+            maximum = found ? std::max(maximum, item.FmtValue.doubleValue)
+                            : item.FmtValue.doubleValue;
+            found = true;
+        }
+        if (!found)
+            return false;
+        value = maximum;
+        return true;
+    }
+
+    bool collect(ResourceSnapshot& result) {
+        if (!query || PdhCollectQueryData(query) != ERROR_SUCCESS) {
+            primed = false;
+            return false;
+        }
+        if (!primed) {
+            primed = true;
+            return false;
+        }
+
+        bool any = false;
+        double value = 0.0;
+        if (readMaximum(gpuUsage, value)) {
+            result.gpuPercent = std::clamp(value, 0.0, 100.0);
+            result.gpuAvailable = true;
+            any = true;
+        }
+
+        double readBytes = 0.0;
+        double writeBytes = 0.0;
+        const bool haveRead = readCounter(diskRead, readBytes);
+        const bool haveWrite = readCounter(diskWrite, writeBytes);
+        if (haveRead || haveWrite) {
+            result.diskReadBytesPerSecond = haveRead
+                                                ? static_cast<uint64_t>(std::llround(
+                                                      std::max(0.0, readBytes)))
+                                                : 0;
+            result.diskWriteBytesPerSecond = haveWrite
+                                                 ? static_cast<uint64_t>(std::llround(
+                                                       std::max(0.0, writeBytes)))
+                                                 : 0;
+            result.diskAvailable = true;
+            any = true;
+        }
+
+        return any;
+    }
+};
+
+ResourceMonitor::ResourceMonitor() = default;
 
 ResourceMonitor::~ResourceMonitor() {
     stop();
@@ -90,6 +218,8 @@ ResourceSnapshot ResourceMonitor::snapshot() const {
 }
 
 void ResourceMonitor::run() {
+    performanceCounters_ = std::make_unique<PerformanceCounters>();
+    performanceCounters_->open();
     for (;;) {
         ResourceSnapshot next = sample();
         {
@@ -102,10 +232,14 @@ void ResourceMonitor::run() {
         if (wake_.wait_for(lock, std::chrono::seconds(1), [this] { return stopRequested_; }))
             break;
     }
+    performanceCounters_.reset();
 }
 
 ResourceSnapshot ResourceMonitor::sample() {
     ResourceSnapshot result;
+
+    if (performanceCounters_)
+        performanceCounters_->collect(result);
 
     FILETIME idle{};
     FILETIME kernel{};
@@ -160,6 +294,37 @@ ResourceSnapshot ResourceMonitor::sample() {
         previousNetworkOut_ = sent;
         previousNetworkTickMs_ = nowMs;
         haveNetworkBaseline_ = true;
+    }
+
+    SYSTEM_POWER_STATUS powerStatus{};
+    if (GetSystemPowerStatus(&powerStatus) && powerStatus.BatteryFlag != 128 &&
+        powerStatus.BatteryLifePercent <= 100) {
+        result.batteryPercent = powerStatus.BatteryLifePercent;
+        result.batteryCharging = powerStatus.ACLineStatus == 1 &&
+                                 result.batteryPercent < 100;
+        result.batteryAvailable = true;
+    }
+
+    const DWORD processorCount = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    if (processorCount > 0) {
+        std::vector<ProcessorPowerInformation> processors(processorCount);
+        if (CallNtPowerInformation(ProcessorInformation, nullptr, 0, processors.data(),
+                                   static_cast<ULONG>(processors.size() *
+                                                      sizeof(ProcessorPowerInformation))) ==
+            ERROR_SUCCESS) {
+            double totalMhz = 0.0;
+            size_t validCount = 0;
+            for (const auto& processor : processors) {
+                if (processor.currentMhz > 0) {
+                    totalMhz += processor.currentMhz;
+                    ++validCount;
+                }
+            }
+            if (validCount > 0) {
+                result.cpuFrequencyGHz = totalMhz / static_cast<double>(validCount) / 1000.0;
+                result.cpuFrequencyAvailable = true;
+            }
+        }
     }
 
     return result;
