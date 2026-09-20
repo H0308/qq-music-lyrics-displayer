@@ -2,5 +2,8 @@
 101 ICON "@CMAKE_CURRENT_SOURCE_DIR@/asset/logo-dark.ico"
 102 ICON "@CMAKE_CURRENT_SOURCE_DIR@/asset/logo-light.ico"
 
+// Dock 电子宠物像素动作图集
+103 RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/asset/dock_pet_sprites.png"
+
 // 应用程序清单（comctl32 v6 主题、supportedOS）
 1 24 "@CMAKE_CURRENT_SOURCE_DIR@/app.manifest"

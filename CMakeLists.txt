@@ -50,7 +50,7 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/resource.rc.in
 # 显式声明依赖，否则改清单/图标后资源不会重编（曾导致 Debug 静默使用过期清单）
 set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
     PROPERTIES OBJECT_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-dark.ico;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-light.ico")
+    "${CMAKE_CURRENT_SOURCE_DIR}/app.manifest;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-dark.ico;${CMAKE_CURRENT_SOURCE_DIR}/asset/logo-light.ico;${CMAKE_CURRENT_SOURCE_DIR}/asset/dock_pet_sprites.png")
 
 add_executable(QQMusicLyric
     src/main.cpp
@@ -71,6 +71,7 @@ add_executable(QQMusicLyric
     src/lyric/cover_provider.cpp
     src/ui/lyric_renderer.cpp
     src/ui/media_control_icons.cpp
+    src/ui/dock_pet.cpp
     src/ui/settings_icons.cpp
     src/ui/media_popup.cpp
     src/ui/volume_popup.cpp

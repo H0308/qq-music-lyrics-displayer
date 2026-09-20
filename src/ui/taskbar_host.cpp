@@ -2,6 +2,7 @@
 #include "logging/runtime_logger.h"
 #include "ui/app_icon.h"
 #include "fluent_theme.h"
+#include "dock_pet.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
 #include "media_popup.h"
@@ -127,6 +128,8 @@ constexpr float kDockResourceZoneMaxW = 180.0f;
 constexpr float kDockResourceZoneGap = 10.0f;
 constexpr float kDockResourceMetricColumnW = 72.0f;
 constexpr float kDockResourceRightPadding = 3.0f;
+constexpr float kDockPetSeatW = 42.0f;
+constexpr float kPetLaneMinWidthDip = 44.0f;
 constexpr UINT kResourceSnapshotPollMs = 250;
 constexpr float kSpectrumBarGradientDarkFactor = 0.78f;
 constexpr float kSpectrumBarGradientLightMix = 0.22f;
@@ -1183,6 +1186,7 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
     ID2D1SolidColorBrush* brushIdleCool_ = nullptr;
     ID2D1SolidColorBrush* brushIdleAccent_ = nullptr;
+    DockPet dockPet_;
     ID2D1StrokeStyle* dragPreviewStroke_ = nullptr;
     ID2D1Effect* coverBlurFx_ = nullptr;
     ID2D1Effect* coverScaleFx_ = nullptr;
@@ -2872,6 +2876,7 @@ struct TaskbarHost::Impl {
         if (previousMode == TaskbarViewMode::AppBar)
             stopResourceMonitoring();
         viewMode_ = mode;
+        dockPet_.setMode(DockPetMode::Hidden, monotonicNowMs());
         dockResourcePage_ = 0;
         volumeHover_ = false;
         immersiveControlHover_ = -1;
@@ -3934,6 +3939,45 @@ struct TaskbarHost::Impl {
         }
     }
 
+    DockPetMode dockPetMode() const {
+        if (!isAppBarView() || !isSessionVisible() || isMinimalMode() || isStoppedMode())
+            return DockPetMode::Hidden;
+        if (scene_ == DisplayScene::Idle)
+            return DockPetMode::Roaming;
+        return media.playing ? DockPetMode::Listening : DockPetMode::Paused;
+    }
+
+    void drawDockPet(float w, float h, float leftW) {
+        const ULONGLONG now = frameNowMs_ != 0 ? frameNowMs_ : monotonicNowMs();
+        const DockPetMode mode = dockPetMode();
+        if (mode == DockPetMode::Hidden) {
+            dockPet_.setMode(mode, now);
+            return;
+        }
+
+        const float resourceW = dockResourceZoneW(w);
+        const float resourceX = w - resourceW - kDockResourceRightPadding;
+        const float spectrumW = immersiveSpectrumZoneW(w);
+        const float spectrumX = resourceX - kDockResourceZoneGap - spectrumW;
+        const float start = songInfoVisible_ && scene_ != DisplayScene::Idle
+                                ? kSongInfoLyricGap
+                                : kTextPadding;
+        const float laneLeft = leftW + start + immersiveControlsWidth(h);
+        const float laneRight = mode == DockPetMode::Roaming
+                                    ? spectrumX - kTextPadding
+                                    : std::min(spectrumX - kTextPadding,
+                                               laneLeft + kDockPetSeatW);
+        const float minLaneWidth = mode == DockPetMode::Roaming ? kPetLaneMinWidthDip : 28.0f;
+        if (laneRight <= laneLeft + minLaneWidth) {
+            dockPet_.setMode(DockPetMode::Hidden, now);
+            return;
+        }
+
+        dockPet_.setLane(laneLeft, laneRight, h);
+        dockPet_.setMode(mode, now);
+        dockPet_.draw(drawTarget());
+    }
+
     void drawImmersiveRightSide(float w, float h, bool showSpectrum) {
         if (!horizontalImmersiveMode())
             return;
@@ -4464,6 +4508,7 @@ struct TaskbarHost::Impl {
         r(brushIdleWarm_);
         r(brushIdleCool_);
         r(brushIdleAccent_);
+        dockPet_.discardDeviceResources();
         r(dragPreviewStroke_);
         r(coverBlurFx_);
         r(coverScaleFx_);
@@ -5745,7 +5790,10 @@ struct TaskbarHost::Impl {
                                                                              : kTextPadding;
         // 这里返回的是“可绘制安全区”，不再把它当作歌词的居中基准。
         // 右边界统一落在频谱之前，左边界统一落在封面/歌曲信息/沉浸控件之后。
-        const float left = layout.leftW + start + layout.immersiveControlsW;
+        float left = layout.leftW + start + layout.immersiveControlsW;
+        if (isAppBarView() && scene != DisplayScene::Idle && isSessionVisible() &&
+            !isMinimalMode() && !isStoppedMode())
+            left += kDockPetSeatW;
         const float right = layout.w - spectrumExtraForScene(scene, layout.w) - kTextPadding;
         return {left, std::max(1.0f, right - left)};
     }
@@ -8376,6 +8424,8 @@ struct TaskbarHost::Impl {
         // 过渡变换之前绘制；切歌时只让封面、歌曲信息和歌词内容移动。
         if (isExpandedView()) {
             drawImmersiveControls();
+            if (isAppBarView() && !idleScene)
+                drawDockPet(w, h, leftW);
             drawImmersiveRightSide(w, h, showSpectrum);
         }
 
@@ -8545,8 +8595,12 @@ struct TaskbarHost::Impl {
         }
 
         }
+
         if (contentTransitionActive)
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        // Idle 内容先绘制每日一言，再把宠物放到内容层上方，保证两者同时可见。
+        if (isAppBarView() && idleScene)
+            drawDockPet(w, h, leftW);
 
         HRESULT frameHr = rt->EndDraw();
         if (SUCCEEDED(frameHr) && compositorSongContentPending) {
@@ -8583,6 +8637,8 @@ struct TaskbarHost::Impl {
                 }
                 if (isExpandedView()) {
                     drawImmersiveControls();
+                    if (isAppBarView() && !idleScene)
+                        drawDockPet(w, h, leftW);
                     drawImmersiveRightSide(w, h, showSpectrum);
                 }
                 contentTransitionActive = applyImmersiveSongContentTransform(rt);
@@ -8593,6 +8649,8 @@ struct TaskbarHost::Impl {
                                           lyricEffectsEnabled, showControls, showSpectrum);
                 if (contentTransitionActive)
                     rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                if (isAppBarView() && idleScene)
+                    drawDockPet(w, h, leftW);
                 frameHr = rt->EndDraw();
             }
         }
@@ -8890,6 +8948,8 @@ struct TaskbarHost::Impl {
 
     bool hasHighFrequencyAnimation() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
+        if (isAppBarView() && clientAnimations_ && dockPet_.animating())
+            return true;
         if (isLyricTransitionInProgress() && !songLayerActive)
             return true;
         if (isSceneResizeActive())
@@ -9031,6 +9091,8 @@ struct TaskbarHost::Impl {
         const bool songLayerActive = immersiveSongContentLayerActive();
         if (renderState_.hasInvalidation())
             return true;
+        if (isAppBarView() && clientAnimations_ && dockPet_.animating())
+            return true;
         if (isLyricTransitionInProgress() && !songLayerActive)
             return true;
         if (isSceneResizeActive())
@@ -9095,6 +9157,7 @@ struct TaskbarHost::Impl {
             timerMs_ = wantMs;
         }
         frameNowMs_ = monotonicNowMs();
+        dockPet_.tick(frameNowMs_);
         updateVinylRotation();
         if (refreshResourceSnapshot())
             requestFrame();
