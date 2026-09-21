@@ -1,0 +1,87 @@
+/* 网站氛围宠物（Dock 宠物的网页版形象大使）。
+   行为逻辑在 assets/js/pet.js，帧素材 assets/img/pet-sprites.webp。 */
+
+.site-pet {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  z-index: 90; /* 低于 sticky 头部(100)与移动端菜单(300) */
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+}
+
+.site-pet.pet-ready { opacity: 1; }
+
+.pet-move {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  will-change: transform;
+}
+
+.pet-flip {
+  position: relative;
+  width: 100%;
+}
+
+.pet-pose {
+  transform-origin: 50% 100%; /* 呼吸/侧倾围绕脚底支点 */
+}
+
+.pet-body {
+  position: relative;
+  background-image: url("../img/pet-sprites.webp");
+  background-repeat: no-repeat;
+  pointer-events: auto;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 眨眼时贴在眼睛窄带的闭眼贴片（JS 控制显隐与落点） */
+.pet-blink {
+  position: absolute;
+  display: none;
+  background-image: url("../img/pet-sprites.webp");
+  background-repeat: no-repeat;
+  pointer-events: none;
+}
+
+/* 瞌睡气泡：三个 Z 依次升起变淡，周期与桌面端一致（3s） */
+.pet-zzz {
+  position: absolute;
+  left: 58%;
+  bottom: 72%;
+  display: none;
+  pointer-events: none;
+}
+
+.pet-zzz.visible { display: block; }
+
+.pet-zzz span {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  font-weight: 700;
+  color: var(--text-dim);
+  opacity: 0;
+  animation: pet-zzz-float 3s ease-in-out infinite;
+}
+
+.pet-zzz span:nth-child(1) { font-size: 11px; animation-delay: 0s; }
+.pet-zzz span:nth-child(2) { font-size: 13px; animation-delay: 1s; }
+.pet-zzz span:nth-child(3) { font-size: 15px; animation-delay: 2s; }
+
+@keyframes pet-zzz-float {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  25%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(10px, -18px) scale(1.15); }
+}
+
+/* 窄屏（≤640px）不显示宠物：由 JS 直接不初始化，此处无需规则 */
+
+/* 用户开了减弱动效：静态展示，Zzz 动画同样停用 */
+@media (prefers-reduced-motion: reduce) {
+  .pet-zzz { display: none; }
+  .site-pet { transition: none; }
+}
