@@ -63,6 +63,13 @@ constexpr std::uint32_t kSwayBeatMaxMs = 1400;
 // 雀跃一跳：纯位移动画，不需要新素材。
 constexpr std::uint64_t kHopDurationMs = 420;
 constexpr float kHopHeightDip = 9.0f;
+// 行走时的身体起伏：右向两帧的脚步差异很小（素材如此），按步频合成一个
+// 轻微的上下颠簸，避免看起来像贴着地面平移。
+constexpr float kWalkBobDip = 1.6f;
+// 行走侧倾：两个方向的步态帧差异都很细微，渲染到 44dip 后脚步交替几乎
+// 不可读。随步频围绕脚底支点做正弦侧倾，用身体语言表达“重心在左右脚
+// 之间转移”，比素材本身的脚步差异更容易被看到。
+constexpr float kWalkRockDeg = 3.5f;
 // 暂停超过该时长后进入瞌睡：底帧本身即闭眼姿态，只需停止睁眼叠加层，
 // 再加缓慢呼吸与 Zzz 气泡。
 constexpr std::uint64_t kSleepAfterMs = 3 * 60 * 1000;
@@ -85,6 +92,26 @@ constexpr SourceFrame kWalkEyeTargets[] = {
     {89.0f, 78.0f, 126.0f, 100.0f},
     {90.0f, 78.0f, 136.0f, 100.0f},
     {39.0f, 78.0f, 74.0f, 100.0f},
+};
+
+// 四帧角色在格子内的内容中心（按不透明像素包围盒量出）并不一致：左向两帧
+// 相差 21 源像素，直接按格子矩形绘制会让整个身体在帧间来回横跳（抽搐感）。
+// 把每帧锚到统一的内容中心 81.5（两个方向的帧对均值恰好相同，转向也不跳）。
+constexpr float kWalkContentCenterX[] = {71.0f, 78.0f, 85.0f, 92.0f};
+constexpr float kWalkAnchorX = 81.5f;
+
+// 左向行走帧：右向帧 1/2 的水平镜像，由 ensureAtlas 生成到一张小位图。
+// 右向帧的亮色爪垫在前后脚之间交替（迈步的核心视觉信号），左向原帧的亮爪
+// 始终钉在前脚，只有抬起/放下，交替感弱，因此左向直接镜像复用右向帧。
+constexpr SourceFrame kWalkMirrorFrames[] = {
+    {0.0f, 0.0f, 172.0f, 170.0f},   // 镜像帧1
+    {172.0f, 0.0f, 343.0f, 170.0f}, // 镜像帧2
+};
+constexpr float kWalkMirrorContentCenterX[] = {94.0f, 86.0f};
+// 镜像帧的眨眼目标：右向帧目标按各自帧宽水平翻转。
+constexpr SourceFrame kWalkMirrorEyeTargets[] = {
+    {46.0f, 78.0f, 83.0f, 100.0f}, // 172 - 126 .. 172 - 89
+    {35.0f, 78.0f, 81.0f, 100.0f}, // 171 - 136 .. 171 - 90
 };
 
 constexpr SourceFrame kLookUpEyeTarget = {88.0f, 62.0f, 132.0f, 82.0f};
@@ -135,6 +162,7 @@ DockPet::~DockPet() {
 
 void DockPet::releaseAtlas() noexcept {
     releaseCom(atlas_);
+    releaseCom(walkMirror_);
     atlasLoadAttempted_ = false;
 }
 
@@ -419,11 +447,11 @@ bool DockPet::ensureAtlas(ID2D1DeviceContext* target) {
                                    pixels.data());
     }
 
+    const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_NONE,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+        96.0f, 96.0f);
     if (SUCCEEDED(hr)) {
-        const D2D1_BITMAP_PROPERTIES1 properties = D2D1::BitmapProperties1(
-            D2D1_BITMAP_OPTIONS_NONE,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-            96.0f, 96.0f);
         ID2D1Bitmap1* bitmap = nullptr;
         hr = target->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4,
                                   &properties, &bitmap);
@@ -431,6 +459,42 @@ bool DockPet::ensureAtlas(ID2D1DeviceContext* target) {
             atlas_ = bitmap;
         else
             releaseCom(bitmap);
+    }
+
+    if (atlas_ && width >= 686 && height >= 170) {
+        // 生成左向行走用的镜像位图：右向帧 1/2 逐帧水平翻转（见
+        // kWalkMirrorFrames）。失败时左向回退到原帧，只是步态偏弱。
+        const struct {
+            UINT srcLeft;
+            UINT srcWidth;
+            UINT dstLeft;
+        } mirrorCells[] = {{171u, 172u, 0u}, {343u, 171u, 172u}};
+        constexpr UINT mirrorWidth = 343;
+        constexpr UINT mirrorHeight = 170;
+        std::vector<BYTE> mirrorPixels(mirrorWidth * mirrorHeight * 4, 0);
+        for (const auto& cell : mirrorCells) {
+            for (UINT y = 0; y < mirrorHeight; ++y) {
+                const BYTE* srcRow =
+                    pixels.data() + (static_cast<size_t>(y) * width + cell.srcLeft) * 4;
+                BYTE* dstRow = mirrorPixels.data() +
+                               (static_cast<size_t>(y) * mirrorWidth + cell.dstLeft) * 4;
+                for (UINT x = 0; x < cell.srcWidth; ++x) {
+                    const BYTE* sp = srcRow + (cell.srcWidth - 1 - x) * 4;
+                    BYTE* dp = dstRow + x * 4;
+                    dp[0] = sp[0];
+                    dp[1] = sp[1];
+                    dp[2] = sp[2];
+                    dp[3] = sp[3];
+                }
+            }
+        }
+        ID2D1Bitmap1* mirrorBitmap = nullptr;
+        if (SUCCEEDED(target->CreateBitmap(D2D1::SizeU(mirrorWidth, mirrorHeight),
+                                           mirrorPixels.data(), mirrorWidth * 4,
+                                           &properties, &mirrorBitmap)))
+            walkMirror_ = mirrorBitmap;
+        else
+            releaseCom(mirrorBitmap);
     }
 
     releaseCom(converter);
@@ -447,14 +511,23 @@ void DockPet::draw(ID2D1DeviceContext* target) {
 
     const bool sleepNow = sleeping();
     const SourceFrame* source = nullptr;
+    ID2D1Bitmap* frameBitmap = atlas_;
     int walkingSourceIndex = -1;
+    int walkMirrorPhase = -1;
     bool drawClosedFace = false;
     bool drawPausedEyes = false;
     if (mode_ == DockPetMode::Roaming) {
         switch (behavior_) {
         case Behavior::Walk:
-            walkingSourceIndex = walkingFrameIndex(direction_, frame_);
-            source = &walkingFrame(direction_, frame_);
+            if (direction_ < 0 && walkMirror_) {
+                // 左向使用右向帧的镜像（见 kWalkMirrorFrames）
+                walkMirrorPhase = std::abs(frame_) % 2;
+                source = &kWalkMirrorFrames[walkMirrorPhase];
+                frameBitmap = walkMirror_;
+            } else {
+                walkingSourceIndex = walkingFrameIndex(direction_, frame_);
+                source = &walkingFrame(direction_, frame_);
+            }
             drawClosedFace = blinkUntilMs_ != 0;
             break;
         case Behavior::Sit:
@@ -507,8 +580,26 @@ void DockPet::draw(ID2D1DeviceContext* target) {
         destinationHeight *= s;
     }
 
-    const float destinationLeft = x_ - destinationWidth * 0.5f;
+    // 行走帧按内容中心对齐（见 kWalkContentCenterX）；脸部叠加层基于
+    // destination 计算，会随偏移一起移动，无需额外处理。
+    float walkOffsetDip = 0.0f;
+    if (walkingSourceIndex >= 0)
+        walkOffsetDip = (kWalkAnchorX - kWalkContentCenterX[walkingSourceIndex]) *
+                        (destinationWidth / sourceWidth);
+    else if (walkMirrorPhase >= 0)
+        walkOffsetDip = (kWalkAnchorX - kWalkMirrorContentCenterX[walkMirrorPhase]) *
+                        (destinationWidth / sourceWidth);
+    const float destinationLeft = x_ - destinationWidth * 0.5f + walkOffsetDip;
     float destinationBottom = laneHeight_ + 1.0f;
+    // 行走起伏：与踏步帧同源计时，每步落地（帧切换点）时身体最低。
+    if (mode_ == DockPetMode::Roaming && behavior_ == Behavior::Walk &&
+        lastTickMs_ >= behaviorStartedMs_) {
+        const float stepPhase = static_cast<float>(
+            (lastTickMs_ - behaviorStartedMs_) % kWalkFrameMs) /
+            static_cast<float>(kWalkFrameMs);
+        destinationBottom -=
+            kWalkBobDip * std::fabs(std::sinf(kTwoPi * 0.5f * stepPhase));
+    }
     // 雀跃一跳：整体沿抛物线离地，双脚不需要专门的离地帧。
     if (hopStartMs_ != 0 && lastTickMs_ >= hopStartMs_) {
         const float p =
@@ -522,7 +613,26 @@ void DockPet::draw(ID2D1DeviceContext* target) {
         destinationLeft, destinationBottom - destinationHeight,
         destinationLeft + destinationWidth, destinationBottom);
     const D2D1_RECT_F sourceRect = toD2DRect(*source);
-    target->DrawBitmap(atlas_, &destination, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+
+    // 行走侧倾（见 kWalkRockDeg）：围绕脚底支点旋转整个角色，眨眼叠加层
+    // 在同一变换内绘制，随身体一起倾。旋转周期 = 2 个踏步帧。
+    float walkRockDeg = 0.0f;
+    if (mode_ == DockPetMode::Roaming && behavior_ == Behavior::Walk &&
+        lastTickMs_ >= behaviorStartedMs_) {
+        const float frameT = static_cast<float>(lastTickMs_ - behaviorStartedMs_) /
+                             static_cast<float>(kWalkFrameMs);
+        walkRockDeg = kWalkRockDeg * std::sinf(kTwoPi * 0.5f * frameT);
+    }
+    D2D1_MATRIX_3X2_F savedTransform{};
+    const bool rocked = std::fabs(walkRockDeg) > 0.05f;
+    if (rocked) {
+        target->GetTransform(&savedTransform);
+        target->SetTransform(D2D1::Matrix3x2F::Rotation(
+                                 walkRockDeg, D2D1::Point2F(x_, laneHeight_)) *
+                                 savedTransform);
+    }
+
+    target->DrawBitmap(frameBitmap, &destination, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
                        &sourceRect);
 
     // 把脸部小图按当前整帧的比例贴回去，动作期间身体不发生跳帧。
@@ -544,6 +654,9 @@ void DockPet::draw(ID2D1DeviceContext* target) {
     if (drawClosedFace) {
         if (behavior_ == Behavior::Walk && walkingSourceIndex >= 0) {
             drawFaceOverlay(kClosedEyeOverlay, kWalkEyeTargets[walkingSourceIndex]);
+        } else if (behavior_ == Behavior::Walk && walkMirrorPhase >= 0) {
+            // 闭眼图块近似左右对称，直接取原图集贴到镜像帧的翻转目标位置。
+            drawFaceOverlay(kClosedEyeOverlay, kWalkMirrorEyeTargets[walkMirrorPhase]);
         } else if (behavior_ == Behavior::LookUp) {
             drawFaceOverlay(kClosedEyeOverlay, kLookUpEyeTarget);
         }
@@ -551,6 +664,9 @@ void DockPet::draw(ID2D1DeviceContext* target) {
         drawFaceOverlay(kPausedOpenEyeSource, kPausedLeftEyeTarget);
         drawFaceOverlay(kPausedOpenEyeSource, kPausedRightEyeTarget);
     }
+
+    if (rocked)
+        target->SetTransform(savedTransform);
 
     if (sleepNow && !movingToSeat_) {
         drawZzz(target, destination.left + destinationWidth * 0.62f,
