@@ -3,6 +3,7 @@
 #include "resource.h"
 
 #include <d2d1_1.h>
+#include <dwrite.h>
 #include <wincodec.h>
 #include <windows.h>
 
@@ -56,6 +57,18 @@ constexpr std::uint64_t kWalkDurationMinMs = 6500;
 constexpr std::uint64_t kWalkDurationJitterMs = 5500;
 constexpr std::uint64_t kListeningSwayFrameMs = 680;
 constexpr std::uint64_t kBlinkDurationMs = 130;
+// 歌词行节拍提示的钳制范围：半周期过短会晃眼，过长则不像在跟节奏。
+constexpr std::uint32_t kSwayBeatMinMs = 320;
+constexpr std::uint32_t kSwayBeatMaxMs = 1400;
+// 雀跃一跳：纯位移动画，不需要新素材。
+constexpr std::uint64_t kHopDurationMs = 420;
+constexpr float kHopHeightDip = 9.0f;
+// 暂停超过该时长后进入瞌睡：底帧本身即闭眼姿态，只需停止睁眼叠加层，
+// 再加缓慢呼吸与 Zzz 气泡。
+constexpr std::uint64_t kSleepAfterMs = 3 * 60 * 1000;
+constexpr std::uint64_t kSleepBreathPeriodMs = 3400;
+constexpr std::uint64_t kStandBreathPeriodMs = 2600;
+constexpr std::uint64_t kZzzCycleMs = 3000;
 
 // 这些脸部小区域也直接取自原图。叠加时只替换眼睛窄带，
 // 这样眨眼/侧看不会把身体姿态或整块面板一起切换掉。
@@ -114,12 +127,34 @@ D2D1_RECT_F toD2DRect(const SourceFrame& frame) {
 } // namespace
 
 DockPet::~DockPet() {
-    releaseAtlas();
+    discardDeviceResources();
+    for (auto*& format : zzzFormats_)
+        releaseCom(format);
+    releaseCom(dwrite_);
 }
 
 void DockPet::releaseAtlas() noexcept {
     releaseCom(atlas_);
     atlasLoadAttempted_ = false;
+}
+
+void DockPet::releaseZzz() noexcept {
+    releaseCom(zzzBrush_);
+}
+
+void DockPet::setSwayBeatMs(std::uint32_t ms) {
+    // 只记录速度提示；相位累加器不清零，换行时摇摆不会产生跳变。
+    swayFrameMs_ = ms == 0 ? 0 : std::clamp(ms, kSwayBeatMinMs, kSwayBeatMaxMs);
+}
+
+void DockPet::hop(std::uint64_t nowMs) {
+    if (mode_ == DockPetMode::Hidden)
+        return;
+    hopStartMs_ = nowMs;
+}
+
+void DockPet::setLightTheme(bool light) {
+    lightTheme_ = light;
 }
 
 void DockPet::setMode(DockPetMode mode, std::uint64_t nowMs) {
@@ -134,7 +169,13 @@ void DockPet::setMode(DockPetMode mode, std::uint64_t nowMs) {
         movingToSeat_ = false;
         nextBlinkMs_ = 0;
         blinkUntilMs_ = 0;
+        hopStartMs_ = 0;
         return;
+    }
+    // 开始/恢复播放（从任何其他状态进入听歌）都雀跃一下。
+    if (mode_ == DockPetMode::Listening) {
+        swayAccum_ = 0.0f;
+        hopStartMs_ = nowMs;
     }
 
     const float minX = laneLeft_ + kCenterPaddingDip;
@@ -199,12 +240,23 @@ void DockPet::tick(std::uint64_t nowMs) {
         }
         if (!movingToSeat_) {
             if (mode_ == DockPetMode::Listening) {
-                frame_ = static_cast<int>(((nowMs - modeStartedMs_) /
-                                            kListeningSwayFrameMs) % 2);
+                // 摇摆节拍来自宿主给出的歌词行时长（setSwayBeatMs）；相位按帧
+                // 累加，行时长变化只改变步进速度，不会在换行瞬间跳帧。
+                const float frameMs = swayFrameMs_ != 0
+                                          ? static_cast<float>(swayFrameMs_)
+                                          : static_cast<float>(kListeningSwayFrameMs);
+                swayAccum_ += dt * 1000.0f / frameMs;
+                // 相位只需 2 帧循环，收拢避免长时间播放后 float 精度损失。
+                if (swayAccum_ >= 2.0f)
+                    swayAccum_ = std::fmod(swayAccum_, 2.0f);
+                frame_ = static_cast<int>(swayAccum_) % 2;
             } else {
-                // 暂停时身体固定在正面坐姿，只改变脸部叠加层。
+                // 暂停时身体固定在正面坐姿，只改变脸部叠加层；瞌睡后底帧即闭眼，
+                // 不再调度眨眼。
                 frame_ = 0;
-                if (blinkUntilMs_ != 0 && nowMs >= blinkUntilMs_) {
+                if (sleeping()) {
+                    blinkUntilMs_ = 0;
+                } else if (blinkUntilMs_ != 0 && nowMs >= blinkUntilMs_) {
                     blinkUntilMs_ = 0;
                     nextBlinkMs_ = nowMs + 2300 + nextRandom() % 2600;
                 } else if (blinkUntilMs_ == 0 && nowMs >= nextBlinkMs_) {
@@ -302,8 +354,14 @@ bool DockPet::animating() const noexcept {
            mode_ == DockPetMode::Paused || movingToSeat_;
 }
 
+bool DockPet::sleeping() const noexcept {
+    return mode_ == DockPetMode::Paused && lastTickMs_ != 0 &&
+           lastTickMs_ - modeStartedMs_ >= kSleepAfterMs;
+}
+
 void DockPet::discardDeviceResources() noexcept {
     releaseAtlas();
+    releaseZzz();
 }
 
 bool DockPet::ensureAtlas(ID2D1DeviceContext* target) {
@@ -387,6 +445,7 @@ void DockPet::draw(ID2D1DeviceContext* target) {
     if (mode_ == DockPetMode::Hidden || !target || laneRight_ <= laneLeft_ || !ensureAtlas(target))
         return;
 
+    const bool sleepNow = sleeping();
     const SourceFrame* source = nullptr;
     int walkingSourceIndex = -1;
     bool drawClosedFace = false;
@@ -416,16 +475,49 @@ void DockPet::draw(ID2D1DeviceContext* target) {
         source = &listeningSwayFrame(frame_);
     } else {
         source = &listeningFrame(1);
-        drawPausedEyes = !movingToSeat_ && blinkUntilMs_ == 0;
+        // 瞌睡后底帧的闭眼姿态直接露出，不再叠加睁眼图块。
+        drawPausedEyes = !movingToSeat_ && !sleepNow && blinkUntilMs_ == 0;
     }
 
     const float sourceWidth = source->right - source->left;
     const float sourceHeight = source->bottom - source->top;
-    const float destinationHeight = std::clamp(
+    float destinationHeight = std::clamp(
         laneHeight_ * 0.92f, kFrameHeightDip - 2.0f, kFrameHeightDip + 2.0f);
-    const float destinationWidth = destinationHeight * sourceWidth / sourceHeight;
+    float destinationWidth = destinationHeight * sourceWidth / sourceHeight;
+
+    // 呼吸：静止姿态（待机站立/坐、瞌睡）沿底部锚点做缓慢的等比缩放，
+    // 让画面在两次行为之间不至于完全冻住。
+    constexpr float kTwoPi = 6.28318530717958647692f;
+    float breathPeriodMs = 0.0f;
+    float breathAmount = 0.0f;
+    if (sleepNow) {
+        breathPeriodMs = static_cast<float>(kSleepBreathPeriodMs);
+        breathAmount = 0.028f;
+    } else if (mode_ == DockPetMode::Roaming &&
+               (behavior_ == Behavior::Stand || behavior_ == Behavior::Sit)) {
+        breathPeriodMs = static_cast<float>(kStandBreathPeriodMs);
+        breathAmount = 0.02f;
+    }
+    if (breathPeriodMs > 0.0f) {
+        const float phase =
+            static_cast<float>(lastTickMs_ % static_cast<std::uint64_t>(breathPeriodMs)) /
+            breathPeriodMs;
+        const float s = 1.0f + breathAmount * std::sinf(kTwoPi * phase);
+        destinationWidth *= s;
+        destinationHeight *= s;
+    }
+
     const float destinationLeft = x_ - destinationWidth * 0.5f;
-    const float destinationBottom = laneHeight_ + 1.0f;
+    float destinationBottom = laneHeight_ + 1.0f;
+    // 雀跃一跳：整体沿抛物线离地，双脚不需要专门的离地帧。
+    if (hopStartMs_ != 0 && lastTickMs_ >= hopStartMs_) {
+        const float p =
+            static_cast<float>(lastTickMs_ - hopStartMs_) / static_cast<float>(kHopDurationMs);
+        if (p >= 1.0f)
+            hopStartMs_ = 0;
+        else
+            destinationBottom -= 4.0f * kHopHeightDip * p * (1.0f - p);
+    }
     const D2D1_RECT_F destination = D2D1::RectF(
         destinationLeft, destinationBottom - destinationHeight,
         destinationLeft + destinationWidth, destinationBottom);
@@ -459,20 +551,71 @@ void DockPet::draw(ID2D1DeviceContext* target) {
         drawFaceOverlay(kPausedOpenEyeSource, kPausedLeftEyeTarget);
         drawFaceOverlay(kPausedOpenEyeSource, kPausedRightEyeTarget);
     }
+
+    if (sleepNow && !movingToSeat_) {
+        drawZzz(target, destination.left + destinationWidth * 0.62f,
+                destination.top + destinationHeight * 0.08f);
+    }
+}
+
+void DockPet::drawZzz(ID2D1DeviceContext* target, float headX, float headY) {
+    // DWrite 工厂与文字格式都是设备无关资源，只需懒创建一次。
+    if (!dwrite_ &&
+        FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
+                                   reinterpret_cast<IUnknown**>(&dwrite_))))
+        return;
+    constexpr float kZzzSizes[3] = {9.0f, 11.0f, 13.5f};
+    for (int i = 0; i < 3; ++i) {
+        if (!zzzFormats_[i] &&
+            FAILED(dwrite_->CreateTextFormat(
+                L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC,
+                DWRITE_FONT_STRETCH_NORMAL, kZzzSizes[i], L"en-us", &zzzFormats_[i])))
+            return;
+    }
+    if (!zzzBrush_ &&
+        FAILED(target->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.0f),
+                                             &zzzBrush_)))
+        return;
+
+    const float base = lightTheme_ ? 0.10f : 1.0f;
+    const float cycleT =
+        static_cast<float>(lastTickMs_ % kZzzCycleMs) / static_cast<float>(kZzzCycleMs);
+    for (int i = 0; i < 3; ++i) {
+        // 三个 Z 依次从头顶向右侧飘出，透明度随生命周期淡入淡出。宠物几乎占满
+        // 整条走廊的高度，向上飘会很快被窗口顶裁掉，所以漂移以水平为主。
+        const float q = std::fmod(cycleT + static_cast<float>(i) / 3.0f, 1.0f);
+        const float alphaIn = std::min(q / 0.18f, 1.0f);
+        const float alphaOut = std::min((1.0f - q) / 0.25f, 1.0f);
+        const float alpha = 0.72f * std::min(alphaIn, alphaOut);
+        const float x = headX + q * 10.0f;
+        const float y = headY - 2.0f - q * 6.0f;
+        zzzBrush_->SetColor(D2D1::ColorF(base, base, base, alpha));
+        const D2D1_RECT_F layout = D2D1::RectF(x, y, x + 24.0f, y + 24.0f);
+        target->DrawText(L"Z", 1, zzzFormats_[i], layout, zzzBrush_);
+    }
 }
 
 void DockPet::chooseRoamingBehavior(std::uint64_t nowMs) {
+    // 夜间（23:00–07:00）更安静：久坐久看、少走动；白天保持原有分布。
+    SYSTEMTIME localTime{};
+    GetLocalTime(&localTime);
+    const bool night = localTime.wHour >= 23 || localTime.wHour < 7;
+    const int sitBelow = night ? 4 : 2;
+    const int lookUpBelow = night ? 7 : 4;
+    const std::uint32_t adjustChoice = night ? 7u : 4u;
+
     const std::uint32_t choice = nextRandom() % 10;
-    if (choice < 2) {
+    if (choice < static_cast<std::uint32_t>(sitBelow)) {
         behavior_ = Behavior::Sit;
         behaviorStartedMs_ = nowMs;
-        behaviorUntilMs_ = nowMs + 1800 + nextRandom() % 1200;
+        behaviorUntilMs_ = night ? nowMs + 2800 + nextRandom() % 1800
+                                 : nowMs + 1800 + nextRandom() % 1200;
         frame_ = 1;
         nextBlinkMs_ = 0;
         blinkUntilMs_ = 0;
         return;
     }
-    if (choice < 4) {
+    if (choice < static_cast<std::uint32_t>(lookUpBelow)) {
         behavior_ = Behavior::LookUp;
         behaviorStartedMs_ = nowMs;
         behaviorUntilMs_ = nowMs + 2200 + nextRandom() % 1200;
@@ -481,7 +624,7 @@ void DockPet::chooseRoamingBehavior(std::uint64_t nowMs) {
         blinkUntilMs_ = 0;
         return;
     }
-    if (choice == 4) {
+    if (choice == adjustChoice) {
         behavior_ = Behavior::AdjustHeadphones;
         behaviorStartedMs_ = nowMs;
         behaviorUntilMs_ = nowMs + 900;
