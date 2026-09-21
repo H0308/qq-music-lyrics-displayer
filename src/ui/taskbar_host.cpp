@@ -2405,20 +2405,6 @@ struct TaskbarHost::Impl {
                 fluent::applyUiFontFallback(fmtDragPreview_);
             }
 
-            auto createClockFormat = [&](float size, DWRITE_FONT_WEIGHT weight,
-                                         IDWriteTextFormat** out) {
-                dwrite->CreateTextFormat(
-                    fluent::uiFontFamily(), nullptr, weight, DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL, size, L"", out);
-                if (*out) {
-                    (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                    (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                    fluent::applyUiFontFallback(*out);
-                }
-            };
-            createClockFormat(13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtClockTime_);
-            createClockFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
         }
         if (auto* factory = renderer.d2d()) {
             D2D1_STROKE_STYLE_PROPERTIES props{};
@@ -4419,10 +4405,36 @@ struct TaskbarHost::Impl {
         }
     }
 
+    void recreateClockFormats() {
+        IDWriteFactory* dwrite = renderer.dwrite();
+        if (!dwrite)
+            return;
+        auto make = [&](float size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) {
+            if (*out) {
+                (*out)->Release();
+                *out = nullptr;
+            }
+            DWRITE_FONT_WEIGHT effectiveWeight =
+                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight;
+            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
+                                     dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, size,
+                                     L"", out);
+            if (*out) {
+                (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                fluent::applyUiFontFallback(*out);
+            }
+        };
+        make(13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtClockTime_);
+        make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
+    }
+
     void recreateFormats() {
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite)
             return;
+        recreateClockFormats();
         auto make = [&](float size, DWRITE_FONT_WEIGHT weight, DWRITE_PARAGRAPH_ALIGNMENT pa,
                         IDWriteTextFormat** out) {
             if (*out) {

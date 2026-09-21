@@ -211,7 +211,7 @@ std::wstring colorText(COLORREF color) {
 }
 
 constexpr const wchar_t* kFontSettingNotice =
-    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息";
+    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息、沉浸模式时间/日期和 Dock 资源占用";
 
 const wchar_t* idleQuoteSourceHint(int source) {
     if (source == 1)
