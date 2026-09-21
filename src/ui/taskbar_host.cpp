@@ -3978,18 +3978,6 @@ struct TaskbarHost::Impl {
         dockPet_.setLane(laneLeft, laneRight, h);
         dockPet_.setMode(mode, now);
         dockPet_.setLightTheme(lightTheme_);
-        // 摇摆节拍取自当前歌词行时长（半周期 = 行时长 / 4）；
-        // 纯音乐、最后一行等没有下一段时间戳时传 0，退回固定默认节拍。
-        std::uint32_t petBeatMs = 0;
-        if (mode == DockPetMode::Listening && currentLine >= 0 &&
-            (size_t)currentLine + 1 < lines.size()) {
-            const int64_t lineDurMs =
-                lines[(size_t)currentLine + 1].ms - lines[(size_t)currentLine].ms;
-            if (lineDurMs > 0)
-                petBeatMs = static_cast<std::uint32_t>(
-                    std::min<int64_t>(lineDurMs / 4, 60000));
-        }
-        dockPet_.setSwayBeatMs(petBeatMs);
         // 播放中切歌（曲目变化但始终处于 Listening）时补一次雀跃；
         // 暂停/恢复与开始播放的雀跃由 DockPet::setMode 内部处理。
         if (mode == DockPetMode::Listening) {

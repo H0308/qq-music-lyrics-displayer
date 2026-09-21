@@ -23,9 +23,6 @@ public:
 
     void setMode(DockPetMode mode, std::uint64_t nowMs);
     void setLane(float left, float right, float height);
-    // 宿主按当前歌词行时长给出的摇摆半周期提示（毫秒）；0 表示无节奏信息，
-    // 退回默认固定周期。内部做范围钳制，换行时只改速度、不打断当前相位。
-    void setSwayBeatMs(std::uint32_t ms);
     // 切歌/恢复播放时的雀跃一跳；Hidden 状态下忽略。
     void hop(std::uint64_t nowMs);
     // 瞌睡气泡（Zzz）颜色跟随任务栏主题。
@@ -53,6 +50,8 @@ private:
     void releaseZzz() noexcept;
     void chooseRoamingBehavior(std::uint64_t nowMs);
     bool sleeping() const noexcept;
+    // 哈欠过渡期结束、已进入蜷缩睡姿（Zzz 气泡此时才出现）。
+    bool fullyAsleep() const noexcept;
     void drawZzz(ID2D1DeviceContext* target, float headX, float headY);
     std::uint32_t nextRandom();
 
@@ -74,12 +73,28 @@ private:
     std::uint64_t blinkUntilMs_ = 0;
     std::uint32_t randomState_ = 0x6D2B79F5u;
 
-    // 节拍摇摆：以帧为单位的相位累加器，行时长变化只改步进速度。
-    std::uint32_t swayFrameMs_ = 0; // 0 表示尚未设置，tick 时取默认值
+    // 摇摆相位累加器（固定中速，见 kListeningSwayFrameMs）。
     float swayAccum_ = 0.0f;
     // 雀跃一跳的起点；0 表示当前没有跳跃。
     std::uint64_t hopStartMs_ = 0;
     bool lightTheme_ = false;
+
+    // 动作帧（唱歌/跳舞/挥手/哈欠/睡姿/爱心眼）位于图集第 4~6 行；
+    // 旧版图集没有这些行，ensureAtlas 按尺寸探测后置 actionsAvailable_。
+    bool actionsAvailable_ = false;
+    // Listening 下的随机插曲：唱歌或跳舞，冷却结束随机二选一。
+    enum class Interlude {
+        None,
+        Singing,
+        Dancing,
+    };
+    Interlude interlude_ = Interlude::None;
+    std::uint64_t interludeUntilMs_ = 0;
+    std::uint64_t nextInterludeMs_ = 0;
+    // Hidden→Roaming 出现时的挥手问候起点；0 表示未在挥手。
+    std::uint64_t waveStartMs_ = 0;
+    // 听歌状态下的爱心眼闪现截止时刻（雀跃时触发）。
+    std::uint64_t happyUntilMs_ = 0;
 
     ID2D1Bitmap* atlas_ = nullptr;
     // 右向行走帧的水平镜像，用作左向行走帧（左向原帧的亮爪不前后交替，
