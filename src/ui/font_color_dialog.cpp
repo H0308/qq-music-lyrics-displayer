@@ -3,15 +3,19 @@
 #include "ui/app_icon.h"
 #include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
+#include "ui/fluent_controls.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "logging/runtime_logger.h"
 
+#include <commctrl.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
+#include <cwctype>
 #include <utility>
 #include <vector>
 
@@ -29,6 +33,7 @@ constexpr int kIdTabLight = 419;
 constexpr int kIdToggleGlobal = 420;
 constexpr int kIdOk = 421;
 constexpr int kIdCancel = 422;
+constexpr int kIdAlphaValueEdit = 423;
 
 constexpr int kAlphaMin = 5;
 constexpr int kAlphaMax = 100;
@@ -47,6 +52,8 @@ constexpr float kMinClientHeightDip = fluent::metrics::pagePadding + 30.0f + 20.
                                        fluent::metrics::sectionGap + fluent::metrics::controlHeight +
                                        fluent::metrics::pagePadding;
 constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
+constexpr float kAlphaEditorW = 44.0f;
+constexpr UINT_PTR kAlphaEditSubclassId = 1;
 
 const wchar_t kSampleText[] = L"我是你爸爸，养你这么大";
 
@@ -72,6 +79,31 @@ const std::array<int, 2> kToggleIds = {
     kIdToggleOutline,
 };
 
+bool parseBoundedInteger(const std::wstring& text, int minValue, int maxValue, int& value) {
+    size_t begin = 0;
+    size_t end = text.size();
+    while (begin < end && std::iswspace(text[begin]))
+        ++begin;
+    while (end > begin && std::iswspace(text[end - 1]))
+        --end;
+    if (begin == end)
+        return false;
+
+    int parsed = 0;
+    for (size_t i = begin; i < end; ++i) {
+        const wchar_t ch = text[i];
+        if (ch < L'0' || ch > L'9')
+            return false;
+        const int digit = static_cast<int>(ch - L'0');
+        if (parsed > (INT_MAX - digit) / 10)
+            parsed = INT_MAX;
+        else
+            parsed = parsed * 10 + digit;
+    }
+    value = std::clamp(parsed, minValue, maxValue);
+    return true;
+}
+
 const std::array<int, 2> kTabIds = {
     kIdTabDark,
     kIdTabLight,
@@ -95,6 +127,9 @@ struct FontColorDialog::Impl {
 
     State state; // 工作副本：确定前的一切修改只落在这里和预览上
     fluent::FluentDialogSurface surface;
+    fluent::FluentEdit alphaValueEdit;
+    bool alphaEditOpen = false;
+    bool alphaEditCommitting = false;
 
     D2D1_RECT_F titleRect{};
     D2D1_RECT_F subtitleRect{};
@@ -160,6 +195,28 @@ struct FontColorDialog::Impl {
         if (self)
             return self->handle(msg, wp, lp);
         return DefWindowProcW(h, msg, wp, lp);
+    }
+
+    static LRESULT CALLBACK alphaEditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR subclassId, DWORD_PTR refData) {
+        auto* self = reinterpret_cast<Impl*>(refData);
+        if (msg == WM_NCDESTROY) {
+            RemoveWindowSubclass(h, &Impl::alphaEditProc, subclassId);
+            return DefSubclassProc(h, msg, wp, lp);
+        }
+        if (self && msg == WM_KEYDOWN) {
+            if (wp == VK_RETURN) {
+                self->commitAlphaEditor();
+                SetFocus(self->hwnd);
+                return 0;
+            }
+            if (wp == VK_ESCAPE) {
+                self->cancelAlphaEditor();
+                SetFocus(self->hwnd);
+                return 0;
+            }
+        }
+        return DefSubclassProc(h, msg, wp, lp);
     }
 
     COLORREF& colorRefOf(int id) {
@@ -471,8 +528,9 @@ struct FontColorDialog::Impl {
 
         wchar_t alphaText[8];
         swprintf_s(alphaText, L"%d%%", std::clamp(theme.unplayedAlphaPct, kAlphaMin, kAlphaMax));
-        painter.drawText(alphaText, painter.textFormat(13.0f, 400, true, true), alphaValueRect,
-                         p.textSecondary);
+        if (!alphaEditOpen)
+            painter.drawText(alphaText, painter.textFormat(13.0f, 400, true, true), alphaValueRect,
+                             p.textSecondary);
 
         drawPreview(painter);
         drawButton(painter, okRect, L"确定", true, kIdOk);
@@ -533,6 +591,70 @@ struct FontColorDialog::Impl {
             return;
         theme.unplayedAlphaPct = next;
         surface.invalidate();
+    }
+
+    void hideAlphaEditor() {
+        alphaEditOpen = false;
+        if (alphaValueEdit.hwnd())
+            ShowWindow(alphaValueEdit.hwnd(), SW_HIDE);
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    void cancelAlphaEditor() {
+        if (!alphaEditOpen)
+            return;
+        alphaValueEdit.setText(std::to_wstring(activeThemeState().unplayedAlphaPct));
+        hideAlphaEditor();
+    }
+
+    void commitAlphaEditor() {
+        if (!alphaEditOpen || alphaEditCommitting)
+            return;
+        alphaEditCommitting = true;
+        int value = activeThemeState().unplayedAlphaPct;
+        if (parseBoundedInteger(alphaValueEdit.text(), kAlphaMin, kAlphaMax, value))
+            setAlpha(value);
+        else
+            alphaValueEdit.setText(std::to_wstring(value));
+        hideAlphaEditor();
+        alphaEditCommitting = false;
+    }
+
+    void layoutAlphaEditor() {
+        if (!alphaEditOpen)
+            return;
+        const float s = surface.dipScale();
+        const int x = static_cast<int>(std::lround((alphaValueRect.right - kAlphaEditorW) * s));
+        const int y = static_cast<int>(std::lround(alphaValueRect.top * s));
+        const int w = static_cast<int>(std::lround(kAlphaEditorW * s));
+        const int h = static_cast<int>(std::lround((alphaValueRect.bottom - alphaValueRect.top) * s));
+        alphaValueEdit.move(x, y, std::max(1, w), std::max(1, h));
+    }
+
+    void openAlphaEditor() {
+        if (!alphaValueEdit.editHwnd())
+            return;
+        alphaEditOpen = true;
+        alphaValueEdit.setText(std::to_wstring(activeThemeState().unplayedAlphaPct));
+        layoutAlphaEditor();
+        alphaValueEdit.focus();
+        SendMessageW(alphaValueEdit.editHwnd(), EM_SETSEL, 0, -1);
+        surface.invalidate();
+    }
+
+    void createAlphaEditor() {
+        if (!alphaValueEdit.create(hwnd, kIdAlphaValueEdit, nullptr, false, 12.0f))
+            return;
+        alphaValueEdit.setContentPadding(4.0f, 0.0f);
+        if (HWND edit = alphaValueEdit.editHwnd()) {
+            LONG_PTR style = GetWindowLongPtrW(edit, GWL_STYLE);
+            SetWindowLongPtrW(edit, GWL_STYLE, style | ES_NUMBER);
+            SendMessageW(edit, EM_SETLIMITTEXT, 3, 0);
+            SetWindowSubclass(edit, &Impl::alphaEditProc, kAlphaEditSubclassId,
+                              reinterpret_cast<DWORD_PTR>(this));
+        }
+        ShowWindow(alphaValueEdit.hwnd(), SW_HIDE);
     }
 
     void updateAlphaFromX(float x) {
@@ -641,6 +763,7 @@ struct FontColorDialog::Impl {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
             surface.initialize(hwnd, backdrop);
+            createAlphaEditor();
             layout();
             return 0;
         case WM_SIZE:
@@ -669,6 +792,7 @@ struct FontColorDialog::Impl {
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             surface.setBackdrop(backdrop);
+            alphaValueEdit.refreshTheme();
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -709,6 +833,14 @@ struct FontColorDialog::Impl {
                 surface.invalidate();
             }
             return 0;
+        case WM_LBUTTONDBLCLK: {
+            const float s = surface.dipScale();
+            const float x = GET_X_LPARAM(lp) / s;
+            const float y = GET_Y_LPARAM(lp) / s;
+            if (contains(alphaValueRect, x, y))
+                openAlphaEditor();
+            return 0;
+        }
         case WM_LBUTTONDOWN: {
             SetFocus(hwnd);
             focusVisible = false;
@@ -719,8 +851,10 @@ struct FontColorDialog::Impl {
             if (pressedId != 0)
                 focusedId = pressedId;
             if (pressedId == kIdAlphaSlider) {
-                draggingSlider = true;
-                updateAlphaFromX(x);
+                if (!contains(alphaValueRect, x, y)) {
+                    draggingSlider = true;
+                    updateAlphaFromX(x);
+                }
             }
             if (pressedId != 0)
                 SetCapture(hwnd);
@@ -806,6 +940,13 @@ struct FontColorDialog::Impl {
         case kMsgColorPickerClosed:
             if (picker && !picker->isOpen())
                 picker.reset();
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wp) == kIdAlphaValueEdit) {
+                if (HIWORD(wp) == EN_KILLFOCUS)
+                    commitAlphaEditor();
+                return 0;
+            }
             return 0;
         case WM_CLOSE:
             destroy();
@@ -933,6 +1074,7 @@ struct FontColorDialog::Impl {
         const float previewY = optionsRect.bottom + fluent::metrics::sectionGap;
         const float previewBottom = std::max(previewY, buttonY - fluent::metrics::sectionGap);
         previewRect = D2D1::RectF(pad, previewY, std::max(pad, w - pad), previewBottom);
+        layoutAlphaEditor();
     }
 
     bool isDialogMessage(MSG* msg) {
@@ -944,6 +1086,8 @@ struct FontColorDialog::Impl {
     }
 
     void destroy() {
+        if (alphaEditOpen)
+            cancelAlphaEditor();
         closePicker();
         if (hwnd) {
             DestroyWindow(hwnd);
@@ -979,7 +1123,7 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricFontColor";

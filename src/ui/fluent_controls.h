@@ -84,9 +84,12 @@ private:
 // EDIT 通知（EN_CHANGE 等）原样转发给对话框父窗口。
 class FluentEdit : public LayeredChild {
 public:
-    bool create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit = false);
+    bool create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit = false,
+                float fontSizeDip = 14.0f);
     std::wstring text() const;
     void setText(const std::wstring& text);
+    // 紧凑型数字输入等场景可缩小原生 EDIT 的内边距，避免小控件裁剪文字。
+    void setContentPadding(float horizontalDip, float verticalDip);
     void move(int x, int y, int w, int h);
     void focus();
     void refreshTheme();
@@ -113,6 +116,8 @@ private:
     COLORREF editBrushColor_ = 0;
     bool focused_ = false;
     bool directEdit_ = false;
+    float contentPaddingXDip_ = 12.0f;
+    float contentPaddingYDip_ = 5.0f;
     int hostX_ = 0;
     int hostY_ = 0;
 };

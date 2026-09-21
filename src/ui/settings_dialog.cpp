@@ -3,16 +3,20 @@
 #include "ui/app_icon.h"
 #include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
+#include "ui/fluent_controls.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "ui/media_control_icons.h"
 #include "ui/settings_icons.h"
 
+#include <commctrl.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <climits>
+#include <cwctype>
 #include <cwchar>
 #include <string>
 #include <utility>
@@ -91,6 +95,7 @@ constexpr int kIdImmersiveMaskOpacity = 471;
 constexpr int kIdDockMaskOpacity = 472;
 constexpr int kIdDockResourceGpuUsage = 473;
 constexpr int kIdDockResourceCpuFrequency = 477;
+constexpr int kIdSliderValueEdit = 478;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -141,6 +146,8 @@ constexpr float kHoverControlStyleCardH = 156.0f;
 constexpr float kHoverControlStyleRowH = 292.0f;
 constexpr float kSliderValueW = 44.0f;
 constexpr float kSliderValueGap = 10.0f;
+constexpr float kSliderEditorW = kSliderValueW;
+constexpr UINT_PTR kSliderEditSubclassId = 1;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
@@ -227,6 +234,31 @@ const wchar_t* taskbarViewModeHint(bool mediaSessionAlive, bool verticalTaskbar)
     if (verticalTaskbar)
         return L"侧边任务栏不支持沉浸模式；Dock 模式以独立顶栏或底栏占用桌面工作区。";
     return L"沉浸模式覆盖 Windows 任务栏；Dock 模式以独立顶栏或底栏占用桌面工作区。";
+}
+
+bool parseBoundedInteger(const std::wstring& text, int minValue, int maxValue, int& value) {
+    size_t begin = 0;
+    size_t end = text.size();
+    while (begin < end && std::iswspace(text[begin]))
+        ++begin;
+    while (end > begin && std::iswspace(text[end - 1]))
+        --end;
+    if (begin == end)
+        return false;
+
+    int parsed = 0;
+    for (size_t i = begin; i < end; ++i) {
+        const wchar_t ch = text[i];
+        if (ch < L'0' || ch > L'9')
+            return false;
+        const int digit = static_cast<int>(ch - L'0');
+        if (parsed > (INT_MAX - digit) / 10)
+            parsed = INT_MAX;
+        else
+            parsed = parsed * 10 + digit;
+    }
+    value = std::clamp(parsed, minValue, maxValue);
+    return true;
 }
 
 settings_icon::Kind iconForPage(int page) {
@@ -427,6 +459,10 @@ struct SettingsDialog::Impl {
     int activePage = 0;
 
     fluent::FluentDialogSurface surface;
+    fluent::FluentEdit sliderValueEdit;
+    int sliderEditRowId = 0;
+    bool sliderEditOpen = false;
+    bool sliderEditCommitting = false;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
         L"显示", L"展示模式", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词",
@@ -476,6 +512,28 @@ struct SettingsDialog::Impl {
 
     static bool contains(const D2D1_RECT_F& rect, float x, float y) {
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+    }
+
+    static LRESULT CALLBACK sliderEditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
+                                           UINT_PTR subclassId, DWORD_PTR refData) {
+        auto* self = reinterpret_cast<Impl*>(refData);
+        if (msg == WM_NCDESTROY) {
+            RemoveWindowSubclass(h, &Impl::sliderEditProc, subclassId);
+            return DefSubclassProc(h, msg, wp, lp);
+        }
+        if (self && msg == WM_KEYDOWN) {
+            if (wp == VK_RETURN) {
+                self->commitSliderEditor();
+                SetFocus(self->hwnd);
+                return 0;
+            }
+            if (wp == VK_ESCAPE) {
+                self->cancelSliderEditor();
+                SetFocus(self->hwnd);
+                return 0;
+            }
+        }
+        return DefSubclassProc(h, msg, wp, lp);
     }
 
     static bool isIdleAppDragOption(int option) {
@@ -533,6 +591,86 @@ struct SettingsDialog::Impl {
             }
         }
         return nullptr;
+    }
+
+    static D2D1_RECT_F sliderValueRect(const Row& row) {
+        const float trackRight = row.controlRect.right - kSliderValueW;
+        return D2D1::RectF(trackRight + kSliderValueGap, row.controlRect.top,
+                           row.controlRect.right, row.controlRect.bottom);
+    }
+
+    void hideSliderEditor() {
+        sliderEditOpen = false;
+        sliderEditRowId = 0;
+        if (sliderValueEdit.hwnd())
+            ShowWindow(sliderValueEdit.hwnd(), SW_HIDE);
+        if (hwnd)
+            surface.invalidate();
+    }
+
+    void cancelSliderEditor() {
+        if (!sliderEditOpen)
+            return;
+        if (const Row* row = findRow(sliderEditRowId))
+            sliderValueEdit.setText(std::to_wstring(row->value));
+        hideSliderEditor();
+    }
+
+    void commitSliderEditor() {
+        if (!sliderEditOpen || sliderEditCommitting)
+            return;
+        sliderEditCommitting = true;
+        Row* row = findRow(sliderEditRowId);
+        if (row && row->enabled) {
+            int value = row->value;
+            if (parseBoundedInteger(sliderValueEdit.text(), row->minValue, row->maxValue,
+                                    value)) {
+                if (value != row->value) {
+                    row->value = value;
+                    onCommand(row->id);
+                }
+            } else {
+                // 空值或非数字不进入设置，恢复编辑前的有效值。
+                sliderValueEdit.setText(std::to_wstring(row->value));
+            }
+        }
+        hideSliderEditor();
+        sliderEditCommitting = false;
+    }
+
+    void layoutSliderEditor() {
+        if (!sliderEditOpen)
+            return;
+        Row* row = findRow(sliderEditRowId);
+        if (!row || row->kind != ControlKind::Slider || !row->enabled ||
+            row->cardRect.right <= row->cardRect.left ||
+            row->cardRect.bottom <= contentViewportRect.top ||
+            row->cardRect.top >= contentViewportRect.bottom) {
+            hideSliderEditor();
+            return;
+        }
+
+        const D2D1_RECT_F valueRect = sliderValueRect(*row);
+        const float s = surface.dipScale();
+        const int x = static_cast<int>(std::lround((valueRect.right - kSliderEditorW) * s));
+        const int y = static_cast<int>(std::lround(valueRect.top * s));
+        const int w = static_cast<int>(std::lround(kSliderEditorW * s));
+        const int h = static_cast<int>(std::lround((valueRect.bottom - valueRect.top) * s));
+        sliderValueEdit.move(x, y, std::max(1, w), std::max(1, h));
+    }
+
+    void openSliderEditor(Row& row) {
+        if (!row.enabled || !sliderValueEdit.editHwnd())
+            return;
+        if (sliderEditOpen && sliderEditRowId != row.id)
+            commitSliderEditor();
+        sliderEditRowId = row.id;
+        sliderEditOpen = true;
+        sliderValueEdit.setText(std::to_wstring(row.value));
+        layoutSliderEditor();
+        sliderValueEdit.focus();
+        SendMessageW(sliderValueEdit.editHwnd(), EM_SETSEL, 0, -1);
+        surface.invalidate();
     }
 
     static bool isOptionEnabled(const Row& row, size_t option) {
@@ -1162,6 +1300,20 @@ struct SettingsDialog::Impl {
         updateImmersiveRowsEnabled();
     }
 
+    void createSliderEditor() {
+        if (!sliderValueEdit.create(hwnd, kIdSliderValueEdit, nullptr, false, 12.0f))
+            return;
+        sliderValueEdit.setContentPadding(4.0f, 0.0f);
+        if (HWND edit = sliderValueEdit.editHwnd()) {
+            LONG_PTR style = GetWindowLongPtrW(edit, GWL_STYLE);
+            SetWindowLongPtrW(edit, GWL_STYLE, style | ES_NUMBER);
+            SendMessageW(edit, EM_SETLIMITTEXT, 3, 0);
+            SetWindowSubclass(edit, &Impl::sliderEditProc, kSliderEditSubclassId,
+                              reinterpret_cast<DWORD_PTR>(this));
+        }
+        ShowWindow(sliderValueEdit.hwnd(), SW_HIDE);
+    }
+
     float measureTextHeight(fluent::FluentDialogSurface::Painter& painter,
                             const std::wstring& text, float width, float textSize) const {
         if (text.empty() || width <= 0.0f)
@@ -1539,11 +1691,14 @@ struct SettingsDialog::Impl {
                                           controlY + controlH);
             y += rowH + kRowGap;
         }
+        layoutSliderEditor();
     }
 
     void showPage(int page) {
         if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
+        if (sliderEditOpen)
+            commitSliderEditor();
         activePage = page;
         hoverId = 0;
         hoverOption = -1;
@@ -1721,11 +1876,13 @@ struct SettingsDialog::Impl {
             painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), 7.0f, 7.0f),
                                                        br);
         }
-        painter.drawText(std::to_wstring(row.value) + row.valueSuffix,
-                         painter.textFormat(12.0f, 400, false, true),
-                         D2D1::RectF(trackRight + kSliderValueGap, row.controlRect.top,
-                                     row.controlRect.right, row.controlRect.bottom),
-                         row.enabled ? p.textSecondary : p.disabled);
+        if (!(sliderEditOpen && sliderEditRowId == row.id)) {
+            painter.drawText(std::to_wstring(row.value) + row.valueSuffix,
+                             painter.textFormat(12.0f, 400, false, true),
+                             D2D1::RectF(trackRight + kSliderValueGap, row.controlRect.top,
+                                         row.controlRect.right, row.controlRect.bottom),
+                             row.enabled ? p.textSecondary : p.disabled);
+        }
         if (focusedId == row.id && focusVisible && row.enabled)
             painter.strokeRoundRect(p.accent,
                                     D2D1::RectF(track.left - 3.0f, track.top - 5.0f,
@@ -3587,6 +3744,8 @@ struct SettingsDialog::Impl {
     }
 
     void updateState(const SettingsState& s) {
+        if (sliderEditOpen)
+            commitSliderEditor();
         state = s;
         const bool vertical = s.verticalTaskbar;
         resetIdleAppDrag();
@@ -3807,6 +3966,7 @@ struct SettingsDialog::Impl {
             backdrop = fluent::styleDialogWindow(hwnd, false);
             surface.initialize(hwnd, backdrop);
             createControls();
+            createSliderEditor();
             layout();
             return 0;
         case WM_SIZE:
@@ -3834,6 +3994,7 @@ struct SettingsDialog::Impl {
         case WM_THEMECHANGED:
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
+            sliderValueEdit.refreshTheme();
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -3892,7 +4053,10 @@ struct SettingsDialog::Impl {
             if (pressedId != 0) {
                 Row* row = findRow(pressedId);
                 if (row && row->kind == ControlKind::Slider && row->enabled) {
-                    updateSliderFromPointer(*row, GET_X_LPARAM(lp) / s);
+                    const float pointerX = GET_X_LPARAM(lp) / s;
+                    const float pointerY = GET_Y_LPARAM(lp) / s;
+                    if (!contains(sliderValueRect(*row), pointerX, pointerY))
+                        updateSliderFromPointer(*row, pointerX);
                     return 0;
                 }
             }
@@ -3912,6 +4076,16 @@ struct SettingsDialog::Impl {
             }
             surface.invalidate();
             return 0;
+        case WM_LBUTTONDBLCLK: {
+            const float s = surface.dipScale();
+            const float pointerX = GET_X_LPARAM(lp) / s;
+            const float pointerY = GET_Y_LPARAM(lp) / s;
+            Row* row = findRow(hitTest(pointerX, pointerY));
+            if (row && row->kind == ControlKind::Slider && row->enabled &&
+                contains(sliderValueRect(*row), pointerX, pointerY))
+                openSliderEditor(*row);
+            return 0;
+        }
         case WM_LBUTTONDOWN: {
             SetFocus(hwnd);
             focusVisible = false;
@@ -3932,7 +4106,8 @@ struct SettingsDialog::Impl {
             }
             if (pressedId != 0) {
                 Row* row = findRow(pressedId);
-                if (row && row->kind == ControlKind::Slider && row->enabled)
+                if (row && row->kind == ControlKind::Slider && row->enabled &&
+                    !contains(sliderValueRect(*row), pointerX, pointerY))
                     updateSliderFromPointer(*row, pointerX);
             }
             if (pressedId != 0 && pressedId != kIdContentScrollBar)
@@ -4157,6 +4332,11 @@ struct SettingsDialog::Impl {
                 colorPicker.reset();
             return 0;
         case WM_COMMAND:
+            if (LOWORD(wp) == kIdSliderValueEdit) {
+                if (HIWORD(wp) == EN_KILLFOCUS)
+                    commitSliderEditor();
+                return 0;
+            }
             if (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == LBN_SELCHANGE)
                 onCommand(LOWORD(wp));
             return 0;
@@ -4175,6 +4355,8 @@ struct SettingsDialog::Impl {
     }
 
     void destroy() {
+        if (sliderEditOpen)
+            cancelSliderEditor();
         if (colorPicker) {
             colorPicker->destroy();
             colorPicker.reset();
@@ -4202,7 +4384,7 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = Impl::wndProc;
     wc.hInstance = inst;
     wc.lpszClassName = L"QQMusicLyricSettingsDialog";

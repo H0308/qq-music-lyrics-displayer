@@ -358,7 +358,8 @@ namespace {
 constexpr UINT_PTR kEditCueSubclassId = 1;
 } // namespace
 
-bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit) {
+bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit,
+                        float fontSizeDip) {
     id_ = id;
     directEdit_ = directEdit;
     editParent_ = nullptr;
@@ -378,7 +379,7 @@ bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool dire
     if (!hEdit_)
         return false;
 
-    editFont_ = createUiFont(GetDpiForWindow(hwnd_));
+    editFont_ = createUiFont(GetDpiForWindow(hwnd_), fontSizeDip);
     SendMessageW(hEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(editFont_), TRUE);
     if (cueBanner && *cueBanner) {
         // EM_SETCUEBANNER 的占位色由系统绘制，不随深浅主题变化（深色下不可读），
@@ -434,6 +435,13 @@ void FluentEdit::setText(const std::wstring& text) {
     if (!hEdit_)
         return;
     SetWindowTextW(hEdit_, text.c_str());
+}
+
+void FluentEdit::setContentPadding(float horizontalDip, float verticalDip) {
+    contentPaddingXDip_ = std::max(0.0f, horizontalDip);
+    contentPaddingYDip_ = std::max(0.0f, verticalDip);
+    layoutEdit();
+    repaintEdit();
 }
 
 void FluentEdit::move(int x, int y, int w, int h) {
@@ -525,12 +533,12 @@ void FluentEdit::layoutEdit() {
     RECT rc;
     GetClientRect(hwnd_, &rc);
     float s = dipScale(GetDpiForWindow(hwnd_));
-    int padX = static_cast<int>(12 * s);
-    int padY = static_cast<int>(5 * s);
+    int padX = static_cast<int>(std::lround(contentPaddingXDip_ * s));
+    int padY = static_cast<int>(std::lround(contentPaddingYDip_ * s));
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    int editW = w - padX * 2;
-    int editH = h - padY * 2 - static_cast<int>(2 * s);
+    int editW = std::max(1, w - padX * 2);
+    int editH = std::max(1, h - padY * 2 - static_cast<int>(2 * s));
     if (directEdit_) {
         // EDIT 与宿主是兄弟窗口：宿主创建/显示时序会让宿主压在 EDIT 上方，
         // 宿主的不透明 BitBlt 帧会盖住文字并拦截点击，必须显式把 EDIT 置顶
@@ -586,7 +594,8 @@ void FluentEdit::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     rt->FillRectangle(full, br);
     D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
     fillRoundRect(rt, br, p.cardFillSolid, rect);
-    strokeRoundRect(rt, br, p.cardStroke, rect);
+    strokeRoundRect(rt, br, focused_ ? p.accent : p.cardStroke, rect,
+                    focused_ ? 1.25f : 1.0f);
     // Win11 输入框底边线：静止时细灰线，聚焦时强调色粗线
     const float underlineHeight = focused_ ? 2.0f : 1.0f;
     D2D1_RECT_F bottom = D2D1::RectF(rect.left + 1.0f, rect.bottom - underlineHeight,
