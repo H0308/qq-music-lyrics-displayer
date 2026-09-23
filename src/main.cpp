@@ -87,9 +87,11 @@ constexpr UINT_PTR kTimerIdleQuote = 5;
 // 避免一次瞬时网络失败让今日任务在本次运行中一直缺席。
 constexpr UINT_PTR kTimerTickTickStartupRetry = 6;
 constexpr UINT_PTR kTimerTaskbarAutoRestore = 7;
+constexpr UINT_PTR kTimerBackgroundSettingsSave = 8;
 constexpr UINT kTaskbarAutoRestoreMs = 1000;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
+constexpr UINT kBackgroundSettingsSaveDebounceMs = 300;
 constexpr UINT kIdleQuoteCheckMs = 60 * 1000;
 constexpr int kTickTickStartupMaxRetries = 3;
 constexpr UINT kTickTickStartupRetryDelaysMs[kTickTickStartupMaxRetries] = {
@@ -1061,8 +1063,13 @@ struct App {
     int taskbarPosition_ = 0;
     TaskbarViewMode taskbarViewMode_ = TaskbarViewMode::Embedded;
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
-    int immersiveMaskOpacity_ = 88;
-    int dockMaskOpacity_ = 88;
+    int immersiveBackgroundBlur_ = 88;
+    int dockBackgroundBlur_ = 88;
+    bool backgroundBlurSettingsSavePending_ = false;
+    bool immersiveBackgroundBlurLogPending_ = false;
+    bool dockBackgroundBlurLogPending_ = false;
+    int immersiveBackgroundAdjustment_ = 0;
+    int dockBackgroundAdjustment_ = 0;
     bool dockResourceGpuUsage_ = false;
     bool dockResourceCpuFrequency_ = false;
     bool taskbarContextMenuEnabled_ = true;
@@ -1470,8 +1477,11 @@ struct App {
         mode = std::clamp(mode, 0, 2);
         taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
         if (taskbarHost) {
-            taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
-            taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
+            taskbarHost->setImmersiveBackgroundAdjustment(
+                immersiveBackgroundAdjustment_);
+            taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+            taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+            taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
             syncTaskbarView(monitor.snapshot());
             syncTaskbarOrientation();
             applyEffectiveTaskbarSettings();
@@ -1490,20 +1500,79 @@ struct App {
         refreshSettingsDialog(true);
     }
 
-    void applyImmersiveMaskOpacity(int percent) {
-        immersiveMaskOpacity_ = std::clamp(percent, 0, 100);
+    void applyImmersiveBackgroundBlur(int percent) {
+        const int nextBlur = std::clamp(percent, 0, 100);
+        if (immersiveBackgroundBlur_ == nextBlur)
+            return;
+        immersiveBackgroundBlur_ = nextBlur;
         if (taskbarHost)
-            taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
-        logSettingInt(L"immersive-mask-opacity", immersiveMaskOpacity_);
+            taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+        scheduleBackgroundBlurSettingsSave(true);
+        if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
+            refreshSettingsDialog(true);
+    }
+
+    void applyDockBackgroundBlur(int percent) {
+        const int nextBlur = std::clamp(percent, 0, 100);
+        if (dockBackgroundBlur_ == nextBlur)
+            return;
+        dockBackgroundBlur_ = nextBlur;
+        if (taskbarHost)
+            taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
+        scheduleBackgroundBlurSettingsSave(false);
+        if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
+            refreshSettingsDialog(true);
+    }
+
+    void scheduleBackgroundBlurSettingsSave(bool immersive) {
+        if (immersive)
+            immersiveBackgroundBlurLogPending_ = true;
+        else
+            dockBackgroundBlurLogPending_ = true;
+        backgroundBlurSettingsSavePending_ = true;
+        if (trayHwnd && SetTimer(trayHwnd, kTimerBackgroundSettingsSave,
+                                 kBackgroundSettingsSaveDebounceMs, nullptr) != 0)
+            return;
+        flushBackgroundBlurSettingsSave();
+    }
+
+    void flushBackgroundBlurSettingsSave() {
+        if (!backgroundBlurSettingsSavePending_)
+            return;
+        backgroundBlurSettingsSavePending_ = false;
+        if (trayHwnd)
+            KillTimer(trayHwnd, kTimerBackgroundSettingsSave);
+        if (immersiveBackgroundBlurLogPending_) {
+            immersiveBackgroundBlurLogPending_ = false;
+            logSettingInt(L"immersive-background-blur", immersiveBackgroundBlur_);
+        }
+        if (dockBackgroundBlurLogPending_) {
+            dockBackgroundBlurLogPending_ = false;
+            logSettingInt(L"dock-background-blur", dockBackgroundBlur_);
+        }
         saveSettings();
     }
 
-    void applyDockMaskOpacity(int percent) {
-        dockMaskOpacity_ = std::clamp(percent, 0, 100);
+    void applyImmersiveBackgroundAdjustment(int mode) {
+        immersiveBackgroundAdjustment_ = std::clamp(mode, 0, 1);
         if (taskbarHost)
-            taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
-        logSettingInt(L"dock-mask-opacity", dockMaskOpacity_);
+            taskbarHost->setImmersiveBackgroundAdjustment(
+                immersiveBackgroundAdjustment_);
+        logSettingInt(L"immersive-background-adjustment",
+                      immersiveBackgroundAdjustment_);
         saveSettings();
+        if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
+            refreshSettingsDialog(true);
+    }
+
+    void applyDockBackgroundAdjustment(int mode) {
+        dockBackgroundAdjustment_ = std::clamp(mode, 0, 1);
+        if (taskbarHost)
+            taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+        logSettingInt(L"dock-background-adjustment", dockBackgroundAdjustment_);
+        saveSettings();
+        if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
+            refreshSettingsDialog(true);
     }
 
     void applyDockResourceVisibility() {
@@ -1585,8 +1654,11 @@ struct App {
             minimal ? TaskbarBackground::None
                     : static_cast<TaskbarBackground>(taskbarBackground_));
         taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
-        taskbarHost->setImmersiveMaskOpacity(immersiveMaskOpacity_);
-        taskbarHost->setDockMaskOpacity(dockMaskOpacity_);
+        taskbarHost->setImmersiveBackgroundAdjustment(
+            immersiveBackgroundAdjustment_);
+        taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+        taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+        taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
         applyDockResourceVisibility();
         syncTaskbarView(monitor.snapshot());
     }
@@ -2862,6 +2934,7 @@ struct App {
         if (shutdownRequested_)
             return;
         shutdownRequested_ = true;
+        flushBackgroundBlurSettingsSave();
         runtimeLogger_.write(L"[lifecycle] quit requested");
         runtimeLogger_.flushSync();
 
@@ -3895,9 +3968,21 @@ void App::loadSettings() {
                                       : (j.value("taskbarImmersive", false) ? 1 : 0);
         taskbarViewMode_ = static_cast<TaskbarViewMode>(std::clamp(savedViewMode, 0, 2));
         appBarEdge_ = j.value("appBarEdge", 0) == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
-        immersiveMaskOpacity_ = std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
-        dockMaskOpacity_ = std::clamp(
-            j.value("dockMaskOpacity", immersiveMaskOpacity_), 0, 100);
+        const int legacyImmersiveMaskOpacity =
+            std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
+        const int legacyDockMaskOpacity = std::clamp(
+            j.value("dockMaskOpacity", legacyImmersiveMaskOpacity), 0, 100);
+        const int legacyDockBlur = std::clamp(j.value("dockBackgroundBlur", 100), 0, 100);
+        const int legacyDockBlurLevel =
+            (legacyDockMaskOpacity * legacyDockBlur + 50) / 100;
+        immersiveBackgroundBlur_ = std::clamp(
+            j.value("immersiveBackgroundBlur", legacyImmersiveMaskOpacity), 0, 100);
+        dockBackgroundBlur_ = std::clamp(
+            j.value("dockBackgroundBlurLevel", legacyDockBlurLevel), 0, 100);
+        immersiveBackgroundAdjustment_ = std::clamp(
+            j.value("immersiveBackgroundAdjustment", 0), 0, 1);
+        dockBackgroundAdjustment_ = std::clamp(
+            j.value("dockBackgroundAdjustment", 0), 0, 1);
         dockResourceGpuUsage_ = j.value("dockResourceGpu", false);
         dockResourceCpuFrequency_ = j.value("dockResourceCpuFrequency", false);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
@@ -4153,8 +4238,13 @@ void App::saveSettings() {
         j["taskbarViewMode"] = static_cast<int>(taskbarViewMode_);
         j["appBarEdge"] = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
         j.erase("taskbarImmersive");
-        j["immersiveMaskOpacity"] = immersiveMaskOpacity_;
-        j["dockMaskOpacity"] = dockMaskOpacity_;
+        j["immersiveBackgroundBlur"] = immersiveBackgroundBlur_;
+        j["dockBackgroundBlurLevel"] = dockBackgroundBlur_;
+        j["immersiveBackgroundAdjustment"] = immersiveBackgroundAdjustment_;
+        j["dockBackgroundAdjustment"] = dockBackgroundAdjustment_;
+        j.erase("immersiveMaskOpacity");
+        j.erase("dockMaskOpacity");
+        j.erase("dockBackgroundBlur");
         j["dockResourceGpu"] = dockResourceGpuUsage_;
         j.erase("dockResourceDisk");
         j.erase("dockResourceBattery");
@@ -5470,8 +5560,11 @@ SettingsState App::currentSettingsState() const {
     st.taskbarViewMode = static_cast<int>(taskbarViewMode_);
     st.mediaSessionAlive = monitor.snapshot().sessionAlive;
     st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
-    st.immersiveMaskOpacity = immersiveMaskOpacity_;
-    st.dockMaskOpacity = dockMaskOpacity_;
+    st.immersiveBackgroundBlur = immersiveBackgroundBlur_;
+    st.dockBackgroundBlur = dockBackgroundBlur_;
+    st.immersiveBackgroundAdjustment = immersiveBackgroundAdjustment_;
+    st.dockBackgroundAdjustment = dockBackgroundAdjustment_;
+    st.backgroundBlurSupported = !taskbarHost || taskbarHost->backgroundBlurAvailable();
     st.dockResourceGpuUsage = dockResourceGpuUsage_;
     st.dockResourceCpuFrequency = dockResourceCpuFrequency_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
@@ -5555,9 +5648,14 @@ SettingsActions App::buildSettingsActions() {
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onTaskbarViewMode = [this](int mode) { applyTaskbarViewMode(mode); };
     act.onAppBarEdge = [this](int edge) { applyAppBarEdge(edge); };
-    act.onImmersiveMaskOpacity =
-        [this](int percent) { applyImmersiveMaskOpacity(percent); };
-    act.onDockMaskOpacity = [this](int percent) { applyDockMaskOpacity(percent); };
+    act.onImmersiveBackgroundBlur =
+        [this](int percent) { applyImmersiveBackgroundBlur(percent); };
+    act.onDockBackgroundBlur =
+        [this](int percent) { applyDockBackgroundBlur(percent); };
+    act.onImmersiveBackgroundAdjustment =
+        [this](int mode) { applyImmersiveBackgroundAdjustment(mode); };
+    act.onDockBackgroundAdjustment =
+        [this](int mode) { applyDockBackgroundAdjustment(mode); };
     act.onDockResourceGpuUsage =
         [this](bool on) { applyDockResourceGpuUsage(on); };
     act.onDockResourceCpuFrequency =
@@ -5749,6 +5847,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_TIMER && wp == kTimerLyricDebounce) {
         KillTimer(h, kTimerLyricDebounce);
         app->onLyricDebounce();
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kTimerBackgroundSettingsSave) {
+        KillTimer(h, kTimerBackgroundSettingsSave);
+        app->flushBackgroundBlurSettingsSave();
         return 0;
     }
     if (msg == WM_TIMER && wp == kTimerSongToastCover) {

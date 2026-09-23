@@ -7,6 +7,7 @@
 #include "media_control_icons.h"
 #include "media_popup.h"
 #include "monitor/resource_monitor.h"
+#include "dock_backdrop.h"
 #include "platform_icon.h"
 #include "settings_icons.h"
 #include "volume_popup.h"
@@ -1181,8 +1182,12 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushBackground_ = nullptr; // 纯色填充与模糊遮罩共用（每帧 SetColor）
     // 沉浸模式使用完整任务栏客户区；AppBar 使用独立的 Shell 工作区协议。
     TaskbarViewMode viewMode_ = TaskbarViewMode::Embedded;
-    int immersiveMaskOpacityPct_ = 88;
-    int dockMaskOpacityPct_ = 88;
+    int immersiveBackgroundBlurPct_ = 88;
+    int dockBackgroundBlurPct_ = 88;
+    int immersiveBackgroundAdjustment_ = 0;
+    int dockBackgroundAdjustment_ = 0;
+    bool backgroundBlurSupported_ = true;
+    DockBackdrop dockBackdrop_;
     ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
     ID2D1SolidColorBrush* brushIdleCool_ = nullptr;
     ID2D1SolidColorBrush* brushIdleAccent_ = nullptr;
@@ -1707,6 +1712,10 @@ struct TaskbarHost::Impl {
         if (!findTaskbar())
             return;
 
+        const bool immersiveBackdropPrepared =
+            viewMode_ == TaskbarViewMode::Immersive && !dockBackdrop_.available();
+        if (immersiveBackdropPrepared)
+            initializeBackdropForCurrentViewMode();
         if (!attachToTaskbar(hwnd)) {
             // 附着失败时仍保持顶层窗口，但必须使用屏幕坐标，避免落到屏幕顶部。
             adjustPosition();
@@ -1714,6 +1723,8 @@ struct TaskbarHost::Impl {
         }
 
         cancelTaskbarAttachRetry();
+        if (!immersiveBackdropPrepared)
+            initializeBackdropForCurrentViewMode();
         adjustPosition();
         if (isWindowVisible())
             requestFrameAndFlush();
@@ -1749,6 +1760,10 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         app_icon::applyTaskbarIcon(hwnd);
+        const bool immersiveBackdropPrepared =
+            viewMode_ == TaskbarViewMode::Immersive;
+        if (immersiveBackdropPrepared)
+            initializeBackdropForCurrentViewMode();
         if (isAppBarView()) {
             taskbarEmbedded_ = false;
             renderState_.setVisibilitySuppressed(false);
@@ -1756,6 +1771,8 @@ struct TaskbarHost::Impl {
         } else if (!attachToTaskbar(h)) {
             scheduleTaskbarAttachRetry();
         }
+        if (!immersiveBackdropPrepared)
+            initializeBackdropForCurrentViewMode();
         if (!mediaPopup.create(inst, hwnd))
             runtime_log::writef(L"[taskbar] media popup creation failed");
         if (!volumePopup_.create(inst))
@@ -2333,6 +2350,7 @@ struct TaskbarHost::Impl {
             requestInvalidation(RenderInvalidation::Layout);
             if (themeChanged) {
                 lightTheme_ = light;
+                updateBackdropSolidColor();
                 discardDeviceResources();
             }
         }
@@ -2865,6 +2883,14 @@ struct TaskbarHost::Impl {
         if (previousMode == TaskbarViewMode::AppBar)
             stopResourceMonitoring();
         viewMode_ = mode;
+        bool immersiveBackdropPrepared = false;
+        if (mode == TaskbarViewMode::Immersive && !dockBackdrop_.available()) {
+            if (!taskbarEmbedded_ || detachFromTaskbar())
+                initializeBackdropForCurrentViewMode();
+            else
+                backgroundBlurSupported_ = false;
+            immersiveBackdropPrepared = true;
+        }
         dockPet_.setMode(DockPetMode::Hidden, monotonicNowMs());
         dockResourcePage_ = 0;
         volumeHover_ = false;
@@ -2886,6 +2912,8 @@ struct TaskbarHost::Impl {
             if (!attachToTaskbar(hwnd))
                 scheduleTaskbarAttachRetry();
         }
+        if (!immersiveBackdropPrepared)
+            initializeBackdropForCurrentViewMode();
         // 沉浸模式仍需要完成首次真实探测，才能解除创建阶段的显示抑制；
         // 探测完成且窗口已可见后才停止避让定时器。否则重启时会一直隐藏。
         if (mode == TaskbarViewMode::Immersive && probeReady_ &&
@@ -2911,22 +2939,95 @@ struct TaskbarHost::Impl {
         requestFrameAndFlush();
     }
 
-    void setImmersiveMaskOpacity(int opacityPercent) {
-        const int nextOpacity = std::clamp(opacityPercent, 0, 100);
-        if (immersiveMaskOpacityPct_ == nextOpacity)
+    void setImmersiveBackgroundBlur(int percent) {
+        const int nextBlur = std::clamp(percent, 0, 100);
+        if (immersiveBackgroundBlurPct_ == nextBlur)
             return;
-        immersiveMaskOpacityPct_ = nextOpacity;
-        if (viewMode_ == TaskbarViewMode::Immersive)
-            requestFrameAndFlush();
+        immersiveBackgroundBlurPct_ = nextBlur;
+        if (viewMode_ == TaskbarViewMode::Immersive) {
+            dockBackdrop_.setBlurPercent(immersiveBackgroundBlurPct_);
+            if (!dockBackdrop_.available())
+                backgroundBlurSupported_ = false;
+        }
     }
 
-    void setDockMaskOpacity(int opacityPercent) {
-        const int nextOpacity = std::clamp(opacityPercent, 0, 100);
-        if (dockMaskOpacityPct_ == nextOpacity)
+    void setDockBackgroundBlur(int percent) {
+        const int nextBlur = std::clamp(percent, 0, 100);
+        if (dockBackgroundBlurPct_ == nextBlur)
             return;
-        dockMaskOpacityPct_ = nextOpacity;
-        if (viewMode_ == TaskbarViewMode::AppBar)
+        dockBackgroundBlurPct_ = nextBlur;
+        if (viewMode_ == TaskbarViewMode::AppBar) {
+            dockBackdrop_.setBlurPercent(dockBackgroundBlurPct_);
+            if (!dockBackdrop_.available())
+                backgroundBlurSupported_ = false;
+        }
+    }
+
+    void setImmersiveBackgroundAdjustment(int mode) {
+        const int nextMode = std::clamp(mode, 0, 1);
+        if (immersiveBackgroundAdjustment_ == nextMode)
+            return;
+        immersiveBackgroundAdjustment_ = nextMode;
+        if (viewMode_ == TaskbarViewMode::Immersive) {
+            updateBackdropSolidColor();
+            dockBackdrop_.setAdjustmentMode(immersiveBackgroundAdjustment_);
+            if (!dockBackdrop_.available())
+                backgroundBlurSupported_ = false;
             requestFrameAndFlush();
+        }
+    }
+
+    void setDockBackgroundAdjustment(int mode) {
+        const int nextMode = std::clamp(mode, 0, 1);
+        if (dockBackgroundAdjustment_ == nextMode)
+            return;
+        dockBackgroundAdjustment_ = nextMode;
+        if (viewMode_ == TaskbarViewMode::AppBar) {
+            updateBackdropSolidColor();
+            dockBackdrop_.setAdjustmentMode(dockBackgroundAdjustment_);
+            if (!dockBackdrop_.available())
+                backgroundBlurSupported_ = false;
+            requestFrameAndFlush();
+        }
+    }
+
+    bool backgroundBlurAvailable() const { return backgroundBlurSupported_; }
+
+    void updateBackdropSolidColor() {
+        if (viewMode_ == TaskbarViewMode::Embedded)
+            return;
+        const COLORREF color = fluent::isWindowsAppDarkMode() ? RGB(32, 32, 32)
+                                                              : RGB(243, 243, 243);
+        dockBackdrop_.setSolidColor(color);
+        if (!dockBackdrop_.available())
+            backgroundBlurSupported_ = false;
+    }
+
+    void initializeBackdropForCurrentViewMode() {
+        if (viewMode_ == TaskbarViewMode::Embedded) {
+            dockBackdrop_.setVisible(false);
+            backgroundBlurSupported_ = true;
+            return;
+        }
+
+        if (dockBackdrop_.available()) {
+            backgroundBlurSupported_ = true;
+            runtime_log::writef(
+                L"[dock-backdrop] init result=reused view=%s hwnd=%p",
+                viewMode_ == TaskbarViewMode::Immersive ? L"immersive" : L"dock", hwnd);
+        } else {
+            backgroundBlurSupported_ = dockBackdrop_.initialize(hwnd);
+        }
+        updateBackdropSolidColor();
+        dockBackdrop_.setAdjustmentMode(viewMode_ == TaskbarViewMode::Immersive
+                                            ? immersiveBackgroundAdjustment_
+                                            : dockBackgroundAdjustment_);
+        dockBackdrop_.setBlurPercent(viewMode_ == TaskbarViewMode::Immersive
+                                         ? immersiveBackgroundBlurPct_
+                                         : dockBackgroundBlurPct_);
+        dockBackdrop_.setVisible(true);
+        if (!dockBackdrop_.available())
+            backgroundBlurSupported_ = false;
     }
 
     void setDockResourceVisibility(const DockResourceVisibility& visibility) {
@@ -4360,6 +4461,14 @@ struct TaskbarHost::Impl {
                             timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
+                const bool immersiveBackdropPrepared =
+                    viewMode_ == TaskbarViewMode::Immersive && !dockBackdrop_.available();
+                if (immersiveBackdropPrepared) {
+                    if (!taskbarEmbedded_ || detachFromTaskbar())
+                        initializeBackdropForCurrentViewMode();
+                    else
+                        backgroundBlurSupported_ = false;
+                }
                 if (isAppBarView()) {
                     // Explorer 重启后 Shell 的 AppBar 注册表已丢失，本地标记不再可信。
                     appBarRegistered_ = false;
@@ -4371,6 +4480,8 @@ struct TaskbarHost::Impl {
                 } else {
                     cancelTaskbarAttachRetry();
                 }
+                if (!immersiveBackdropPrepared)
+                    initializeBackdropForCurrentViewMode();
                 adjustPosition();
                 reconcileWindowVisibility();
                 requestFrameAndFlush();
@@ -4381,6 +4492,7 @@ struct TaskbarHost::Impl {
             }
             return;
         }
+        dockBackdrop_.reset();
         hwnd = nullptr;
         taskbarEmbedded_ = false;
         // Explorer 强制退出时旧窗口可能没有走 WM_DESTROY，Shell 侧与本地的
@@ -4579,6 +4691,7 @@ struct TaskbarHost::Impl {
 
     void refreshTheme() {
         app_icon::applyTaskbarIcon(hwnd);
+        updateBackdropSolidColor();
         const bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         if (light != lightTheme_) {
             lightTheme_ = light;
@@ -8029,24 +8142,10 @@ struct TaskbarHost::Impl {
 
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         const D2D1_ROUNDED_RECT bg = taskbarBackgroundRect(w, h);
-        if (isExpandedView()) {
-            if (brushBackground_) {
-                // 沉浸 / Dock 遮罩直接跟随 Windows 的“应用模式”，不受任务栏歌词
-                // 自身的主题选择器影响；不透明度完全由对应设置控制。
-                const bool appDark = fluent::isWindowsAppDarkMode();
-                D2D1_COLOR_F mask = fluent::toD2D(
-                    appDark ? RGB(32, 32, 32) : RGB(243, 243, 243));
-                const int opacityPct = viewMode_ == TaskbarViewMode::AppBar
-                                           ? dockMaskOpacityPct_
-                                           : immersiveMaskOpacityPct_;
-                mask.a = std::clamp(opacityPct, 0, 100) / 100.0f;
-                brushBackground_->SetColor(mask);
-                // 沉浸遮罩是完整任务栏客户区的矩形底，不继承普通嵌入模式的圆角。
-                rt->FillRectangle(bg.rect, brushBackground_);
-            } else if (brushBg_) {
-                rt->FillRectangle(bg.rect, brushBg_);
-            }
-        } else if (coverBlurChain && coverLayer_ && brushBackground_) {
+        if (isExpandedView())
+            return; // Immersive 和 Dock 的背景由 Composition 模糊层绘制，窗口保持透明。
+
+        if (coverBlurChain && coverLayer_ && brushBackground_) {
             ID2D1RoundedRectangleGeometry* clip = nullptr;
             if (auto* factory = renderer.d2d())
                 factory->CreateRoundedRectangleGeometry(bg, &clip);
@@ -9518,6 +9617,7 @@ struct TaskbarHost::Impl {
         case WM_DESTROY:
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)",
                                 isWindowVisible() ? 1 : 0);
+            dockBackdrop_.reset();
             renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
             unregisterAppBar();
             KillTimer(hwnd, kTaskbarAttachTimerId);
@@ -9933,12 +10033,24 @@ void TaskbarHost::setAppBarEdge(AppBarEdge edge) {
     impl_->setAppBarEdge(edge);
 }
 
-void TaskbarHost::setImmersiveMaskOpacity(int opacityPercent) {
-    impl_->setImmersiveMaskOpacity(opacityPercent);
+void TaskbarHost::setImmersiveBackgroundBlur(int percent) {
+    impl_->setImmersiveBackgroundBlur(percent);
 }
 
-void TaskbarHost::setDockMaskOpacity(int opacityPercent) {
-    impl_->setDockMaskOpacity(opacityPercent);
+void TaskbarHost::setDockBackgroundBlur(int percent) {
+    impl_->setDockBackgroundBlur(percent);
+}
+
+void TaskbarHost::setImmersiveBackgroundAdjustment(int mode) {
+    impl_->setImmersiveBackgroundAdjustment(mode);
+}
+
+void TaskbarHost::setDockBackgroundAdjustment(int mode) {
+    impl_->setDockBackgroundAdjustment(mode);
+}
+
+bool TaskbarHost::backgroundBlurAvailable() const {
+    return impl_->backgroundBlurAvailable();
 }
 
 void TaskbarHost::setDockResourceVisibility(const DockResourceVisibility& visibility) {

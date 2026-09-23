@@ -75,6 +75,7 @@ add_executable(QQMusicLyric
     src/ui/settings_icons.cpp
     src/ui/media_popup.cpp
     src/ui/volume_popup.cpp
+    src/ui/dock_backdrop.cpp
     src/ui/song_toast.cpp
     src/ui/app_icon.cpp
     src/ui/platform_icon.cpp
@@ -126,6 +127,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     gdi32
     shell32
     ole32
+    coremessaging
     shcore
     uiautomationcore
     dwmapi

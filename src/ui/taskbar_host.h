@@ -207,8 +207,11 @@ public:
     void setViewMode(TaskbarViewMode mode);
     // AppBar 仅支持水平顶部/底部；位置变更会立即重新向 Shell 协商工作区。
     void setAppBarEdge(AppBarEdge edge);
-    void setImmersiveMaskOpacity(int opacityPercent);
-    void setDockMaskOpacity(int opacityPercent);
+    void setImmersiveBackgroundBlur(int percent);
+    void setDockBackgroundBlur(int percent);
+    void setImmersiveBackgroundAdjustment(int mode);
+    void setDockBackgroundAdjustment(int mode);
+    bool backgroundBlurAvailable() const;
     void setDockResourceVisibility(const DockResourceVisibility& visibility);
 
     void show() override;

@@ -91,11 +91,13 @@ constexpr int kIdTickTickEnabled = 466;
 constexpr int kIdTaskbarContextMenu = 467;
 constexpr int kIdTaskbarViewMode = 468;
 constexpr int kIdAppBarEdge = 469;
-constexpr int kIdImmersiveMaskOpacity = 471;
-constexpr int kIdDockMaskOpacity = 472;
+constexpr int kIdImmersiveBackgroundBlur = 471;
+constexpr int kIdDockBackgroundBlur = 474;
 constexpr int kIdDockResourceGpuUsage = 473;
 constexpr int kIdDockResourceCpuFrequency = 477;
 constexpr int kIdSliderValueEdit = 478;
+constexpr int kIdImmersiveBackgroundAdjustment = 479;
+constexpr int kIdDockBackgroundAdjustment = 480;
 constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 constexpr int kIdIdleAppNames = 460;
@@ -236,6 +238,20 @@ const wchar_t* taskbarViewModeHint(bool mediaSessionAlive, bool verticalTaskbar)
     return L"沉浸模式覆盖 Windows 任务栏；Dock 模式以独立顶栏或底栏占用桌面工作区。";
 }
 
+const wchar_t* backgroundAdjustmentHint(bool supported, int mode) {
+    if (!supported)
+        return L"背景模糊层初始化失败，请查看运行日志中的 dock-backdrop 信息。";
+    return mode == 1
+               ? L"0% 完全透明，100% 显示随 Windows 应用主题变化的纯底色；中间值为底色半透明。"
+               : L"0% 完全透明，100% 完全模糊；中间值混合清晰桌面与模糊背景。";
+}
+
+const wchar_t* backgroundAdjustmentLabel(bool immersive, int mode) {
+    if (immersive)
+        return mode == 1 ? L"沉浸模式背景不透明度" : L"沉浸模式背景模糊程度";
+    return mode == 1 ? L"背景不透明度" : L"背景模糊程度";
+}
+
 bool parseBoundedInteger(const std::wstring& text, int minValue, int maxValue, int& value) {
     size_t begin = 0;
     size_t end = text.size();
@@ -319,9 +335,11 @@ settings_icon::Kind iconForRow(int id) {
         return settings_icon::Kind::Display;
     case kIdAppBarEdge:
         return settings_icon::Kind::Position;
-    case kIdImmersiveMaskOpacity:
-    case kIdDockMaskOpacity:
-        return settings_icon::Kind::Opacity;
+    case kIdImmersiveBackgroundBlur:
+    case kIdDockBackgroundBlur:
+    case kIdImmersiveBackgroundAdjustment:
+    case kIdDockBackgroundAdjustment:
+        return settings_icon::Kind::Background;
     case kIdDockResourceGpuUsage:
     case kIdDockResourceCpuFrequency:
         return settings_icon::Kind::Performance;
@@ -753,6 +771,23 @@ struct SettingsDialog::Impl {
                            findRow(kIdProgressBackground)->checked;
     }
 
+    void updateBackgroundAdjustmentPresentation() {
+        auto update = [this](int modeId, int sliderId, bool immersive) {
+            const auto* modeRow = findRow(modeId);
+            const int selected = modeRow ? std::clamp(modeRow->selected, 0, 1) : 0;
+            if (auto* slider = findRow(sliderId)) {
+                slider->text = backgroundAdjustmentLabel(immersive, selected);
+                slider->hint = backgroundAdjustmentHint(
+                    state.backgroundBlurSupported, selected);
+                slider->showHint = true;
+                slider->minHeight = kRowTallH;
+                slider->height = slider->minHeight;
+            }
+        };
+        update(kIdImmersiveBackgroundAdjustment, kIdImmersiveBackgroundBlur, true);
+        update(kIdDockBackgroundAdjustment, kIdDockBackgroundBlur, false);
+    }
+
     void updateImmersiveRowsEnabled() {
         auto* mode = findRow(kIdTaskbarViewMode);
         const int selectedMode = mode ? std::clamp(mode->selected, 0, 2) : 0;
@@ -768,10 +803,33 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdAppBarEdge))
             row->enabled = appBarEnabled;
-        if (auto* row = findRow(kIdImmersiveMaskOpacity))
-            row->enabled = selectedMode == 1 && immersiveEnabled;
-        if (auto* row = findRow(kIdDockMaskOpacity))
-            row->enabled = appBarEnabled;
+        if (auto* row = findRow(kIdImmersiveBackgroundAdjustment)) {
+            row->selected = std::clamp(state.immersiveBackgroundAdjustment, 0, 1);
+            row->enabled = selectedMode == 1 && immersiveEnabled &&
+                           state.backgroundBlurSupported;
+        }
+        if (auto* row = findRow(kIdDockBackgroundAdjustment)) {
+            row->selected = std::clamp(state.dockBackgroundAdjustment, 0, 1);
+            row->enabled = appBarEnabled && state.backgroundBlurSupported;
+        }
+        if (auto* row = findRow(kIdImmersiveBackgroundBlur)) {
+            row->enabled = selectedMode == 1 && immersiveEnabled &&
+                           state.backgroundBlurSupported;
+            row->hint = backgroundAdjustmentHint(
+                state.backgroundBlurSupported, state.immersiveBackgroundAdjustment);
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
+        }
+        if (auto* row = findRow(kIdDockBackgroundBlur)) {
+            row->enabled = appBarEnabled && state.backgroundBlurSupported;
+            row->hint = backgroundAdjustmentHint(
+                state.backgroundBlurSupported, state.dockBackgroundAdjustment);
+            row->showHint = true;
+            row->minHeight = kRowTallH;
+            row->height = row->minHeight;
+        }
+        updateBackgroundAdjustmentPresentation();
         if (auto* row = findRow(kIdDockResourceGpuUsage))
             row->enabled = appBarEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
@@ -809,8 +867,9 @@ struct SettingsDialog::Impl {
         return row;
     }
 
-    Row& addSlider(int page, int id, const wchar_t* text, int value, bool enabled) {
-        Row& row = addRow(page, id, ControlKind::Slider, text, nullptr, 216.0f, kRowH);
+    Row& addSlider(int page, int id, const wchar_t* text, int value, bool enabled,
+                   const wchar_t* hint = nullptr, float height = kRowH) {
+        Row& row = addRow(page, id, ControlKind::Slider, text, hint, 216.0f, height);
         row.value = std::clamp(value, 0, 100);
         row.minValue = 0;
         row.maxValue = 100;
@@ -1064,10 +1123,30 @@ struct SettingsDialog::Impl {
         addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
                  L"当前仅支持水平顶部和底部。", {L"顶部", L"底部"},
                  std::clamp(state.appBarEdge, 0, 1), state.taskbarViewMode == 2, kRowH);
-        addSlider(kTaskbarModePage, kIdImmersiveMaskOpacity, L"沉浸模式遮罩不透明度",
-                  state.immersiveMaskOpacity, !vertical && state.taskbarViewMode == 1);
-        addSlider(kTaskbarModePage, kIdDockMaskOpacity, L"Dock 模式遮罩不透明度",
-                  state.dockMaskOpacity, state.taskbarViewMode == 2);
+        addRadio(kTaskbarModePage, kIdImmersiveBackgroundAdjustment, L"调整方式", nullptr,
+                 {L"模糊程度", L"不透明度"},
+                 std::clamp(state.immersiveBackgroundAdjustment, 0, 1),
+                 !vertical && state.taskbarViewMode == 1 && state.backgroundBlurSupported,
+                 kRowH);
+        addSlider(kTaskbarModePage, kIdImmersiveBackgroundBlur,
+                  backgroundAdjustmentLabel(true, state.immersiveBackgroundAdjustment),
+                  state.immersiveBackgroundBlur,
+                  !vertical && state.taskbarViewMode == 1 && state.backgroundBlurSupported,
+                  backgroundAdjustmentHint(state.backgroundBlurSupported,
+                                           state.immersiveBackgroundAdjustment),
+                  kRowTallH);
+        addHeader(kTaskbarModePage, L"Dock 背景");
+        addRadio(kTaskbarModePage, kIdDockBackgroundAdjustment, L"调整方式", nullptr,
+                 {L"模糊程度", L"不透明度"},
+                 std::clamp(state.dockBackgroundAdjustment, 0, 1),
+                 state.taskbarViewMode == 2 && state.backgroundBlurSupported, kRowH);
+        addSlider(kTaskbarModePage, kIdDockBackgroundBlur,
+                  backgroundAdjustmentLabel(false, state.dockBackgroundAdjustment),
+                  state.dockBackgroundBlur,
+                  state.taskbarViewMode == 2 && state.backgroundBlurSupported,
+                  backgroundAdjustmentHint(state.backgroundBlurSupported,
+                                           state.dockBackgroundAdjustment),
+                  kRowTallH);
         addHeader(kTaskbarModePage, L"Dock 资源监视");
         Row& dockResourceGpu = addRow(
             kTaskbarModePage, kIdDockResourceGpuUsage, ControlKind::Toggle,
@@ -3509,13 +3588,26 @@ struct SettingsDialog::Impl {
             if (actions.onAppBarEdge)
                 actions.onAppBarEdge(state.appBarEdge);
             break;
-        case kIdImmersiveMaskOpacity:
-            if (actions.onImmersiveMaskOpacity)
-                actions.onImmersiveMaskOpacity(row->value);
+        case kIdImmersiveBackgroundAdjustment:
+            state.immersiveBackgroundAdjustment = std::clamp(row->selected, 0, 1);
+            updateBackgroundAdjustmentPresentation();
+            if (actions.onImmersiveBackgroundAdjustment)
+                actions.onImmersiveBackgroundAdjustment(
+                    state.immersiveBackgroundAdjustment);
             break;
-        case kIdDockMaskOpacity:
-            if (actions.onDockMaskOpacity)
-                actions.onDockMaskOpacity(row->value);
+        case kIdDockBackgroundAdjustment:
+            state.dockBackgroundAdjustment = std::clamp(row->selected, 0, 1);
+            updateBackgroundAdjustmentPresentation();
+            if (actions.onDockBackgroundAdjustment)
+                actions.onDockBackgroundAdjustment(state.dockBackgroundAdjustment);
+            break;
+        case kIdImmersiveBackgroundBlur:
+            if (actions.onImmersiveBackgroundBlur)
+                actions.onImmersiveBackgroundBlur(row->value);
+            break;
+        case kIdDockBackgroundBlur:
+            if (actions.onDockBackgroundBlur)
+                actions.onDockBackgroundBlur(row->value);
             break;
         case kIdDockResourceGpuUsage:
             row->checked = !row->checked;
@@ -3796,14 +3888,31 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.appBarEdge, 0, 1);
             row->enabled = s.taskbarViewMode == 2;
         }
-        if (auto* row = findRow(kIdImmersiveMaskOpacity)) {
-            row->value = std::clamp(s.immersiveMaskOpacity, 0, 100);
-            row->enabled = !vertical && s.taskbarViewMode == 1;
+        if (auto* row = findRow(kIdImmersiveBackgroundAdjustment)) {
+            row->selected = std::clamp(s.immersiveBackgroundAdjustment, 0, 1);
+            row->enabled = !vertical && s.taskbarViewMode == 1 &&
+                           s.backgroundBlurSupported;
         }
-        if (auto* row = findRow(kIdDockMaskOpacity)) {
-            row->value = std::clamp(s.dockMaskOpacity, 0, 100);
-            row->enabled = s.taskbarViewMode == 2;
+        if (auto* row = findRow(kIdDockBackgroundAdjustment)) {
+            row->selected = std::clamp(s.dockBackgroundAdjustment, 0, 1);
+            row->enabled = s.taskbarViewMode == 2 && s.backgroundBlurSupported;
         }
+        if (auto* row = findRow(kIdImmersiveBackgroundBlur)) {
+            row->value = std::clamp(s.immersiveBackgroundBlur, 0, 100);
+            row->enabled = !vertical && s.taskbarViewMode == 1 &&
+                           s.backgroundBlurSupported;
+            row->hint = backgroundAdjustmentHint(
+                s.backgroundBlurSupported, s.immersiveBackgroundAdjustment);
+            row->showHint = true;
+        }
+        if (auto* row = findRow(kIdDockBackgroundBlur)) {
+            row->value = std::clamp(s.dockBackgroundBlur, 0, 100);
+            row->enabled = s.taskbarViewMode == 2 && s.backgroundBlurSupported;
+            row->hint = backgroundAdjustmentHint(
+                s.backgroundBlurSupported, s.dockBackgroundAdjustment);
+            row->showHint = true;
+        }
+        updateBackgroundAdjustmentPresentation();
         if (auto* row = findRow(kIdDockResourceGpuUsage)) {
             row->checked = s.dockResourceGpuUsage;
             row->enabled = s.taskbarViewMode == 2;

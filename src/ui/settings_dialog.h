@@ -34,8 +34,11 @@ struct SettingsState {
     int taskbarViewMode = 0; // 0 内嵌 1 沉浸 2 AppBar
     bool mediaSessionAlive = false; // 有活动媒体会话时才允许选择沉浸模式
     int appBarEdge = 0; // 0 顶部 1 底部
-    int immersiveMaskOpacity = 88;
-    int dockMaskOpacity = 88;
+    int immersiveBackgroundBlur = 88;
+    int dockBackgroundBlur = 88;
+    int immersiveBackgroundAdjustment = 0; // 0 模糊程度 1 不透明度
+    int dockBackgroundAdjustment = 0; // 0 模糊程度 1 不透明度
+    bool backgroundBlurSupported = true;
     bool dockResourceGpuUsage = false;
     bool dockResourceCpuFrequency = false;
     bool spectrumOn = false;
@@ -104,8 +107,10 @@ struct SettingsActions {
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(int)> onTaskbarViewMode;
     std::function<void(int)> onAppBarEdge;
-    std::function<void(int)> onImmersiveMaskOpacity;
-    std::function<void(int)> onDockMaskOpacity;
+    std::function<void(int)> onImmersiveBackgroundBlur;
+    std::function<void(int)> onDockBackgroundBlur;
+    std::function<void(int)> onImmersiveBackgroundAdjustment;
+    std::function<void(int)> onDockBackgroundAdjustment;
     std::function<void(bool)> onDockResourceGpuUsage;
     std::function<void(bool)> onDockResourceCpuFrequency;
     std::function<void(bool)> onSpectrum;
