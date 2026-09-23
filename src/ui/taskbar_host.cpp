@@ -1739,8 +1739,9 @@ struct TaskbarHost::Impl {
         if (!findTaskbar())
             return false;
 
-        // 内容完全由 DirectComposition visual 提供，不再是分层窗口
-        DWORD ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        // 内容完全由 DirectComposition visual 提供；禁用窗口自身的不透明重定向位图，
+        // 避免登录或解锁后重建的底面透过半透明遮罩显示为灰底。
+        DWORD ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
         HWND h = CreateWindowExW(ex, kWndClassName, L"QQMusicLyricTaskbar", WS_POPUP, 0, 0, 1, 1,
                                  nullptr, nullptr, inst, this);
         if (!h)
