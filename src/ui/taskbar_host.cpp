@@ -2948,6 +2948,7 @@ struct TaskbarHost::Impl {
             dockBackdrop_.setBlurPercent(immersiveBackgroundBlurPct_);
             if (!dockBackdrop_.available())
                 backgroundBlurSupported_ = false;
+            requestFrame();
         }
     }
 
@@ -2960,6 +2961,7 @@ struct TaskbarHost::Impl {
             dockBackdrop_.setBlurPercent(dockBackgroundBlurPct_);
             if (!dockBackdrop_.available())
                 backgroundBlurSupported_ = false;
+            requestFrame();
         }
     }
 
@@ -8142,6 +8144,19 @@ struct TaskbarHost::Impl {
 
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         const D2D1_ROUNDED_RECT bg = taskbarBackgroundRect(w, h);
+        if (isAppBarView() && brushBackground_) {
+            // 扩展模式会在下方提前返回；Dock 面向工作区的一侧要在此处绘制分隔线。
+            const bool appDark = fluent::isWindowsAppDarkMode();
+            brushBackground_->SetColor(appDark
+                                           ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f)
+                                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.16f));
+            const float pixel = 1.0f / std::max(scale(), 1.0f);
+            const float top = appBarEdge_ == AppBarEdge::Top
+                                  ? std::max(0.0f, h - pixel)
+                                  : 0.0f;
+            rt->FillRectangle(D2D1::RectF(0.0f, top, w, std::min(h, top + pixel)),
+                              brushBackground_);
+        }
         if (isExpandedView())
             return; // Immersive 和 Dock 的背景由 Composition 模糊层绘制，窗口保持透明。
 
@@ -8203,20 +8218,6 @@ struct TaskbarHost::Impl {
         if (taskbarDynamicBackgroundVisible())
             drawIdleQuoteBackground(w, h, dynamicBackgroundW);
 
-        if (isAppBarView() && brushBackground_) {
-            // 与 Windows 任务栏一致，只在 Dock 面向工作区的一侧保留 1 个物理像素
-            // 的分隔线：顶部 Dock 画下边缘，底部 Dock 镜像到上边缘。
-            const bool appDark = fluent::isWindowsAppDarkMode();
-            brushBackground_->SetColor(appDark
-                                           ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f)
-                                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.16f));
-            const float pixel = 1.0f / std::max(scale(), 1.0f);
-            const float top = appBarEdge_ == AppBarEdge::Top
-                                  ? std::max(0.0f, h - pixel)
-                                  : 0.0f;
-            rt->FillRectangle(D2D1::RectF(0.0f, top, w, std::min(h, top + pixel)),
-                              brushBackground_);
-        }
     }
 
     bool finishTaskbarFrame(HRESULT hr) {
