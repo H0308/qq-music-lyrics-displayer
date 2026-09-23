@@ -48,7 +48,7 @@ public:
     void start(ChangeCallback onChange);
     SmtcSnapshot snapshot() const; // 当前快照（Playing 时进度已插值）
 
-    // 播放控制（无会话或调用失败时静默忽略）
+    // 播放控制（无会话或调用失败时不改变 UI，并记录诊断日志）
     void playPause();
     void skipNext();
     void skipPrevious();

@@ -3,6 +3,7 @@
 #include "media/smtc/netease_smtc_adapter.h"
 #include "media/smtc/qq_music_smtc_adapter.h"
 #include "media/smtc/smtc_common.h"
+#include "logging/runtime_logger.h"
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -11,6 +12,7 @@
 #include <condition_variable>
 #include <cwchar>
 #include <mutex>
+#include <sstream>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -56,6 +58,63 @@ bool playerProcessAlive(SmtcPlayerType player) {
         return processAlive(L"cloudmusic.exe");
     default:
         return false;
+    }
+}
+
+const wchar_t* playerName(SmtcPlayerType player) noexcept {
+    switch (player) {
+    case SmtcPlayerType::QQMusic:
+        return L"QQMusic";
+    case SmtcPlayerType::NetEase:
+        return L"NetEase";
+    default:
+        return L"Unknown";
+    }
+}
+
+const wchar_t* playbackStatusName(PlaybackStatus status) noexcept {
+    switch (status) {
+    case PlaybackStatus::Stopped:
+        return L"Stopped";
+    case PlaybackStatus::Playing:
+        return L"Playing";
+    case PlaybackStatus::Paused:
+        return L"Paused";
+    default:
+        return L"Other";
+    }
+}
+
+const wchar_t* asyncStatusName(winrt::Windows::Foundation::AsyncStatus status) noexcept {
+    using AsyncStatus = winrt::Windows::Foundation::AsyncStatus;
+    switch (status) {
+    case AsyncStatus::Started:
+        return L"Started";
+    case AsyncStatus::Completed:
+        return L"Completed";
+    case AsyncStatus::Canceled:
+        return L"Canceled";
+    case AsyncStatus::Error:
+        return L"Error";
+    default:
+        return L"Unknown";
+    }
+}
+
+void writeSmtcControlLog(const std::wstring& message) noexcept {
+    try {
+        runtime_log::writef(L"[smtc-control] %s", message.c_str());
+    } catch (...) {
+    }
+}
+
+std::wstring sessionSourceAppUserModelId(const Session& session) {
+    if (!session)
+        return L"<none>";
+    try {
+        return session.SourceAppUserModelId().c_str();
+    } catch (...) {
+        return L"<unavailable>";
     }
 }
 
@@ -150,23 +209,132 @@ struct SmtcMonitor::Impl {
     }
 
     // 控制按钮运行在任务栏窗口线程上，不能同步等待远程 WinRT 操作。
-    // 失败状态在完成回调中直接忽略，避免在切歌期间对已失效会话调用
-    // GetResults()，也避免阻塞任务栏消息循环。
+    // 完成回调只记录异步结果，不阻塞任务栏消息循环。
+    void logControlSession(const wchar_t* action, const wchar_t* api,
+                           const Session& target, const SmtcSnapshot& snapshot) {
+        Session systemCurrent{ nullptr };
+        int targetIndex = -1;
+        int currentIndex = -1;
+        int sessionCount = -1;
+        const wchar_t* managerQuery = manager ? L"ok" : L"unavailable";
+
+        if (manager) {
+            try {
+                systemCurrent = manager.GetCurrentSession();
+                auto sessions = manager.GetSessions();
+                if (sessions) {
+                    sessionCount = static_cast<int>(sessions.Size());
+                    for (uint32_t i = 0; i < sessions.Size(); ++i) {
+                        const Session candidate = sessions.GetAt(i);
+                        if (target && targetIndex < 0 && smtc::sameSession(target, candidate))
+                            targetIndex = static_cast<int>(i);
+                        if (systemCurrent && currentIndex < 0 &&
+                            smtc::sameSession(systemCurrent, candidate))
+                            currentIndex = static_cast<int>(i);
+                    }
+                }
+            } catch (...) {
+                managerQuery = L"error";
+            }
+        }
+
+        std::wostringstream line;
+        line << L"phase=dispatch action=" << action << L" api=" << api
+             << L" player=" << playerName(snapshot.player)
+             << L" selectedSource=" << sessionSourceAppUserModelId(target)
+             << L" selectedListed=" << (targetIndex >= 0 ? 1 : 0)
+             << L" selectedIndex=" << targetIndex
+             << L" cachedStatus=" << playbackStatusName(snapshot.status)
+             << L" controls(prev=" << (snapshot.canPrev ? 1 : 0)
+             << L",playPause=" << (snapshot.canPlayPause ? 1 : 0)
+             << L",next=" << (snapshot.canNext ? 1 : 0) << L")"
+             << L" systemCurrentSource=" << sessionSourceAppUserModelId(systemCurrent)
+             << L" currentListed=" << (currentIndex >= 0 ? 1 : 0)
+             << L" currentIndex=" << currentIndex
+             << L" sameSession=" << (target && systemCurrent &&
+                                           smtc::sameSession(target, systemCurrent) ? 1 : 0)
+             << L" sessionCount=" << sessionCount << L" managerQuery=" << managerQuery;
+        writeSmtcControlLog(line.str());
+    }
+
     template <typename StartOperation>
-    void startControlOperation(StartOperation&& start) {
+    void startControlOperation(const wchar_t* action, const wchar_t* api,
+                               const Session& target, const SmtcSnapshot& snapshot,
+                               StartOperation&& start) {
+        try {
+            logControlSession(action, api, target, snapshot);
+        } catch (...) {
+            // 诊断日志异常不能阻止实际控制请求。
+        }
+        if (!target) {
+            std::wostringstream line;
+            line << L"phase=operation-skipped action=" << action << L" api=" << api
+                 << L" reason=no-selected-session";
+            writeSmtcControlLog(line.str());
+            return;
+        }
+
         try {
             auto operation = start();
-            if (!operation)
+            if (!operation) {
+                std::wostringstream line;
+                line << L"phase=operation-start action=" << action << L" api=" << api
+                     << L" result=no-operation";
+                writeSmtcControlLog(line.str());
                 return;
-            operation.Completed([](auto&& completedOperation, auto status) {
-                if (status != winrt::Windows::Foundation::AsyncStatus::Completed)
+            }
+
+            {
+                std::wostringstream line;
+                line << L"phase=operation-start action=" << action << L" api=" << api
+                     << L" result=started";
+                writeSmtcControlLog(line.str());
+            }
+
+            const std::wstring actionCopy(action);
+            const std::wstring apiCopy(api);
+            operation.Completed([actionCopy, apiCopy](auto&& completedOperation, auto status) {
+                using AsyncStatus = winrt::Windows::Foundation::AsyncStatus;
+                if (status != AsyncStatus::Completed) {
+                    std::wostringstream line;
+                    line << L"phase=operation-complete action=" << actionCopy
+                         << L" api=" << apiCopy << L" asyncStatus="
+                         << asyncStatusName(status) << L"(" << static_cast<int>(status) << L")";
+                    writeSmtcControlLog(line.str());
                     return;
+                }
+
                 try {
-                    (void)completedOperation.GetResults();
+                    const bool succeeded = completedOperation.GetResults();
+                    std::wostringstream line;
+                    line << L"phase=operation-complete action=" << actionCopy
+                         << L" api=" << apiCopy << L" asyncStatus=Completed result="
+                         << (succeeded ? L"true" : L"false");
+                    writeSmtcControlLog(line.str());
+                } catch (const winrt::hresult_error& error) {
+                    std::wostringstream line;
+                    line << L"phase=operation-complete action=" << actionCopy
+                         << L" api=" << apiCopy << L" asyncStatus=Completed result=exception hresult=0x"
+                         << std::hex << static_cast<uint32_t>(error.code());
+                    writeSmtcControlLog(line.str());
                 } catch (...) {
+                    std::wostringstream line;
+                    line << L"phase=operation-complete action=" << actionCopy
+                         << L" api=" << apiCopy << L" asyncStatus=Completed result=unknown-exception";
+                    writeSmtcControlLog(line.str());
                 }
             });
+        } catch (const winrt::hresult_error& error) {
+            std::wostringstream line;
+            line << L"phase=operation-start action=" << action << L" api=" << api
+                 << L" result=exception hresult=0x" << std::hex
+                 << static_cast<uint32_t>(error.code());
+            writeSmtcControlLog(line.str());
         } catch (...) {
+            std::wostringstream line;
+            line << L"phase=operation-start action=" << action << L" api=" << api
+                 << L" result=unknown-exception";
+            writeSmtcControlLog(line.str());
         }
     }
 
@@ -606,6 +774,7 @@ SmtcMonitor::SmtcMonitor() : impl_(std::make_unique<Impl>()) {}
 SmtcMonitor::~SmtcMonitor() = default;
 
 void SmtcMonitor::start(ChangeCallback onChange) {
+    writeSmtcControlLog(L"phase=monitor-start");
     impl_->onChange = std::move(onChange);
     try {
         auto managerOp = GlobalSystemMediaTransportControlsSessionManager::RequestAsync();
@@ -639,38 +808,41 @@ SmtcSnapshot SmtcMonitor::snapshot() const {
 
 void SmtcMonitor::playPause() {
     Session current{ nullptr };
-    PlaybackStatus status = PlaybackStatus::Other;
+    SmtcSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         current = impl_->session;
-        status = impl_->snap.status;
+        snapshot = impl_->snap;
     }
-    if (!current)
-        return;
-    if (status == PlaybackStatus::Playing)
-        impl_->startControlOperation([current] { return current.TryPauseAsync(); });
-    else
-        impl_->startControlOperation([current] { return current.TryPlayAsync(); });
+    if (snapshot.status == PlaybackStatus::Playing) {
+        impl_->startControlOperation(L"play-pause", L"TryPauseAsync", current, snapshot,
+                                     [current] { return current.TryPauseAsync(); });
+    } else {
+        impl_->startControlOperation(L"play-pause", L"TryPlayAsync", current, snapshot,
+                                     [current] { return current.TryPlayAsync(); });
+    }
 }
 
 void SmtcMonitor::skipNext() {
     Session current{ nullptr };
+    SmtcSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         current = impl_->session;
+        snapshot = impl_->snap;
     }
-    if (!current)
-        return;
-    impl_->startControlOperation([current] { return current.TrySkipNextAsync(); });
+    impl_->startControlOperation(L"next", L"TrySkipNextAsync", current, snapshot,
+                                 [current] { return current.TrySkipNextAsync(); });
 }
 
 void SmtcMonitor::skipPrevious() {
     Session current{ nullptr };
+    SmtcSnapshot snapshot;
     {
         std::lock_guard<std::mutex> lk(impl_->mtx);
         current = impl_->session;
+        snapshot = impl_->snap;
     }
-    if (!current)
-        return;
-    impl_->startControlOperation([current] { return current.TrySkipPreviousAsync(); });
+    impl_->startControlOperation(L"previous", L"TrySkipPreviousAsync", current, snapshot,
+                                 [current] { return current.TrySkipPreviousAsync(); });
 }
