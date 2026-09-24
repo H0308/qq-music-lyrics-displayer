@@ -127,6 +127,7 @@ constexpr float kDockResourceZoneRatio = 0.12f;
 constexpr float kDockResourceZoneMinW = 172.0f;
 constexpr float kDockResourceZoneMaxW = 180.0f;
 constexpr float kDockResourceZoneGap = 10.0f;
+constexpr float kDockResourceTextMinGap = 2.0f;
 constexpr float kDockResourceMetricColumnW = 72.0f;
 constexpr float kDockResourceRightPadding = 3.0f;
 constexpr float kDockPetSeatW = 42.0f;
@@ -4003,6 +4004,9 @@ struct TaskbarHost::Impl {
         const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
         const float rightColumnW =
             std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
+        const float leftCellW = leftColumnW +
+                                std::max(0.0f, kDockResourceZoneGap -
+                                                  kDockResourceTextMinGap);
 
         IDWriteFactory* dwrite = renderer.dwrite();
         auto drawResourceCell = [&](const std::wstring& text, float left, float rowTop,
@@ -4025,7 +4029,7 @@ struct TaskbarHost::Impl {
         for (size_t row = 0; row < visibleRows.size(); ++row) {
             const auto& current = visibleRows[row];
             const float rowTop = top + row * rowH;
-            drawResourceCell(current.left, x, rowTop, leftColumnW);
+            drawResourceCell(current.left, x, rowTop, leftCellW);
             if (!current.right.empty())
                 drawResourceCell(current.right, rightColumnX, rowTop, rightColumnW);
         }
