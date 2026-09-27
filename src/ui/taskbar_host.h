@@ -3,6 +3,8 @@
 #include "lyric_window.h"
 
 #include <array>
+#include <string>
+#include <vector>
 
 enum class AlbumCoverEffect {
     Default,
@@ -85,6 +87,21 @@ enum class AppBarEdge {
     Bottom,
 };
 
+// 当前桌面显示器及对应的 Explorer 任务栏。deviceName 用于跨进程重建时重新定位，
+// monitor 仅在本次显示拓扑有效。
+struct TaskbarDisplayInfo {
+    HMONITOR monitor = nullptr;
+    std::wstring deviceName;
+    std::wstring displayName;
+    RECT monitorRect{};
+    HWND taskbarWindow = nullptr;
+    bool primary = false;
+    bool horizontalTaskbar = false;
+};
+
+// 枚举当前已连接到桌面的显示器，以及 Explorer 在该显示器上的任务栏。
+std::vector<TaskbarDisplayInfo> enumerateTaskbarDisplays();
+
 // 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
 // 数值保持与 settings.json 中已有的 0/1/2 语义一致，Minimal 追加为 3。
 enum class RenderMode {
@@ -103,6 +120,8 @@ public:
     ~TaskbarHost() override;
 
     bool create(HINSTANCE inst) override;
+    bool create(HINSTANCE inst, const std::wstring& monitorDeviceName,
+                TaskbarViewMode initialViewMode);
     HWND hwnd() const override;
 
     void setTickCallback(std::function<void()> cb) override;

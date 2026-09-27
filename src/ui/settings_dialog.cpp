@@ -91,6 +91,7 @@ constexpr int kIdTickTickEnabled = 466;
 constexpr int kIdTaskbarContextMenu = 467;
 constexpr int kIdTaskbarViewMode = 468;
 constexpr int kIdAppBarEdge = 469;
+constexpr int kIdTaskbarMonitor = 470;
 constexpr int kIdImmersiveBackgroundBlur = 471;
 constexpr int kIdDockBackgroundBlur = 474;
 constexpr int kIdDockResourceGpuUsage = 473;
@@ -803,6 +804,8 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdAppBarEdge))
             row->enabled = appBarEnabled;
+        if (auto* row = findRow(kIdTaskbarMonitor))
+            row->enabled = selectedMode != 0;
         if (auto* row = findRow(kIdImmersiveBackgroundAdjustment)) {
             row->selected = std::clamp(state.immersiveBackgroundAdjustment, 0, 1);
             row->enabled = selectedMode == 1 && immersiveEnabled &&
@@ -1120,6 +1123,11 @@ struct SettingsDialog::Impl {
                  taskbarViewModeHint(state.mediaSessionAlive, vertical),
                  {L"内嵌", L"沉浸", L"Dock 模式"}, std::clamp(state.taskbarViewMode, 0, 2),
                  true, kRowTallH);
+        Row& taskbarMonitor = addButton(
+            kTaskbarModePage, kIdTaskbarMonitor, L"目标显示器",
+            L"内嵌模式固定显示在主显示器；沉浸模式覆盖所选任务栏，全部显示器时只覆盖横向任务栏。Dock 模式占用对应显示器的工作区；断开后切回主显示器。",
+            state.taskbarMonitorLabel.c_str(), kRowTallH);
+        taskbarMonitor.enabled = state.taskbarViewMode != 0;
         addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
                  L"当前仅支持水平顶部和底部。", {L"顶部", L"底部"},
                  std::clamp(state.appBarEdge, 0, 1), state.taskbarViewMode == 2, kRowH);
@@ -3583,6 +3591,10 @@ struct SettingsDialog::Impl {
             if (actions.onTaskbarViewMode)
                 actions.onTaskbarViewMode(state.taskbarViewMode);
             break;
+        case kIdTaskbarMonitor:
+            if (actions.onChooseTaskbarMonitor)
+                actions.onChooseTaskbarMonitor();
+            break;
         case kIdAppBarEdge:
             state.appBarEdge = std::clamp(row->selected, 0, 1);
             if (actions.onAppBarEdge)
@@ -3883,6 +3895,10 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.taskbarViewMode, 0, 2);
             row->hint = taskbarViewModeHint(s.mediaSessionAlive, vertical);
             row->showHint = true;
+        }
+        if (auto* row = findRow(kIdTaskbarMonitor)) {
+            row->controlText = s.taskbarMonitorLabel;
+            row->enabled = s.taskbarViewMode != 0;
         }
         if (auto* row = findRow(kIdAppBarEdge)) {
             row->selected = std::clamp(s.appBarEdge, 0, 1);

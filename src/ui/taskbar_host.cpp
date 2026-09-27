@@ -212,7 +212,9 @@ bool isValidTaskbarEdge(UINT edge) {
 UINT queryTaskbarEdge(HWND taskbar, const RECT& taskbarRect) {
     APPBARDATA data{};
     data.cbSize = sizeof(data);
-    if (SHAppBarMessage(ABM_GETTASKBARPOS, &data) != 0 && isValidTaskbarEdge(data.uEdge))
+    if (SHAppBarMessage(ABM_GETTASKBARPOS, &data) != 0 && isValidTaskbarEdge(data.uEdge) &&
+        data.rc.left == taskbarRect.left && data.rc.top == taskbarRect.top &&
+        data.rc.right == taskbarRect.right && data.rc.bottom == taskbarRect.bottom)
         return data.uEdge;
 
     // ABM_GETTASKBARPOS 是首选；旧版 Shell 或第三方任务栏替代实现不可用时，
@@ -238,6 +240,78 @@ UINT queryTaskbarEdge(HWND taskbar, const RECT& taskbarRect) {
     return (taskbarRect.bottom - taskbarRect.top) > (taskbarRect.right - taskbarRect.left)
                ? ABE_LEFT
                : ABE_BOTTOM;
+}
+
+struct DisplayEnumeration {
+    std::vector<TaskbarDisplayInfo>* displays = nullptr;
+};
+
+BOOL CALLBACK collectDisplayMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) {
+    auto* enumeration = reinterpret_cast<DisplayEnumeration*>(parameter);
+    if (!enumeration || !enumeration->displays)
+        return FALSE;
+
+    MONITORINFOEXW info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info))
+        return TRUE;
+
+    TaskbarDisplayInfo display;
+    display.monitor = monitor;
+    display.deviceName = info.szDevice;
+    display.displayName = display.deviceName;
+    display.monitorRect = info.rcMonitor;
+    display.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+
+    DISPLAY_DEVICEW device{};
+    device.cb = sizeof(device);
+    if (!EnumDisplayDevicesW(info.szDevice, 0, &device, 0) ||
+        (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
+        return TRUE;
+    if (device.DeviceString[0] != L'\0')
+        display.displayName = device.DeviceString;
+
+    enumeration->displays->push_back(std::move(display));
+    return TRUE;
+}
+
+struct TaskbarWindowEnumeration {
+    std::vector<TaskbarDisplayInfo>* displays = nullptr;
+    DWORD shellProcessId = 0;
+};
+
+BOOL CALLBACK findTaskbarForDisplay(HWND window, LPARAM parameter) {
+    auto* enumeration = reinterpret_cast<TaskbarWindowEnumeration*>(parameter);
+    if (!enumeration || !enumeration->displays)
+        return FALSE;
+
+    wchar_t className[128]{};
+    const int length = GetClassNameW(window, className, static_cast<int>(std::size(className)));
+    if (length <= 0 ||
+        (wcscmp(className, L"Shell_TrayWnd") != 0 &&
+         wcscmp(className, L"Shell_SecondaryTrayWnd") != 0))
+        return TRUE;
+
+    DWORD processId = 0;
+    GetWindowThreadProcessId(window, &processId);
+    if (enumeration->shellProcessId != 0 && processId != enumeration->shellProcessId)
+        return TRUE;
+
+    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+    auto it = std::find_if(enumeration->displays->begin(), enumeration->displays->end(),
+                           [monitor](const TaskbarDisplayInfo& display) {
+                               return display.monitor == monitor;
+                           });
+    if (it == enumeration->displays->end())
+        return TRUE;
+
+    it->taskbarWindow = window;
+    RECT taskbarRect{};
+    if (GetWindowRect(window, &taskbarRect)) {
+        const UINT edge = queryTaskbarEdge(window, taskbarRect);
+        it->horizontalTaskbar = edge == ABE_TOP || edge == ABE_BOTTOM;
+    }
+    return TRUE;
 }
 
 bool isVerticalTaskbarEdge(UINT edge) {
@@ -733,6 +807,24 @@ constexpr RenderInvalidationMask toMask(RenderInvalidation value) {
 
 } // namespace
 
+std::vector<TaskbarDisplayInfo> enumerateTaskbarDisplays() {
+    std::vector<TaskbarDisplayInfo> displays;
+    DisplayEnumeration displayEnumeration{&displays};
+    EnumDisplayMonitors(nullptr, nullptr, collectDisplayMonitor,
+                        reinterpret_cast<LPARAM>(&displayEnumeration));
+
+    DWORD shellProcessId = 0;
+    if (const HWND primaryTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr))
+        GetWindowThreadProcessId(primaryTaskbar, &shellProcessId);
+    TaskbarWindowEnumeration taskbarEnumeration{&displays, shellProcessId};
+    EnumWindows(findTaskbarForDisplay, reinterpret_cast<LPARAM>(&taskbarEnumeration));
+
+    std::stable_sort(displays.begin(), displays.end(), [](const auto& left, const auto& right) {
+        return left.primary && !right.primary;
+    });
+    return displays;
+}
+
 struct TaskbarHost::Impl {
     struct WindowPlacement {
         int x = 0;
@@ -889,6 +981,8 @@ struct TaskbarHost::Impl {
 
     // 任务栏句柄与子部件
     HWND taskbar_ = nullptr;
+    HMONITOR targetMonitor_ = nullptr;
+    std::wstring targetMonitorDeviceName_;
     bool taskbarEmbedded_ = false;
     bool appBarRegistered_ = false;
     bool appBarFullscreenOpen_ = false;
@@ -1484,17 +1578,35 @@ struct TaskbarHost::Impl {
     // ---------- 窗口创建与定位 ----------
 
     bool findTaskbar() {
-        taskbar_ = FindWindowW(L"Shell_TrayWnd", nullptr);
-        taskbarAtomic_ = taskbar_; // 同步给探测工作线程
-        if (!taskbar_)
+        const auto displays = enumerateTaskbarDisplays();
+        auto display = std::find_if(displays.begin(), displays.end(), [this](const auto& item) {
+            return !targetMonitorDeviceName_.empty() &&
+                   item.deviceName == targetMonitorDeviceName_;
+        });
+        if (display == displays.end())
+            display = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
+                return item.primary;
+            });
+        if (display == displays.end())
             return false;
-        notify_ = FindWindowExW(taskbar_, nullptr, L"TrayNotifyWnd", nullptr);
-        start_ = FindWindowExW(taskbar_, nullptr, L"Start", nullptr);
-        dpi_ = GetDpiForWindow(taskbar_);
+
+        targetMonitor_ = display->monitor;
+        taskbar_ = display->taskbarWindow;
+        taskbarAtomic_ = taskbar_; // 同步给探测工作线程
+        if (!taskbar_ && !isAppBarView())
+            return false;
+        notify_ = taskbar_ ? FindWindowExW(taskbar_, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+        start_ = taskbar_ ? FindWindowExW(taskbar_, nullptr, L"Start", nullptr) : nullptr;
+        dpi_ = taskbar_ ? GetDpiForWindow(taskbar_) : GetDpiForSystem();
+        if (dpi_ == 0)
+            dpi_ = 96;
         centerAlign_ = isTaskbarCenterAlign();
         lightTheme_ = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
         updateRects();
-        taskbarEdge_ = queryTaskbarEdge(taskbar_, rcTaskbar_);
+        if (taskbar_)
+            taskbarEdge_ = queryTaskbarEdge(taskbar_, rcTaskbar_);
+        else
+            taskbarEdge_ = ABE_BOTTOM;
         return true;
     }
 
@@ -1604,6 +1716,8 @@ struct TaskbarHost::Impl {
     }
 
     HMONITOR appBarMonitor() const {
+        if (targetMonitor_)
+            return targetMonitor_;
         if (taskbar_ && IsWindow(taskbar_))
             return MonitorFromWindow(taskbar_, MONITOR_DEFAULTTOPRIMARY);
         if (hwnd)
@@ -1731,8 +1845,11 @@ struct TaskbarHost::Impl {
             requestFrameAndFlush();
     }
 
-    bool createWindow(HINSTANCE inst) {
+    bool createWindow(HINSTANCE inst, const std::wstring& monitorDeviceName,
+                      TaskbarViewMode initialViewMode) {
         this->inst = inst;
+        targetMonitorDeviceName_ = monitorDeviceName;
+        viewMode_ = initialViewMode;
         BOOL animations = TRUE;
         SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
         clientAnimations_ = animations != FALSE;
@@ -4513,7 +4630,7 @@ struct TaskbarHost::Impl {
         renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
         probeReady_ = false;
         delete probeOut_.exchange(nullptr);
-        if (createWindow(inst)) {
+        if (createWindow(inst, targetMonitorDeviceName_, viewMode_)) {
             if (isAppBarView()) {
                 renderState_.setVisibilitySuppressed(false);
                 setPlacementStatus(TaskbarPlacementStatus::Safe);
@@ -9669,7 +9786,12 @@ TaskbarHost::~TaskbarHost() {
 }
 
 bool TaskbarHost::create(HINSTANCE inst) {
-    return impl_->createWindow(inst);
+    return impl_->createWindow(inst, L"", TaskbarViewMode::Embedded);
+}
+
+bool TaskbarHost::create(HINSTANCE inst, const std::wstring& monitorDeviceName,
+                         TaskbarViewMode initialViewMode) {
+    return impl_->createWindow(inst, monitorDeviceName, initialViewMode);
 }
 
 HWND TaskbarHost::hwnd() const {

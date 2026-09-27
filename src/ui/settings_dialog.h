@@ -32,6 +32,7 @@ struct SettingsState {
     bool platformIconVisible = false;
     bool coverEffectVinyl = false;
     int taskbarViewMode = 0; // 0 内嵌 1 沉浸 2 AppBar
+    std::wstring taskbarMonitorLabel;
     bool mediaSessionAlive = false; // 有活动媒体会话时才允许选择沉浸模式
     int appBarEdge = 0; // 0 顶部 1 底部
     int immersiveBackgroundBlur = 88;
@@ -106,6 +107,7 @@ struct SettingsActions {
     std::function<void(bool)> onPlatformIconVisible;
     std::function<void(bool)> onCoverEffectVinyl;
     std::function<void(int)> onTaskbarViewMode;
+    std::function<void()> onChooseTaskbarMonitor;
     std::function<void(int)> onAppBarEdge;
     std::function<void(int)> onImmersiveBackgroundBlur;
     std::function<void(int)> onDockBackgroundBlur;

@@ -58,6 +58,7 @@
 #include <system_error>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -135,6 +136,8 @@ constexpr UINT kCmdTaskbarModeImmersive = 136;
 constexpr UINT kCmdTaskbarModeAppBar = 137;
 constexpr UINT kCmdAppBarTop = 138;
 constexpr UINT kCmdAppBarBottom = 139;
+constexpr int kCmdTaskbarMonitorAll = 150;
+constexpr int kCmdTaskbarMonitorBase = 151;
 constexpr int kTaskbarAppCommandBase = 20000;
 constexpr int kDockQuickAppCommandBase = 21000;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
@@ -932,6 +935,9 @@ struct App {
     AppVolumeController appVolume_;   // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;   // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
+    std::vector<std::unique_ptr<TaskbarHost>> additionalTaskbarHosts_;
+    std::vector<std::wstring> activeTaskbarDisplayIds_;
+    std::vector<std::pair<int, std::wstring>> taskbarMonitorMenuItems_;
     bool taskbarAllowOverlap_ = false;
     bool taskbarNoSpaceClosePending_ = false;
     // 任务栏空间不足时自动隐藏；宿主本身继续保留并后台探测空间变化。
@@ -1062,6 +1068,8 @@ struct App {
     // 任务栏歌词锚定位置：0 = 通知区域左侧，1 = 任务栏最左侧
     int taskbarPosition_ = 0;
     TaskbarViewMode taskbarViewMode_ = TaskbarViewMode::Embedded;
+    // 空字符串表示主显示器，“all”表示全部显示器；具体设备名在断开期间保留。
+    std::wstring taskbarMonitorId_;
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
     int immersiveBackgroundBlur_ = 88;
     int dockBackgroundBlur_ = 88;
@@ -1152,6 +1160,122 @@ struct App {
     void forEachHost(Fn&& fn) {
         if (taskbarHost)
             fn(taskbarHost.get());
+        for (auto& host : additionalTaskbarHosts_) {
+            if (host)
+                fn(host.get());
+        }
+    }
+
+    std::vector<TaskbarDisplayInfo> desiredTaskbarDisplays(const SmtcSnapshot& snap) const {
+        auto displays = enumerateTaskbarDisplays();
+        const auto primary = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
+            return item.primary;
+        });
+        if (primary == displays.end())
+            return {};
+
+        if (taskbarViewMode_ == TaskbarViewMode::Embedded ||
+            (taskbarViewMode_ == TaskbarViewMode::Immersive && !snap.sessionAlive))
+            return {*primary};
+
+        if (taskbarMonitorId_ == L"all") {
+            if (taskbarViewMode_ == TaskbarViewMode::Immersive) {
+                std::vector<TaskbarDisplayInfo> horizontal;
+                std::copy_if(displays.begin(), displays.end(), std::back_inserter(horizontal),
+                             [](const auto& item) {
+                                 return item.taskbarWindow && item.horizontalTaskbar;
+                             });
+                return horizontal.empty() ? std::vector<TaskbarDisplayInfo>{*primary}
+                                          : std::move(horizontal);
+            }
+            return displays;
+        }
+
+        auto selected = primary;
+        if (!taskbarMonitorId_.empty()) {
+            const auto found = std::find_if(displays.begin(), displays.end(), [this](const auto& item) {
+                return item.deviceName == taskbarMonitorId_;
+            });
+            if (found != displays.end())
+                selected = found;
+        }
+        if (taskbarViewMode_ == TaskbarViewMode::Immersive && !selected->taskbarWindow)
+            selected = primary;
+        return {*selected};
+    }
+
+    std::wstring taskbarDisplayLabel(const TaskbarDisplayInfo& display) const {
+        std::wstring label = display.displayName;
+        if (display.displayName != display.deviceName)
+            label += L"（" + display.deviceName + L"）";
+        if (display.primary)
+            label += L"（主显示器）";
+        return label;
+    }
+
+    std::wstring taskbarMonitorLabel() const {
+        if (taskbarMonitorId_ == L"all")
+            return L"全部显示器";
+
+        const auto compactDeviceName = [](std::wstring deviceName) {
+            if (deviceName.rfind(L"\\\\.\\", 0) == 0)
+                deviceName.erase(0, 4);
+            return deviceName;
+        };
+        const auto displays = enumerateTaskbarDisplays();
+        if (taskbarMonitorId_.empty())
+            return L"主显示器";
+        const auto selected = std::find_if(displays.begin(), displays.end(), [this](const auto& item) {
+            return item.deviceName == taskbarMonitorId_;
+        });
+        if (selected == displays.end())
+            return compactDeviceName(taskbarMonitorId_) + L" 断开";
+        return selected->primary ? L"主显示器" : compactDeviceName(selected->deviceName);
+    }
+
+    void selectTaskbarMonitor(const std::wstring& deviceName) {
+        if (taskbarMonitorId_ == deviceName)
+            return;
+        taskbarMonitorId_ = deviceName;
+        saveSettings();
+        syncTaskbarView(monitor.snapshot());
+        refreshSettingsDialog(true);
+    }
+
+    void showTaskbarMonitorMenu() {
+        const auto displays = enumerateTaskbarDisplays();
+        std::vector<fluent::FluentMenuItem> items;
+        taskbarMonitorMenuItems_.clear();
+        fluent::FluentMenuItem all;
+        all.id = kCmdTaskbarMonitorAll;
+        all.text = L"全部显示器";
+        all.icon = settings_icon::Kind::Display;
+        all.checked = taskbarMonitorId_ == L"all";
+        items.push_back(std::move(all));
+        for (size_t i = 0; i < displays.size(); ++i) {
+            const auto& display = displays[i];
+            fluent::FluentMenuItem item;
+            item.id = kCmdTaskbarMonitorBase + static_cast<int>(i);
+            item.text = taskbarDisplayLabel(display);
+            item.icon = settings_icon::Kind::Display;
+            item.checked = taskbarMonitorId_.empty() ? display.primary
+                                                      : taskbarMonitorId_ == display.deviceName;
+            taskbarMonitorMenuItems_.emplace_back(item.id, display.deviceName);
+            items.push_back(std::move(item));
+        }
+        POINT point{};
+        GetCursorPos(&point);
+        fluent::FluentMenu::show(trayHwnd, point, std::move(items), [this](int command) {
+            if (command == kCmdTaskbarMonitorAll) {
+                selectTaskbarMonitor(L"all");
+                return;
+            }
+            const auto found = std::find_if(
+                taskbarMonitorMenuItems_.begin(), taskbarMonitorMenuItems_.end(),
+                [command](const auto& item) { return item.first == command; });
+            if (found != taskbarMonitorMenuItems_.end())
+                selectTaskbarMonitor(found->second);
+        });
     }
 
     const wchar_t* notRunningStatus() const {
@@ -1320,33 +1444,33 @@ struct App {
     // 设置项统一直接生效入口：右键菜单与设置页共用同一套应用逻辑
     void applySongInfoVisible(bool on) {
         songInfoVisible_ = on;
-        if (taskbarHost)
-            taskbarHost->setSongInfoVisible(taskbarVertical_ ? false : on);
+        forEachHost([&](TaskbarHost* host) {
+            host->setSongInfoVisible(host->isVerticalTaskbar() ? false : on);
+        });
         logSettingBool(L"song-info-visible", on);
         saveSettings();
     }
 
     void applyAlbumCoverVisible(bool on) {
         albumCoverVisible_ = on;
-        if (taskbarHost)
-            taskbarHost->setAlbumCoverVisible(on);
+        forEachHost([&](TaskbarHost* host) { host->setAlbumCoverVisible(on); });
         logSettingBool(L"album-cover-visible", on);
         saveSettings();
     }
 
     void applyPlatformIconVisible(bool on) {
         platformIconVisible_ = on;
-        if (taskbarHost)
-            taskbarHost->setPlatformIconVisible(on);
+        forEachHost([&](TaskbarHost* host) { host->setPlatformIconVisible(on); });
         logSettingBool(L"platform-icon-visible", on);
         saveSettings();
     }
 
     void applyCoverEffect(bool vinyl) {
         albumCoverEffect_ = vinyl ? AlbumCoverEffect::Vinyl : AlbumCoverEffect::Default;
-        if (taskbarHost)
-            taskbarHost->setAlbumCoverEffect(
-                isMinimalRenderMode() ? AlbumCoverEffect::Default : albumCoverEffect_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setAlbumCoverEffect(isMinimalRenderMode() ? AlbumCoverEffect::Default
+                                                           : albumCoverEffect_);
+        });
         logSettingBool(L"album-cover-vinyl", vinyl);
         saveSettings();
     }
@@ -1366,8 +1490,7 @@ struct App {
                              : style == 1 ? SpectrumStyle::Bars
                                           : style == 2 ? SpectrumStyle::DreamyWave
                                                         : SpectrumStyle::Default;
-        if (taskbarHost)
-            taskbarHost->setSpectrumStyle(spectrumStyle_);
+        forEachHost([&](TaskbarHost* host) { host->setSpectrumStyle(spectrumStyle_); });
         logSettingInt(L"spectrum-style", spectrumStyle_ == SpectrumStyle::Bars
                                             ? 1
                                             : spectrumStyle_ == SpectrumStyle::DreamyWave ? 2 : 0);
@@ -1378,9 +1501,9 @@ struct App {
         const int normalizedMode = taskbarVertical_ ? 0 : std::clamp(mode, 0, 2);
         spectrumCustomColor_ = normalizedMode == 2;
         spectrumFollowAlbum_ = normalizedMode == 1;
-        if (taskbarHost)
-            taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_,
-                                           spectrumFollowAlbum_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setSpectrumColor(spectrumColor_, spectrumCustomColor_, spectrumFollowAlbum_);
+        });
         logSettingInt(L"spectrum-color-mode", normalizedMode);
         saveSettings();
     }
@@ -1389,9 +1512,9 @@ struct App {
         spectrumColor_ = color;
         spectrumCustomColor_ = taskbarVertical_ ? false : true;
         spectrumFollowAlbum_ = false;
-        if (taskbarHost)
-            taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_,
-                                           spectrumFollowAlbum_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setSpectrumColor(spectrumColor_, spectrumCustomColor_, spectrumFollowAlbum_);
+        });
         runtime_log::writef(L"[action][setting] spectrum-color=#%02X%02X%02X",
                             GetRValue(color), GetGValue(color), GetBValue(color));
         saveSettings();
@@ -1399,58 +1522,61 @@ struct App {
 
     void applySpectrumGradient(bool on) {
         spectrumGradient_ = taskbarVertical_ ? false : on;
-        if (taskbarHost)
-            taskbarHost->setSpectrumGradient(spectrumGradient_);
+        forEachHost([&](TaskbarHost* host) { host->setSpectrumGradient(spectrumGradient_); });
         logSettingBool(L"spectrum-gradient", spectrumGradient_);
         saveSettings();
     }
 
     void applySpectrumBackground(bool on) {
         spectrumBackground_ = taskbarVertical_ ? false : on;
-        if (taskbarHost)
-            taskbarHost->setSpectrumBackground(isMinimalRenderMode() ? false : spectrumBackground_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setSpectrumBackground(isMinimalRenderMode() ? false : spectrumBackground_);
+        });
         logSettingBool(L"spectrum-background", spectrumBackground_);
         saveSettings();
     }
 
     void applySpectrumOpacity(int percent) {
         spectrumOpacity_ = std::clamp(percent, 0, 100);
-        if (taskbarHost)
-            taskbarHost->setSpectrumOpacity(spectrumOpacity_);
+        forEachHost([&](TaskbarHost* host) { host->setSpectrumOpacity(spectrumOpacity_); });
         logSettingInt(L"spectrum-opacity", spectrumOpacity_);
         saveSettings();
     }
 
     void applyProgressBackground(bool on) {
         progressBackground_ = on;
-        if (taskbarHost)
-            taskbarHost->setProgressBackground(isMinimalRenderMode() ? false : on);
+        forEachHost([&](TaskbarHost* host) {
+            host->setProgressBackground(isMinimalRenderMode() ? false : on);
+        });
         logSettingBool(L"progress-background", on);
         saveSettings();
     }
 
     void applyProgressBackgroundOpacity(int percent) {
         progressBackgroundOpacity_ = std::clamp(percent, 0, 100);
-        if (taskbarHost)
-            taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+        });
         logSettingInt(L"progress-background-opacity", progressBackgroundOpacity_);
         saveSettings();
     }
 
     void applyTaskbarBackground(int mode) {
         taskbarBackground_ = std::clamp(mode, 0, 2);
-        if (taskbarHost)
-            taskbarHost->setBackground(
-                isMinimalRenderMode() ? TaskbarBackground::None
-                                       : static_cast<TaskbarBackground>(taskbarBackground_));
+        forEachHost([&](TaskbarHost* host) {
+            host->setBackground(isMinimalRenderMode()
+                                    ? TaskbarBackground::None
+                                    : static_cast<TaskbarBackground>(taskbarBackground_));
+        });
         logSettingInt(L"taskbar-background", taskbarBackground_);
         saveSettings();
     }
 
     void applyCoverBackgroundOpacity(int percent) {
         coverBackgroundOpacity_ = std::clamp(percent, 0, 100);
-        if (taskbarHost)
-            taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+        });
         logSettingInt(L"cover-background-opacity", coverBackgroundOpacity_);
         saveSettings();
     }
@@ -1459,29 +1585,44 @@ struct App {
         return taskbarViewMode_ != TaskbarViewMode::Embedded;
     }
 
-    TaskbarViewMode effectiveTaskbarViewMode(const SmtcSnapshot& snap) const {
-        if (taskbarViewMode_ == TaskbarViewMode::Immersive)
-            return !taskbarVertical_ && snap.sessionAlive ? TaskbarViewMode::Immersive
-                                                          : TaskbarViewMode::Embedded;
-        return taskbarViewMode_;
-    }
-
-    void syncTaskbarView(const SmtcSnapshot& snap) {
+    void syncTaskbarView(const SmtcSnapshot& snap, bool forceRebuild = false) {
         if (!taskbarHost)
             return;
-        taskbarHost->setAppBarEdge(appBarEdge_);
-        taskbarHost->setViewMode(effectiveTaskbarViewMode(snap));
+
+        const auto displays = desiredTaskbarDisplays(snap);
+        std::vector<std::wstring> desiredIds;
+        desiredIds.reserve(displays.size());
+        for (const auto& display : displays)
+            desiredIds.push_back(display.deviceName);
+        if (forceRebuild || desiredIds != activeTaskbarDisplayIds_) {
+            const bool allowOverlap = taskbarAllowOverlap_;
+            destroyTaskbar();
+            createTaskbar(GetModuleHandleW(nullptr), allowOverlap);
+            refreshSettingsDialog(true);
+            return;
+        }
+
+        forEachHost([&](TaskbarHost* host) {
+            host->setAppBarEdge(appBarEdge_);
+            TaskbarViewMode mode = taskbarViewMode_;
+            if (mode == TaskbarViewMode::Immersive &&
+                (!snap.sessionAlive || host->isVerticalTaskbar()))
+                mode = TaskbarViewMode::Embedded;
+            host->setViewMode(mode);
+        });
+        syncTaskbarOrientation();
     }
 
     void applyTaskbarViewMode(int mode) {
         mode = std::clamp(mode, 0, 2);
         taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
         if (taskbarHost) {
-            taskbarHost->setImmersiveBackgroundAdjustment(
-                immersiveBackgroundAdjustment_);
-            taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
-            taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
-            taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
+            forEachHost([&](TaskbarHost* host) {
+                host->setImmersiveBackgroundAdjustment(immersiveBackgroundAdjustment_);
+                host->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+                host->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+                host->setDockBackgroundBlur(dockBackgroundBlur_);
+            });
             syncTaskbarView(monitor.snapshot());
             syncTaskbarOrientation();
             applyEffectiveTaskbarSettings();
@@ -1493,8 +1634,7 @@ struct App {
 
     void applyAppBarEdge(int edge) {
         appBarEdge_ = edge == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
-        if (taskbarHost)
-            taskbarHost->setAppBarEdge(appBarEdge_);
+        forEachHost([&](TaskbarHost* host) { host->setAppBarEdge(appBarEdge_); });
         logSettingInt(L"appbar-edge", appBarEdge_ == AppBarEdge::Bottom ? 1 : 0);
         saveSettings();
         refreshSettingsDialog(true);
@@ -1505,8 +1645,9 @@ struct App {
         if (immersiveBackgroundBlur_ == nextBlur)
             return;
         immersiveBackgroundBlur_ = nextBlur;
-        if (taskbarHost)
-            taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+        });
         scheduleBackgroundBlurSettingsSave(true);
         if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
             refreshSettingsDialog(true);
@@ -1517,8 +1658,7 @@ struct App {
         if (dockBackgroundBlur_ == nextBlur)
             return;
         dockBackgroundBlur_ = nextBlur;
-        if (taskbarHost)
-            taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
+        forEachHost([&](TaskbarHost* host) { host->setDockBackgroundBlur(dockBackgroundBlur_); });
         scheduleBackgroundBlurSettingsSave(false);
         if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
             refreshSettingsDialog(true);
@@ -1555,9 +1695,9 @@ struct App {
 
     void applyImmersiveBackgroundAdjustment(int mode) {
         immersiveBackgroundAdjustment_ = std::clamp(mode, 0, 1);
-        if (taskbarHost)
-            taskbarHost->setImmersiveBackgroundAdjustment(
-                immersiveBackgroundAdjustment_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setImmersiveBackgroundAdjustment(immersiveBackgroundAdjustment_);
+        });
         logSettingInt(L"immersive-background-adjustment",
                       immersiveBackgroundAdjustment_);
         saveSettings();
@@ -1567,8 +1707,9 @@ struct App {
 
     void applyDockBackgroundAdjustment(int mode) {
         dockBackgroundAdjustment_ = std::clamp(mode, 0, 1);
-        if (taskbarHost)
-            taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+        });
         logSettingInt(L"dock-background-adjustment", dockBackgroundAdjustment_);
         saveSettings();
         if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
@@ -1581,7 +1722,7 @@ struct App {
         DockResourceVisibility visibility;
         visibility.gpuUsage = dockResourceGpuUsage_;
         visibility.cpuFrequency = dockResourceCpuFrequency_;
-        taskbarHost->setDockResourceVisibility(visibility);
+        forEachHost([&](TaskbarHost* host) { host->setDockResourceVisibility(visibility); });
     }
 
     void applyDockResourceGpuUsage(bool on) {
@@ -1617,49 +1758,49 @@ struct App {
         if (!taskbarHost)
             return;
         const bool minimal = isMinimalRenderMode();
-        const bool vertical = taskbarVertical_ && taskbarViewMode_ != TaskbarViewMode::AppBar;
-        taskbarHost->setSecondaryLyricMode(
-            vertical ? false : (secondaryLyricEnabled_ && !preferRomanization_),
-            vertical ? false : (secondaryLyricEnabled_ && preferRomanization_));
-        taskbarHost->setDoubleLineLyrics(vertical ? false : doubleLineLyricsEnabled_);
-        taskbarHost->setLyricAlignment(vertical ? LyricAlignment::Left : lyricAlignment_);
-        taskbarHost->setIdleQuoteAlignment(vertical ? LyricAlignment::Left
-                                                    : idleQuoteAlignment_);
-        taskbarHost->setSongInfoVisible(vertical ? false : songInfoVisible_);
-        taskbarHost->setControlsOnHover(hoverPlaybackControls_);
-        taskbarHost->setHoverControlStyle(
-            minimal ? HoverControlStyle::Inline : hoverControlStyle_);
-        taskbarHost->setFloatingCardTrigger(floatingCardTrigger_);
-        taskbarHost->setFloatingCardBackground(floatingCardBackground_);
-        taskbarHost->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
-                                                     floatingCardBackgroundColorCustomized_);
-        taskbarHost->setIdleQuoteBackground(
-            minimal ? IdleQuoteBackground::None : idleQuoteBackground_);
-        taskbarHost->setIdleQuoteBackgroundScope(
-            minimal ? IdleQuoteBackgroundScope::None : idleQuoteBackgroundScope_);
-        taskbarHost->setFloatingCardFollowAlbum(floatingCardFollowAlbum_);
-        taskbarHost->setFloatingCardAutoTextContrast(floatingCardAutoTextContrast_);
-        taskbarHost->setAlbumCoverEffect(
-            minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
-        taskbarHost->setSpectrumStyle(spectrumStyle_);
-        taskbarHost->setSpectrumColor(spectrumColor_, spectrumCustomColor_,
-                                       spectrumFollowAlbum_);
-        taskbarHost->setSpectrumAlbumColor(albumColor_, hasAlbumColor_);
-        taskbarHost->setSpectrumGradient(spectrumGradient_);
-        taskbarHost->setSpectrumBackground(minimal || vertical ? false : spectrumBackground_);
-        taskbarHost->setSpectrumOpacity(spectrumOpacity_);
-        taskbarHost->setProgressBackground(minimal ? false : progressBackground_);
-        taskbarHost->setProgressBackgroundOpacity(progressBackgroundOpacity_);
-        taskbarHost->setBackground(
-            minimal ? TaskbarBackground::None
-                    : static_cast<TaskbarBackground>(taskbarBackground_));
-        taskbarHost->setCoverBackgroundOpacity(coverBackgroundOpacity_);
-        taskbarHost->setImmersiveBackgroundAdjustment(
-            immersiveBackgroundAdjustment_);
-        taskbarHost->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
-        taskbarHost->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
-        taskbarHost->setDockBackgroundBlur(dockBackgroundBlur_);
-        applyDockResourceVisibility();
+        forEachHost([&](TaskbarHost* host) {
+            const bool vertical = host->isVerticalTaskbar() &&
+                                  taskbarViewMode_ != TaskbarViewMode::AppBar;
+            host->setSecondaryLyricMode(
+                vertical ? false : (secondaryLyricEnabled_ && !preferRomanization_),
+                vertical ? false : (secondaryLyricEnabled_ && preferRomanization_));
+            host->setDoubleLineLyrics(vertical ? false : doubleLineLyricsEnabled_);
+            host->setLyricAlignment(vertical ? LyricAlignment::Left : lyricAlignment_);
+            host->setIdleQuoteAlignment(vertical ? LyricAlignment::Left : idleQuoteAlignment_);
+            host->setSongInfoVisible(vertical ? false : songInfoVisible_);
+            host->setControlsOnHover(hoverPlaybackControls_);
+            host->setHoverControlStyle(minimal ? HoverControlStyle::Inline : hoverControlStyle_);
+            host->setFloatingCardTrigger(floatingCardTrigger_);
+            host->setFloatingCardBackground(floatingCardBackground_);
+            host->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
+                                                 floatingCardBackgroundColorCustomized_);
+            host->setIdleQuoteBackground(minimal ? IdleQuoteBackground::None
+                                                 : idleQuoteBackground_);
+            host->setIdleQuoteBackgroundScope(minimal ? IdleQuoteBackgroundScope::None
+                                                      : idleQuoteBackgroundScope_);
+            host->setFloatingCardFollowAlbum(floatingCardFollowAlbum_);
+            host->setFloatingCardAutoTextContrast(floatingCardAutoTextContrast_);
+            host->setAlbumCoverEffect(minimal ? AlbumCoverEffect::Default : albumCoverEffect_);
+            host->setSpectrumStyle(spectrumStyle_);
+            host->setSpectrumColor(spectrumColor_, spectrumCustomColor_, spectrumFollowAlbum_);
+            host->setSpectrumAlbumColor(albumColor_, hasAlbumColor_);
+            host->setSpectrumGradient(spectrumGradient_);
+            host->setSpectrumBackground(minimal || vertical ? false : spectrumBackground_);
+            host->setSpectrumOpacity(spectrumOpacity_);
+            host->setProgressBackground(minimal ? false : progressBackground_);
+            host->setProgressBackgroundOpacity(progressBackgroundOpacity_);
+            host->setBackground(minimal ? TaskbarBackground::None
+                                        : static_cast<TaskbarBackground>(taskbarBackground_));
+            host->setCoverBackgroundOpacity(coverBackgroundOpacity_);
+            host->setImmersiveBackgroundAdjustment(immersiveBackgroundAdjustment_);
+            host->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
+            host->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
+            host->setDockBackgroundBlur(dockBackgroundBlur_);
+            DockResourceVisibility visibility;
+            visibility.gpuUsage = dockResourceGpuUsage_;
+            visibility.cpuFrequency = dockResourceCpuFrequency_;
+            host->setDockResourceVisibility(visibility);
+        });
         syncTaskbarView(monitor.snapshot());
     }
 
@@ -1674,11 +1815,10 @@ struct App {
             if (*processName)
                 spectrum_.setTargetProcessName(std::wstring(processName));
             spectrum_.start();
-            taskbarHost->setSpectrumVisible(spectrumOn_);
+            forEachHost([&](TaskbarHost* host) { host->setSpectrumVisible(spectrumOn_); });
         } else {
             spectrum_.stop();
-            if (taskbarHost)
-                taskbarHost->setSpectrumVisible(false);
+            forEachHost([&](TaskbarHost* host) { host->setSpectrumVisible(false); });
         }
     }
 
@@ -1734,14 +1874,18 @@ struct App {
 
         renderMode_ = nextMode;
         if (taskbarHost) {
-            taskbarHost->setRenderMode(static_cast<RenderMode>(renderMode_));
+            forEachHost([&](TaskbarHost* host) {
+                host->setRenderMode(static_cast<RenderMode>(renderMode_));
+            });
             applyEffectiveTaskbarSettings();
         }
         if (leavingStopped && taskbarEnabledBeforeStopped_) {
             if (taskbarHost) {
                 // 切换期间可能没有新的 SMTC 帧，补交当前帧以保留进入停止模式
                 // 前的会话可见性；实际显示仍等待宿主完成最新空间探测。
-                taskbarHost->applyPresentationFrame(currentFrame_);
+                forEachHost([&](TaskbarHost* host) {
+                    host->applyPresentationFrame(currentFrame_);
+                });
             } else {
                 // 宿主可能在完全停止期间因任务栏重建或菜单操作被销毁，退出时
                 // 按原先的开启状态静默重建，不走“手动开启”的提示流程。
@@ -1770,16 +1914,14 @@ struct App {
         if (taskbarExpandedConfigured() && !taskbarVertical_)
             return;
         hoverPlaybackControls_ = on;
-        if (taskbarHost)
-            taskbarHost->setControlsOnHover(on);
+        forEachHost([&](TaskbarHost* host) { host->setControlsOnHover(on); });
         logSettingBool(L"hover-playback-controls", on);
         saveSettings();
     }
 
     void applyTaskbarContextMenu(bool on) {
         taskbarContextMenuEnabled_ = on;
-        if (taskbarHost)
-            taskbarHost->setContextMenuEnabled(on);
+        forEachHost([&](TaskbarHost* host) { host->setContextMenuEnabled(on); });
         logSettingBool(L"taskbar-context-menu", on);
         saveSettings();
     }
@@ -1788,17 +1930,17 @@ struct App {
         if (taskbarExpandedConfigured() && !taskbarVertical_)
             return;
         hoverControlStyle_ = style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
-        if (taskbarHost)
-            taskbarHost->setHoverControlStyle(
-                isMinimalRenderMode() ? HoverControlStyle::Inline : hoverControlStyle_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setHoverControlStyle(isMinimalRenderMode() ? HoverControlStyle::Inline
+                                                             : hoverControlStyle_);
+        });
         logSettingInt(L"hover-control-style", style == 1 ? 1 : 0);
         saveSettings();
     }
 
     void applyFloatingCardTrigger(int mode) {
         floatingCardTrigger_ = mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
-        if (taskbarHost)
-            taskbarHost->setFloatingCardTrigger(floatingCardTrigger_);
+        forEachHost([&](TaskbarHost* host) { host->setFloatingCardTrigger(floatingCardTrigger_); });
         logSettingInt(L"floating-card-trigger", mode == 1 ? 1 : 0);
         saveSettings();
     }
@@ -1806,24 +1948,23 @@ struct App {
     void applyFloatingCardBackground(int mode) {
         floatingCardBackground_ = mode == 1 ? MediaPopupBackground::Frosted
                                              : MediaPopupBackground::Solid;
-        if (taskbarHost)
-            taskbarHost->setFloatingCardBackground(floatingCardBackground_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setFloatingCardBackground(floatingCardBackground_);
+        });
         logSettingInt(L"floating-card-background", mode == 1 ? 1 : 0);
         saveSettings();
     }
 
     void applyFloatingCardFollowAlbum(bool on) {
         floatingCardFollowAlbum_ = on;
-        if (taskbarHost)
-            taskbarHost->setFloatingCardFollowAlbum(on);
+        forEachHost([&](TaskbarHost* host) { host->setFloatingCardFollowAlbum(on); });
         logSettingBool(L"floating-card-follow-album", on);
         saveSettings();
     }
 
     void applyFloatingCardAutoTextContrast(bool on) {
         floatingCardAutoTextContrast_ = on;
-        if (taskbarHost)
-            taskbarHost->setFloatingCardAutoTextContrast(on);
+        forEachHost([&](TaskbarHost* host) { host->setFloatingCardAutoTextContrast(on); });
         logSettingBool(L"floating-card-auto-text-contrast", on);
         saveSettings();
     }
@@ -1940,10 +2081,12 @@ struct App {
         fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
         updateTrayIcon();
         if (taskbarHost) {
-            taskbarHost->refreshTheme();
+            forEachHost([](TaskbarHost* host) { host->refreshTheme(); });
             applyFontAppearance();
-            taskbarHost->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
-                                                         floatingCardBackgroundColorCustomized_);
+            forEachHost([&](TaskbarHost* host) {
+                host->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
+                                                     floatingCardBackgroundColorCustomized_);
+            });
         }
         refreshThemeWindows();
         refreshSettingsDialog(true);
@@ -1977,8 +2120,9 @@ struct App {
 
     void applyDoubleLineLyrics(bool on) {
         doubleLineLyricsEnabled_ = on;
-        if (taskbarHost)
-            taskbarHost->setDoubleLineLyrics(taskbarVertical_ ? false : on);
+        forEachHost([&](TaskbarHost* host) {
+            host->setDoubleLineLyrics(host->isVerticalTaskbar() ? false : on);
+        });
         logSettingBool(L"double-line-lyrics", on);
         saveSettings();
     }
@@ -1989,9 +2133,10 @@ struct App {
         lyricAlignment_ = alignment == 1 ? LyricAlignment::Center
                           : alignment == 2 ? LyricAlignment::Right
                                            : LyricAlignment::Left;
-        if (taskbarHost)
-            taskbarHost->setLyricAlignment(taskbarVertical_ ? LyricAlignment::Left
-                                                             : lyricAlignment_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setLyricAlignment(host->isVerticalTaskbar() ? LyricAlignment::Left
+                                                              : lyricAlignment_);
+        });
         logSettingInt(L"lyric-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
         saveSettings();
     }
@@ -2000,9 +2145,10 @@ struct App {
         idleQuoteAlignment_ = alignment == 1 ? LyricAlignment::Center
                               : alignment == 2 ? LyricAlignment::Right
                                                : LyricAlignment::Left;
-        if (taskbarHost)
-            taskbarHost->setIdleQuoteAlignment(taskbarVertical_ ? LyricAlignment::Left
-                                                                 : idleQuoteAlignment_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setIdleQuoteAlignment(host->isVerticalTaskbar() ? LyricAlignment::Left
+                                                                  : idleQuoteAlignment_);
+        });
         logSettingInt(L"daily-quote-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
         saveSettings();
     }
@@ -2010,9 +2156,10 @@ struct App {
     void applyIdleQuoteBackground(int background) {
         const int normalized = std::clamp(background, 0, 4);
         idleQuoteBackground_ = static_cast<IdleQuoteBackground>(normalized);
-        if (taskbarHost)
-            taskbarHost->setIdleQuoteBackground(
-                isMinimalRenderMode() ? IdleQuoteBackground::None : idleQuoteBackground_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setIdleQuoteBackground(isMinimalRenderMode() ? IdleQuoteBackground::None
+                                                               : idleQuoteBackground_);
+        });
         logSettingInt(L"daily-quote-background", normalized);
         saveSettings();
     }
@@ -2020,10 +2167,11 @@ struct App {
     void applyIdleQuoteBackgroundScope(int scope) {
         const int normalized = std::clamp(scope, 0, 3);
         idleQuoteBackgroundScope_ = static_cast<IdleQuoteBackgroundScope>(normalized);
-        if (taskbarHost)
-            taskbarHost->setIdleQuoteBackgroundScope(
-                isMinimalRenderMode() ? IdleQuoteBackgroundScope::None
-                                      : idleQuoteBackgroundScope_);
+        forEachHost([&](TaskbarHost* host) {
+            host->setIdleQuoteBackgroundScope(isMinimalRenderMode()
+                                                  ? IdleQuoteBackgroundScope::None
+                                                  : idleQuoteBackgroundScope_);
+        });
         logSettingInt(L"taskbar-dynamic-background-scope", normalized);
         saveSettings();
     }
@@ -2758,38 +2906,17 @@ struct App {
         // NoSpace 会保留宿主，由 TaskbarHost 的低频避让探测继续等待空间释放。
     }
 
-    TaskbarCreateResult createTaskbar(HINSTANCE inst, bool allowOverlap = false) {
-        if (taskbarHost) {
-            if (!allowOverlap)
-                return TaskbarCreateResult::Created;
-
-            // 空间不足时保留现有宿主和探测线程；用户确认强制开启时，
-            // 直接把同一个宿主切到允许重叠，避免重新创建窗口和等待首次探测。
-            taskbarAllowOverlap_ = true;
-            taskbarAutoClosedForNoSpace_ = false;
-            taskbarSpectrumSuppressedForNoSpace_ = false;
-            cancelTaskbarAutoRestore();
-            taskbarHost->setAllowOverlap(true);
-            const TaskbarPlacementStatus status = taskbarHost->refreshPlacement();
-            if (status == TaskbarPlacementStatus::Unavailable) {
-                taskbarAllowOverlap_ = false;
-                runtime_log::writef(L"[taskbar] forced-open result=unavailable");
-                return TaskbarCreateResult::Failed;
-            }
-            taskbarHost->show();
-            taskbarHost->applyPresentationFrame(currentFrame_);
-            syncSpectrumWithMode();
-            updateTrayIcon();
-            return TaskbarCreateResult::Created;
+    void configureTaskbarHostCallbacks(TaskbarHost* host, bool primary) {
+        if (!host)
+            return;
+        if (primary) {
+            host->setTickCallback([this] { onFrame(); });
+            host->setStatusTextCycleCompletedCallback([this] {
+                onStartupTaskSummaryCompleted();
+            });
+            host->setPlacementStatusCallback(
+                [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
         }
-        auto host = std::make_unique<TaskbarHost>();
-        host->setVisibilitySuppressed(true);
-        if (!host->create(inst)) {
-            runtime_log::writef(L"failed to create taskbar host");
-            return TaskbarCreateResult::Failed;
-        }
-        host->setAllowOverlap(allowOverlap);
-        host->setTickCallback([this] { onFrame(); });
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setImmersiveExitCallback([this] { applyTaskbarViewMode(0); });
         host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
@@ -2818,55 +2945,108 @@ struct App {
             if (!ok)
                 runtime_log::writef(L"[player] failed to activate source: %s", source.c_str());
         });
-        host->setIdleAppOpenCallback([this](const std::wstring& path) {
-            launchIdleApp(path);
-        });
-        host->setIdleTaskOpenCallback([this](const IdleTaskInfo& task) {
-            openTickTickTask(task);
-        });
-        host->setIdleTaskCompleteCallback([this](const IdleTaskInfo& task) {
-            completeTickTickTask(task);
-        });
+        host->setIdleAppOpenCallback([this](const std::wstring& path) { launchIdleApp(path); });
+        host->setIdleTaskOpenCallback([this](const IdleTaskInfo& task) { openTickTickTask(task); });
+        host->setIdleTaskCompleteCallback(
+            [this](const IdleTaskInfo& task) { completeTickTickTask(task); });
         host->setMediaPopupOpenedCallback([this] { refreshTickTickTasks(); });
-        host->setStatusTextCycleCompletedCallback([this] {
-            onStartupTaskSummaryCompleted();
-        });
-        // 先设置渲染模式，再同步当前帧。完全停止模式下新宿主必须从创建开始就保持隐藏，
-        // 否则 syncHost() 会按默认正常模式先显示一帧，随后才被 setRenderMode() 隐藏。
-        host->setRenderMode(static_cast<RenderMode>(renderMode_));
-        taskbarHost = std::move(host);
+    }
+
+    TaskbarCreateResult createTaskbar(HINSTANCE inst, bool allowOverlap = false) {
+        if (taskbarHost) {
+            if (!allowOverlap)
+                return TaskbarCreateResult::Created;
+
+            // 空间不足时保留现有宿主和探测线程；用户确认强制开启时，
+            // 直接把同一个宿主切到允许重叠，避免重新创建窗口和等待首次探测。
+            taskbarAllowOverlap_ = true;
+            taskbarAutoClosedForNoSpace_ = false;
+            taskbarSpectrumSuppressedForNoSpace_ = false;
+            cancelTaskbarAutoRestore();
+            forEachHost([](TaskbarHost* host) { host->setAllowOverlap(true); });
+            const TaskbarPlacementStatus status = taskbarHost->refreshPlacement();
+            if (status == TaskbarPlacementStatus::Unavailable) {
+                taskbarAllowOverlap_ = false;
+                runtime_log::writef(L"[taskbar] forced-open result=unavailable");
+                return TaskbarCreateResult::Failed;
+            }
+            forEachHost([&](TaskbarHost* host) {
+                host->show();
+                host->applyPresentationFrame(currentFrame_);
+                host->refreshPlacement();
+            });
+            syncSpectrumWithMode();
+            updateTrayIcon();
+            return TaskbarCreateResult::Created;
+        }
+
+        const SmtcSnapshot snap = monitor.snapshot();
+        const auto displays = desiredTaskbarDisplays(snap);
+        if (displays.empty()) {
+            runtime_log::writef(L"failed to create taskbar host");
+            return TaskbarCreateResult::Failed;
+        }
         taskbarAllowOverlap_ = allowOverlap;
-        // 在推送首帧和同步任务栏方向前先确定承载模式。AppBar 始终横向，
-        // 不能因系统任务栏在侧边而先把频谱等横向配置关闭。
-        taskbarHost->setAppBarEdge(appBarEdge_);
-        taskbarHost->setViewMode(effectiveTaskbarViewMode(monitor.snapshot()));
-        syncHost(taskbarHost.get());
-        if (hasUserFont_)
-            taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
+        activeTaskbarDisplayIds_.clear();
+        for (const auto& display : displays)
+            activeTaskbarDisplayIds_.push_back(display.deviceName);
+
+        auto createHost = [&](const TaskbarDisplayInfo& display, bool primary) {
+            auto host = std::make_unique<TaskbarHost>();
+            host->setVisibilitySuppressed(true);
+            TaskbarViewMode initialMode = taskbarViewMode_;
+            if (initialMode == TaskbarViewMode::Immersive &&
+                (!snap.sessionAlive || !display.horizontalTaskbar || !display.taskbarWindow))
+                initialMode = TaskbarViewMode::Embedded;
+            if (!host->create(inst, display.deviceName, initialMode)) {
+                runtime_log::writef(L"failed to create taskbar host for %s",
+                                    display.deviceName.c_str());
+                return std::unique_ptr<TaskbarHost>{};
+            }
+            host->setAllowOverlap(allowOverlap);
+            configureTaskbarHostCallbacks(host.get(), primary);
+            // 完全停止模式下新宿主从创建开始就保持隐藏，避免同步首帧后闪现。
+            host->setRenderMode(static_cast<RenderMode>(renderMode_));
+            host->setAppBarEdge(appBarEdge_);
+            return host;
+        };
+
+        taskbarHost = createHost(displays.front(), true);
+        if (!taskbarHost) {
+            activeTaskbarDisplayIds_.clear();
+            taskbarAllowOverlap_ = false;
+            return TaskbarCreateResult::Failed;
+        }
+        for (size_t i = 1; i < displays.size(); ++i) {
+            auto host = createHost(displays[i], false);
+            if (host)
+                additionalTaskbarHosts_.push_back(std::move(host));
+        }
+
+        forEachHost([&](TaskbarHost* host) {
+            host->setAppBarEdge(appBarEdge_);
+            syncHost(host);
+            if (hasUserFont_)
+                host->setFont(fontFamily_, fontSize_, fontStyle_);
+            host->setAlbumCoverVisible(albumCoverVisible_);
+            host->setPlatformIconVisible(platformIconVisible_);
+            host->setPositionMode(taskbarPosition_);
+            host->setAppVolume(appVolumeState_);
+        });
         applyFontAppearance();
-        taskbarHost->setSecondaryLyricMode(secondaryLyricEnabled_ && !preferRomanization_,
-                                           secondaryLyricEnabled_ && preferRomanization_);
-        taskbarHost->setDoubleLineLyrics(doubleLineLyricsEnabled_);
-        taskbarHost->setLyricAlignment(lyricAlignment_);
-        taskbarHost->setIdleQuoteAlignment(idleQuoteAlignment_);
-        taskbarHost->setSongInfoVisible(songInfoVisible_);
-        taskbarHost->setAlbumCoverVisible(albumCoverVisible_);
-        taskbarHost->setPlatformIconVisible(platformIconVisible_);
-        taskbarHost->setPositionMode(taskbarPosition_);
         syncTaskbarOrientation();
         applyEffectiveTaskbarSettings();
-        taskbarHost->setAppVolume(appVolumeState_); // 同步当前音量状态（可能早于宿主创建）
         syncSpectrumWithMode();
-        taskbarHost->setPlacementStatusCallback(
-            [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
         const TaskbarPlacementStatus placementStatus = taskbarHost->refreshPlacement();
+        for (auto& host : additionalTaskbarHosts_)
+            host->refreshPlacement();
         if (placementStatus == TaskbarPlacementStatus::NoSpace) {
             taskbarAutoClosedForNoSpace_ = true;
             taskbarSpectrumSuppressedForNoSpace_ = true;
             spectrum_.stop();
             const bool wasRestoringSpectrum = taskbarSpectrumRestoring_;
             taskbarSpectrumRestoring_ = true;
-            taskbarHost->setSpectrumVisible(false);
+            forEachHost([](TaskbarHost* host) { host->setSpectrumVisible(false); });
             taskbarSpectrumRestoring_ = wasRestoringSpectrum;
             if (taskbarHost->placementStatus() != TaskbarPlacementStatus::NoSpace) {
                 // 释放频谱占用后已有足够空间，继续保留宿主但不需要进入无空间状态。
@@ -2891,8 +3071,10 @@ struct App {
         // 宿主会在首次避让探测完成后自行解除显示抑制；强制开启仍重新提交当前帧，
         // 确保“开启”选项立即生效而不必等待下一次媒体事件。
         if (allowOverlap) {
-            taskbarHost->show();
-            taskbarHost->applyPresentationFrame(currentFrame_);
+            forEachHost([&](TaskbarHost* host) {
+                host->show();
+                host->applyPresentationFrame(currentFrame_);
+            });
         }
         updateTrayIcon();
         return TaskbarCreateResult::Created;
@@ -2907,8 +3089,10 @@ struct App {
         // 任何销毁路径都结束一次“手动开启待确认”请求，避免旧请求在后续
         // 的自动探测消息中误把自动关闭当成手动开启失败并弹框。
         taskbarManualOpenPending_ = false;
+        additionalTaskbarHosts_.clear();
         auto host = std::move(taskbarHost);
         host.reset();
+        activeTaskbarDisplayIds_.clear();
         updateTrayIcon();
     }
 
@@ -3450,7 +3634,7 @@ struct App {
             spectrumPatch.frameRevision = currentFrame_.frameRevision;
             spectrumPatch.requestGeneration = currentFrame_.requestGeneration;
             spectrumPatch.bands = spectrum_.bands();
-            taskbarHost->applySpectrumPatch(spectrumPatch);
+            forEachHost([&](TaskbarHost* host) { host->applySpectrumPatch(spectrumPatch); });
         }
         if (manualSearchDialog && manualSearchDialog->isOpen()) {
             manualSearchDialog->setPlaybackPosition(snap.positionMs);
@@ -3967,6 +4151,7 @@ void App::loadSettings() {
                                       ? j.value("taskbarViewMode", 0)
                                       : (j.value("taskbarImmersive", false) ? 1 : 0);
         taskbarViewMode_ = static_cast<TaskbarViewMode>(std::clamp(savedViewMode, 0, 2));
+        taskbarMonitorId_ = wideOf(j.value("taskbarMonitor", std::string()));
         appBarEdge_ = j.value("appBarEdge", 0) == 1 ? AppBarEdge::Bottom : AppBarEdge::Top;
         const int legacyImmersiveMaskOpacity =
             std::clamp(j.value("immersiveMaskOpacity", 88), 0, 100);
@@ -4236,6 +4421,7 @@ void App::saveSettings() {
                 {"date", day.date}, {"type", day.type}, {"name", utf8Of(day.name)}});
         j["taskbarPosition"] = taskbarPosition_;
         j["taskbarViewMode"] = static_cast<int>(taskbarViewMode_);
+        j["taskbarMonitor"] = utf8Of(taskbarMonitorId_);
         j["appBarEdge"] = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
         j.erase("taskbarImmersive");
         j["immersiveBackgroundBlur"] = immersiveBackgroundBlur_;
@@ -4573,7 +4759,7 @@ void App::handleTaskbarNoSpace() {
     spectrum_.stop();
     const bool wasRestoringSpectrum = taskbarSpectrumRestoring_;
     taskbarSpectrumRestoring_ = true;
-    taskbarHost->setSpectrumVisible(false);
+    forEachHost([](TaskbarHost* host) { host->setSpectrumVisible(false); });
     taskbarSpectrumRestoring_ = wasRestoringSpectrum;
     // 关闭频谱本身可能已经释放了占用空间；此时不再进入无空间处理，
     // 避免把刚恢复的宿主再次标记为自动隐藏。
@@ -5289,8 +5475,7 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
             break;
         taskbarPosition_ = cmd == kCmdTaskbarPosLeft ? 1 : 0;
         logSettingInt(L"taskbar-position", taskbarPosition_);
-        if (taskbarHost)
-            taskbarHost->setPositionMode(taskbarPosition_);
+        forEachHost([&](TaskbarHost* host) { host->setPositionMode(taskbarPosition_); });
         saveSettings();
         break;
     case kCmdTaskbarModeEmbedded:
@@ -5411,8 +5596,9 @@ void App::pickFont() {
             runtime_log::writef(L"[action][font] applied family=%s size=%.1f style=%s",
                                 fontFamily_.c_str(), static_cast<double>(fontSize_),
                                 fontStyleLabel(fontStyle_));
-            if (taskbarHost)
-                taskbarHost->setFont(fontFamily_, fontSize_, fontStyle_);
+            forEachHost([&](TaskbarHost* host) {
+                host->setFont(fontFamily_, fontSize_, fontStyle_);
+            });
             saveSettings();
             if (settingsDialog)
                 settingsDialog->updateFontDescription(currentSettingsState().fontDesc);
@@ -5440,8 +5626,9 @@ COLORREF App::effectiveFloatingCardBackgroundColor() const {
 void App::applyFloatingCardBackgroundColor(COLORREF color) {
     floatingCardBackgroundColor_ = color;
     floatingCardBackgroundColorCustomized_ = true;
-    if (taskbarHost)
-        taskbarHost->setFloatingCardBackgroundColor(floatingCardBackgroundColor_, true);
+    forEachHost([&](TaskbarHost* host) {
+        host->setFloatingCardBackgroundColor(floatingCardBackgroundColor_, true);
+    });
     runtime_log::writef(L"[action][floating-card] background-color=#%02X%02X%02X",
                         GetRValue(color), GetGValue(color), GetBValue(color));
     saveSettings();
@@ -5462,8 +5649,7 @@ void App::tryExtractAlbumColor() {
                         GetGValue(albumColor_), GetBValue(albumColor_), currentKey.c_str());
     currentFrame_.media.hasDominantColor = true;
     currentFrame_.media.dominantColor = albumColor_;
-    if (taskbarHost)
-        taskbarHost->setMediaInfo(currentFrame_.media);
+    forEachHost([&](TaskbarHost* host) { host->setMediaInfo(currentFrame_.media); });
     applyFontColors();
 }
 
@@ -5473,18 +5659,19 @@ void App::applyFontColors() {
         host->setFontColors(effectivePlayedColor(), appearance.unplayed,
                             appearance.unplayedAlphaPct);
     });
-    if (taskbarHost)
-        taskbarHost->setSpectrumAlbumColor(albumColor_, hasAlbumColor_);
+    forEachHost([&](TaskbarHost* host) {
+        host->setSpectrumAlbumColor(albumColor_, hasAlbumColor_);
+    });
 }
 
 void App::applyFontAppearance() {
     const auto& appearance = currentLyricAppearance();
     applyFontColors();
-    if (taskbarHost) {
-        taskbarHost->setFontGlow(appearance.glowOn);
-        taskbarHost->setFontOutline(appearance.outlineOn);
-        taskbarHost->setFontGlowColors(appearance.glowColor, appearance.outlineColor);
-    }
+    forEachHost([&](TaskbarHost* host) {
+        host->setFontGlow(appearance.glowOn);
+        host->setFontOutline(appearance.outlineOn);
+        host->setFontGlowColors(appearance.glowColor, appearance.outlineColor);
+    });
 }
 
 void App::showFontColorDialog() {
@@ -5558,6 +5745,10 @@ SettingsState App::currentSettingsState() const {
     st.tickTickStatus = tickTickStatus_;
     st.verticalTaskbar = vertical;
     st.taskbarViewMode = static_cast<int>(taskbarViewMode_);
+    if (taskbarViewMode_ == TaskbarViewMode::Embedded)
+        st.taskbarMonitorLabel = L"主显示器";
+    else
+        st.taskbarMonitorLabel = taskbarMonitorLabel();
     st.mediaSessionAlive = monitor.snapshot().sessionAlive;
     st.appBarEdge = appBarEdge_ == AppBarEdge::Bottom ? 1 : 0;
     st.immersiveBackgroundBlur = immersiveBackgroundBlur_;
@@ -5647,6 +5838,7 @@ SettingsActions App::buildSettingsActions() {
     act.onPlatformIconVisible = [this](bool on) { applyPlatformIconVisible(on); };
     act.onCoverEffectVinyl = [this](bool vinyl) { applyCoverEffect(vinyl); };
     act.onTaskbarViewMode = [this](int mode) { applyTaskbarViewMode(mode); };
+    act.onChooseTaskbarMonitor = [this] { showTaskbarMonitorMenu(); };
     act.onAppBarEdge = [this](int edge) { applyAppBarEdge(edge); };
     act.onImmersiveBackgroundBlur =
         [this](int percent) { applyImmersiveBackgroundBlur(percent); };
@@ -5885,6 +6077,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->showTrayMenu();
         return 0;
     }
+    if (msg == WM_DISPLAYCHANGE) {
+        app->syncTaskbarView(app->monitor.snapshot(), true);
+        app->refreshSettingsDialog(true);
+        return 0;
+    }
     if (msg == WM_DESTROY) {
         app->destroyTray();
         return 0;
@@ -5894,7 +6091,7 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // 任务栏歌词窗口可能已随 Shell_TrayWnd 一起被销毁，交给宿主重建/重附着
         app->updateTrayIcon();
         if (app->taskbarHost)
-            app->taskbarHost->onTaskbarCreated();
+            app->forEachHost([](TaskbarHost* host) { host->onTaskbarCreated(); });
         else if (app->taskbarAutoClosedForNoSpace_ &&
                  !app->isRenderMode(RenderMode::Stopped)) {
             app->armTaskbarAutoRestore();
