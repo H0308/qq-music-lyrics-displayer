@@ -1353,8 +1353,7 @@ struct SettingsDialog::Impl {
                   vertical ? false : state.doubleLineLyrics).enabled = !vertical;
         addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
                  {L"左对齐", L"居中", L"右对齐"},
-                 !vertical && state.taskbarViewMode != 0 ? 1
-                                                     : (vertical ? 0 : state.lyricAlignment),
+                 vertical ? 0 : state.lyricAlignment,
                  !vertical && state.taskbarViewMode == 0, kRowH);
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
         addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
@@ -4035,8 +4034,7 @@ struct SettingsDialog::Impl {
             row->enabled = !vertical;
         }
         if (auto* row = findRow(kIdAlignment)) {
-            row->selected = !vertical && s.taskbarViewMode != 0 ? 1
-                                                                : (vertical ? 0 : s.lyricAlignment);
+            row->selected = vertical ? 0 : s.lyricAlignment;
             row->enabled = !vertical && s.taskbarViewMode == 0;
         }
         if (auto* row = findRow(kIdSecondaryOn)) {
