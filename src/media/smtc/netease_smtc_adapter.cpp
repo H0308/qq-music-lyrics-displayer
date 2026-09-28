@@ -21,6 +21,12 @@ bool isNeteaseSource(const std::wstring& sourceAppUserModelId) {
            _wcsicmp(sourceAppUserModelId.c_str(), kNeteaseBridgeAppId) == 0;
 }
 
+bool isStalePositionRegression(int64_t positionMs, int64_t anchorUtcMs,
+                               const SmtcSnapshot& snapshot) {
+    return positionMs < snapshot.positionMs && snapshot.anchorUtcMs > 0 &&
+           anchorUtcMs > 0 && anchorUtcMs <= snapshot.anchorUtcMs;
+}
+
 } // namespace
 
 SmtcPlayerType NeteaseSmtcAdapter::playerType() const noexcept {
@@ -92,9 +98,19 @@ void NeteaseSmtcAdapter::refreshTimeline(const Session& session,
     if (!timeline)
         return;
 
-    snapshot.durationMs = timeSpanMs(timeline.EndTime());
-    snapshot.positionMs = timeSpanMs(timeline.Position());
-    snapshot.anchorUtcMs = lastUpdatedMs(timeline.LastUpdatedTime());
+    const int64_t durationMs = timeSpanMs(timeline.EndTime());
+    const int64_t positionMs = timeSpanMs(timeline.Position());
+    const int64_t reportedAnchorMs = lastUpdatedMs(timeline.LastUpdatedTime());
+    const bool placeholderZero = reportedAnchorMs == 0 && positionMs == 0 &&
+                                 snapshot.positionMs > 0;
+    // 播放状态和时间线通知可能乱序；带有更新锚点的倒退仍可作为 seek 接受。
+    if (placeholderZero ||
+        isStalePositionRegression(positionMs, reportedAnchorMs, snapshot))
+        return;
+
+    snapshot.durationMs = durationMs;
+    snapshot.positionMs = positionMs;
+    snapshot.anchorUtcMs = reportedAnchorMs;
     if (snapshot.anchorUtcMs == 0)
         snapshot.anchorUtcMs = eventNowMs;
 }
@@ -125,7 +141,7 @@ void NeteaseSmtcAdapter::refreshPlayback(const Session& session,
 
     bool anchorMissing = false;
     bool placeholderZero = false;
-    bool stalePausedPosition = false;
+    bool stalePositionRegression = false;
     int64_t newPos = snapshot.positionMs;
     int64_t rawAnchorAge = -1;
     auto timeline = session.GetTimelineProperties();
@@ -140,19 +156,22 @@ void NeteaseSmtcAdapter::refreshPlayback(const Session& session,
         // 下一条通知才是实际位置；该数据不能让歌词回到开头。
         placeholderZero = anchorMissing && newPos == 0 && snapshot.positionMs > 0;
 
-        // 暂停后的重复状态事件可能携带暂停前的旧采样值，不能覆盖刚冻结的位置。
-        stalePausedPosition = !nowPlaying && !anchorMissing &&
-                              rawAnchorAge > 250 && newPos < snapshot.positionMs;
+        // 状态切换附近的重复通知可能携带旧采样值。时间锚点未推进且位置倒退，或暂停采样明显过期
+        // 且位置倒退时保留已有位置；恢复播放时从当前事件时刻重新开始插值。
+        stalePositionRegression = !anchorMissing && newPos < snapshot.positionMs &&
+                                  (isStalePositionRegression(newPos, reportedAnchor,
+                                                             snapshot) ||
+                                   (!nowPlaying && rawAnchorAge > 250));
         if (repeatedPlaying) {
             // 播放中的进度只由独立 TimelinePropertiesChanged 推进。
         } else if (leavingPlaying) {
             snapshot.positionMs = effectiveOldPos;
             snapshot.anchorUtcMs = eventNowMs;
-        } else if (!placeholderZero && !stalePausedPosition) {
+        } else if (!placeholderZero && !stalePositionRegression) {
             snapshot.positionMs = newPos;
             // 状态事件携带的 Position 可能早于事件到达，使用事件时刻重新锚定。
             snapshot.anchorUtcMs = eventNowMs;
-        } else if (placeholderZero) {
+        } else if (placeholderZero || stalePositionRegression) {
             snapshot.anchorUtcMs = eventNowMs;
         }
     } else if (leavingPlaying) {
