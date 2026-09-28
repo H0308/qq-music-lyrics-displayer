@@ -19,6 +19,7 @@ public:
 
 private:
     static bool parseSongId(const std::wstring& genre, std::wstring& songId);
+    int64_t lastStatusChangeMs_ = 0;
 };
 
 } // namespace smtc

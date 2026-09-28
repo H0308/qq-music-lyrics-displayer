@@ -15,6 +15,9 @@ namespace {
 constexpr wchar_t kGenrePrefix[] = L"NCM-";
 constexpr wchar_t kCloudMusicAppId[] = L"cloudmusic.exe";
 constexpr wchar_t kNeteaseBridgeAppId[] = L"NeteaseBridge.exe";
+constexpr int64_t kTimelinePositionToleranceMs = 250;
+constexpr int64_t kRecentStatusChangeWindowMs = 2000;
+constexpr int64_t kMaxStatusTransitionTimelineLagMs = 2000;
 
 bool isNeteaseSource(const std::wstring& sourceAppUserModelId) {
     return _wcsicmp(sourceAppUserModelId.c_str(), kCloudMusicAppId) == 0 ||
@@ -25,6 +28,16 @@ bool isStalePositionRegression(int64_t positionMs, int64_t anchorUtcMs,
                                const SmtcSnapshot& snapshot) {
     return positionMs < snapshot.positionMs && snapshot.anchorUtcMs > 0 &&
            anchorUtcMs > 0 && anchorUtcMs <= snapshot.anchorUtcMs;
+}
+
+int64_t positionAtEventMs(int64_t positionMs, int64_t anchorUtcMs,
+                          int64_t eventNowMs, PlaybackStatus status,
+                          int64_t durationMs) {
+    if (status == PlaybackStatus::Playing && anchorUtcMs > 0)
+        positionMs += std::max<int64_t>(0, eventNowMs - anchorUtcMs);
+    if (durationMs > 0)
+        positionMs = std::min(positionMs, durationMs);
+    return std::max<int64_t>(positionMs, 0);
 }
 
 } // namespace
@@ -103,14 +116,38 @@ void NeteaseSmtcAdapter::refreshTimeline(const Session& session,
     const int64_t reportedAnchorMs = lastUpdatedMs(timeline.LastUpdatedTime());
     const bool placeholderZero = reportedAnchorMs == 0 && positionMs == 0 &&
                                  snapshot.positionMs > 0;
-    // 播放状态和时间线通知可能乱序；带有更新锚点的倒退仍可作为 seek 接受。
-    if (placeholderZero ||
-        isStalePositionRegression(positionMs, reportedAnchorMs, snapshot))
+    const int64_t incomingAnchorMs = reportedAnchorMs > 0 ? reportedAnchorMs : eventNowMs;
+    const int64_t currentAtEventMs = positionAtEventMs(
+        snapshot.positionMs, snapshot.anchorUtcMs, eventNowMs, snapshot.status,
+        snapshot.durationMs);
+    const int64_t incomingAtEventMs = positionAtEventMs(
+        positionMs, incomingAnchorMs, eventNowMs, snapshot.status, durationMs);
+    const int64_t positionDeltaMs = incomingAtEventMs - currentAtEventMs;
+    const bool positionDiscontinuity =
+        positionDeltaMs > kTimelinePositionToleranceMs ||
+        positionDeltaMs < -kTimelinePositionToleranceMs;
+    const int64_t statusAgeMs = lastStatusChangeMs_ > 0
+                                    ? eventNowMs - lastStatusChangeMs_
+                                    : -1;
+    const int64_t rawBackwardMs = snapshot.positionMs - positionMs;
+    const bool staleTransitionTimeline =
+        statusAgeMs >= 0 && statusAgeMs < kRecentStatusChangeWindowMs &&
+        reportedAnchorMs > 0 && reportedAnchorMs < lastStatusChangeMs_ &&
+        rawBackwardMs > kTimelinePositionToleranceMs &&
+        rawBackwardMs <= kMaxStatusTransitionTimelineLagMs &&
+        !positionDiscontinuity;
+    const bool stalePositionRegression =
+        isStalePositionRegression(positionMs, reportedAnchorMs, snapshot);
+    const bool playingSeek = positionDiscontinuity &&
+                             snapshot.status == PlaybackStatus::Playing;
+    // 状态切换后的旧采样继续丢弃；播放中的 seek 不能沿用跳变前的锚点。
+    if (placeholderZero || staleTransitionTimeline ||
+        (stalePositionRegression && !playingSeek))
         return;
 
     snapshot.durationMs = durationMs;
     snapshot.positionMs = positionMs;
-    snapshot.anchorUtcMs = reportedAnchorMs;
+    snapshot.anchorUtcMs = positionDiscontinuity ? eventNowMs : reportedAnchorMs;
     if (snapshot.anchorUtcMs == 0)
         snapshot.anchorUtcMs = eventNowMs;
 }
@@ -128,6 +165,8 @@ void NeteaseSmtcAdapter::refreshPlayback(const Session& session,
     const bool nowPlaying = newStatus == PlaybackStatus::Playing;
     const bool leavingPlaying = wasPlaying && !nowPlaying;
     const bool repeatedPlaying = wasPlaying && nowPlaying;
+    if (newStatus != previousStatus)
+        lastStatusChangeMs_ = eventNowMs;
 
     // PlaybackInfoChanged 到达时，Position 可能还是上一条时间线的采样值；
     // 暂停时先按旧锚点换算到事件时刻，避免歌词回退到旧采样点。
@@ -189,6 +228,8 @@ SmtcSnapshot NeteaseSmtcAdapter::snapshot(const SmtcSnapshot& source,
     return result;
 }
 
-void NeteaseSmtcAdapter::reset() {}
+void NeteaseSmtcAdapter::reset() {
+    lastStatusChangeMs_ = 0;
+}
 
 } // namespace smtc
