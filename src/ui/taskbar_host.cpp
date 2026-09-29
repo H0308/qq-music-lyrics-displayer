@@ -8278,8 +8278,12 @@ struct TaskbarHost::Impl {
             rt->FillRectangle(D2D1::RectF(0.0f, top, w, std::min(h, top + pixel)),
                               brushBackground_);
         }
-        if (isExpandedView())
-            return; // Immersive 和 Dock 的背景由 Composition 模糊层绘制，窗口保持透明。
+        if (isExpandedView()) {
+            // 主背景由 Composition 模糊层绘制；动态装饰仍需绘制到透明宿主上。
+            if (taskbarDynamicBackgroundVisible())
+                drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+            return;
+        }
 
         if (coverBlurChain && coverLayer_ && brushBackground_) {
             ID2D1RoundedRectangleGeometry* clip = nullptr;
