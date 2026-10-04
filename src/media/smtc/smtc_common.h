@@ -23,7 +23,8 @@ PlaybackStatus mapStatus(
     winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus status);
 
 std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
-    const winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties& props);
+    const winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionMediaProperties& props,
+    uint64_t readSequence);
 
 template <typename PlaybackInfo>
 inline void applyPlaybackControls(const PlaybackInfo& info, SmtcSnapshot& snapshot) {

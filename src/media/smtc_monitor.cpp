@@ -132,6 +132,11 @@ struct SmtcMonitor::Impl {
     struct ThumbnailRequest {
         GlobalSystemMediaTransportControlsSessionMediaProperties props{ nullptr };
         uint64_t generation = 0;
+        uint64_t sequence = 0;
+        std::wstring title;
+        std::wstring artist;
+        std::wstring album;
+        std::wstring source;
     };
     struct SessionWatcher {
         Session session{ nullptr };
@@ -168,6 +173,9 @@ struct SmtcMonitor::Impl {
     uint64_t thumbnailGeneration = 0;
     bool thumbnailPending = false;
     int64_t thumbnailRetryAtMs = 0;
+    uint64_t thumbnailReadSequence = 0;
+    uint64_t thumbnailDiagnosticsGeneration = 0;
+    int thumbnailReferenceState = -1;
     int64_t sampledPositionMs = 0;
     int64_t sampledDurationMs = 0;
     int64_t sampledAnchorMs = 0;
@@ -238,7 +246,12 @@ struct SmtcMonitor::Impl {
         thumbnailThread = std::thread([this] {
             try {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            } catch (const winrt::hresult_error& error) {
+                runtime_log::writef(L"[cover][smtc] reader-init-failed hresult=0x%08X reason=\"%s\"",
+                                   static_cast<unsigned int>(error.code().value), error.message().c_str());
+                return;
             } catch (...) {
+                runtime_log::writef(L"[cover][smtc] reader-init-failed reason=unknown");
                 return;
             }
             for (;;) {
@@ -253,10 +266,19 @@ struct SmtcMonitor::Impl {
                     request = std::move(thumbnailRequest);
                     thumbnailRequest = {};
                 }
-                auto thumbnail = smtc::readThumbnail(request.props);
+                runtime_log::writef(
+                    L"[cover][smtc] read-started sequence=%llu generation=%llu source=\"%s\" "
+                    L"title=\"%s\" artist=\"%s\" album=\"%s\"",
+                    static_cast<unsigned long long>(request.sequence),
+                    static_cast<unsigned long long>(request.generation), request.source.c_str(),
+                    request.title.c_str(), request.artist.c_str(), request.album.c_str());
+                auto thumbnail = smtc::readThumbnail(request.props, request.sequence);
+                const size_t bytes = thumbnail ? thumbnail->size() : 0;
                 bool changed = false;
+                uint64_t currentGeneration = 0;
                 {
                     std::lock_guard<std::mutex> lk(mtx);
+                    currentGeneration = thumbnailGeneration;
                     if (request.generation == thumbnailGeneration) {
                         thumbnailPending = false;
                         thumbnailRetryAtMs = smtc::nowUtcMs() + 1000;
@@ -266,6 +288,21 @@ struct SmtcMonitor::Impl {
                             changed = true;
                         }
                     }
+                }
+                if (request.generation != currentGeneration) {
+                    runtime_log::writef(
+                        L"[cover][smtc] read-discarded sequence=%llu generation=%llu current-generation=%llu "
+                        L"title=\"%s\" bytes=%zu reason=track-or-session-changed",
+                        static_cast<unsigned long long>(request.sequence),
+                        static_cast<unsigned long long>(request.generation),
+                        static_cast<unsigned long long>(currentGeneration), request.title.c_str(), bytes);
+                } else {
+                    runtime_log::writef(
+                        L"[cover][smtc] %s sequence=%llu generation=%llu title=\"%s\" bytes=%zu retry-after=%dms",
+                        changed ? L"read-committed" : L"retry-scheduled",
+                        static_cast<unsigned long long>(request.sequence),
+                        static_cast<unsigned long long>(request.generation), request.title.c_str(),
+                        bytes, changed ? 0 : 1000);
                 }
                 if (changed)
                     notify();
@@ -278,12 +315,36 @@ struct SmtcMonitor::Impl {
     void requestThumbnail(
         const GlobalSystemMediaTransportControlsSessionMediaProperties& props) {
         if (!props || thumbCache_ || thumbnailPending ||
-            smtc::nowUtcMs() < thumbnailRetryAtMs || !props.Thumbnail())
+            smtc::nowUtcMs() < thumbnailRetryAtMs)
             return;
+        const bool hasThumbnail = static_cast<bool>(props.Thumbnail());
+        if (thumbnailDiagnosticsGeneration != thumbnailGeneration ||
+            thumbnailReferenceState != static_cast<int>(hasThumbnail)) {
+            thumbnailDiagnosticsGeneration = thumbnailGeneration;
+            thumbnailReferenceState = static_cast<int>(hasThumbnail);
+            runtime_log::writef(
+                L"[cover][smtc] thumbnail-%s generation=%llu source=\"%s\" title=\"%s\" artist=\"%s\" album=\"%s\"",
+                hasThumbnail ? L"provided" : L"missing",
+                static_cast<unsigned long long>(thumbnailGeneration), snap.sourceAppUserModelId.c_str(),
+                snap.title.c_str(), snap.artist.c_str(), snap.album.c_str());
+        }
+        if (!hasThumbnail)
+            return;
+        const uint64_t sequence = ++thumbnailReadSequence;
         {
             std::lock_guard<std::mutex> lk(thumbnailMtx);
-            thumbnailRequest = { props, thumbnailGeneration };
+            if (thumbnailRequest.props) {
+                runtime_log::writef(
+                    L"[cover][smtc] read-discarded sequence=%llu generation=%llu title=\"%s\" reason=request-replaced-before-read",
+                    static_cast<unsigned long long>(thumbnailRequest.sequence),
+                    static_cast<unsigned long long>(thumbnailRequest.generation), thumbnailRequest.title.c_str());
+            }
+            thumbnailRequest = { props, thumbnailGeneration, sequence,
+                                 snap.title, snap.artist, snap.album, snap.sourceAppUserModelId };
             thumbnailPending = true;
+            runtime_log::writef(L"[cover][smtc] read-queued sequence=%llu generation=%llu title=\"%s\"",
+                               static_cast<unsigned long long>(sequence),
+                               static_cast<unsigned long long>(thumbnailGeneration), snap.title.c_str());
         }
         thumbnailCv.notify_one();
     }
@@ -569,7 +630,22 @@ struct SmtcMonitor::Impl {
             snap = std::move(next);
             try {
                 requestThumbnail(props);
+            } catch (const winrt::hresult_error& error) {
+                if (thumbnailDiagnosticsGeneration != thumbnailGeneration || thumbnailReferenceState != -2) {
+                    thumbnailDiagnosticsGeneration = thumbnailGeneration;
+                    thumbnailReferenceState = -2;
+                    runtime_log::writef(
+                        L"[cover][smtc] request-failed generation=%llu title=\"%s\" hresult=0x%08X reason=\"%s\"",
+                        static_cast<unsigned long long>(thumbnailGeneration), snap.title.c_str(),
+                        static_cast<unsigned int>(error.code().value), error.message().c_str());
+                }
             } catch (...) {
+                if (thumbnailDiagnosticsGeneration != thumbnailGeneration || thumbnailReferenceState != -2) {
+                    thumbnailDiagnosticsGeneration = thumbnailGeneration;
+                    thumbnailReferenceState = -2;
+                    runtime_log::writef(L"[cover][smtc] request-failed generation=%llu title=\"%s\" reason=unknown",
+                                       static_cast<unsigned long long>(thumbnailGeneration), snap.title.c_str());
+                }
             }
         }
         if (changed)
