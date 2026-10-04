@@ -120,8 +120,19 @@ std::wstring sessionSourceAppUserModelId(const Session& session) {
 
 } // namespace
 
-// 成员顺序有意为之：revoker 最后声明、析构时最先退订，避免回调访问已销毁成员。
 struct SmtcMonitor::Impl {
+    struct RefreshSignal {
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool stopping = false;
+        bool requested = false;
+        bool rebuildWatchers = false;
+    };
+
+    struct ThumbnailRequest {
+        GlobalSystemMediaTransportControlsSessionMediaProperties props{ nullptr };
+        uint64_t generation = 0;
+    };
     struct SessionWatcher {
         Session session{ nullptr };
         Session::PlaybackInfoChanged_revoker playbackRevoker;
@@ -132,8 +143,7 @@ struct SmtcMonitor::Impl {
     Session session{ nullptr };
 
     mutable std::mutex mtx;
-    std::mutex updateMtx;
-    std::mutex attachMtx;
+    // 会话选择、属性和进度适配只由刷新线程执行；封面线程仅提交图片字节。
     SmtcSnapshot snap;
     SmtcMonitor::ChangeCallback onChange;
 
@@ -143,24 +153,29 @@ struct SmtcMonitor::Impl {
     Session::TimelinePropertiesChanged_revoker timelineRevoker;
 
     // 所有媒体会话都保留轻量监听，避免只监听当前选中会话导致切换丢失。
-    std::mutex watchersMtx;
     std::vector<SessionWatcher> sessionWatchers;
 
     // 新播放器只需实现一个适配器并在这里注册，监控器本身不再增加播放器分支。
     std::vector<std::unique_ptr<smtc::SmtcPlayerAdapter>> adapters;
 
-    // 某些播放器被强制退出时，系统不会及时投递 SessionsChanged；
-    // 用后台健康检查重新读取会话列表，避免必须点击控制按钮才能清理旧会话。
-    std::mutex pollMtx;
-    std::condition_variable pollCv;
-    bool pollStopping = false;
+    std::shared_ptr<RefreshSignal> refreshSignal = std::make_shared<RefreshSignal>();
     std::thread pollThread;
+    std::mutex thumbnailMtx;
+    std::condition_variable thumbnailCv;
+    bool thumbnailStopping = false;
+    ThumbnailRequest thumbnailRequest;
+    std::thread thumbnailThread;
+    uint64_t thumbnailGeneration = 0;
+    bool thumbnailPending = false;
+    int64_t thumbnailRetryAtMs = 0;
+    int64_t sampledPositionMs = 0;
+    int64_t sampledDurationMs = 0;
+    int64_t sampledAnchorMs = 0;
 
     // Windows 在其他 SMTC 应用成为当前会话时，可能从枚举结果中漏掉
     // 已暂停的音乐会话。只要该会话所属的音乐播放器仍在运行，就保留暂停快照；
     // 播放器退出后再等待一个稳定窗口，避免生命周期边界的瞬时空列表。
     std::chrono::steady_clock::time_point sessionLossCandidateSince;
-    bool sessionSelectionHeld = false;
     static constexpr auto kSessionLossStabilityWindow = std::chrono::milliseconds(1500);
 
     Impl() {
@@ -170,12 +185,36 @@ struct SmtcMonitor::Impl {
 
     ~Impl() {
         {
-            std::lock_guard<std::mutex> lk(pollMtx);
-            pollStopping = true;
+            std::lock_guard<std::mutex> lk(refreshSignal->mtx);
+            refreshSignal->stopping = true;
         }
-        pollCv.notify_all();
+        refreshSignal->cv.notify_all();
         if (pollThread.joinable())
             pollThread.join();
+        timelineRevoker.revoke();
+        currentSessionRevoker.revoke();
+        sessionsRevoker.revoke();
+        sessionWatchers.clear();
+        {
+            std::lock_guard<std::mutex> lk(thumbnailMtx);
+            thumbnailStopping = true;
+            thumbnailRequest = {};
+        }
+        thumbnailCv.notify_all();
+        if (thumbnailThread.joinable())
+            thumbnailThread.join();
+    }
+
+    static void requestRefresh(const std::shared_ptr<RefreshSignal>& signal,
+                               bool rebuildWatchers = false) {
+        {
+            std::lock_guard<std::mutex> lk(signal->mtx);
+            if (signal->stopping)
+                return;
+            signal->requested = true;
+            signal->rebuildWatchers = signal->rebuildWatchers || rebuildWatchers;
+        }
+        signal->cv.notify_one();
     }
 
     smtc::SmtcPlayerAdapter* adapterFor(SmtcPlayerType player) const {
@@ -186,11 +225,68 @@ struct SmtcMonitor::Impl {
         return nullptr;
     }
 
-    // 缩略图去重：同一首歌的属性事件会连续触发多次，曲目身份（标题|歌手|专辑）
-    // 未变时复用上次读取的字节，避免在回调线程上重复阻塞读取 MB 级图片流。
-    // 读取失败（封面晚到）不写缓存，下一次事件到达时重试。
     std::wstring thumbCacheKey_;
     std::shared_ptr<const std::vector<uint8_t>> thumbCache_;
+
+    static std::wstring thumbnailKey(const SmtcSnapshot& snapshot) {
+        return snapshot.sourceAppUserModelId + L'\x1f' + snapshot.neteaseSongId +
+               L'\x1f' + snapshot.title + L'\x1f' + snapshot.artist +
+               L'\x1f' + snapshot.album;
+    }
+
+    void startThumbnailReader() {
+        thumbnailThread = std::thread([this] {
+            try {
+                winrt::init_apartment(winrt::apartment_type::multi_threaded);
+            } catch (...) {
+                return;
+            }
+            for (;;) {
+                ThumbnailRequest request;
+                {
+                    std::unique_lock<std::mutex> lk(thumbnailMtx);
+                    thumbnailCv.wait(lk, [this] {
+                        return thumbnailStopping || thumbnailRequest.props;
+                    });
+                    if (thumbnailStopping)
+                        break;
+                    request = std::move(thumbnailRequest);
+                    thumbnailRequest = {};
+                }
+                auto thumbnail = smtc::readThumbnail(request.props);
+                bool changed = false;
+                {
+                    std::lock_guard<std::mutex> lk(mtx);
+                    if (request.generation == thumbnailGeneration) {
+                        thumbnailPending = false;
+                        thumbnailRetryAtMs = smtc::nowUtcMs() + 1000;
+                        if (thumbnail) {
+                            thumbCache_ = std::move(thumbnail);
+                            snap.thumbnail = thumbCache_;
+                            changed = true;
+                        }
+                    }
+                }
+                if (changed)
+                    notify();
+            }
+            winrt::uninit_apartment();
+        });
+    }
+
+    // 调用方持有快照锁；图片流读取独立于歌曲信息和播放状态的提交。
+    void requestThumbnail(
+        const GlobalSystemMediaTransportControlsSessionMediaProperties& props) {
+        if (!props || thumbCache_ || thumbnailPending ||
+            smtc::nowUtcMs() < thumbnailRetryAtMs || !props.Thumbnail())
+            return;
+        {
+            std::lock_guard<std::mutex> lk(thumbnailMtx);
+            thumbnailRequest = { props, thumbnailGeneration };
+            thumbnailPending = true;
+        }
+        thumbnailCv.notify_one();
+    }
 
     smtc::SmtcSessionIdentity identifySession(const Session& candidate) const {
         for (const auto& adapter : adapters) {
@@ -293,7 +389,8 @@ struct SmtcMonitor::Impl {
 
             const std::wstring actionCopy(action);
             const std::wstring apiCopy(api);
-            operation.Completed([actionCopy, apiCopy](auto&& completedOperation, auto status) {
+            operation.Completed([actionCopy, apiCopy, signal = refreshSignal](
+                                    auto&& completedOperation, auto status) {
                 using AsyncStatus = winrt::Windows::Foundation::AsyncStatus;
                 if (status != AsyncStatus::Completed) {
                     std::wostringstream line;
@@ -311,6 +408,8 @@ struct SmtcMonitor::Impl {
                          << L" api=" << apiCopy << L" asyncStatus=Completed result="
                          << (succeeded ? L"true" : L"false");
                     writeSmtcControlLog(line.str());
+                    if (succeeded)
+                        requestRefresh(signal);
                 } catch (const winrt::hresult_error& error) {
                     std::wostringstream line;
                     line << L"phase=operation-complete action=" << actionCopy
@@ -346,147 +445,135 @@ struct SmtcMonitor::Impl {
             currentSession = session;
             previous = snap;
         }
+        if (!currentSession)
+            return;
 
-        SmtcSnapshot next;
-        smtc::SmtcSessionIdentity identity = identifySession(currentSession);
-        if (identity.player == SmtcPlayerType::Unknown && previous.sessionAlive &&
-            currentSession) {
-            try {
-                // 网易云的身份来自 Genres 中的 NCM-{ID}，播放/暂停/切歌的过渡窗口里
-                // 状态或属性会暂时读不全。只要仍是同一来源的会话，就保留上一份身份，
-                // 避免 sessionAlive 短暂翻转为 false 让任务栏窗口整体闪隐。
-                const std::wstring source = currentSession.SourceAppUserModelId().c_str();
-                if (!source.empty() && source == previous.sourceAppUserModelId) {
-                    identity.player = previous.player;
-                    identity.neteaseSongId = previous.neteaseSongId;
-                    identity.sourceAppUserModelId = previous.sourceAppUserModelId;
-                    identity.enhancedSmtc = previous.enhancedSmtc;
+        bool playbackChanged = false;
+        try {
+            auto info = currentSession.GetPlaybackInfo();
+            std::lock_guard<std::mutex> lk(mtx);
+            if (info && snap.sessionAlive) {
+                if (smtc::mapStatus(info.PlaybackStatus()) != snap.status) {
+                    try {
+                        if (auto* adapter = adapterFor(snap.player))
+                            adapter->refreshPlayback(currentSession, snap, smtc::nowUtcMs());
+                    } catch (...) {
+                    }
+                    snap.status = smtc::mapStatus(info.PlaybackStatus());
                 }
-            } catch (...) {
+                smtc::applyPlaybackControls(info, snap);
+                playbackChanged = snap.status != previous.status ||
+                                  snap.canPrev != previous.canPrev ||
+                                  snap.canPlayPause != previous.canPlayPause ||
+                                  snap.canNext != previous.canNext;
             }
+            previous = snap;
+        } catch (...) {
         }
-        next.player = identity.player;
-        next.neteaseSongId = identity.neteaseSongId;
-        next.sourceAppUserModelId = identity.sourceAppUserModelId;
-        next.enhancedSmtc = identity.enhancedSmtc;
-        next.sessionAlive = identity.player != SmtcPlayerType::Unknown;
+        if (playbackChanged)
+            notify();
 
-        if (currentSession) {
-            try {
-                auto propsOp = currentSession.TryGetMediaPropertiesAsync();
-                if (propsOp) {
-                    auto props = propsOp.get();
-                    if (props) {
-                        next.title = props.Title().c_str();
-                        next.artist = props.Artist().c_str();
-                        next.album = props.AlbumTitle().c_str();
-                        const std::wstring thumbKey =
-                            next.title + L'\x1f' + next.artist + L'\x1f' + next.album;
-                        {
-                            std::lock_guard<std::mutex> lk(mtx);
-                            if (thumbCache_ && thumbKey == thumbCacheKey_)
-                                next.thumbnail = thumbCache_;
-                        }
-                        if (!next.thumbnail) {
-                            auto thumb = smtc::readThumbnail(props);
-                            if (thumb) {
-                                std::lock_guard<std::mutex> lk(mtx);
-                                thumbCacheKey_ = thumbKey;
-                                thumbCache_ = thumb;
-                            }
-                            next.thumbnail = std::move(thumb);
+        SmtcSnapshot next = previous;
+        if (!next.sessionAlive) {
+            const auto identity = identifySession(currentSession);
+            next.player = identity.player;
+            next.neteaseSongId = identity.neteaseSongId;
+            next.sourceAppUserModelId = identity.sourceAppUserModelId;
+            next.enhancedSmtc = identity.enhancedSmtc;
+            next.sessionAlive = identity.player != SmtcPlayerType::Unknown;
+        }
+        auto* adapter = adapterFor(next.player);
+        if (!adapter)
+            return;
+
+        GlobalSystemMediaTransportControlsSessionMediaProperties props{ nullptr };
+        try {
+            auto operation = currentSession.TryGetMediaPropertiesAsync();
+            if (operation.wait_for(std::chrono::seconds(1)) ==
+                winrt::Windows::Foundation::AsyncStatus::Completed)
+                props = operation.GetResults();
+            else
+                operation.Cancel();
+            if (props) {
+                next.title = props.Title().c_str();
+                next.artist = props.Artist().c_str();
+                next.album = props.AlbumTitle().c_str();
+                if (next.player == SmtcPlayerType::NetEase) {
+                    for (const auto& genre : props.Genres()) {
+                        const std::wstring value = genre.c_str();
+                        if (value.starts_with(L"NCM-") && value.size() > 4 &&
+                            value.find_first_not_of(L"0123456789", 4) == std::wstring::npos) {
+                            next.neteaseSongId = value.substr(4);
+                            break;
                         }
                     }
                 }
-            } catch (...) {
             }
-
-            try {
-                auto timeline = currentSession.GetTimelineProperties();
-                if (timeline) {
-                    next.durationMs = smtc::timeSpanMs(timeline.EndTime());
-                    next.positionMs = smtc::timeSpanMs(timeline.Position());
-                    next.anchorUtcMs = smtc::lastUpdatedMs(timeline.LastUpdatedTime());
-                    if (next.anchorUtcMs == 0)
-                        next.anchorUtcMs = smtc::nowUtcMs();
-                }
-            } catch (...) {
-            }
-
-            if (next.anchorUtcMs != 0) {
-                if (auto* adapter = adapterFor(next.player))
-                    adapter->prepareInitialSnapshot(next);
-            }
-
-            try {
-                auto info = currentSession.GetPlaybackInfo();
-                if (info) {
-                    next.status = smtc::mapStatus(info.PlaybackStatus());
-                    auto controls = info.Controls();
-                    if (controls) {
-                        next.canPrev = controls.IsPreviousEnabled();
-                        next.canPlayPause = controls.IsPlayEnabled() || controls.IsPauseEnabled();
-                        next.canNext = controls.IsNextEnabled();
-                    }
-                }
-            } catch (...) {
-            }
+        } catch (...) {
         }
 
+        const bool trackChanged = !previous.sessionAlive ||
+                                  next.title != previous.title ||
+                                  next.artist != previous.artist ||
+                                  next.neteaseSongId != previous.neteaseSongId;
+        try {
+            auto timeline = currentSession.GetTimelineProperties();
+            auto info = currentSession.GetPlaybackInfo();
+            const int64_t now = smtc::nowUtcMs();
+            const int64_t position = smtc::timeSpanMs(timeline.Position());
+            const int64_t duration = smtc::timeSpanMs(timeline.EndTime());
+            const int64_t anchor = smtc::lastUpdatedMs(timeline.LastUpdatedTime());
+            std::lock_guard<std::mutex> lk(mtx);
+            if (trackChanged) {
+                next.positionMs = position;
+                next.durationMs = duration;
+                next.anchorUtcMs = anchor > 0 ? anchor : now;
+                next.timelineStale = false;
+                adapter->prepareInitialSnapshot(next);
+                next.status = smtc::mapStatus(info.PlaybackStatus());
+            } else {
+                if (smtc::mapStatus(info.PlaybackStatus()) != next.status)
+                    adapter->refreshPlayback(currentSession, next, now);
+                if (next.timelineStale || position != sampledPositionMs ||
+                    duration != sampledDurationMs || anchor != sampledAnchorMs)
+                    adapter->refreshTimeline(currentSession, next, now);
+            }
+            smtc::applyPlaybackControls(info, next);
+            sampledPositionMs = position;
+            sampledDurationMs = duration;
+            sampledAnchorMs = anchor;
+        } catch (...) {
+        }
+
+        bool changed = false;
         {
             std::lock_guard<std::mutex> lk(mtx);
-            if (!smtc::sameSession(session, currentSession))
-                return;
+            const std::wstring key = thumbnailKey(next);
+            if (key != thumbCacheKey_) {
+                thumbCacheKey_ = key;
+                thumbCache_.reset();
+                ++thumbnailGeneration;
+                thumbnailPending = false;
+                thumbnailRetryAtMs = 0;
+            }
+            next.thumbnail = thumbCache_;
+            changed = next.sessionAlive != snap.sessionAlive ||
+                      next.player != snap.player || next.title != snap.title ||
+                      next.artist != snap.artist || next.album != snap.album ||
+                      next.neteaseSongId != snap.neteaseSongId ||
+                      next.status != snap.status || next.durationMs != snap.durationMs ||
+                      next.positionMs != snap.positionMs || next.anchorUtcMs != snap.anchorUtcMs ||
+                      next.timelineStale != snap.timelineStale ||
+                      next.thumbnail != snap.thumbnail || next.canPrev != snap.canPrev ||
+                      next.canPlayPause != snap.canPlayPause || next.canNext != snap.canNext;
             snap = std::move(next);
-        }
-        notify();
-    }
-
-    void refreshCurrentSession(const Session& changedSession) {
-        if (!changedSession)
-            return;
-        {
-            std::lock_guard<std::mutex> lk(mtx);
-            if (!smtc::sameSession(session, changedSession))
-                return;
-        }
-        // MediaPropertiesChanged 表示歌曲或播放器识别属性可能已经切换，
-        // 因此重新读取完整的当前快照。
-        refreshAll();
-    }
-
-    void refreshTimeline(const Session& changedSession) {
-        if (!changedSession)
-            return;
-        {
-            std::lock_guard<std::mutex> lk(mtx);
             try {
-                if (!smtc::sameSession(session, changedSession))
-                    return;
-                if (auto* adapter = adapterFor(snap.player))
-                    adapter->refreshTimeline(changedSession, snap, smtc::nowUtcMs());
+                requestThumbnail(props);
             } catch (...) {
-                return;
             }
         }
-        notify();
-    }
-
-    void refreshPlayback(const Session& changedSession) {
-        if (!changedSession)
-            return;
-        {
-            std::lock_guard<std::mutex> lk(mtx);
-            try {
-                if (!smtc::sameSession(session, changedSession))
-                    return;
-                if (auto* adapter = adapterFor(snap.player))
-                    adapter->refreshPlayback(changedSession, snap, smtc::nowUtcMs());
-            } catch (...) {
-                return;
-            }
-        }
-        notify();
+        if (changed)
+            notify();
     }
 
     static bool isResponsivePlaybackStatus(
@@ -511,7 +598,6 @@ struct SmtcMonitor::Impl {
     }
 
     void attach(const Session& selected) {
-        std::lock_guard<std::mutex> attachLock(attachMtx);
         try {
             timelineRevoker.revoke();
         } catch (...) {
@@ -521,17 +607,28 @@ struct SmtcMonitor::Impl {
         {
             std::lock_guard<std::mutex> lk(mtx);
             session = selected;
+            snap = {};
+            thumbCacheKey_.clear();
+            thumbCache_.reset();
+            ++thumbnailGeneration;
+            thumbnailPending = false;
+            thumbnailRetryAtMs = 0;
+            sampledPositionMs = 0;
+            sampledDurationMs = 0;
+            sampledAnchorMs = 0;
             for (auto& adapter : adapters) {
                 if (adapter)
                     adapter->reset();
             }
         }
-        if (!selected)
+        if (!selected) {
+            notify();
             return;
+        }
 
         try {
             timelineRevoker = selected.TimelinePropertiesChanged(winrt::auto_revoke,
-                [this, watched = selected](auto&&, auto&&) { refreshTimeline(watched); });
+                [signal = refreshSignal](auto&&, auto&&) { requestRefresh(signal); });
         } catch (...) {
             // 会话可能在绑定监听前已经被播放器撤销；下一次系统事件或后台健康检查
             // 会重新尝试绑定。
@@ -539,7 +636,6 @@ struct SmtcMonitor::Impl {
     }
 
     void watchSessions(const auto& sessions) {
-        std::lock_guard<std::mutex> watchersLock(watchersMtx);
         sessionWatchers.clear();
         for (auto const& watched : sessions) {
             if (!watched)
@@ -548,17 +644,9 @@ struct SmtcMonitor::Impl {
                 SessionWatcher watcher;
                 watcher.session = watched;
                 watcher.playbackRevoker = watched.PlaybackInfoChanged(winrt::auto_revoke,
-                    [this, watched](auto&&, auto&&) {
-                        // 先处理当前选中会话的播放器专属进度，再重新选择活动来源。
-                        refreshPlayback(watched);
-                        updateSession();
-                    });
+                    [signal = refreshSignal](auto&&, auto&&) { requestRefresh(signal); });
                 watcher.propsRevoker = watched.MediaPropertiesChanged(winrt::auto_revoke,
-                    [this, watched](auto&&, auto&&) {
-                        // 网易云可能先建立会话、后写入 NCM-{ID}，属性变化也要触发重新识别。
-                        refreshCurrentSession(watched);
-                        updateSession();
-                    });
+                    [signal = refreshSignal](auto&&, auto&&) { requestRefresh(signal); });
                 sessionWatchers.push_back(std::move(watcher));
             } catch (...) {
                 // 单个已失效会话绑定失败不应阻断其他会话的监听。
@@ -567,7 +655,6 @@ struct SmtcMonitor::Impl {
     }
 
     void updateSession(bool rebuildWatchers = false) {
-        std::lock_guard<std::mutex> updateLock(updateMtx);
         Session found{ nullptr };
         Session selectedSession{ nullptr };
         bool selectedSessionAlive = false;
@@ -697,9 +784,7 @@ struct SmtcMonitor::Impl {
             }
         }
 
-        bool recoveredHeldSession = false;
         if (!found && selectedSessionAlive && selectedSession) {
-            sessionSelectionHeld = true;
             if (playerProcessAlive(selectedPlayer)) {
                 sessionLossCandidateSince = {};
                 return;
@@ -709,11 +794,8 @@ struct SmtcMonitor::Impl {
                 sessionLossCandidateSince = now;
             if (now - sessionLossCandidateSince < kSessionLossStabilityWindow)
                 return;
-            sessionSelectionHeld = false;
             sessionLossCandidateSince = {};
         } else {
-            recoveredHeldSession = found && sessionSelectionHeld;
-            sessionSelectionHeld = false;
             sessionLossCandidateSince = {};
         }
 
@@ -725,46 +807,39 @@ struct SmtcMonitor::Impl {
         if (!smtc::sameSession(currentSession, found)) {
             try {
                 attach(found);
-                refreshAll();
             } catch (...) {
                 // 会话切换与属性读取发生在播放器生命周期边界，失败时保持
                 // 当前快照，等待下一次系统媒体会话事件或后台健康检查重试。
             }
-        } else if (recoveredHeldSession) {
-            // 保留期内会话可能已发生暂停/恢复或属性变化，而它短暂从
-            // 枚举结果中消失时监听器也可能被重建。恢复后主动补读一次完整快照。
-            refreshAll();
         }
     }
 
     void startPolling() {
-        {
-            std::lock_guard<std::mutex> lk(pollMtx);
-            if (pollThread.joinable())
-                return;
-            pollStopping = false;
-        }
-
         pollThread = std::thread([this] {
             try {
                 winrt::init_apartment(winrt::apartment_type::multi_threaded);
             } catch (...) {
                 return;
             }
-
             for (;;) {
-                std::unique_lock<std::mutex> lk(pollMtx);
-                if (pollCv.wait_for(lk, std::chrono::seconds(1),
-                                    [this] { return pollStopping; }))
-                    break;
-                lk.unlock();
-
+                bool rebuildWatchers = false;
+                {
+                    std::unique_lock<std::mutex> lk(refreshSignal->mtx);
+                    refreshSignal->cv.wait_for(lk, std::chrono::milliseconds(100), [this] {
+                        return refreshSignal->stopping || refreshSignal->requested;
+                    });
+                    if (refreshSignal->stopping)
+                        break;
+                    rebuildWatchers = refreshSignal->rebuildWatchers;
+                    refreshSignal->requested = false;
+                    refreshSignal->rebuildWatchers = false;
+                }
                 try {
-                    updateSession();
+                    updateSession(rebuildWatchers);
+                    refreshAll();
                 } catch (...) {
                 }
             }
-
             winrt::uninit_apartment();
         });
     }
@@ -784,10 +859,15 @@ void SmtcMonitor::start(ChangeCallback onChange) {
         if (!impl_->manager)
             return;
         impl_->sessionsRevoker = impl_->manager.SessionsChanged(winrt::auto_revoke,
-            [this](auto&&, auto&&) { impl_->updateSession(true); });
+            [signal = impl_->refreshSignal](auto&&, auto&&) {
+                Impl::requestRefresh(signal, true);
+            });
         impl_->currentSessionRevoker = impl_->manager.CurrentSessionChanged(winrt::auto_revoke,
-            [this](auto&&, auto&&) { impl_->updateSession(); });
-        impl_->updateSession(true);
+            [signal = impl_->refreshSignal](auto&&, auto&&) {
+                Impl::requestRefresh(signal);
+            });
+        impl_->startThumbnailReader();
+        Impl::requestRefresh(impl_->refreshSignal, true);
         impl_->startPolling();
     } catch (...) {
         // 没有可用媒体会话或系统媒体控制能力时，监控器保持空快照，
@@ -814,13 +894,8 @@ void SmtcMonitor::playPause() {
         current = impl_->session;
         snapshot = impl_->snap;
     }
-    if (snapshot.status == PlaybackStatus::Playing) {
-        impl_->startControlOperation(L"play-pause", L"TryPauseAsync", current, snapshot,
-                                     [current] { return current.TryPauseAsync(); });
-    } else {
-        impl_->startControlOperation(L"play-pause", L"TryPlayAsync", current, snapshot,
-                                     [current] { return current.TryPlayAsync(); });
-    }
+    impl_->startControlOperation(L"play-pause", L"TryTogglePlayPauseAsync", current, snapshot,
+                                 [current] { return current.TryTogglePlayPauseAsync(); });
 }
 
 void SmtcMonitor::skipNext() {

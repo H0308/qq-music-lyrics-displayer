@@ -95,7 +95,12 @@ std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
         auto streamOp = ref.OpenReadAsync();
         if (!streamOp)
             return nullptr;
-        auto stream = streamOp.get();
+        if (streamOp.wait_for(std::chrono::seconds(5)) !=
+            winrt::Windows::Foundation::AsyncStatus::Completed) {
+            streamOp.Cancel();
+            return nullptr;
+        }
+        auto stream = streamOp.GetResults();
         if (!stream)
             return nullptr;
         uint64_t size = stream.Size();
@@ -106,7 +111,13 @@ std::shared_ptr<const std::vector<uint8_t>> readThumbnail(
         auto loadOp = reader.LoadAsync((uint32_t)size);
         if (!loadOp)
             return nullptr;
-        loadOp.get();
+        if (loadOp.wait_for(std::chrono::seconds(5)) !=
+            winrt::Windows::Foundation::AsyncStatus::Completed) {
+            loadOp.Cancel();
+            return nullptr;
+        }
+        if (loadOp.GetResults() != size)
+            return nullptr;
         reader.ReadBytes(winrt::array_view<uint8_t>(buffer->data(), (uint32_t)buffer->size()));
         if (!isDecodableImage(*buffer))
             return nullptr;

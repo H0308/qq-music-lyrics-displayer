@@ -37,7 +37,7 @@ struct SmtcSnapshot {
 // 监听 Windows 系统媒体会话：保留 QQMusic.exe，并识别 Genres 中带 NCM-{ID} 的网易云增强会话。
 class SmtcMonitor {
 public:
-    using ChangeCallback = std::function<void()>; // 任意事件后触发（WinRT 线程池线程）
+    using ChangeCallback = std::function<void()>; // 快照变化后触发（后台刷新/封面线程）
 
     SmtcMonitor();
     ~SmtcMonitor();

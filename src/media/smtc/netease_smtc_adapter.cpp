@@ -5,6 +5,7 @@
 #include <winrt/Windows.Foundation.Collections.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cwchar>
 #include <utility>
 
@@ -82,7 +83,12 @@ SmtcSessionIdentity NeteaseSmtcAdapter::identifySession(const Session& session) 
         auto propsOp = session.TryGetMediaPropertiesAsync();
         if (!propsOp)
             return identity;
-        auto props = propsOp.get();
+        if (propsOp.wait_for(std::chrono::seconds(1)) !=
+            winrt::Windows::Foundation::AsyncStatus::Completed) {
+            propsOp.Cancel();
+            return identity;
+        }
+        auto props = propsOp.GetResults();
         if (!props)
             return identity;
         auto genres = props.Genres();
