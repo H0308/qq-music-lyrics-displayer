@@ -20,6 +20,9 @@ public:
     void setSolidColor(COLORREF color) noexcept;
     void setBlurPercent(int percent) noexcept;
     void setVisible(bool visible) noexcept;
+    // 整层显隐过渡（沉浸模式让出任务栏时使用），与 blur/不透明度设置相互独立。
+    // durationMs 为 0 时直接落到 to。
+    void animatePresence(float from, float to, unsigned durationMs) noexcept;
     bool available() const noexcept;
 
 private:

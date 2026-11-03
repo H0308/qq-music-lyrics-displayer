@@ -140,7 +140,6 @@ constexpr UINT kCmdAppBarTop = 138;
 constexpr UINT kCmdAppBarBottom = 139;
 constexpr int kCmdTaskbarMonitorAll = 150;
 constexpr int kCmdTaskbarMonitorBase = 151;
-constexpr int kTaskbarAppCommandBase = 20000;
 constexpr int kDockQuickAppCommandBase = 21000;
 constexpr int64_t kLyricTransitionLeadMs = 100; // 提前准备下一句显示，逐字高亮仍按真实进度
 constexpr int kUpdatePromptReleasePage = 1;
@@ -658,275 +657,7 @@ fluent::NativeMenuIcon shellIconForPath(const std::wstring& path) {
     return ownMenuIcon(info.hIcon);
 }
 
-std::wstring windowAppUserModelId(HWND window) {
-    if (!window)
-        return {};
-
-    IPropertyStore* store = nullptr;
-    if (FAILED(SHGetPropertyStoreForWindow(window, IID_PPV_ARGS(&store))) || !store)
-        return {};
-
-    PROPVARIANT value{};
-    PropVariantInit(&value);
-    std::wstring appUserModelId;
-    if (SUCCEEDED(store->GetValue(PKEY_AppUserModel_ID, &value))) {
-        if (value.vt == VT_LPWSTR && value.pwszVal)
-            appUserModelId = value.pwszVal;
-        else if (value.vt == VT_BSTR && value.bstrVal)
-            appUserModelId = value.bstrVal;
-    }
-    PropVariantClear(&value);
-    store->Release();
-    return appUserModelId;
-}
-
-fluent::NativeMenuIcon packagedAppMenuIcon(HWND window) {
-    const std::wstring appUserModelId = windowAppUserModelId(window);
-    if (appUserModelId.empty())
-        return {};
-
-    // 打包应用图标由 Shell 解析，按 AUMID 缓存，避免每次打开应用收纳都重复查询。
-    static std::unordered_map<std::wstring, fluent::NativeMenuIcon> cache;
-    if (const auto it = cache.find(appUserModelId); it != cache.end())
-        return it->second;
-
-    std::wstring shellPath = L"shell:AppsFolder\\";
-    shellPath += appUserModelId;
-    SHFILEINFOW info{};
-    if (SHGetFileInfoW(shellPath.c_str(), 0, &info, sizeof(info),
-                       SHGFI_ICON | SHGFI_SMALLICON) == 0 ||
-        !info.hIcon)
-        return {};
-
-    auto icon = ownMenuIcon(info.hIcon);
-    cache.emplace(appUserModelId, icon);
-    return icon;
-}
-
-std::wstring processImagePath(DWORD processId) {
-    if (processId == 0)
-        return {};
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (!process)
-        return {};
-    std::wstring path(32768, L'\0');
-    DWORD length = static_cast<DWORD>(path.size());
-    const bool queried = QueryFullProcessImageNameW(process, 0, path.data(), &length) != FALSE;
-    CloseHandle(process);
-    if (!queried || length == 0)
-        return {};
-    path.resize(length);
-    return path;
-}
-
-fluent::NativeMenuIcon processMenuIcon(DWORD processId) {
-    const std::wstring path = processImagePath(processId);
-    if (path.empty())
-        return {};
-
-    HICON largeIcon = nullptr;
-    HICON smallIcon = nullptr;
-    if (ExtractIconExW(path.c_str(), 0, &largeIcon, &smallIcon, 1) <= 0) {
-        if (largeIcon)
-            DestroyIcon(largeIcon);
-        if (smallIcon)
-            DestroyIcon(smallIcon);
-        return {};
-    }
-
-    HICON source = smallIcon ? smallIcon : largeIcon;
-    HICON copy = source ? CopyIcon(source) : nullptr;
-    if (largeIcon)
-        DestroyIcon(largeIcon);
-    if (smallIcon)
-        DestroyIcon(smallIcon);
-    return ownMenuIcon(copy);
-}
-
-fluent::NativeMenuIcon windowMenuIcon(HWND window, DWORD processId) {
-    // 菜单打开运行在主 UI 线程。先读类图标，再以很短的上限读取窗口图标，
-    // 避免无响应的目标窗口把菜单长时间卡住；最后按经典 EXE / 打包应用分别回退。
-    HICON borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
-    if (!borrowed)
-        borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
-    auto queryWindowIcon = [window](WPARAM kind) -> HICON {
-        DWORD_PTR result = 0;
-        if (!SendMessageTimeoutW(window, WM_GETICON, kind, 0,
-                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, 5, &result))
-            return nullptr;
-        return reinterpret_cast<HICON>(result);
-    };
-    if (!borrowed)
-        borrowed = queryWindowIcon(ICON_SMALL2);
-    if (!borrowed)
-        borrowed = queryWindowIcon(ICON_BIG);
-    if (borrowed) {
-        if (HICON copy = CopyIcon(borrowed))
-            return ownMenuIcon(copy);
-    }
-    if (auto icon = processMenuIcon(processId))
-        return icon;
-    return packagedAppMenuIcon(window);
-}
-
-struct RunningTaskbarApp {
-    HWND window = nullptr;
-    std::wstring title;
-    fluent::NativeMenuIcon icon;
-};
-
-struct PinnedTaskbarApp {
-    std::wstring shortcutPath;
-    std::wstring title;
-    fluent::NativeMenuIcon icon;
-    size_t taskbarOrder = 0;
-};
-
-std::wstring trimTaskbarAppTitle(std::wstring value) {
-    const auto first = std::find_if_not(value.begin(), value.end(), [](wchar_t ch) {
-        return std::iswspace(ch) != 0;
-    });
-    const auto last = std::find_if_not(value.rbegin(), value.rend(), [](wchar_t ch) {
-        return std::iswspace(ch) != 0;
-    }).base();
-    if (first >= last)
-        return {};
-    value = std::wstring(first, last);
-    constexpr size_t kMaxMenuTitleLength = 48;
-    if (value.size() > kMaxMenuTitleLength) {
-        value.resize(kMaxMenuTitleLength - 1);
-        value += L'…';
-    }
-    return value;
-}
-
-std::vector<RunningTaskbarApp> enumerateRunningTaskbarApps() {
-    std::vector<RunningTaskbarApp> apps;
-    EnumWindows(
-        [](HWND window, LPARAM param) -> BOOL {
-            auto& result = *reinterpret_cast<std::vector<RunningTaskbarApp>*>(param);
-            if (!IsWindowVisible(window) || window == GetShellWindow())
-                return TRUE;
-
-            const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
-            const bool forceTaskbar = (exStyle & WS_EX_APPWINDOW) != 0;
-            if (!forceTaskbar &&
-                ((exStyle & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) != 0 ||
-                 GetWindow(window, GW_OWNER) != nullptr))
-                return TRUE;
-
-            BOOL cloaked = FALSE;
-            if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked,
-                                                sizeof(cloaked))) &&
-                cloaked)
-                return TRUE;
-
-            DWORD processId = 0;
-            GetWindowThreadProcessId(window, &processId);
-            if (processId == 0 || processId == GetCurrentProcessId())
-                return TRUE;
-
-            const int titleLength = GetWindowTextLengthW(window);
-            if (titleLength <= 0)
-                return TRUE;
-            std::wstring title(static_cast<size_t>(titleLength) + 1, L'\0');
-            const int copied = GetWindowTextW(window, title.data(), titleLength + 1);
-            if (copied <= 0)
-                return TRUE;
-            title.resize(static_cast<size_t>(copied));
-            title = trimTaskbarAppTitle(std::move(title));
-            if (!title.empty())
-                result.push_back(
-                    {window, std::move(title), windowMenuIcon(window, processId)});
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&apps));
-    return apps;
-}
-
-std::vector<BYTE> readTaskbandFavorites() {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband",
-                      0, KEY_QUERY_VALUE, &key) != ERROR_SUCCESS)
-        return {};
-
-    DWORD type = 0;
-    DWORD size = 0;
-    LONG status = RegQueryValueExW(key, L"Favorites", nullptr, &type, nullptr, &size);
-    if (status != ERROR_SUCCESS || type != REG_BINARY || size == 0) {
-        RegCloseKey(key);
-        return {};
-    }
-
-    std::vector<BYTE> value(size);
-    status = RegQueryValueExW(key, L"Favorites", nullptr, &type, value.data(), &size);
-    RegCloseKey(key);
-    if (status != ERROR_SUCCESS || type != REG_BINARY)
-        return {};
-    value.resize(size);
-    return value;
-}
-
-size_t taskbandFavoriteOrder(const std::vector<BYTE>& favorites,
-                             const std::wstring& shortcutFileName) {
-    if (favorites.empty() || shortcutFileName.empty())
-        return std::wstring::npos;
-    const auto* nameBegin = reinterpret_cast<const BYTE*>(shortcutFileName.data());
-    const auto* nameEnd = nameBegin + shortcutFileName.size() * sizeof(wchar_t);
-    const auto match = std::search(favorites.begin(), favorites.end(), nameBegin, nameEnd);
-    if (match == favorites.end())
-        return std::wstring::npos;
-    return static_cast<size_t>(std::distance(favorites.begin(), match));
-}
-
-std::vector<PinnedTaskbarApp> enumeratePinnedTaskbarApps() {
-    std::vector<PinnedTaskbarApp> apps;
-    const std::vector<BYTE> favorites = readTaskbandFavorites();
-    if (favorites.empty())
-        return apps;
-
-    wchar_t appData[MAX_PATH]{};
-    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, SHGFP_TYPE_CURRENT,
-                                appData)))
-        return apps;
-
-    const std::filesystem::path taskbarPins =
-        std::filesystem::path(appData) / L"Microsoft" / L"Internet Explorer" /
-        L"Quick Launch" / L"User Pinned" / L"TaskBar";
-    std::error_code ec;
-    for (std::filesystem::directory_iterator it(taskbarPins, ec), end; !ec && it != end;
-         it.increment(ec)) {
-        if (!it->is_regular_file(ec))
-            continue;
-        const std::wstring extension = it->path().extension().wstring();
-        if (_wcsicmp(extension.c_str(), L".lnk") != 0 &&
-            _wcsicmp(extension.c_str(), L".url") != 0)
-            continue;
-        const size_t taskbarOrder =
-            taskbandFavoriteOrder(favorites, it->path().filename().wstring());
-        if (taskbarOrder == std::wstring::npos)
-            continue;
-        std::wstring title = trimTaskbarAppTitle(it->path().stem().wstring());
-        if (!title.empty()) {
-            const std::wstring shortcutPath = it->path().wstring();
-            apps.push_back(
-                {shortcutPath, std::move(title), shellIconForPath(shortcutPath),
-                 taskbarOrder});
-        }
-    }
-    std::sort(apps.begin(), apps.end(), [](const auto& left, const auto& right) {
-        return left.taskbarOrder < right.taskbarOrder;
-    });
-    return apps;
-}
-
 struct App {
-    struct TaskbarAppAction {
-        HWND window = nullptr;
-        std::wstring shortcutPath;
-    };
-
     DWORD mainThread = GetCurrentThreadId();
     runtime_log::RuntimeLogger runtimeLogger_;
     SmtcMonitor monitor;
@@ -981,7 +712,6 @@ struct App {
     std::shared_ptr<const std::vector<uint8_t>> lastSmtcThumbnail;
 
     HWND trayHwnd = nullptr;
-    std::vector<TaskbarAppAction> taskbarAppActions_;
     std::vector<std::wstring> dockQuickAppActions_;
     UINT taskbarCreatedMsg_ = 0; // Explorer 重启广播（只有顶层窗口收得到，托盘窗口不能用 HWND_MESSAGE）
     bool shutdownRequested_ = false;
@@ -2974,7 +2704,6 @@ struct App {
         }
         host->setControlCallback([this](MediaControl c) { onControl(c); });
         host->setImmersiveExitCallback([this] { applyTaskbarViewMode(0); });
-        host->setAppCollectionCallback([this](POINT pt) { showTaskbarApps(pt); });
         host->setDockQuickAppsCallback([this](POINT pt) { showDockQuickApps(pt); });
         host->setImmersiveMenuCallback([this](POINT pt) { showTrayMenu(pt); });
         host->setContextMenuCallback([this](POINT pt) { showTaskbarMenu(pt); });
@@ -3705,9 +3434,6 @@ struct App {
     void showTrayMenu();
     void showTrayMenu(POINT screenPt);
     void showTaskbarMenu(POINT screenPt);
-    void showTaskbarApps(POINT screenPt);
-    std::vector<fluent::FluentMenuItem> buildTaskbarAppItems();
-    void onTaskbarAppCommand(int command);
     void showDockQuickApps(POINT screenPt);
     std::vector<fluent::FluentMenuItem> buildDockQuickAppItems();
     void onDockQuickAppCommand(int command);
@@ -5355,88 +5081,6 @@ void App::showTrayMenu(POINT screenPt) {
 void App::showTaskbarMenu(POINT screenPt) {
     fluent::FluentMenu::show(trayHwnd, screenPt, buildMenuItems(false),
                              [this](int cmd) { onMenuCommand(cmd, L"taskbar-menu"); });
-}
-
-std::vector<fluent::FluentMenuItem> App::buildTaskbarAppItems() {
-    taskbarAppActions_.clear();
-
-    auto addAction = [this](fluent::FluentMenuItem& group, const std::wstring& title,
-                            settings_icon::Kind icon, fluent::NativeMenuIcon nativeIcon,
-                            TaskbarAppAction action) {
-        fluent::FluentMenuItem item;
-        item.id = kTaskbarAppCommandBase + static_cast<int>(taskbarAppActions_.size());
-        item.text = title;
-        item.icon = icon;
-        item.nativeIcon = std::move(nativeIcon);
-        group.submenu.push_back(std::move(item));
-        taskbarAppActions_.push_back(std::move(action));
-    };
-    auto addEmpty = [](fluent::FluentMenuItem& group, const wchar_t* text) {
-        fluent::FluentMenuItem item;
-        item.text = text;
-        item.enabled = false;
-        group.submenu.push_back(std::move(item));
-    };
-
-    const auto runningApps = enumerateRunningTaskbarApps();
-    fluent::FluentMenuItem running;
-    running.text = L"正在运行（" + std::to_wstring(runningApps.size()) + L"）";
-    running.icon = settings_icon::Kind::Apps;
-    for (const auto& app : runningApps)
-        addAction(running, app.title, settings_icon::Kind::Apps, app.icon,
-                  TaskbarAppAction{app.window, {}});
-    if (running.submenu.empty())
-        addEmpty(running, L"暂无正在运行的应用");
-
-    const auto pinnedApps = enumeratePinnedTaskbarApps();
-    fluent::FluentMenuItem pinned;
-    pinned.text = L"已固定（" + std::to_wstring(pinnedApps.size()) + L"）";
-    pinned.icon = settings_icon::Kind::Persist;
-    for (const auto& app : pinnedApps)
-        addAction(pinned, app.title, settings_icon::Kind::Persist, app.icon,
-                  TaskbarAppAction{nullptr, app.shortcutPath});
-    if (pinned.submenu.empty())
-        addEmpty(pinned, L"暂无可读取的固定应用");
-
-    std::vector<fluent::FluentMenuItem> items;
-    items.push_back(std::move(running));
-    items.push_back(std::move(pinned));
-    return items;
-}
-
-void App::showTaskbarApps(POINT screenPt) {
-    fluent::FluentMenu::show(trayHwnd, screenPt, buildTaskbarAppItems(),
-                             [this](int command) { onTaskbarAppCommand(command); });
-}
-
-void App::onTaskbarAppCommand(int command) {
-    const int index = command - kTaskbarAppCommandBase;
-    if (index < 0 || static_cast<size_t>(index) >= taskbarAppActions_.size())
-        return;
-
-    const TaskbarAppAction action = taskbarAppActions_[static_cast<size_t>(index)];
-    bool opened = false;
-    if (action.window) {
-        if (IsWindow(action.window)) {
-            HWND target = GetLastActivePopup(action.window);
-            if (!target || !IsWindowVisible(target))
-                target = action.window;
-            ShowWindowAsync(target, IsIconic(target) ? SW_RESTORE : SW_SHOW);
-            BringWindowToTop(target);
-            opened = SetForegroundWindow(target) != FALSE;
-        }
-        runtime_log::writef(L"[action][taskbar-apps] activate hwnd=%p result=%s",
-                            action.window, opened ? L"ok" : L"failed");
-        return;
-    }
-
-    if (!action.shortcutPath.empty()) {
-        const HINSTANCE result = ShellExecuteW(trayHwnd, L"open", action.shortcutPath.c_str(),
-                                               nullptr, nullptr, SW_SHOWNORMAL);
-        opened = reinterpret_cast<INT_PTR>(result) > 32;
-        runtime_log::writef(L"[action][taskbar-apps] launch shortcut=%s result=%s",
-                            action.shortcutPath.c_str(), opened ? L"ok" : L"failed");
-    }
 }
 
 std::vector<fluent::FluentMenuItem> App::buildDockQuickAppItems() {

@@ -580,29 +580,31 @@ struct SmtcMonitor::Impl {
         try {
             auto timeline = currentSession.GetTimelineProperties();
             auto info = currentSession.GetPlaybackInfo();
-            const int64_t now = smtc::nowUtcMs();
-            const int64_t position = smtc::timeSpanMs(timeline.Position());
-            const int64_t duration = smtc::timeSpanMs(timeline.EndTime());
-            const int64_t anchor = smtc::lastUpdatedMs(timeline.LastUpdatedTime());
-            std::lock_guard<std::mutex> lk(mtx);
-            if (trackChanged) {
-                next.positionMs = position;
-                next.durationMs = duration;
-                next.anchorUtcMs = anchor > 0 ? anchor : now;
-                next.timelineStale = false;
-                adapter->prepareInitialSnapshot(next);
-                next.status = smtc::mapStatus(info.PlaybackStatus());
-            } else {
-                if (smtc::mapStatus(info.PlaybackStatus()) != next.status)
-                    adapter->refreshPlayback(currentSession, next, now);
-                if (next.timelineStale || position != sampledPositionMs ||
-                    duration != sampledDurationMs || anchor != sampledAnchorMs)
-                    adapter->refreshTimeline(currentSession, next, now);
+            if (timeline && info) {
+                const int64_t now = smtc::nowUtcMs();
+                const int64_t position = smtc::timeSpanMs(timeline.Position());
+                const int64_t duration = smtc::timeSpanMs(timeline.EndTime());
+                const int64_t anchor = smtc::lastUpdatedMs(timeline.LastUpdatedTime());
+                std::lock_guard<std::mutex> lk(mtx);
+                if (trackChanged) {
+                    next.positionMs = position;
+                    next.durationMs = duration;
+                    next.anchorUtcMs = anchor > 0 ? anchor : now;
+                    next.timelineStale = false;
+                    adapter->prepareInitialSnapshot(next);
+                    next.status = smtc::mapStatus(info.PlaybackStatus());
+                } else {
+                    if (smtc::mapStatus(info.PlaybackStatus()) != next.status)
+                        adapter->refreshPlayback(currentSession, next, now);
+                    if (next.timelineStale || position != sampledPositionMs ||
+                        duration != sampledDurationMs || anchor != sampledAnchorMs)
+                        adapter->refreshTimeline(currentSession, next, now);
+                }
+                smtc::applyPlaybackControls(info, next);
+                sampledPositionMs = position;
+                sampledDurationMs = duration;
+                sampledAnchorMs = anchor;
             }
-            smtc::applyPlaybackControls(info, next);
-            sampledPositionMs = position;
-            sampledDurationMs = duration;
-            sampledAnchorMs = anchor;
         } catch (...) {
         }
 

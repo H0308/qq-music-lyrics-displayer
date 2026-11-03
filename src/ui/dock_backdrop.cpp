@@ -9,6 +9,7 @@
 #include <windows.ui.composition.interop.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Foundation.Numerics.h>
 #include <winrt/Windows.Graphics.Effects.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.h>
@@ -17,6 +18,7 @@
 #include <wrl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cwchar>
 
 namespace {
@@ -180,6 +182,8 @@ struct DockBackdrop::Impl {
     COLORREF solidColor = RGB(32, 32, 32);
     winrt::Windows::UI::Composition::Compositor compositor{nullptr};
     winrt::Windows::UI::Composition::Desktop::DesktopWindowTarget target{nullptr};
+    // 显隐过渡只作用在这层容器上，内部 SpriteVisual 的 Opacity 仍表示用户设置的强度。
+    winrt::Windows::UI::Composition::ContainerVisual presence{nullptr};
     winrt::Windows::UI::Composition::SpriteVisual visual{nullptr};
     winrt::Windows::UI::Composition::CompositionEffectBrush effectBrush{nullptr};
     winrt::Windows::UI::Composition::CompositionColorBrush solidBrush{nullptr};
@@ -286,8 +290,12 @@ bool DockBackdrop::initialize(HWND hwnd) {
         impl_->visual = impl_->compositor.CreateSpriteVisual();
         impl_->visual.RelativeSizeAdjustment({1.0f, 1.0f});
         impl_->visual.Brush(impl_->effectBrush);
+        stage = L"presence-visual";
+        impl_->presence = impl_->compositor.CreateContainerVisual();
+        impl_->presence.RelativeSizeAdjustment({1.0f, 1.0f});
+        impl_->presence.Children().InsertAtTop(impl_->visual);
         stage = L"target-root";
-        impl_->target.Root(impl_->visual);
+        impl_->target.Root(impl_->presence);
         impl_->isAvailable = true;
         impl_->update();
         runtime_log::writef(L"[dock-backdrop] init result=ready hwnd=%p topmost=0",
@@ -315,6 +323,7 @@ void DockBackdrop::reset() noexcept {
             impl_->target.Root(nullptr);
     } catch (...) {
     }
+    impl_->presence = nullptr;
     impl_->visual = nullptr;
     impl_->effectBrush = nullptr;
     impl_->solidBrush = nullptr;
@@ -393,4 +402,32 @@ void DockBackdrop::setVisible(bool visible) noexcept {
 
 bool DockBackdrop::available() const noexcept {
     return impl_ && impl_->isAvailable;
+}
+
+void DockBackdrop::animatePresence(float from, float to, unsigned durationMs) noexcept {
+    if (!impl_ || !impl_->isAvailable || !impl_->presence || !impl_->compositor)
+        return;
+    try {
+        const float start = std::clamp(from, 0.0f, 1.0f);
+        const float end = std::clamp(to, 0.0f, 1.0f);
+        impl_->presence.StopAnimation(L"Opacity");
+        if (durationMs == 0) {
+            impl_->presence.Opacity(end);
+            return;
+        }
+        // 与 DirectComposition 根视觉的 smoothstep 曲线近似，保证背景与内容同步淡入淡出。
+        auto easing = impl_->compositor.CreateCubicBezierEasingFunction({0.42f, 0.0f},
+                                                                        {0.58f, 1.0f});
+        auto animation = impl_->compositor.CreateScalarKeyFrameAnimation();
+        animation.InsertKeyFrame(0.0f, start);
+        animation.InsertKeyFrame(1.0f, end, easing);
+        animation.Duration(std::chrono::milliseconds(durationMs));
+        impl_->presence.Opacity(end);
+        impl_->presence.StartAnimation(L"Opacity", animation);
+    } catch (winrt::hresult_error const& error) {
+        runtime_log::writef(L"[dock-backdrop] presence result=failed hr=0x%08X",
+                            static_cast<unsigned>(error.code()));
+    } catch (...) {
+        runtime_log::writef(L"[dock-backdrop] presence result=failed hr=unknown");
+    }
 }

@@ -1054,6 +1054,11 @@ void DCompRenderer::resetRoot() {
         rootOpacity_->SetOpacity(1.0f);
 }
 
+void DCompRenderer::setRootOpacity(float opacity) {
+    if (rootOpacity_)
+        rootOpacity_->SetOpacity(std::clamp(opacity, 0.0f, 1.0f));
+}
+
 void DCompRenderer::commit() {
     if (dcomp_)
         dcomp_->Commit();

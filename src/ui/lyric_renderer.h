@@ -129,6 +129,8 @@ public:
     bool animateRoot(float fromX, float toX, float fromY, float toY,
                      float fromOpacity, float toOpacity, float durationSec);
     void resetRoot();
+    // 直接设置根视觉透明度（取消其上的透明度动画），不改变位移。
+    void setRootOpacity(float opacity);
     // 给弹出卡片的根视觉设置物理像素圆角裁剪；未调用时根视觉保持矩形。
     bool setRootRoundedClip(float top, float bottom, float cornerRadius);
     void commit();

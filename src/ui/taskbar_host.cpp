@@ -28,7 +28,6 @@
 #include <cstring>
 #include <cstdlib>
 #include <cwchar>
-#include <cwctype>
 #include <functional>
 #include <iterator>
 #include <memory>
@@ -47,6 +46,14 @@ constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~1
 constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr UINT kTaskbarAttachRetryMs = 250;
 constexpr UINT_PTR kPlacementTimerId = 4;
+// 沉浸模式让出任务栏：悬停确认（单次）与显隐过渡/离开检测（轮询）。
+constexpr UINT_PTR kImmersiveYieldTimerId = 5;
+constexpr UINT_PTR kImmersivePresenceTimerId = 6;
+constexpr UINT kImmersiveYieldDelayMs = 100;    // 悬停非控件区多久后让出任务栏
+constexpr UINT kImmersiveHideMs = 100;          // 淡出时长
+constexpr UINT kImmersiveShowMs = 140;          // 淡入时长
+constexpr UINT kImmersiveRestoreDelayMs = 180;  // 鼠标离开任务栏多久后恢复沉浸条
+constexpr UINT kImmersivePresencePollMs = 20;
 constexpr UINT kAppBarCallbackMessage = WM_APP + 40;
 constexpr UINT kPlacementTimerMs = 500; // 隐藏时只拾取避让结果，不运行完整渲染帧
 constexpr UINT kProbeIntervalMs = 3000;
@@ -90,13 +97,11 @@ constexpr int kImmersiveControlPlayPause = 1;
 constexpr int kImmersiveControlNext = 2;
 constexpr int kImmersiveControlVolume = 3;
 constexpr int kImmersiveControlExit = 4;
-// Dock 的快捷应用入口使用独立图标和命中项；不能复用沉浸模式的应用收纳入口。
+// Dock 的快捷应用入口使用独立图标和命中项，沉浸模式不显示。
 constexpr int kDockControlQuickApps = 5;
-constexpr int kImmersiveControlApps = 6;
-constexpr int kImmersiveControlMenu = 7;
-constexpr int kImmersiveControlTray = 8;
-constexpr int kImmersiveControlCount = 8; // 沉浸模式显示 8 个，索引 5 保留给 Dock 入口
-constexpr int kExpandedControlCount = 9;
+constexpr int kImmersiveControlMenu = 6;
+constexpr int kImmersiveControlCount = 6; // 沉浸模式显示 6 个，索引 5 保留给 Dock 入口
+constexpr int kExpandedControlCount = 7;
 constexpr int kAppBarControlCount = 7;
 constexpr float kAppBarHeightDip = 48.0f;
 constexpr float kImmersiveControlRadiusFactor = 0.24f;
@@ -488,282 +493,6 @@ void queryTaskbarButtonsUia(IUIAutomation* uia, HWND taskbar, std::vector<RECT>&
     arr->Release();
 }
 
-bool containsCaseInsensitive(const std::wstring& value, const wchar_t* token) {
-    if (value.empty() || !token || !*token)
-        return false;
-
-    std::wstring normalized = value;
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](wchar_t ch) {
-        return static_cast<wchar_t>(std::towlower(static_cast<wint_t>(ch)));
-    });
-    std::wstring normalizedToken = token;
-    std::transform(normalizedToken.begin(), normalizedToken.end(), normalizedToken.begin(),
-                   [](wchar_t ch) {
-                       return static_cast<wchar_t>(std::towlower(static_cast<wint_t>(ch)));
-                   });
-    return normalized.find(normalizedToken) != std::wstring::npos;
-}
-
-bool isTaskbarTrayOverflowElement(IUIAutomationElement* element) {
-    if (!element)
-        return false;
-
-    BSTR automationIdValue = nullptr;
-    BSTR nameValue = nullptr;
-    CONTROLTYPEID controlType = 0;
-    element->get_CurrentAutomationId(&automationIdValue);
-    element->get_CurrentName(&nameValue);
-    element->get_CurrentControlType(&controlType);
-    const std::wstring automationId = automationIdValue ? automationIdValue : L"";
-    const std::wstring name = nameValue ? nameValue : L"";
-    SysFreeString(automationIdValue);
-    SysFreeString(nameValue);
-
-    const bool byAutomationId = containsCaseInsensitive(automationId, L"OverflowTrayIconsList") ||
-                                containsCaseInsensitive(automationId, L"overflow");
-    const bool isButton = controlType == UIA_ButtonControlTypeId;
-    const bool byName = isButton &&
-                        (containsCaseInsensitive(name, L"show hidden icon") ||
-                         containsCaseInsensitive(name, L"hidden icon") ||
-                         containsCaseInsensitive(name, L"overflow") ||
-                         containsCaseInsensitive(name, L"隐藏图标") ||
-                         containsCaseInsensitive(name, L"溢出"));
-    if (!byAutomationId && !byName)
-        return false;
-
-    BOOL offscreen = FALSE;
-    if (SUCCEEDED(element->get_CurrentIsOffscreen(&offscreen)) && offscreen)
-        return false;
-    BOOL enabled = TRUE;
-    if (SUCCEEDED(element->get_CurrentIsEnabled(&enabled)) && !enabled)
-        return false;
-    RECT bounds{};
-    if (SUCCEEDED(element->get_CurrentBoundingRectangle(&bounds)) &&
-        (bounds.right <= bounds.left || bounds.bottom <= bounds.top))
-        return false;
-    return true;
-}
-
-IUIAutomationElement* findTaskbarTrayOverflowElement(IUIAutomation* uia, HWND taskbar) {
-    if (!uia || !taskbar)
-        return nullptr;
-
-    IUIAutomationElement* root = nullptr;
-    if (FAILED(uia->ElementFromHandle(taskbar, &root)) || !root)
-        return nullptr;
-
-    IUIAutomationCondition* condition = nullptr;
-    uia->CreateTrueCondition(&condition);
-    IUIAutomationElementArray* elements = nullptr;
-    if (condition) {
-        root->FindAll(TreeScope_Descendants, condition, &elements);
-        condition->Release();
-    }
-    root->Release();
-    if (!elements)
-        return nullptr;
-
-    IUIAutomationElement* result = nullptr;
-    int count = 0;
-    elements->get_Length(&count);
-    for (int i = 0; i < count; ++i) {
-        IUIAutomationElement* element = nullptr;
-        elements->GetElement(i, &element);
-        if (!element)
-            continue;
-        if (isTaskbarTrayOverflowElement(element)) {
-            result = element;
-            break;
-        }
-        element->Release();
-    }
-    elements->Release();
-    return result;
-}
-
-bool invokeTaskbarTrayOverflowElement(IUIAutomationElement* element) {
-    if (!element)
-        return false;
-
-    IUnknown* unknown = nullptr;
-    if (SUCCEEDED(element->GetCurrentPattern(UIA_InvokePatternId, &unknown)) && unknown) {
-        IUIAutomationInvokePattern* pattern = nullptr;
-        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
-        unknown->Release();
-        if (SUCCEEDED(query) && pattern) {
-            const HRESULT result = pattern->Invoke();
-            pattern->Release();
-            if (SUCCEEDED(result))
-                return true;
-        }
-    }
-
-    unknown = nullptr;
-    if (SUCCEEDED(element->GetCurrentPattern(UIA_TogglePatternId, &unknown)) && unknown) {
-        IUIAutomationTogglePattern* pattern = nullptr;
-        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
-        unknown->Release();
-        if (SUCCEEDED(query) && pattern) {
-            const HRESULT result = pattern->Toggle();
-            pattern->Release();
-            if (SUCCEEDED(result))
-                return true;
-        }
-    }
-
-    unknown = nullptr;
-    if (SUCCEEDED(element->GetCurrentPattern(UIA_ExpandCollapsePatternId, &unknown)) &&
-        unknown) {
-        IUIAutomationExpandCollapsePattern* pattern = nullptr;
-        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
-        unknown->Release();
-        if (SUCCEEDED(query) && pattern) {
-            const HRESULT result = pattern->Expand();
-            pattern->Release();
-            if (SUCCEEDED(result))
-                return true;
-        }
-    }
-
-    unknown = nullptr;
-    if (SUCCEEDED(element->GetCurrentPattern(UIA_LegacyIAccessiblePatternId, &unknown)) &&
-        unknown) {
-        IUIAutomationLegacyIAccessiblePattern* pattern = nullptr;
-        const HRESULT query = unknown->QueryInterface(IID_PPV_ARGS(&pattern));
-        unknown->Release();
-        if (SUCCEEDED(query) && pattern) {
-            const HRESULT result = pattern->DoDefaultAction();
-            pattern->Release();
-            if (SUCCEEDED(result))
-                return true;
-        }
-    }
-    return false;
-}
-
-struct TrayOverflowWindowSearch {
-    DWORD explorerProcessId = 0;
-    HWND result = nullptr;
-};
-
-BOOL CALLBACK findTrayOverflowWindowProc(HWND window, LPARAM parameter) {
-    auto* search = reinterpret_cast<TrayOverflowWindowSearch*>(parameter);
-    if (!search || !IsWindowVisible(window))
-        return TRUE;
-
-    DWORD processId = 0;
-    GetWindowThreadProcessId(window, &processId);
-    if (processId != search->explorerProcessId)
-        return TRUE;
-
-    wchar_t className[128] = {};
-    GetClassNameW(window, className, static_cast<int>(std::size(className)));
-    if (containsCaseInsensitive(className, L"overflow"))
-        search->result = window;
-    return search->result ? FALSE : TRUE;
-}
-
-HWND findTrayOverflowWindow(HWND taskbar) {
-    if (!taskbar)
-        return nullptr;
-
-    TrayOverflowWindowSearch search;
-    GetWindowThreadProcessId(taskbar, &search.explorerProcessId);
-    if (!search.explorerProcessId)
-        return nullptr;
-    EnumWindows(findTrayOverflowWindowProc, reinterpret_cast<LPARAM>(&search));
-    return search.result;
-}
-
-void positionTrayOverflowWindow(HWND overflow, HWND taskbar, POINT anchor, UINT taskbarEdge) {
-    if (!overflow || !taskbar)
-        return;
-
-    RECT panel{};
-    RECT taskbarRect{};
-    if (!GetWindowRect(overflow, &panel) || !GetWindowRect(taskbar, &taskbarRect))
-        return;
-    const int width = panel.right - panel.left;
-    const int height = panel.bottom - panel.top;
-    if (width <= 0 || height <= 0)
-        return;
-
-    const UINT dpi = std::max<UINT>(96, GetDpiForWindow(taskbar));
-    const int gap = std::max(4, MulDiv(6, static_cast<int>(dpi), 96));
-    int x = panel.left;
-    int y = panel.top;
-    switch (taskbarEdge) {
-    case ABE_TOP:
-        x = anchor.x - width / 2;
-        y = taskbarRect.bottom + gap;
-        break;
-    case ABE_LEFT:
-        x = taskbarRect.right + gap;
-        y = anchor.y - height / 2;
-        break;
-    case ABE_RIGHT:
-        x = taskbarRect.left - width - gap;
-        y = anchor.y - height / 2;
-        break;
-    case ABE_BOTTOM:
-    default:
-        x = anchor.x - width / 2;
-        y = taskbarRect.top - height - gap;
-        break;
-    }
-
-    HMONITOR monitor = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO monitorInfo{};
-    monitorInfo.cbSize = sizeof(monitorInfo);
-    if (monitor && GetMonitorInfoW(monitor, &monitorInfo)) {
-        const RECT& work = monitorInfo.rcWork;
-        const int workLeft = static_cast<int>(work.left);
-        const int workTop = static_cast<int>(work.top);
-        const int workRight = static_cast<int>(work.right);
-        const int workBottom = static_cast<int>(work.bottom);
-        x = std::clamp(x, workLeft, std::max(workLeft, workRight - width));
-        y = std::clamp(y, workTop, std::max(workTop, workBottom - height));
-    }
-
-    SetWindowPos(overflow, nullptr, x, y, 0, 0,
-                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW);
-}
-
-bool invokeTaskbarTrayOverflow(HWND taskbar, POINT anchor, UINT taskbarEdge) {
-    if (!taskbar || !IsWindow(taskbar))
-        return false;
-
-    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    if (FAILED(init) && init != RPC_E_CHANGED_MODE)
-        return false;
-
-    bool invoked = false;
-    IUIAutomation* uia = nullptr;
-    if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                                   IID_PPV_ARGS(&uia)))) {
-        IUIAutomationElement* element = findTaskbarTrayOverflowElement(uia, taskbar);
-        if (element) {
-            invoked = invokeTaskbarTrayOverflowElement(element);
-            element->Release();
-        }
-        uia->Release();
-    }
-
-    if (invoked) {
-        for (int attempt = 0; attempt < 50; ++attempt) {
-            if (HWND overflow = findTrayOverflowWindow(taskbar)) {
-                positionTrayOverflowWindow(overflow, taskbar, anchor, taskbarEdge);
-                break;
-            }
-            Sleep(10);
-        }
-    }
-
-    if (SUCCEEDED(init))
-        CoUninitialize();
-    return invoked;
-}
-
 bool sameLyricLine(const LyricLine& a, const LyricLine& b) {
     if (a.ms != b.ms || a.text != b.text || a.translation != b.translation ||
         a.romanization != b.romanization || a.chars.size() != b.chars.size())
@@ -1016,9 +745,6 @@ struct TaskbarHost::Impl {
     std::atomic<bool> probeFast_{false};
     std::atomic<ProbeResult*> probeOut_{nullptr};
     std::atomic<HWND> taskbarAtomic_{nullptr}; // taskbar_ 的线程安全副本（探测线程读）
-    // 系统托盘溢出按钮的 UIA 查询放到独立线程，避免 Explorer 的跨进程调用阻塞歌词 UI。
-    std::shared_ptr<std::atomic<bool>> trayOverflowOpening_ =
-        std::make_shared<std::atomic<bool>>(false);
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -1052,7 +778,6 @@ struct TaskbarHost::Impl {
     std::function<void()> onImmersiveExit;
     std::function<void(POINT)> onContextMenu;
     std::function<void(POINT)> onImmersiveMenu;
-    std::function<void(POINT)> onAppCollection;
     std::function<void(POINT)> onDockQuickApps;
     std::function<void(int)> onPositionModeChanged;
     bool mouseOver_ = false;
@@ -1073,6 +798,21 @@ struct TaskbarHost::Impl {
     MediaPopup mediaPopup;
     bool mediaPopupEnabled_ = false;
     bool quitting = false;
+
+    // 沉浸模式默认覆盖任务栏；鼠标悬停在播放控件以外的区域时淡出并隐藏窗口，
+    // 把任务栏交还给用户，鼠标离开任务栏后再淡入恢复。
+    enum class ImmersivePresence {
+        Shown,
+        Hiding,
+        Hidden,
+        Showing,
+    };
+    ImmersivePresence immersivePresence_ = ImmersivePresence::Shown;
+    ULONGLONG immersivePresenceStartMs_ = 0;
+    float immersivePresenceFrom_ = 1.0f;
+    ULONGLONG immersiveCursorAwaySinceMs_ = 0;
+    bool immersiveYieldArmed_ = false;
+    bool immersivePresenceTimerRunning_ = false;
 
     // 应用音量（内嵌控件音量图标 + 悬停滑块浮窗）
     AppVolumeState appVolume_;
@@ -1489,6 +1229,8 @@ struct TaskbarHost::Impl {
     bool shouldShowWindow() const {
         if (!hwnd || isStoppedMode() || !isSessionVisible() ||
             renderState_.visibilitySuppressed())
+            return false;
+        if (immersivePresence_ == ImmersivePresence::Hidden)
             return false;
         if (!allowOverlap_ && (placementStatus_ == TaskbarPlacementStatus::NoSpace ||
                                placementStatus_ == TaskbarPlacementStatus::Unavailable))
@@ -3014,6 +2756,7 @@ struct TaskbarHost::Impl {
         const TaskbarViewMode previousMode = viewMode_;
         if (hwnd && IsWindowVisible(hwnd))
             ShowWindow(hwnd, SW_HIDE);
+        resetImmersivePresence();
         const bool hadImmersivePress = immersiveControlPressed_ >= 0;
         if (dragPress_ || lyricDragging_)
             finishLyricDrag(false);
@@ -4659,6 +4402,7 @@ struct TaskbarHost::Impl {
         }
         dockBackdrop_.reset();
         hwnd = nullptr;
+        resetImmersivePresence();
         taskbarEmbedded_ = false;
         // Explorer 强制退出时旧窗口可能没有走 WM_DESTROY，Shell 侧与本地的
         // AppBar 注册状态都必须按已失效处理，避免重建窗口跳过 ABM_NEW。
@@ -4867,6 +4611,22 @@ struct TaskbarHost::Impl {
             if (deviceGeneration_ != 0)
                 releaseDeviceResources();
             deviceGeneration_ = renderer.deviceGeneration();
+            if (viewMode_ == TaskbarViewMode::Immersive) {
+                const ULONGLONG now = GetTickCount64();
+                const float opacity = immersivePresenceOpacity(now);
+                renderer.setRootOpacity(opacity);
+                if (immersivePresenceStartMs_ != 0 &&
+                    (immersivePresence_ == ImmersivePresence::Hiding ||
+                     immersivePresence_ == ImmersivePresence::Showing)) {
+                    const bool hiding = immersivePresence_ == ImmersivePresence::Hiding;
+                    const UINT duration = hiding ? kImmersiveHideMs : kImmersiveShowMs;
+                    const ULONGLONG elapsed = now - immersivePresenceStartMs_;
+                    if (elapsed < duration)
+                        renderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f, opacity,
+                                             hiding ? 0.0f : 1.0f,
+                                             static_cast<float>(duration - elapsed) / 1000.0f);
+                }
+            }
         }
         renderer.setDpi(dpi_);
         createDeviceResources();
@@ -6352,7 +6112,8 @@ struct TaskbarHost::Impl {
         return true;
     }
 
-    int hitImmersiveControl(float x, float y) const {
+    // includeDisabled：让出任务栏的判定把暂不可用的按钮也算作控件区域。
+    int hitImmersiveControl(float x, float y, bool includeDisabled = false) const {
         D2D1_POINT_2F centers[kExpandedControlCount]{};
         float cy = 0.0f;
         float r = 0.0f;
@@ -6379,19 +6140,13 @@ struct TaskbarHost::Impl {
             case kDockControlQuickApps:
                 enabled = static_cast<bool>(onDockQuickApps);
                 break;
-            case kImmersiveControlApps:
-                enabled = static_cast<bool>(onAppCollection);
-                break;
             case kImmersiveControlMenu:
                 enabled = static_cast<bool>(onImmersiveMenu);
-                break;
-            case kImmersiveControlTray:
-                enabled = static_cast<bool>(taskbar_);
                 break;
             default:
                 break;
             }
-            if (!enabled)
+            if (!enabled && !includeDisabled)
                 continue;
             if (std::hypot(logicalX - centers[i].x, logicalY - centers[i].y) <= r + 4.0f)
                 return i;
@@ -6479,15 +6234,6 @@ struct TaskbarHost::Impl {
                             centers[kDockControlQuickApps].y + r * 0.82f),
                 onDockQuickApps ? brushBtn_ : brushBtnDisabled_, 1.45f);
         }
-        if (expandedControlVisible(kImmersiveControlApps)) {
-            settings_icon::draw(
-                rt, settings_icon::Kind::Apps,
-                D2D1::RectF(centers[kImmersiveControlApps].x - r * 0.82f,
-                            centers[kImmersiveControlApps].y - r * 0.82f,
-                            centers[kImmersiveControlApps].x + r * 0.82f,
-                            centers[kImmersiveControlApps].y + r * 0.82f),
-                brushBtn_, 1.2f);
-        }
         if (brushBtn_) {
             const float dotRadius = std::clamp(r * 0.13f, 1.0f, 1.6f);
             const float dotPitch = r * 0.48f;
@@ -6499,15 +6245,6 @@ struct TaskbarHost::Impl {
                         dotRadius, dotRadius),
                     brushBtn_);
             }
-        }
-        if (expandedControlVisible(kImmersiveControlTray)) {
-            settings_icon::draw(
-                rt, settings_icon::Kind::Tray,
-                D2D1::RectF(centers[kImmersiveControlTray].x - r * 0.82f,
-                            centers[kImmersiveControlTray].y - r * 0.82f,
-                            centers[kImmersiveControlTray].x + r * 0.82f,
-                            centers[kImmersiveControlTray].y + r * 0.82f),
-                brushBtn_, 1.2f);
         }
     }
 
@@ -6613,6 +6350,7 @@ struct TaskbarHost::Impl {
     }
 
     void prepareForExternalPopup() {
+        cancelImmersiveYield();
         volumeHover_ = false;
         immersiveControlHover_ = -1;
         volumePopup_.onAnchorLeave();
@@ -6636,35 +6374,221 @@ struct TaskbarHost::Impl {
         onImmersiveMenu(screenPoint);
     }
 
-    void openSystemTrayOverflow(POINT anchor) {
-        if (!taskbar_ || !IsWindow(taskbar_))
-            return;
+    // ---------- 沉浸模式让出任务栏 ----------
+    bool immersiveYieldAvailable() const {
+        return viewMode_ == TaskbarViewMode::Immersive && hwnd && taskbar_ &&
+               isWindowVisible();
+    }
 
-        bool expected = false;
-        if (!trayOverflowOpening_->compare_exchange_strong(expected, true))
+    // 与 DCompRenderer::animateRoot 的 smoothstep 曲线一致，用于中途反向时取当前透明度。
+    float immersivePresenceOpacity(ULONGLONG now) const {
+        if (immersivePresence_ == ImmersivePresence::Shown)
+            return 1.0f;
+        if (immersivePresence_ == ImmersivePresence::Hidden)
+            return 0.0f;
+        if (immersivePresenceStartMs_ == 0)
+            return immersivePresenceFrom_;
+        const bool hiding = immersivePresence_ == ImmersivePresence::Hiding;
+        const float duration = static_cast<float>(hiding ? kImmersiveHideMs : kImmersiveShowMs);
+        const float t = std::clamp(
+            static_cast<float>(now - immersivePresenceStartMs_) / duration, 0.0f, 1.0f);
+        const float eased = t * t * (3.0f - 2.0f * t);
+        const float target = hiding ? 0.0f : 1.0f;
+        return immersivePresenceFrom_ + (target - immersivePresenceFrom_) * eased;
+    }
+
+    // 内容（DComp 根视觉）与模糊背景（Windows.UI.Composition 层）同步淡入淡出。
+    void animateImmersivePresence(float from, float to, UINT durationMs) {
+        if (!renderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f, from, to,
+                                  static_cast<float>(durationMs) / 1000.0f))
+            renderer.setRootOpacity(to);
+        renderer.commit();
+        dockBackdrop_.animatePresence(from, to, durationMs);
+    }
+
+    void startImmersivePresenceTimer() {
+        if (immersivePresenceTimerRunning_ || !hwnd)
             return;
-        prepareForExternalPopup();
-        const HWND taskbar = taskbar_;
-        const UINT taskbarEdge = taskbarEdge_;
-        const auto opening = trayOverflowOpening_;
-        try {
-            std::thread([taskbar, anchor, taskbarEdge, opening] {
-                try {
-                    invokeTaskbarTrayOverflow(taskbar, anchor, taskbarEdge);
-                } catch (...) {
-                }
-                opening->store(false);
-            }).detach();
-        } catch (...) {
-            opening->store(false);
+        if (SetTimer(hwnd, kImmersivePresenceTimerId, kImmersivePresencePollMs, nullptr))
+            immersivePresenceTimerRunning_ = true;
+    }
+
+    void stopImmersivePresenceTimer() {
+        if (immersivePresenceTimerRunning_ && hwnd)
+            KillTimer(hwnd, kImmersivePresenceTimerId);
+        immersivePresenceTimerRunning_ = false;
+    }
+
+    void cancelImmersiveYield() {
+        if (immersiveYieldArmed_ && hwnd)
+            KillTimer(hwnd, kImmersiveYieldTimerId);
+        immersiveYieldArmed_ = false;
+    }
+
+    bool immersiveYieldAllowedState() const {
+        return immersivePresence_ == ImmersivePresence::Shown ||
+               immersivePresence_ == ImmersivePresence::Showing;
+    }
+
+    // 鼠标移动时更新让出判定：只有停在播放控件以外的区域才开始计时，
+    // 划过控件之间的空隙去点按钮不会误触发。
+    void updateImmersiveYield(int hoveredControl) {
+        if (immersiveYieldAvailable() &&
+            (hoveredControl >= 0 || immersiveControlPressed_ >= 0))
+            cancelImmersiveHide();
+        if (!immersiveYieldAvailable() || !immersiveYieldAllowedState() ||
+            hoveredControl >= 0 || immersiveControlPressed_ >= 0) {
+            cancelImmersiveYield();
+            return;
+        }
+        if (!immersiveYieldArmed_ &&
+            SetTimer(hwnd, kImmersiveYieldTimerId, kImmersiveYieldDelayMs, nullptr))
+            immersiveYieldArmed_ = true;
+    }
+
+    void onImmersiveYieldTimer() {
+        cancelImmersiveYield();
+        if (!immersiveYieldAvailable() || !immersiveYieldAllowedState() ||
+            immersiveControlPressed_ >= 0)
+            return;
+        POINT cursor{};
+        RECT windowRect{};
+        if (!GetCursorPos(&cursor) || !GetWindowRect(hwnd, &windowRect) ||
+            !PtInRect(&windowRect, cursor))
+            return;
+        POINT client = cursor;
+        ScreenToClient(hwnd, &client);
+        if (hitImmersiveControl(static_cast<float>(client.x), static_cast<float>(client.y),
+                                true) >= 0)
+            return;
+        beginImmersiveHide();
+    }
+
+    void beginImmersiveHide() {
+        const ULONGLONG now = GetTickCount64();
+        const float from = immersivePresenceOpacity(now);
+        immersivePresence_ = ImmersivePresence::Hiding;
+        immersivePresenceStartMs_ = now;
+        immersivePresenceFrom_ = from;
+        immersiveCursorAwaySinceMs_ = 0;
+        volumeHover_ = false;
+        immersiveControlHover_ = -1;
+        volumePopup_.onAnchorLeave();
+        volumePopup_.hide();
+        animateImmersivePresence(from, 0.0f, kImmersiveHideMs);
+        startImmersivePresenceTimer();
+        requestFrameAndFlush();
+    }
+
+    void cancelImmersiveHide() {
+        cancelImmersiveYield();
+        if (immersivePresence_ != ImmersivePresence::Hiding)
+            return;
+        const ULONGLONG now = GetTickCount64();
+        const float from = immersivePresenceOpacity(now);
+        immersivePresence_ = ImmersivePresence::Showing;
+        immersivePresenceFrom_ = from;
+        immersivePresenceStartMs_ = now;
+        immersiveCursorAwaySinceMs_ = 0;
+        animateImmersivePresence(from, 1.0f, kImmersiveShowMs);
+        startImmersivePresenceTimer();
+    }
+
+    void finishImmersiveHide() {
+        immersivePresence_ = ImmersivePresence::Hidden;
+        immersiveCursorAwaySinceMs_ = 0;
+        const bool hadPress = immersiveControlPressed_ >= 0;
+        immersiveControlPressed_ = -1;
+        if (hadPress && GetCapture() == hwnd)
+            ReleaseCapture();
+        mouseOver_ = false;
+        trackingLeave_ = false;
+        immersiveControlHover_ = -1;
+        volumeHover_ = false;
+        volumePopup_.onAnchorLeave();
+        volumePopup_.hide();
+        reconcileWindowVisibility();
+    }
+
+    void beginImmersiveShow() {
+        immersivePresence_ = ImmersivePresence::Showing;
+        immersivePresenceFrom_ = 0.0f;
+        immersivePresenceStartMs_ = 0;
+        immersiveCursorAwaySinceMs_ = 0;
+        // 先以透明状态完成首帧并显示窗口，再启动淡入，避免隐藏期间的旧帧闪现。
+        renderer.setRootOpacity(0.0f);
+        dockBackdrop_.animatePresence(0.0f, 0.0f, 0);
+        requestInvalidation(RenderInvalidation::Paint);
+        reconcileWindowVisibility(true);
+        if (!isWindowVisible()) {
+            // 停止模式、会话不可见等其他原因仍要求隐藏：直接回到常态，交由原有可见性逻辑。
+            resetImmersivePresence();
+            return;
+        }
+        immersivePresenceStartMs_ = GetTickCount64();
+        animateImmersivePresence(0.0f, 1.0f, kImmersiveShowMs);
+        startImmersivePresenceTimer();
+    }
+
+    // 鼠标离开任务栏且没有按住按键（例如正往任务栏按钮上拖放文件）时才恢复。
+    bool immersiveCursorAwayFromTaskbar() const {
+        POINT cursor{};
+        if (!GetCursorPos(&cursor))
+            return false;
+        RECT taskbarRect{};
+        if (taskbar_ && GetWindowRect(taskbar_, &taskbarRect) && PtInRect(&taskbarRect, cursor))
+            return false;
+        for (const int button : {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON}) {
+            if ((GetAsyncKeyState(button) & 0x8000) != 0)
+                return false;
+        }
+        return true;
+    }
+
+    void onImmersivePresenceTimer() {
+        if (viewMode_ != TaskbarViewMode::Immersive) {
+            resetImmersivePresence();
+            return;
+        }
+        const ULONGLONG now = GetTickCount64();
+        switch (immersivePresence_) {
+        case ImmersivePresence::Hiding:
+            if (now - immersivePresenceStartMs_ >= kImmersiveHideMs)
+                finishImmersiveHide();
+            break;
+        case ImmersivePresence::Hidden:
+            if (!immersiveCursorAwayFromTaskbar()) {
+                immersiveCursorAwaySinceMs_ = 0;
+            } else if (immersiveCursorAwaySinceMs_ == 0) {
+                immersiveCursorAwaySinceMs_ = now;
+            } else if (now - immersiveCursorAwaySinceMs_ >= kImmersiveRestoreDelayMs) {
+                beginImmersiveShow();
+            }
+            break;
+        case ImmersivePresence::Showing:
+            if (now - immersivePresenceStartMs_ >= kImmersiveShowMs) {
+                immersivePresence_ = ImmersivePresence::Shown;
+                stopImmersivePresenceTimer();
+            }
+            break;
+        case ImmersivePresence::Shown:
+            stopImmersivePresenceTimer();
+            break;
         }
     }
 
-    void openAppCollection(POINT screenPoint) {
-        if (!onAppCollection)
-            return;
-        prepareForExternalPopup();
-        onAppCollection(screenPoint);
+    // 切换展示模式、窗口销毁等场景立即回到常态（不透明、不让出）。
+    void resetImmersivePresence() {
+        cancelImmersiveYield();
+        stopImmersivePresenceTimer();
+        const bool wasShown = immersivePresence_ == ImmersivePresence::Shown;
+        immersivePresence_ = ImmersivePresence::Shown;
+        immersiveCursorAwaySinceMs_ = 0;
+        if (!wasShown) {
+            renderer.setRootOpacity(1.0f);
+            renderer.commit();
+            dockBackdrop_.animatePresence(1.0f, 1.0f, 0);
+        }
     }
 
     void openDockQuickApps(POINT screenPoint) {
@@ -6703,16 +6627,6 @@ struct TaskbarHost::Impl {
             openDockQuickApps(pt);
             break;
         }
-        case kImmersiveControlApps: {
-            POINT pt{};
-            if (!GetCursorPos(&pt)) {
-                RECT rc{};
-                GetWindowRect(hwnd, &rc);
-                pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
-            }
-            openAppCollection(pt);
-            break;
-        }
         case kImmersiveControlMenu: {
             POINT pt{};
             if (!GetCursorPos(&pt)) {
@@ -6723,17 +6637,6 @@ struct TaskbarHost::Impl {
             // 菜单按钮是完整托盘菜单的固定入口，不受“右键显示
             // 任务栏歌词菜单”开关影响，也不复用任务栏歌词的精简菜单。
             openImmersiveMenu(pt);
-            break;
-        }
-        case kImmersiveControlTray: {
-            // 这里打开 Windows 自己的“隐藏图标/托盘溢出”面板，不是应用内 FluentMenu。
-            POINT pt{};
-            if (!GetCursorPos(&pt)) {
-                RECT rc{};
-                GetWindowRect(hwnd, &rc);
-                pt = POINT{(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
-            }
-            openSystemTrayOverflow(pt);
             break;
         }
         default:
@@ -8452,7 +8355,9 @@ struct TaskbarHost::Impl {
                 isExpandedView() && songContentTransition_ &&
                 songContentTransition_->compositorLayer;
             if (startSongTransition) {
-                renderer.resetRoot();
+                // 展开视图的根视觉只承载沉浸模式显隐过渡，切歌不能把它复位。
+                if (!isExpandedView())
+                    renderer.resetRoot();
                 if (!isMinimalMode() && !isExpandedView()) {
                     const float travel = kSongTransitionTravelDip * scale();
                     const bool vertical = isVerticalTaskbar();
@@ -9560,6 +9465,10 @@ struct TaskbarHost::Impl {
                 onPlacementTimer();
             else if (wp == kTaskbarAttachTimerId)
                 retryTaskbarAttach();
+            else if (wp == kImmersiveYieldTimerId)
+                onImmersiveYieldTimer();
+            else if (wp == kImmersivePresenceTimerId)
+                onImmersivePresenceTimer();
             return 0;
         case WM_DISPLAYCHANGE:
             // 显示拓扑/分辨率变化（远程接入、虚拟屏开关等）是设备丢失的前置信号，
@@ -9661,6 +9570,8 @@ struct TaskbarHost::Impl {
                 immersiveControlHover_ = immersiveHover;
                 requestFrameAndFlush();
             }
+            if (viewMode_ == TaskbarViewMode::Immersive)
+                updateImmersiveYield(hitImmersiveControl(mouseX, mouseY, true));
             // 内嵌控件的音量按钮：悬停弹出音量滑块浮窗
             const bool volHover = isExpandedView()
                                       ? immersiveHover == kImmersiveControlVolume
@@ -9676,7 +9587,7 @@ struct TaskbarHost::Impl {
                 if (!volHover)
                     volumePopup_.onAnchorLeave();
             }
-            if (volHover && appVolume_.available) {
+            if (volHover && appVolume_.available && immersiveYieldAllowedState()) {
                 volumePopup_.onAnchorEnter();
                 volumePopup_.showNear(volumeButtonScreenRect(), isVerticalTaskbar(),
                                       taskbarEdge_ == ABE_LEFT);
@@ -9686,6 +9597,7 @@ struct TaskbarHost::Impl {
         case WM_MOUSELEAVE:
             if (dragPress_ || lyricDragging_)
                 return 0;
+            cancelImmersiveYield();
             mouseOver_ = false;
             trackingLeave_ = false;
             volumeHover_ = false;
@@ -9727,8 +9639,11 @@ struct TaskbarHost::Impl {
                 immersiveControlPressed_ =
                     hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
                                         static_cast<float>(GET_Y_LPARAM(lp)));
-                if (immersiveControlPressed_ >= 0)
+                if (immersiveControlPressed_ >= 0) {
+                    if (viewMode_ == TaskbarViewMode::Immersive)
+                        cancelImmersiveHide();
                     SetCapture(hwnd);
+                }
                 requestFrameAndFlush();
                 return 0;
             }
@@ -9855,6 +9770,7 @@ struct TaskbarHost::Impl {
         case WM_DESTROY:
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)",
                                 isWindowVisible() ? 1 : 0);
+            resetImmersivePresence();
             dockBackdrop_.reset();
             renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
             unregisterAppBar();
@@ -10005,10 +9921,6 @@ void TaskbarHost::setContextMenuCallback(std::function<void(POINT)> cb) {
 
 void TaskbarHost::setImmersiveMenuCallback(std::function<void(POINT)> cb) {
     impl_->onImmersiveMenu = std::move(cb);
-}
-
-void TaskbarHost::setAppCollectionCallback(std::function<void(POINT)> cb) {
-    impl_->onAppCollection = std::move(cb);
 }
 
 void TaskbarHost::setDockQuickAppsCallback(std::function<void(POINT)> cb) {
