@@ -4196,7 +4196,8 @@ struct TaskbarHost::Impl {
     }
 
     DockPetMode dockPetMode() const {
-        if (!isAppBarView() || !isSessionVisible() || isMinimalMode() || isStoppedMode())
+        if (!horizontalImmersiveMode() || !isSessionVisible() || isMinimalMode() ||
+            isStoppedMode())
             return DockPetMode::Hidden;
         if (scene_ == DisplayScene::Idle)
             return DockPetMode::Roaming;
@@ -4211,10 +4212,8 @@ struct TaskbarHost::Impl {
             return;
         }
 
-        const float resourceW = dockResourceZoneW(w);
-        const float resourceX = w - resourceW - kDockResourceRightPadding;
-        const float spectrumW = immersiveSpectrumZoneW(w);
-        const float spectrumX = resourceX - kDockResourceZoneGap - spectrumW;
+        // Dock 右侧为“频谱 + 资源区”，沉浸模式为“频谱 + 时钟”，统一按右侧固定区起点收束。
+        const float spectrumX = w - spectrumExtraForScene(scene_, w);
         const float start = songInfoVisible_ && scene_ != DisplayScene::Idle
                                 ? kSongInfoLyricGap
                                 : kTextPadding;
@@ -6115,7 +6114,7 @@ struct TaskbarHost::Impl {
         // 这里返回的是“可绘制安全区”，不再把它当作歌词的居中基准。
         // 右边界统一落在频谱之前，左边界统一落在封面/歌曲信息/沉浸控件之后。
         float left = layout.leftW + start + layout.immersiveControlsW;
-        if (isAppBarView() && scene != DisplayScene::Idle && isSessionVisible() &&
+        if (horizontalImmersiveMode() && scene != DisplayScene::Idle && isSessionVisible() &&
             !isMinimalMode() && !isStoppedMode())
             left += kDockPetSeatW;
         const float right = layout.w - spectrumExtraForScene(scene, layout.w) - kTextPadding;
@@ -8768,7 +8767,7 @@ struct TaskbarHost::Impl {
         // 过渡变换之前绘制；切歌时只让封面、歌曲信息和歌词内容移动。
         if (isExpandedView()) {
             drawImmersiveControls();
-            if (isAppBarView() && !idleScene)
+            if (!idleScene)
                 drawDockPet(w, h, leftW);
             drawImmersiveRightSide(w, h, showSpectrum);
         } else if (embeddedResourceVisible()) {
@@ -8946,7 +8945,7 @@ struct TaskbarHost::Impl {
         if (contentTransitionActive)
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
         // Idle 内容先绘制每日一言，再把宠物放到内容层上方，保证两者同时可见。
-        if (isAppBarView() && idleScene)
+        if (isExpandedView() && idleScene)
             drawDockPet(w, h, leftW);
 
         HRESULT frameHr = rt->EndDraw();
@@ -8984,7 +8983,7 @@ struct TaskbarHost::Impl {
                 }
                 if (isExpandedView()) {
                     drawImmersiveControls();
-                    if (isAppBarView() && !idleScene)
+                    if (!idleScene)
                         drawDockPet(w, h, leftW);
                     drawImmersiveRightSide(w, h, showSpectrum);
                 } else if (embeddedResourceVisible()) {
@@ -8999,7 +8998,7 @@ struct TaskbarHost::Impl {
                                           lyricEffectsEnabled, showControls, showSpectrum);
                 if (contentTransitionActive)
                     rt->SetTransform(D2D1::Matrix3x2F::Identity());
-                if (isAppBarView() && idleScene)
+                if (isExpandedView() && idleScene)
                     drawDockPet(w, h, leftW);
                 frameHr = rt->EndDraw();
             }
@@ -9298,7 +9297,7 @@ struct TaskbarHost::Impl {
 
     bool hasHighFrequencyAnimation() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
-        if (isAppBarView() && clientAnimations_ && dockPet_.animating())
+        if (horizontalImmersiveMode() && clientAnimations_ && dockPet_.animating())
             return true;
         if (isLyricTransitionInProgress() && !songLayerActive)
             return true;
@@ -9442,7 +9441,7 @@ struct TaskbarHost::Impl {
         const bool songLayerActive = immersiveSongContentLayerActive();
         if (renderState_.hasInvalidation())
             return true;
-        if (isAppBarView() && clientAnimations_ && dockPet_.animating())
+        if (horizontalImmersiveMode() && clientAnimations_ && dockPet_.animating())
             return true;
         if (isLyricTransitionInProgress() && !songLayerActive)
             return true;

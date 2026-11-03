@@ -2,6 +2,7 @@
 
 #include "util/com_release.h"
 
+#include "dock_pet.h"
 #include "fluent_theme.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
@@ -118,6 +119,12 @@ constexpr float kMediaTitleTopDip = 48.0f;
 constexpr float kMediaTitleBottomDip = 76.0f;
 constexpr float kMediaArtistTopDip = 78.0f;
 constexpr float kMediaArtistBottomDip = 102.0f;
+// 标题/歌手右侧为伴听宠物预留的固定座位。座位宽度不足以漫游，
+// 宠物只在原地表演（听歌摇摆、唱歌、跳舞、哈欠与瞌睡）。
+constexpr float kMediaPetZoneWidthDip = 48.0f;
+constexpr float kMediaPetLaneTopDip = 50.0f;
+constexpr float kMediaPetLaneHeightDip = 48.0f;
+constexpr float kMediaTextRightReserveDip = kPopupTextRightPaddingDip + kMediaPetZoneWidthDip;
 // d2d1effects.h 只声明这个 GUID；当前工程的链接配置不提供其外部定义，
 // 这里保留 Direct2D 标准 Gaussian Blur CLSID 的内部定义。
 constexpr CLSID kGaussianBlurClsid = {
@@ -365,6 +372,7 @@ struct MediaPopup::Impl {
 
     DCompRenderer renderer;
     uint64_t deviceGeneration = 0;
+    DockPet pet;
     ID2D1SolidColorBrush* brushBackground = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;
     ID2D1SolidColorBrush* brushText = nullptr;
@@ -837,6 +845,7 @@ struct MediaPopup::Impl {
         stopCategoryTransition();
         stopQuickExpandTransition();
         releaseVisualResources();
+        pet.discardDeviceResources();
         themeDirty = true;
         coverDirty = true;
         materialNeedsApply = true;
@@ -1062,7 +1071,7 @@ struct MediaPopup::Impl {
             return SUCCEEDED(hr) && *out;
         };
         const bool mediaFadeReady = createTextEdgeFade(
-            kPopupTextLeftDip, kPopupWidthDip - kPopupTextRightPaddingDip,
+            kPopupTextLeftDip, kPopupWidthDip - kMediaTextRightReserveDip,
             &brushMediaTextEdgeFade);
         const bool idleFadeReady = createTextEdgeFade(
             16.0f, kPopupWidthDip - 16.0f, &brushIdleTextEdgeFade);
@@ -1429,7 +1438,18 @@ struct MediaPopup::Impl {
     }
 
     float textAreaWidth(float popupWidth) const {
-        return std::max(1.0f, popupWidth - kPopupTextLeftDip - kPopupTextRightPaddingDip);
+        return std::max(1.0f, popupWidth - kPopupTextLeftDip - kMediaTextRightReserveDip);
+    }
+
+    // 宠物状态由媒体快照驱动，弹窗隐藏期间也保持同步，暂停计时与 Dock 一致。
+    void syncPetMode(bool trackChanged) {
+        const ULONGLONG now = GetTickCount64();
+        const DockPetMode mode = !available    ? DockPetMode::Hidden
+                                 : media.playing ? DockPetMode::Listening
+                                                 : DockPetMode::Paused;
+        pet.setMode(mode, now);
+        if (trackChanged && mode == DockPetMode::Listening)
+            pet.hop(now);
     }
 
     void updateScrollTimer(float areaWidth) {
@@ -1439,11 +1459,11 @@ struct MediaPopup::Impl {
         const bool idleOverflow = idleQuoteOverflow || idleSourceOverflow;
         const bool mediaOverflow = titleWidth > areaWidth || artistWidth > areaWidth;
         const bool transitionDriving = idleContentTransitionActive;
+        const bool textDriving = transitionDriving || (idleMode && idleOverflow) ||
+                                 (!idleMode && available && media.playing && mediaOverflow);
+        const bool petDriving = !idleMode && available && pet.animating();
         const bool shouldRun = popupVisible && !entering && !closing && enabled &&
-                               clientAnimations &&
-                               (transitionDriving ||
-                                (idleMode && idleOverflow) ||
-                                (!idleMode && available && media.playing && mediaOverflow));
+                               clientAnimations && (textDriving || petDriving);
         if (shouldRun) {
             // 短转场由这个定时器逐帧驱动，需要 60fps 级别才平滑；
             // 纯文本跑马灯保持 32ms 即可。驱动目的变化时按新间隔重建定时器。
@@ -1457,9 +1477,9 @@ struct MediaPopup::Impl {
                 scrollTimerRunning = true;
                 scrollTimerInterval = interval;
             }
-            return;
-        }
-        if (scrollTimerRunning) {
+            if (textDriving)
+                return;
+        } else if (scrollTimerRunning) {
             KillTimer(hwnd, kScrollTimer);
             scrollTimerRunning = false;
             scrollTimerInterval = 0;
@@ -2269,12 +2289,30 @@ struct MediaPopup::Impl {
                          float artistOffset) {
         drawScrollingText(rt, title, titleW, titleH,
                           D2D1::RectF(kPopupTextLeftDip, kMediaTitleTopDip,
-                                      w - kPopupTextRightPaddingDip, kMediaTitleBottomDip),
+                                      w - kMediaTextRightReserveDip, kMediaTitleBottomDip),
                           titleOffset, brushText, brushMediaTextEdgeFade);
         drawScrollingText(rt, artist, artistW, artistH,
                           D2D1::RectF(kPopupTextLeftDip, kMediaArtistTopDip,
-                                      w - kPopupTextRightPaddingDip, kMediaArtistBottomDip),
+                                      w - kMediaTextRightReserveDip, kMediaArtistBottomDip),
                           artistOffset, brushSecondary, brushMediaTextEdgeFade);
+    }
+
+    void drawMediaPet(ID2D1DeviceContext* rt, float w) {
+        if (!rt)
+            return;
+        const float laneRight = w - kPopupTextRightPaddingDip;
+        pet.setLane(laneRight - kMediaPetZoneWidthDip, laneRight, kMediaPetLaneHeightDip);
+        pet.tick(GetTickCount64());
+        // Zzz 颜色跟随卡片当前文字色（含专辑色背景下的自动对比度）。
+        if (brushText) {
+            const D2D1_COLOR_F text = brushText->GetColor();
+            pet.setLightTheme(0.2126f * text.r + 0.7152f * text.g + 0.0722f * text.b < 0.5f);
+        }
+        D2D1_MATRIX_3X2_F saved{};
+        rt->GetTransform(&saved);
+        rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, kMediaPetLaneTopDip) * saved);
+        pet.draw(rt);
+        rt->SetTransform(saved);
     }
 
     void drawMediaContent(ID2D1DeviceContext* rt, float w, bool useCachedLayers) {
@@ -2284,6 +2322,7 @@ struct MediaPopup::Impl {
         drawCover(rt, useCachedLayers);
         drawMediaTitles(rt, w, titleLayout, titleWidth, titleHeight, titleScrollOffset,
                         artistLayout, artistWidth, artistHeight, artistScrollOffset);
+        drawMediaPet(rt, w);
         drawProgress(rt, w, media);
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i, media);
@@ -2317,6 +2356,7 @@ struct MediaPopup::Impl {
                         categoryTransitionTitleScrollOffset, snapshotArtistLayout,
                         snapshotArtistWidth, snapshotArtistHeight,
                         categoryTransitionArtistScrollOffset);
+        drawMediaPet(rt, w);
         drawProgress(rt, w, snapshot);
         for (int i = 0; i < 3; ++i)
             drawButton(rt, i, snapshot);
@@ -4621,6 +4661,7 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
     impl_->songTransitionPending = false;
     impl_->media = info;
     impl_->available = available;
+    impl_->syncPetMode(textChanged);
     if (coverChanged)
         impl_->coverDirty = true;
     if (sourceChanged)
@@ -4729,6 +4770,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
     impl_->idle = content;
     impl_->available = available;
+    impl_->syncPetMode(false);
     if (!content.todayTasksEnabled) {
         impl_->idleQuickTab = IdleQuickTab::QuickStart;
         impl_->hoverIdleQuickTab = -1;
@@ -4801,6 +4843,7 @@ void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool in
 
     if (!available) {
         impl_->available = false;
+        impl_->syncPetMode(false);
         impl_->playbackScene = false;
         impl_->idlePanelManual = false;
         impl_->categoryTransitionActive = false;
@@ -4810,6 +4853,7 @@ void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool in
     }
 
     impl_->available = true;
+    impl_->syncPetMode(false);
     const bool noPlayback = scene == DisplayScene::Idle || scene == DisplayScene::NoPlayback;
     impl_->playbackScene = !noPlayback;
     if (noPlayback || inlineControls)

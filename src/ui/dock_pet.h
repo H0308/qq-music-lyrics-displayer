@@ -8,8 +8,8 @@ struct ID2D1SolidColorBrush;
 struct IDWriteFactory;
 struct IDWriteTextFormat;
 
-// Dock 内的原始像素宠物状态。角色像素来自 asset/dock_pet_sprites.png，
-// 这里仅负责动作帧、位置和播放状态，不参与鼠标命中逻辑。
+// Dock/沉浸模式任务栏与媒体卡片共用的原始像素宠物状态。角色像素来自
+// asset/dock_pet_sprites.png，这里仅负责动作帧、位置和播放状态，不参与鼠标命中逻辑。
 enum class DockPetMode {
     Hidden,
     Roaming,
