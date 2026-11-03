@@ -690,6 +690,9 @@ struct MediaPopup::Impl {
 
     D2D1_COLOR_F cardFillForPage(PopupPage page) const {
         const auto& p = fluent::palette(fluent::ThemeTarget::Window);
+        // 纯色卡片使用窗口底色，媒体页与快捷启动页保持一致。
+        if (!frostedBackgroundActiveForPage(page))
+            return p.windowBg;
         const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
         D2D1_COLOR_F cardFill = p.cardFillSolid;
         if (page == PopupPage::Idle) {
@@ -986,7 +989,9 @@ struct MediaPopup::Impl {
         const auto& p = fluent::palette(fluent::ThemeTarget::Window);
         const D2D1_COLOR_F cardFill = cardFillForPage(currentPage());
         if (FAILED(rt->CreateSolidColorBrush(cardFill, &brushBackground)) ||
-            FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
+            FAILED(rt->CreateSolidColorBrush(frostedBackgroundActive() ? p.cardStroke
+                                                                      : p.controlStroke,
+                                             &brushStroke)) ||
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
             FAILED(rt->CreateSolidColorBrush(p.textSecondary, &brushSecondary)) ||
             FAILED(rt->CreateSolidColorBrush(p.disabled, &brushDisabled)) ||
