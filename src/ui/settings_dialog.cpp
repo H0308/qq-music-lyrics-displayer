@@ -490,10 +490,10 @@ struct SettingsDialog::Impl {
     bool sliderEditCommitting = false;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
-        L"显示", L"展示模式", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词",
+        L"显示", L"展示模式", L"性能", L"悬浮卡片", L"媒体控件", L"频谱", L"歌词",
         L"切歌弹窗", L"每日一言与更多"};
     std::array<std::wstring, kSettingsPageCount> pageTitles{
-        L"显示", L"展示模式", L"性能", L"悬浮卡片", L"悬浮媒体控件", L"频谱", L"歌词",
+        L"显示", L"展示模式", L"性能", L"悬浮卡片", L"媒体控件", L"频谱", L"歌词",
         L"切歌弹窗", L"每日一言与更多"};
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
@@ -1442,10 +1442,10 @@ struct SettingsDialog::Impl {
                     !minimal && state.idleQuoteBackground != 0,
                     kModeGridMinH);
         addHeader(kMediaPopupPage, L"播放控件");
-        addToggle(kMediaPopupPage, kIdHoverControls, L"悬浮时显示播放控件",
+        addToggle(kMediaPopupPage, kIdHoverControls, L"显示播放控件",
                   state.hoverControls);
-        addRadio(kMediaPopupPage, kIdHoverControlStyle, L"悬浮控件样式",
-                 L"内嵌控件仅显示播放操作；媒体卡片另有歌词进度，点击应用图标或名称可打开播放器。",
+        addRadio(kMediaPopupPage, kIdHoverControlStyle, L"控件样式",
+                 L"内嵌控件在鼠标悬浮时显示，仅提供播放操作；媒体卡片还显示歌词进度，其打开方式由“悬浮卡片”中的“悬浮卡片展开方式”决定，点击应用图标或名称可打开播放器。",
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
                  kHoverControlStyleRowH);
