@@ -76,6 +76,7 @@ constexpr UINT kMsgTickTickTasksReady = WM_APP + 9;
 constexpr UINT kMsgTickTickTaskCompleteReady = WM_APP + 10;
 constexpr UINT kMsgTaskbarNoSpace = WM_APP + 11;
 constexpr UINT kMsgQqCoverInfoReady = WM_APP + 12;
+constexpr UINT kMsgTaskbarRebuild = WM_APP + 13;
 // QQ 切歌时 SMTC 把媒体属性与时间线拆成多条事件投递，歌词请求延迟到这批事件
 // 合并完成后发出，避免按不完整的标题/歌手/时长先失败一次（界面闪「暂无歌词」）。
 constexpr UINT_PTR kTimerLyricDebounce = 3;
@@ -940,6 +941,7 @@ struct App {
     std::vector<std::pair<int, std::wstring>> taskbarMonitorMenuItems_;
     bool taskbarAllowOverlap_ = false;
     bool taskbarNoSpaceClosePending_ = false;
+    bool taskbarRebuildPending_ = false;
     // 任务栏空间不足时自动隐藏；宿主本身继续保留并后台探测空间变化。
     bool taskbarAutoClosedForNoSpace_ = false;
     bool taskbarSpectrumSuppressedForNoSpace_ = false;
@@ -1585,7 +1587,35 @@ struct App {
         return taskbarViewMode_ != TaskbarViewMode::Embedded;
     }
 
-    void syncTaskbarView(const SmtcSnapshot& snap, bool forceRebuild = false) {
+    void requestTaskbarRebuild() {
+        if (shutdownRequested_ || taskbarRebuildPending_)
+            return;
+        taskbarRebuildPending_ = true;
+        // 这里只唤醒主消息循环，窗口过程和模态消息循环都不能直接销毁宿主。
+        // SetWindowPos/SHAppBarMessage 等调用可能重入 WM_DISPLAYCHANGE，
+        // 必须等原来的窗口调用栈退出后才能释放它仍在使用的对象。
+        if (trayHwnd && !PostMessageW(trayHwnd, kMsgTaskbarRebuild, 0, 0))
+            runtime_log::writef(L"[display] failed to wake main loop for taskbar rebuild");
+    }
+
+    // 仅由最外层主消息循环调用；重建期间的新显示通知留到下一轮处理。
+    void rebuildTaskbarIfPending() {
+        if (!taskbarRebuildPending_)
+            return;
+        taskbarRebuildPending_ = false;
+        if (shutdownRequested_ || !taskbarHost)
+            return;
+
+        const bool allowOverlap = taskbarAllowOverlap_;
+        runtime_log::writef(L"[display] taskbar rebuild started");
+        destroyTaskbar();
+        if (shutdownRequested_)
+            return;
+        createTaskbar(GetModuleHandleW(nullptr), allowOverlap);
+        refreshSettingsDialog(true);
+    }
+
+    void syncTaskbarView(const SmtcSnapshot& snap) {
         if (!taskbarHost)
             return;
 
@@ -1594,11 +1624,8 @@ struct App {
         desiredIds.reserve(displays.size());
         for (const auto& display : displays)
             desiredIds.push_back(display.deviceName);
-        if (forceRebuild || desiredIds != activeTaskbarDisplayIds_) {
-            const bool allowOverlap = taskbarAllowOverlap_;
-            destroyTaskbar();
-            createTaskbar(GetModuleHandleW(nullptr), allowOverlap);
-            refreshSettingsDialog(true);
+        if (desiredIds != activeTaskbarDisplayIds_) {
+            requestTaskbarRebuild();
             return;
         }
 
@@ -3081,6 +3108,7 @@ struct App {
     }
 
     void destroyTaskbar() {
+        taskbarRebuildPending_ = false;
         spectrum_.stop(); // 频谱只画在任务栏上，宿主销毁时捕获线程一并停
         taskbarAllowOverlap_ = false;
         taskbarSpectrumSuppressedForNoSpace_ = false;
@@ -6078,8 +6106,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_DISPLAYCHANGE) {
-        app->syncTaskbarView(app->monitor.snapshot(), true);
-        app->refreshSettingsDialog(true);
+        app->requestTaskbarRebuild();
+        return 0;
+    }
+    if (msg == kMsgTaskbarRebuild) {
+        // 只负责唤醒；即使被菜单等嵌套消息循环取出，也保留重建请求。
         return 0;
     }
     if (msg == WM_DESTROY) {
@@ -6214,7 +6245,13 @@ int main() {
     runtime_log::writef(L"QQMusicLyric started, waiting for QQ Music or NetEase Music...");
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
+    for (;;) {
+        app.rebuildTaskbarIfPending();
+        // 重建内部的模态循环可能已取走唤醒消息；有新请求时不能先阻塞等待。
+        if (app.taskbarRebuildPending_)
+            continue;
+        if (!GetMessageW(&msg, nullptr, 0, 0))
+            break;
         if (msg.hwnd == nullptr) {
             if (msg.message == kMsgSmtcChanged) {
                 app.onSmtcChanged();
