@@ -2,6 +2,7 @@
 
 #include "ui/lyric_renderer.h"
 #include "ui/fluent_theme.h"
+#include "ui/fluent_dialog_surface.h"
 
 #include <windows.h>
 
@@ -10,8 +11,7 @@
 #include <string>
 #include <vector>
 
-// Win11 Fluent 风格的自绘控件，全部为 WS_EX_LAYERED 子窗口，
-// 用 D2D 渲染并逐像素叠加在对话框实色背景上。
+// Win11 Fluent 风格控件；自绘控件使用分层窗口，文本输入框使用普通原生窗口。
 namespace fluent {
 
 // 分层子窗口基座：窗口创建、D2D 帧管理（beginFrame/endFrame）
@@ -27,8 +27,7 @@ public:
     void compositeTo(HDC dst, int x, int y) { renderer_.compositeTo(dst, x, y); }
 
 protected:
-    // layered=false 时创建普通子窗口，帧用 BitBlt 提交（用于内含真控件的 FluentEdit：
-    // 分层窗口的子控件不会被系统绘制）
+    // layered=false 时创建普通子窗口，帧用 BitBlt 提交。
     bool createLayered(HWND parent, const wchar_t* className, WNDPROC proc, int id,
                        bool layered = true, bool tabStop = false);
     // 开始一帧：返回渲染目标（坐标单位为 DIP），wDip/hDip 输出客户区 DIP 尺寸
@@ -82,23 +81,32 @@ private:
 // 圆角输入框卡片，使用无边框真 EDIT（保留 IME/选中/剪贴板）；
 // 默认 EDIT 作为宿主子窗口，必要时可直接挂到对话框父窗口。
 // EDIT 通知（EN_CHANGE 等）原样转发给对话框父窗口。
-class FluentEdit : public LayeredChild {
+class FluentEdit {
 public:
+    FluentEdit() = default;
+    ~FluentEdit();
+    FluentEdit(const FluentEdit&) = delete;
+    FluentEdit& operator=(const FluentEdit&) = delete;
+
     bool create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit = false,
-                float fontSizeDip = 14.0f);
+                float fontSizeDip = 14.0f, bool wrapText = false);
     std::wstring text() const;
     void setText(const std::wstring& text);
     // 紧凑型数字输入等场景可缩小原生 EDIT 的内边距，避免小控件裁剪文字。
     void setContentPadding(float horizontalDip, float verticalDip);
+    // 数值框内部的数字编辑区：外框与单位由父窗口统一绘制。
+    void setEmbeddedNumberStyle();
     void move(int x, int y, int w, int h);
     void focus();
     void refreshTheme();
     HWND editHwnd() const { return hEdit_; }
+    HWND hwnd() const { return hwnd_; }
     void onEditNotification(UINT code);
     LRESULT colorEdit(HDC hdc);
 
 private:
-    void render(ID2D1DCRenderTarget* rt, float wDip, float hDip) override;
+    void render(FluentDialogSurface::Painter& painter, float wDip, float hDip);
+    void renderNow();
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp);
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp);
     // 内嵌 EDIT 的子类过程：默认绘制后补绘主题色占位文本
@@ -108,6 +116,8 @@ private:
     void repaintEdit();
 
     int id_ = 0;
+    HWND hwnd_ = nullptr;
+    FluentDialogSurface surface_;
     std::wstring cueBanner_;
     HWND hEdit_ = nullptr;
     HWND editParent_ = nullptr;
@@ -116,6 +126,10 @@ private:
     COLORREF editBrushColor_ = 0;
     bool focused_ = false;
     bool directEdit_ = false;
+    bool embeddedNumber_ = false;
+    bool wrapText_ = false;
+    float fontSizeDip_ = 14.0f;
+    UINT editFontDpi_ = 0;
     float contentPaddingXDip_ = 12.0f;
     float contentPaddingYDip_ = 5.0f;
     int hostX_ = 0;

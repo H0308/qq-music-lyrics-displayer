@@ -5,6 +5,20 @@
 
 namespace fluent {
 
+DialogContentLayout centeredDialogLayout(float clientWidth) {
+    const float width = std::min(clientWidth, 1000.0f + metrics::pagePadding * 2.0f);
+    return {(clientWidth - width) * 0.5f, width};
+}
+
+void offsetDialogRects(float offsetX, std::initializer_list<D2D1_RECT_F*> rects) {
+    for (auto* rect : rects) {
+        if (rect->right > rect->left && rect->bottom > rect->top) {
+            rect->left += offsetX;
+            rect->right += offsetX;
+        }
+    }
+}
+
 namespace {
 
 void excludeVisibleChildren(HWND parent, HDC hdc) {
@@ -336,8 +350,6 @@ void FluentDialogSurface::eraseBackground(HDC hdc, bool backdrop) {
 bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& callback) {
     if (!hwnd_ || !hdc)
         return false;
-    (void)backdrop;
-
     RECT client{};
     GetClientRect(hwnd_, &client);
     const int width = client.right - client.left;
@@ -355,17 +367,18 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     if (!target)
         return false;
 
-    // 对话框表面使用当前 WM_PAINT 的 DC，在实色窗口底色上绘制 Fluent 内容。
+    // 对话框表面使用当前 WM_PAINT 的 DC，材质仅位于顶层窗口根背景。
     // 父窗口本身带 WS_CLIPCHILDREN，且额外排除可见子窗口，原生控件由系统单独绘制。
     RECT renderRect{0, 0, width, height};
     excludeVisibleChildren(hwnd_, hdc);
     if (FAILED(target->BindDC(hdc, &renderRect)))
         return false;
 
-    // 根背景由 D2D 在当前 WM_PAINT 内统一绘制，不向 DWM 提交透明像素。
+    // Mica 窗口留出透明根背景；卡片和原生输入框仍使用各自的不透明表面。
     target->BeginDraw();
     target->SetTransform(D2D1::Matrix3x2F::Identity());
-    target->Clear(fluent::palette().windowBg);
+    target->Clear(backdrop ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f)
+                           : fluent::palette().windowBg);
     Painter painter(target, renderer_.dwrite());
     if (callback)
         callback(painter, static_cast<float>(width) / dipScale(),

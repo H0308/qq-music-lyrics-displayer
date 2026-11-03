@@ -336,7 +336,7 @@ void FluentButton::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
     }
     fillRoundRect(rt, br, fill, rect);
     if (!accent_ || !enabled)
-        strokeRoundRect(rt, br, p.cardStroke, rect);
+        strokeRoundRect(rt, br, p.controlStroke, rect);
 
     if (focused_ && enabled) {
         D2D1_COLOR_F focusColor = accent_ ? p.textOnAccent : p.accent;
@@ -358,21 +358,35 @@ namespace {
 constexpr UINT_PTR kEditCueSubclassId = 1;
 } // namespace
 
+FluentEdit::~FluentEdit() {
+    if (hwnd_)
+        DestroyWindow(hwnd_);
+}
+
 bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit,
-                        float fontSizeDip) {
+                        float fontSizeDip, bool wrapText) {
     id_ = id;
     directEdit_ = directEdit;
+    fontSizeDip_ = fontSizeDip;
+    wrapText_ = wrapText;
     editParent_ = nullptr;
 
     // 非分层窗口：分层窗口内的真控件（EDIT）不会被系统绘制
     int hostId = directEdit_ ? 0x7000 + id : id;
-    if (!createLayered(parent, L"QQMusicLyricFluentEdit", wndProc, hostId, false)) {
+    constexpr wchar_t className[] = L"QQMusicLyricFluentEdit";
+    registerOnce(className, wndProc);
+    hwnd_ = CreateWindowExW(0, className, L"", WS_CHILD | WS_CLIPCHILDREN,
+        0, 0, 10, 10, parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(hostId)),
+        GetModuleHandleW(nullptr), this);
+    if (!hwnd_) {
         return false;
     }
+    surface_.initialize(hwnd_, false);
 
     editParent_ = directEdit_ ? parent : hwnd_;
     hEdit_ = CreateWindowExW(0, L"EDIT", L"",
-                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | ES_LEFT,
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_LEFT |
+                                 (wrapText_ ? ES_MULTILINE | ES_AUTOVSCROLL : ES_AUTOHSCROLL),
                              0, 0, 10, 10, editParent_,
                              reinterpret_cast<HMENU>(static_cast<UINT_PTR>(directEdit_ ? id_ : 1)),
                              GetModuleHandleW(nullptr), nullptr);
@@ -385,9 +399,9 @@ bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool dire
         // EM_SETCUEBANNER 的占位色由系统绘制，不随深浅主题变化（深色下不可读），
         // 改为子类化 EDIT 后用主题次要文字色自绘。
         cueBanner_ = cueBanner;
-        SetWindowSubclass(hEdit_, &FluentEdit::editCueProc, kEditCueSubclassId,
-                          reinterpret_cast<DWORD_PTR>(this));
     }
+    SetWindowSubclass(hEdit_, &FluentEdit::editCueProc, kEditCueSubclassId,
+                      reinterpret_cast<DWORD_PTR>(this));
     return true;
 }
 
@@ -397,6 +411,29 @@ LRESULT CALLBACK FluentEdit::editCueProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
     if (msg == WM_NCDESTROY) {
         RemoveWindowSubclass(h, &FluentEdit::editCueProc, subclassId);
         return DefSubclassProc(h, msg, wp, lp);
+    }
+    // 自动折行只改变显示方式，仍保持原有单行文本的输入语义。
+    if (self && self->wrapText_) {
+        if (msg == WM_CHAR && (wp == L'\r' || wp == L'\n'))
+            return 0;
+        if (msg == WM_PASTE) {
+            if (!OpenClipboard(h))
+                return 0;
+            std::wstring text;
+            if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+                if (const auto* value = static_cast<const wchar_t*>(GlobalLock(data))) {
+                    text.assign(value);
+                    GlobalUnlock(data);
+                }
+            }
+            CloseClipboard();
+            const auto lineEnd = text.find_first_of(L"\r\n");
+            if (lineEnd != std::wstring::npos)
+                text.resize(lineEnd);
+            if (!text.empty())
+                SendMessageW(h, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(text.c_str()));
+            return 0;
+        }
     }
     if (msg == WM_PAINT && self && GetWindowTextLengthW(h) == 0) {
         LRESULT result = DefSubclassProc(h, msg, wp, lp);
@@ -411,7 +448,8 @@ LRESULT CALLBACK FluentEdit::editCueProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
             SetTextColor(hdc, toColorRef(palette().textSecondary));
             DrawTextW(hdc, self->cueBanner_.c_str(),
                       static_cast<int>(self->cueBanner_.size()), &rc,
-                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX | DT_EDITCONTROL);
+                      DT_LEFT | DT_TOP | DT_NOPREFIX | DT_EDITCONTROL |
+                          (self->wrapText_ ? DT_WORDBREAK : DT_SINGLELINE));
             if (oldFont)
                 SelectObject(hdc, oldFont);
             ReleaseDC(h, hdc);
@@ -444,12 +482,26 @@ void FluentEdit::setContentPadding(float horizontalDip, float verticalDip) {
     repaintEdit();
 }
 
+void FluentEdit::setEmbeddedNumberStyle() {
+    embeddedNumber_ = true;
+    editFontDpi_ = 0;
+    contentPaddingXDip_ = 0.0f;
+    contentPaddingYDip_ = 0.0f;
+    const LONG_PTR style = GetWindowLongPtrW(hEdit_, GWL_STYLE);
+    SetWindowLongPtrW(hEdit_, GWL_STYLE, (style & ~(ES_CENTER | ES_RIGHT)) | ES_CENTER);
+    SendMessageW(hEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+    layoutEdit();
+    renderNow();
+    repaintEdit();
+}
+
 void FluentEdit::move(int x, int y, int w, int h) {
     hostX_ = x;
     hostY_ = y;
-    LayeredChild::move(x, y, w, h);
+    SetWindowPos(hwnd_, nullptr, x, y, w, h,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
     layoutEdit();
-    repaintEdit();
+    renderNow();
 }
 
 void FluentEdit::focus() {
@@ -458,8 +510,12 @@ void FluentEdit::focus() {
 }
 
 void FluentEdit::refreshTheme() {
-    LayeredChild::refreshTheme();
-    repaintEdit();
+    renderNow();
+}
+
+void FluentEdit::renderNow() {
+    if (hwnd_)
+        RedrawWindow(hwnd_, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
 }
 
 LRESULT CALLBACK FluentEdit::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -474,9 +530,12 @@ LRESULT CALLBACK FluentEdit::wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 LRESULT FluentEdit::handle(UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_PAINT: {
-        PAINTSTRUCT ps;
-        BeginPaint(hwnd_, &ps);
-        renderNow();
+        PAINTSTRUCT ps{};
+        HDC dc = BeginPaint(hwnd_, &ps);
+        surface_.paint(dc, false,
+            [this](FluentDialogSurface::Painter& painter, float width, float height) {
+                render(painter, width, height);
+            });
         EndPaint(hwnd_, &ps);
         // 宿主帧提交完成后再同步绘制原生 EDIT，确保文本位于宿主背景之上。
         repaintEdit();
@@ -486,8 +545,7 @@ LRESULT FluentEdit::handle(UINT msg, WPARAM wp, LPARAM lp) {
         return 1;
     case WM_SIZE:
         layoutEdit();
-        renderNow();
-        repaintEdit();
+        InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     case WM_SETFOCUS:
         SetFocus(hEdit_);
@@ -521,6 +579,7 @@ LRESULT FluentEdit::handle(UINT msg, WPARAM wp, LPARAM lp) {
         }
         hEdit_ = nullptr;
         editParent_ = nullptr;
+        surface_.discard();
         hwnd_ = nullptr;
         return 0;
     }
@@ -532,13 +591,37 @@ void FluentEdit::layoutEdit() {
         return;
     RECT rc;
     GetClientRect(hwnd_, &rc);
-    float s = dipScale(GetDpiForWindow(hwnd_));
+    const UINT dpi = GetDpiForWindow(hwnd_);
+    float s = dipScale(dpi);
     int padX = static_cast<int>(std::lround(contentPaddingXDip_ * s));
     int padY = static_cast<int>(std::lround(contentPaddingYDip_ * s));
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
     int editW = std::max(1, w - padX * 2);
-    int editH = std::max(1, h - padY * 2 - static_cast<int>(2 * s));
+    int editH = std::max(1, h - padY * 2);
+    if (editFontDpi_ != dpi) {
+        if (HFONT font = createUiFont(dpi, fontSizeDip_,
+                                      embeddedNumber_ ? FW_SEMIBOLD : FW_NORMAL)) {
+            SendMessageW(hEdit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+            if (editFont_)
+                DeleteObject(editFont_);
+            editFont_ = font;
+            editFontDpi_ = dpi;
+            SendMessageW(hEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        }
+    }
+    if (!wrapText_) {
+        if (HDC dc = GetDC(hEdit_)) {
+            const HGDIOBJ oldFont = SelectObject(dc, editFont_);
+            TEXTMETRICW textMetrics{};
+            if (GetTextMetricsW(dc, &textMetrics)) {
+                editH = std::min(editH, static_cast<int>(textMetrics.tmHeight));
+                padY = (h - editH) / 2;
+            }
+            SelectObject(dc, oldFont);
+            ReleaseDC(hEdit_, dc);
+        }
+    }
     if (directEdit_) {
         // EDIT 与宿主是兄弟窗口：宿主创建/显示时序会让宿主压在 EDIT 上方，
         // 宿主的不透明 BitBlt 帧会盖住文字并拦截点击，必须显式把 EDIT 置顶
@@ -571,7 +654,7 @@ void FluentEdit::onEditNotification(UINT code) {
 LRESULT FluentEdit::colorEdit(HDC hdc) {
     const Palette& p = palette();
     // EDIT 背景与卡片同色，视觉上融为一体
-    COLORREF bg = toColorRef(p.cardFillSolid);
+    COLORREF bg = toColorRef(p.controlFill);
     if (!editBrush_ || editBrushColor_ != bg) {
         if (editBrush_)
             DeleteObject(editBrush_);
@@ -583,25 +666,18 @@ LRESULT FluentEdit::colorEdit(HDC hdc) {
     return reinterpret_cast<LRESULT>(editBrush_);
 }
 
-void FluentEdit::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
+void FluentEdit::render(FluentDialogSurface::Painter& painter, float wDip, float hDip) {
     const Palette& p = palette();
-    auto* br = brush(rt);
-    if (!br)
+    if (embeddedNumber_) {
+        if (auto* brush = painter.brush(p.controlFill))
+            painter.target()->FillRectangle(D2D1::RectF(0.0f, 0.0f, wDip, hDip), brush);
         return;
-    // 不透明提交：先用 Mica 底色铺满（圆角外的角落与对话框背景近似一致）
-    D2D1_RECT_F full = D2D1::RectF(0.0f, 0.0f, wDip, hDip);
-    br->SetColor(p.windowBg);
-    rt->FillRectangle(full, br);
+    }
+    // 根背景和原生 EDIT 的裁剪由 surface_ 在当前 WM_PAINT 中统一处理。
     D2D1_RECT_F rect = D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f);
-    fillRoundRect(rt, br, p.cardFillSolid, rect);
-    strokeRoundRect(rt, br, focused_ ? p.accent : p.cardStroke, rect,
-                    focused_ ? 1.25f : 1.0f);
-    // Win11 输入框底边线：静止时细灰线，聚焦时强调色粗线
-    const float underlineHeight = focused_ ? 2.0f : 1.0f;
-    D2D1_RECT_F bottom = D2D1::RectF(rect.left + 1.0f, rect.bottom - underlineHeight,
-                                     rect.right - 1.0f, rect.bottom);
-    br->SetColor(focused_ ? p.accent : p.separator);
-    rt->FillRectangle(bottom, br);
+    painter.fillRoundRect(p.controlFill, rect);
+    painter.strokeRoundRect(focused_ ? p.accent : p.controlStroke, rect,
+                            focused_ ? 1.5f : 1.0f);
 }
 
 // ---------------- FluentList ----------------
@@ -1285,14 +1361,14 @@ void FluentToggle::render(ID2D1DCRenderTarget* rt, float wDip, float hDip) {
 
     if (!enabled) {
         fillRoundRect(rt, br, p.listHover, track, radius);
-        strokeRoundRect(rt, br, p.cardStroke, track, 1.0f, radius);
+        strokeRoundRect(rt, br, p.controlStroke, track, 1.0f, radius);
         br->SetColor(p.disabled);
     } else if (checked_) {
         fillRoundRect(rt, br, hover_ ? p.accentHover : p.accent, track, radius);
         br->SetColor(p.textOnAccent);
     } else {
         fillRoundRect(rt, br, hover_ ? p.controlHover : p.controlFill, track, radius);
-        strokeRoundRect(rt, br, p.cardStroke, track, 1.0f, radius);
+        strokeRoundRect(rt, br, p.textSecondary, track, 1.0f, radius);
         br->SetColor(p.textSecondary);
     }
     rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);

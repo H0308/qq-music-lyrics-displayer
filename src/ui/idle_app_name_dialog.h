@@ -6,7 +6,8 @@
 #include <memory>
 #include <string>
 
-// 单行文本编辑小窗。默认文案对应快速启动应用名称编辑（留空恢复 EXE 默认名称），
+// 文本编辑小窗：长内容自动折行显示，保存值仍为单行文本。
+// 默认文案对应快速启动应用名称编辑（留空恢复 EXE 默认名称），
 // 调用方可通过 title/subtitle/placeholder 复用于其他文本设置（如自定义欢迎语）。
 class IdleAppNameDialog {
 public:

@@ -16,10 +16,13 @@ constexpr int kIdSubtitle = 502;
 constexpr int kIdNameEdit = 503;
 constexpr int kIdOk = 504;
 constexpr int kIdCancel = 505;
-constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME;
+// 父窗口重绘背景时必须排除输入框等子窗口，避免盖掉其圆角表面与边框。
+constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_CLIPCHILDREN;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
-constexpr float kClientW = 360.0f;
-constexpr float kBaseClientH = 188.0f;
+constexpr float kClientW = 520.0f;
+constexpr float kBaseClientH = 212.0f;
+constexpr float kShortEditH = 44.0f;
+constexpr float kLongEditH = 112.0f;
 constexpr float kSubtitleLineHeightDip = 20.0f;
 
 float measureSubtitleHeightDip(const std::wstring& text, float widthDip) {
@@ -83,7 +86,12 @@ struct IdleAppNameDialog::Impl {
     }
 
     float clientHeightDip() const {
-        return kBaseClientH + subtitleHeightDip() - kSubtitleLineHeightDip;
+        return kBaseClientH + subtitleHeightDip() - kSubtitleLineHeightDip +
+               editHeightDip() - kShortEditH;
+    }
+
+    float editHeightDip() const {
+        return maxLength > 0 && maxLength <= 32 ? kShortEditH : kLongEditH;
     }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -111,7 +119,9 @@ struct IdleAppNameDialog::Impl {
     void createControls() {
         titleLabel.create(hwnd, kIdTitle, title.c_str(), false, 20.0f, 600);
         subtitleLabel.create(hwnd, kIdSubtitle, subtitle.c_str(), true, 13.0f, 400);
-        nameEdit.create(hwnd, kIdNameEdit, placeholder.c_str());
+        const bool wrapText = editHeightDip() > kShortEditH;
+        nameEdit.create(hwnd, kIdNameEdit, placeholder.c_str(), false, 14.0f, wrapText);
+        nameEdit.setContentPadding(14.0f, wrapText ? 12.0f : 5.0f);
         if (maxLength > 0)
             SendMessageW(nameEdit.editHwnd(), EM_SETLIMITTEXT,
                          static_cast<WPARAM>(maxLength), 0);
@@ -127,25 +137,30 @@ struct IdleAppNameDialog::Impl {
         GetClientRect(hwnd, &rc);
         const float s = fluent::dipScale(GetDpiForWindow(hwnd));
         const auto px = [s](float dip) { return static_cast<int>(std::lround(dip * s)); };
-        const int w = rc.right - rc.left;
+        const auto content = fluent::centeredDialogLayout(
+            static_cast<float>(rc.right - rc.left) / s);
+        const int originX = px(content.offsetX);
+        const int w = px(content.width);
         const int h = rc.bottom - rc.top;
         const int pad = px(fluent::metrics::pagePadding);
         const int gap = px(fluent::metrics::controlGap);
         const int titleH = px(28.0f);
-        const int subtitleH = px(subtitleHeightDip());
-        const int editH = px(fluent::metrics::controlHeight);
+        const int subtitleH = px(measureSubtitleHeightDip(
+            subtitle, static_cast<float>(w - pad * 2) / s));
         const int buttonH = px(fluent::metrics::controlHeight);
 
-        titleLabel.move(pad, pad, w - pad * 2, titleH);
-        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
+        titleLabel.move(originX + pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(originX + pad, pad + titleH, w - pad * 2, subtitleH);
         const int editY = pad + titleH + subtitleH + px(fluent::metrics::sectionGap);
-        nameEdit.move(pad, editY, w - pad * 2, editH);
 
         const int cancelW = px(88.0f);
         const int okW = px(96.0f);
         const int buttonY = h - pad - buttonH;
-        cancelButton.move(w - pad - cancelW, buttonY, cancelW, buttonH);
-        okButton.move(w - pad - cancelW - gap - okW, buttonY, okW, buttonH);
+        const int editH = editHeightDip() > kShortEditH
+            ? std::max(px(editHeightDip()), buttonY - px(24.0f) - editY) : px(kShortEditH);
+        nameEdit.move(originX + pad, editY, w - pad * 2, editH);
+        cancelButton.move(originX + w - pad - cancelW, buttonY, cancelW, buttonH);
+        okButton.move(originX + w - pad - cancelW - gap - okW, buttonY, okW, buttonH);
     }
 
     void destroy() {

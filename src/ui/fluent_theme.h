@@ -33,7 +33,7 @@ inline constexpr float sectionGap = 16.0f;
 inline constexpr float controlGap = 12.0f;
 inline constexpr float compactGap = 8.0f;
 inline constexpr float controlHeight = 32.0f;
-inline constexpr float controlRadius = 6.0f;
+inline constexpr float controlRadius = 4.0f;
 inline constexpr float cardRadius = 8.0f;
 } // namespace metrics
 
@@ -63,6 +63,7 @@ struct Palette {
     D2D1_COLOR_F controlFill;    // 普通按钮填充
     D2D1_COLOR_F controlHover;   // 普通按钮悬停
     D2D1_COLOR_F controlPressed; // 普通按钮按下
+    D2D1_COLOR_F controlStroke;  // 控件边框，与卡片的弱分隔线区分
     D2D1_COLOR_F accent;         // 强调色按钮
     D2D1_COLOR_F accentHover;
     D2D1_COLOR_F accentPressed;
@@ -84,14 +85,13 @@ void applyDarkCaption(HWND hwnd, bool dark);
 void applyBorderColor(HWND hwnd, COLORREF color);
 // 不绘制窗口边框（用于弹出菜单等无边框窗口）
 void suppressBorder(HWND hwnd);
-// 普通窗口一键套用：圆角 + 实色客户区 + 标题栏配色；返回值保留为 false，
-// 用于兼容各对话框现有的表面生命周期。
+// 普通窗口一键套用：圆角、深浅主题、Mica；返回材质是否成功启用。
 bool styleDialogWindow(HWND hwnd, bool transientWindow = false);
-// 主题变化时重新套用实色窗口样式；oldBackdrop/transientWindow 仅为兼容现有调用方保留。
+// 主题变化时重新应用窗口材质和标题栏样式。
 bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow = false);
 // 背景材质未生效时的实心回退背景色
 COLORREF fallbackBgColor();
-// 绘制普通对话框根背景；深色模式不依赖 DWM 材质。
+// 绘制普通对话框根背景；启用材质时为 DWM 留出透明底面。
 void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop);
 
 // ---- 字体 ----

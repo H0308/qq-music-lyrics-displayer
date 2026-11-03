@@ -21,6 +21,9 @@ namespace fluent {
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
 #endif
+#ifndef DWMWA_CAPTION_COLOR
+#define DWMWA_CAPTION_COLOR 35
+#endif
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
@@ -30,6 +33,7 @@ namespace {
 constexpr int kDwmWcpRound = 2;      // DWMWCP_ROUND
 constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
 constexpr int kDwmsbtNone = 1;       // DWMSBT_NONE
+constexpr int kDwmsbtMainWindow = 2; // Windows 11 Mica
 
 ThemeMode gTaskbarThemeMode = ThemeMode::FollowSystem;
 ThemeMode gWindowThemeMode = ThemeMode::FollowApp;
@@ -168,6 +172,7 @@ Palette makeLight() {
     p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.78f);
     p.controlHover = D2D1::ColorF(0.976f, 0.976f, 0.976f, 0.88f);
     p.controlPressed = D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.92f);
+    p.controlStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.14f);
     p.listHover = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
     p.listSelected = D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.12f);
     p.menuFill = D2D1::ColorF(0.976f, 0.976f, 0.976f, 1.0f);
@@ -189,12 +194,32 @@ Palette makeDark() {
     p.controlFill = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f);
     p.controlHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f);
     p.controlPressed = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f);
+    p.controlStroke = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f);
     p.listHover = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.08f);
     p.listSelected = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f);
     p.menuFill = D2D1::ColorF(0.17f, 0.17f, 0.17f, 1.0f);
     p.menuStroke = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.1f);
     p.separator = D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.1f);
     p.editText = D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+    return p;
+}
+
+// 普通窗口使用不透明的分层表面；任务栏继续使用原有的透明调色板。
+Palette makeWindowPalette(bool dark) {
+    Palette p = dark ? makeDark() : makeLight();
+    p.cardFill = dark ? toD2D(RGB(43, 43, 43)) : toD2D(RGB(251, 251, 251));
+    p.cardFillSolid = p.cardFill;
+    p.cardStroke = D2D1::ColorF(0.0f, 0.0f, 0.0f, dark ? 0.16f : 0.06f);
+    p.controlFill = dark ? toD2D(RGB(55, 55, 55)) : toD2D(RGB(255, 255, 255));
+    p.controlHover = dark ? toD2D(RGB(62, 62, 62)) : toD2D(RGB(249, 249, 249));
+    p.controlPressed = dark ? toD2D(RGB(48, 48, 48)) : toD2D(RGB(242, 242, 242));
+    p.controlStroke = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f)
+                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.14f);
+    p.listHover = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f)
+                      : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.04f);
+    p.listSelected = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f)
+                         : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
+    p.menuFill = dark ? toD2D(RGB(44, 44, 44)) : toD2D(RGB(250, 250, 250));
     return p;
 }
 
@@ -266,6 +291,8 @@ const Palette& palette(ThemeTarget target) {
     // 避免系统换色后必须重启程序才生效。
     static Palette light = makeLight();
     static Palette dark = makeDark();
+    static Palette windowLight = makeWindowPalette(false);
+    static Palette windowDark = makeWindowPalette(true);
     static bool accentApplied = false;
     static COLORREF cachedAccent = 0;
     const COLORREF current = accentColor();
@@ -273,8 +300,12 @@ const Palette& palette(ThemeTarget target) {
         cachedAccent = current;
         applyAccent(light, current);
         applyAccent(dark, current);
+        applyAccent(windowLight, current);
+        applyAccent(windowDark, current);
         accentApplied = true;
     }
+    if (target == ThemeTarget::Window)
+        return isDarkMode(target) ? windowDark : windowLight;
     return isDarkMode(target) ? dark : light;
 }
 
@@ -308,11 +339,21 @@ bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     applyRoundCorners(hwnd, false);
     const bool dark = isDarkMode(ThemeTarget::Window);
     applyDarkCaption(hwnd, dark);
-    // 所有普通对话框统一使用当前主题的实色客户区，避免 DWM 材质在重绘、DPI
-    // 切换或分层子控件更新时产生透明残留和背景不同步。
-    clearBackdrop(hwnd);
+    // 标题栏由 DWM 绘制材质，不再用自定义实色覆盖。
+    const COLORREF captionColor = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
+    const int type = kDwmsbtMainWindow;
+    bool backdrop = SUCCEEDED(DwmSetWindowAttribute(
+        hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type)));
+    const MARGINS margins = backdrop ? MARGINS{-1, -1, -1, -1} : MARGINS{};
+    if (FAILED(DwmExtendFrameIntoClientArea(hwnd, &margins))) {
+        clearBackdrop(hwnd);
+        const MARGINS emptyMargins{};
+        DwmExtendFrameIntoClientArea(hwnd, &emptyMargins);
+        backdrop = false;
+    }
     InvalidateRect(hwnd, nullptr, TRUE);
-    return false;
+    return backdrop;
 }
 
 bool restyleDialogWindow(HWND hwnd, bool oldBackdrop, bool transientWindow) {
@@ -325,10 +366,13 @@ COLORREF fallbackBgColor() {
 }
 
 void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop) {
-    (void)backdrop;
-
     RECT rc{};
     GetClientRect(hwnd, &rc);
+    if (backdrop) {
+        // 扩展的 DWM 客户区用零 alpha 底面显示系统材质。
+        FillRect(hdc, &rc, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        return;
+    }
     HBRUSH brush = CreateSolidBrush(fallbackBgColor());
     FillRect(hdc, &rc, brush);
     DeleteObject(brush);

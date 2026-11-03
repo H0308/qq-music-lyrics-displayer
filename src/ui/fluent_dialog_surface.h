@@ -8,10 +8,20 @@
 #include <windows.h>
 
 #include <functional>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
 namespace fluent {
+
+struct DialogContentLayout {
+    float offsetX;
+    float width;
+};
+
+// 内容宽度最多 1000 DIP（不含页面内边距），宽屏下整体居中。
+DialogContentLayout centeredDialogLayout(float clientWidth);
+void offsetDialogRects(float offsetX, std::initializer_list<D2D1_RECT_F*> rects);
 
 // 为普通顶层窗口设置按客户区 DIP 计算的最小外框尺寸。
 void setDialogMinimumTrackSize(HWND hwnd, MINMAXINFO* info, DWORD style, DWORD exStyle,

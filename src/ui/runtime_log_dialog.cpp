@@ -245,7 +245,9 @@ struct RuntimeLogDialog::Impl {
         RECT client{};
         GetClientRect(hwnd, &client);
         const float s = surface.dipScale();
-        const float width = static_cast<float>(client.right - client.left) / s;
+        const auto content = fluent::centeredDialogLayout(
+            static_cast<float>(client.right - client.left) / s);
+        const float width = content.width;
         const float height = static_cast<float>(client.bottom - client.top) / s;
 
         const float statusTop = 82.0f;
@@ -275,6 +277,8 @@ struct RuntimeLogDialog::Impl {
         const float buttonRight = width - kPagePadding - buttonInset;
         retentionRect = D2D1::RectF(buttonRight - retentionW, buttonTop, buttonRight,
                                     buttonTop + buttonH);
+        fluent::offsetDialogRects(content.offsetX,
+            {&chooseRect, &openRect, &retentionRect, &coverToggleRect});
     }
 
     void drawButton(fluent::FluentDialogSurface::Painter& painter,
@@ -290,7 +294,7 @@ struct RuntimeLogDialog::Impl {
             fill = accent ? p.accentHover : p.controlHover;
         painter.fillRoundRect(fill, rect, fluent::metrics::controlRadius);
         if (!accent)
-            painter.strokeRoundRect(p.cardStroke, rect, 1.0f, fluent::metrics::controlRadius);
+            painter.strokeRoundRect(p.controlStroke, rect, 1.0f, fluent::metrics::controlRadius);
         painter.drawText(text, painter.textFormat(13.0f, 600, true, true), rect,
                          accent ? p.textOnAccent : p.text);
         if (focusVisible && focusedId == id)
@@ -344,7 +348,7 @@ struct RuntimeLogDialog::Impl {
             painter.fillRoundRect(pressed ? p.controlPressed
                                           : hovered ? p.controlHover : p.controlFill,
                                   track, radius);
-            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            painter.strokeRoundRect(p.textSecondary, track, 1.0f, radius);
             if (auto* br = painter.brush(p.textSecondary))
                 painter.target()->FillEllipse(
                     D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
@@ -438,14 +442,18 @@ struct RuntimeLogDialog::Impl {
             return;
         const auto snapshot = logger->snapshot();
         const auto& p = fluent::palette();
+        const auto content = fluent::centeredDialogLayout(width);
+        width = content.width;
+        const float contentLeft = content.offsetX + kPagePadding;
+        const float contentRight = content.offsetX + width - kPagePadding;
         const float contentWidth = std::max(1.0f, width - kPagePadding * 2.0f);
         const float titleY = 20.0f;
         painter.drawText(L"运行日志", painter.textFormat(22.0f, 600, false, true),
-                         D2D1::RectF(kPagePadding, titleY, width - kPagePadding, titleY + 30.0f),
+                         D2D1::RectF(contentLeft, titleY, contentRight, titleY + 30.0f),
                          p.text);
         painter.drawText(L"当前会话状态与资源占用；详细事件写入下方日志文件",
                          painter.textFormat(12.0f, 400, false, true),
-                         D2D1::RectF(kPagePadding, titleY + 32.0f, width - kPagePadding,
+                         D2D1::RectF(contentLeft, titleY + 32.0f, contentRight,
                                      titleY + 54.0f),
                          p.textSecondary);
 
@@ -457,15 +465,15 @@ struct RuntimeLogDialog::Impl {
             if (!snapshot.currentArtist.empty())
                 songValue += L" · " + snapshot.currentArtist;
         }
-        drawCard(painter, D2D1::RectF(kPagePadding, statusTop, width - kPagePadding,
+        drawCard(painter, D2D1::RectF(contentLeft, statusTop, contentRight,
                                      statusTop + songH),
                  L"当前播放", songValue, true);
 
         const float gridTop = statusTop + songH + kCardGap;
         const float gridH = 76.0f;
         const float gridW = (contentWidth - kCardGap * 2.0f) / 3.0f;
-        const auto card = [gridTop, gridH, gridW](int column, int row) {
-            const float left = kPagePadding + column * (gridW + kCardGap);
+        const auto card = [gridTop, gridH, gridW, contentLeft](int column, int row) {
+            const float left = contentLeft + column * (gridW + kCardGap);
             const float top = gridTop + row * (gridH + kCardGap);
             return D2D1::RectF(left, top, left + gridW, top + gridH);
         };
@@ -479,8 +487,8 @@ struct RuntimeLogDialog::Impl {
         drawCard(painter, card(2, 1), L"专用内存", memoryText(snapshot.memoryBytes));
 
         const float settingsTop = std::max(0.0f, height - 188.0f);
-        const D2D1_RECT_F settingsRect = D2D1::RectF(kPagePadding, settingsTop,
-                                                     width - kPagePadding, height - kPagePadding);
+        const D2D1_RECT_F settingsRect = D2D1::RectF(contentLeft, settingsTop,
+                                                     contentRight, height - kPagePadding);
         painter.fillRoundRect(p.cardFill, settingsRect, kCardRadius);
         painter.strokeRoundRect(p.cardStroke, settingsRect, 1.0f, kCardRadius);
         painter.drawText(L"日志文件", painter.textFormat(14.0f, 600, false, true),

@@ -475,7 +475,10 @@ struct ColorPickerDialog::Impl {
         GetClientRect(hwnd, &rc);
         float s = fluent::dipScale(GetDpiForWindow(hwnd));
         auto px = [&](float dip) { return static_cast<int>(std::lround(dip * s)); };
-        int w = rc.right - rc.left;
+        const auto content = fluent::centeredDialogLayout(
+            static_cast<float>(rc.right - rc.left) / s);
+        const int originX = px(content.offsetX);
+        const int w = px(content.width);
         int h = rc.bottom - rc.top;
         const float widthDip = static_cast<float>(w) / s;
         const float heightDip = static_cast<float>(h) / s;
@@ -486,8 +489,8 @@ struct ColorPickerDialog::Impl {
 
         int titleH = px(28.0f);
         int subtitleH = px(20.0f);
-        titleLabel.move(pad, pad, w - pad * 2, titleH);
-        subtitleLabel.move(pad, pad + titleH, w - pad * 2, subtitleH);
+        titleLabel.move(originX + pad, pad, w - pad * 2, titleH);
+        subtitleLabel.move(originX + pad, pad + titleH, w - pad * 2, subtitleH);
 
         const float canvasYDip = padDip + 28.0f + 20.0f + fluent::metrics::sectionGap;
         const float buttonHDip = fluent::metrics::controlHeight;
@@ -510,19 +513,19 @@ struct ColorPickerDialog::Impl {
         int canvasY = px(canvasYDip);
         int canvasW = px(canvasWDip);
         int canvasH = px(canvasHDip);
-        canvas.move(canvasX, canvasY, canvasW, canvasH);
+        canvas.move(originX + canvasX, canvasY, canvasW, canvasH);
 
         int hexY = canvasY + canvasH + gap;
         int labelW = px(36);
         int editH = px(fluent::metrics::controlHeight);
-        hexLabel.move(pad, hexY + (editH - px(20)) / 2, labelW, px(20));
-        hexEdit.move(pad + labelW + px(4), hexY, w - pad * 2 - labelW - px(4), editH);
+        hexLabel.move(originX + pad, hexY + (editH - px(20)) / 2, labelW, px(20));
+        hexEdit.move(originX + pad + labelW + px(4), hexY, w - pad * 2 - labelW - px(4), editH);
 
         int btnH = px(fluent::metrics::controlHeight);
         int okW = px(96), cancelW = px(88);
         int btnY = h - pad - btnH;
-        okBtn.move(w - pad - okW - cancelW - gap, btnY, okW, btnH);
-        cancelBtn.move(w - pad - cancelW, btnY, cancelW, btnH);
+        okBtn.move(originX + w - pad - okW - cancelW - gap, btnY, okW, btnH);
+        cancelBtn.move(originX + w - pad - cancelW, btnY, cancelW, btnH);
     }
 
     void onCommand(int id, int code) {

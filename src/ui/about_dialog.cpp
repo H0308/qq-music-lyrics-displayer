@@ -1018,6 +1018,28 @@ public:
 
     void scrollBy(float delta) { scrollY_ += delta; }
     float contentHeight() const { return contentHeight_; }
+    bool dragging() const { return dragging_; }
+    void endDrag() { dragging_ = false; }
+    bool beginScroll(float x, float y) {
+        if (maxScroll_ <= 0.0f || x < scrollTrack_.left - 4.5f ||
+            x > scrollTrack_.right + 4.5f || y < scrollTrack_.top || y > scrollTrack_.bottom)
+            return false;
+        if (y >= scrollThumb_.top && y <= scrollThumb_.bottom) {
+            dragging_ = true;
+            dragOffset_ = y - scrollThumb_.top;
+        } else {
+            scrollY_ = std::clamp(scrollY_ + (y < scrollThumb_.top ? -viewHeight_ : viewHeight_),
+                                  0.0f, maxScroll_);
+        }
+        return true;
+    }
+    void dragTo(float y) {
+        const float travel = scrollTrack_.bottom - scrollTrack_.top -
+                             (scrollThumb_.bottom - scrollThumb_.top);
+        if (dragging_ && travel > 0.0f)
+            scrollY_ = std::clamp((y - scrollTrack_.top - dragOffset_) / travel,
+                                  0.0f, 1.0f) * maxScroll_;
+    }
 
 private:
     void applyMarkdownStyles(IDWriteTextLayout* layout, const MarkdownBlock& block,
@@ -1048,7 +1070,11 @@ private:
     }
 
 public:
-    void paint(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect) {
+    void paint(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+               float scrollbarRight) {
+        scrollTrack_ = {};
+        scrollThumb_ = {};
+        maxScroll_ = 0.0f;
         ID2D1DCRenderTarget* rt = painter.target();
         if (!rt)
             return;
@@ -1178,6 +1204,8 @@ public:
             totalHeight = std::max(0.0f, totalHeight - rendered.back().gap);
         contentHeight_ = totalHeight;
         const float maxScroll = std::max(0.0f, contentHeight_ - bodyViewHeight);
+        maxScroll_ = maxScroll;
+        viewHeight_ = bodyViewHeight;
         scrollY_ = std::clamp(scrollY_, 0.0f, maxScroll);
 
         rt->PushAxisAlignedClip(D2D1::RectF(rect.left, bodyTop, rect.right, rect.bottom),
@@ -1224,11 +1252,11 @@ public:
             const float thumbTravel = std::max(0.0f, trackHeight - thumbHeight);
             const float thumbTop =
                 trackTop + (maxScroll > 0.0f ? scrollY_ / maxScroll * thumbTravel : 0.0f);
-            painter.fillRoundRect(
-                palette.textSecondary,
-                D2D1::RectF(std::max(rect.left, rect.right - 11.0f), thumbTop,
-                             std::max(rect.left, rect.right - 8.0f), thumbTop + thumbHeight),
-                1.5f);
+            scrollTrack_ = D2D1::RectF(scrollbarRight - 3.0f, trackTop,
+                                       scrollbarRight, trackTop + trackHeight);
+            scrollThumb_ = D2D1::RectF(scrollTrack_.left, thumbTop,
+                                       scrollTrack_.right, thumbTop + thumbHeight);
+            painter.fillRoundRect(palette.textSecondary, scrollThumb_, 1.5f);
         }
     }
 
@@ -1242,6 +1270,12 @@ public:
     std::wstring message_;
     float scrollY_ = 0.0f;
     float contentHeight_ = 0.0f;
+    D2D1_RECT_F scrollTrack_{};
+    D2D1_RECT_F scrollThumb_{};
+    float maxScroll_ = 0.0f;
+    float viewHeight_ = 0.0f;
+    float dragOffset_ = 0.0f;
+    bool dragging_ = false;
 };
 
 } // namespace
@@ -1295,6 +1329,7 @@ struct AboutDialog::Impl {
     D2D1_RECT_F releaseRect{};
     D2D1_RECT_F closeRect{};
     D2D1_RECT_F notesRect{};
+    float scrollbarRight = 0.0f;
 
     int hoverId = 0;
     int pressedId = 0;
@@ -1353,7 +1388,7 @@ struct AboutDialog::Impl {
         }
         painter.fillRoundRect(fill, rect);
         if (!accent || !enabled)
-            painter.strokeRoundRect(p.cardStroke, rect);
+            painter.strokeRoundRect(p.controlStroke, rect);
         if (focusedId == id && focusVisible && enabled) {
             painter.strokeRoundRect(accent ? p.textOnAccent : p.accent,
                                     D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f,
@@ -1428,7 +1463,7 @@ struct AboutDialog::Impl {
                                              br);
         } else {
             painter.fillRoundRect(hovered ? p.controlHover : p.controlFill, track, radius);
-            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            painter.strokeRoundRect(p.textSecondary, track, 1.0f, radius);
             if (auto* br = painter.brush(p.textSecondary))
                 painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR,
                                                             knobR),
@@ -1467,7 +1502,7 @@ struct AboutDialog::Impl {
                               selectedSource == 0, kIdGithubSourceButton);
         drawUpdateSourceRadio(painter, giteeSourceRect, L"Gitee",
                               selectedSource == 1, kIdGiteeSourceButton);
-        releaseNotes.paint(painter, notesRect);
+        releaseNotes.paint(painter, notesRect, scrollbarRight);
         painter.drawText(statusText, painter.textFormat(13.0f, 400), statusRect, p.textSecondary);
         painter.drawText(latestText, painter.textFormat(13.0f, 400), latestRect, p.textSecondary);
 
@@ -1624,6 +1659,11 @@ struct AboutDialog::Impl {
             surface.eraseBackground(reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_MOUSEMOVE: {
+            if (releaseNotes.dragging()) {
+                releaseNotes.dragTo(GET_Y_LPARAM(lp) / surface.dipScale());
+                surface.invalidate();
+                return 0;
+            }
             if (!GetCapture()) {
                 TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
                 TrackMouseEvent(&tme);
@@ -1646,6 +1686,12 @@ struct AboutDialog::Impl {
             SetFocus(hwnd);
             focusVisible = false;
             const float s = surface.dipScale();
+            if (releaseNotes.beginScroll(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s)) {
+                if (releaseNotes.dragging())
+                    SetCapture(hwnd);
+                surface.invalidate();
+                return 0;
+            }
             pressedId = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
             if (pressedId == kIdReleaseNotes)
                 pressedId = 0;
@@ -1657,6 +1703,13 @@ struct AboutDialog::Impl {
             return 0;
         }
         case WM_LBUTTONUP: {
+            if (releaseNotes.dragging()) {
+                releaseNotes.endDrag();
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                surface.invalidate();
+                return 0;
+            }
             const float s = surface.dipScale();
             const int hit = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
             const int pressed = pressedId;
@@ -1669,6 +1722,7 @@ struct AboutDialog::Impl {
             return 0;
         }
         case WM_CAPTURECHANGED:
+            releaseNotes.endDrag();
             pressedId = 0;
             surface.invalidate();
             return 0;
@@ -1676,7 +1730,8 @@ struct AboutDialog::Impl {
             POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &point);
             const float s = surface.dipScale();
-            if (contains(notesRect, point.x / s, point.y / s)) {
+            if (point.y / s >= notesRect.top && point.y / s <= notesRect.bottom &&
+                point.x >= 0 && point.x / s <= scrollbarRight + 8.0f) {
                 releaseNotes.scrollBy(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) /
                                        WHEEL_DELTA * 64.0f);
                 surface.invalidate();
@@ -1843,7 +1898,10 @@ struct AboutDialog::Impl {
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const float s = surface.dipScale();
-        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const float clientWidth = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const auto content = fluent::centeredDialogLayout(clientWidth);
+        const float w = content.width;
+        scrollbarRight = clientWidth - 8.0f;
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
         const float pad = fluent::metrics::pagePadding;
         const float gap = fluent::metrics::controlGap;
@@ -1917,6 +1975,13 @@ struct AboutDialog::Impl {
                                 std::max(notesY + 80.0f, notesBottom));
         statusRect = D2D1::RectF(pad, statusY, std::max(pad, w - pad), statusY + statusH);
         latestRect = D2D1::RectF(pad, latestY, std::max(pad, w - pad), latestY + latestH);
+        fluent::offsetDialogRects(content.offsetX, {
+            &autoSwitchRect, &titleRect, &subtitleRect, &infoCardRect,
+            &versionRect, &autoCheckLabelRect, &releaseTitleRect, &statusRect,
+            &latestRect, &projectRect, &giteeProjectRect, &updateSourceLabelRect,
+            &githubSourceRect, &giteeSourceRect, &checkRect, &releaseRect,
+            &closeRect, &notesRect});
+
     }
 
     void clearDownloadedInstaller() {

@@ -14,10 +14,10 @@ namespace fluent {
 
 namespace {
 
-constexpr float kItemH = 30.0f;
+constexpr float kItemH = 32.0f;
 constexpr float kSepH = 9.0f;
-constexpr float kPadY = 4.0f;
-constexpr float kPadX = 4.0f;
+constexpr float kPadY = 6.0f;
+constexpr float kPadX = 6.0f;
 constexpr float kIconLeft = 12.0f;
 constexpr float kIconSize = 16.0f;
 constexpr float kIconTextGap = 8.0f;
@@ -206,13 +206,19 @@ struct MenuWnd {
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         brush->SetColor(p.menuFill);
         rt->Clear(p.menuFill);
+        brush->SetColor(p.menuStroke);
+        rt->DrawRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f),
+                              metrics::controlRadius, metrics::controlRadius),
+            brush, 1.0f);
 
         float y = kPadY;
         for (int i = 0; i < static_cast<int>(items.size()); ++i) {
             const auto& it = items[i];
             if (it.separator) {
                 brush->SetColor(p.separator);
-                rt->FillRectangle(D2D1::RectF(kPadX, y + kSepH / 2.0f - 0.5f, wDip - 12.0f,
+                rt->FillRectangle(D2D1::RectF(kPadX + 6.0f, y + kSepH / 2.0f - 0.5f,
+                                              wDip - kPadX - 6.0f,
                                               y + kSepH / 2.0f + 0.5f),
                                   brush);
                 y += kSepH;
@@ -228,7 +234,7 @@ struct MenuWnd {
             }
             if (it.checked) {
                 // 图标已经占用左侧识别区，勾选标记移到右侧状态位，避免挤开文字。
-                brush->SetColor(it.enabled ? p.text : p.textSecondary);
+                brush->SetColor(it.enabled ? p.accent : p.disabled);
                 const float checkRightPad = it.submenu.empty() ? kCheckRightPad
                                                                 : kSubmenuCheckRightPad;
                 const float cx = wDip - checkRightPad;
@@ -251,12 +257,12 @@ struct MenuWnd {
                     rt, it.icon, iconRect,
                     brush, 1.15f);
             }
-            brush->SetColor(it.enabled ? p.text : p.textSecondary);
+            brush->SetColor(it.enabled ? p.text : p.disabled);
             rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,
                           D2D1::RectF(kGutter, y, wDip - kRightPad, y + kItemH), brush);
             if (!it.submenu.empty()) {
                 // 子菜单箭头
-                brush->SetColor(p.textSecondary);
+                brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
                 float ax = wDip - 16.0f, ay = y + kItemH / 2.0f;
                 rt->DrawLine(D2D1::Point2F(ax, ay - 4.0f), D2D1::Point2F(ax + 3.5f, ay), brush, 1.4f);
                 rt->DrawLine(D2D1::Point2F(ax + 3.5f, ay), D2D1::Point2F(ax, ay + 4.0f), brush, 1.4f);

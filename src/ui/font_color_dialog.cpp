@@ -282,7 +282,7 @@ struct FontColorDialog::Impl {
         const D2D1_COLOR_F textColor = accent ? p.textOnAccent : p.text;
         painter.fillRoundRect(fill, rect);
         if (!accent)
-            painter.strokeRoundRect(p.cardStroke, rect);
+            painter.strokeRoundRect(p.controlStroke, rect);
         if (focusedId == id && focusVisible) {
             painter.strokeRoundRect(
                 accent ? p.textOnAccent : p.accent,
@@ -340,7 +340,7 @@ struct FontColorDialog::Impl {
                     D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
         } else {
             painter.fillRoundRect(hovered ? p.controlHover : p.controlFill, track, radius);
-            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            painter.strokeRoundRect(p.textSecondary, track, 1.0f, radius);
             if (auto* br = painter.brush(p.textSecondary))
                 painter.target()->FillEllipse(
                     D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
@@ -967,7 +967,9 @@ struct FontColorDialog::Impl {
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const float s = surface.dipScale();
-        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const float clientWidth = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const auto content = fluent::centeredDialogLayout(clientWidth);
+        const float w = content.width;
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
         const float pad = fluent::metrics::pagePadding;
         const float gap = fluent::metrics::controlGap;
@@ -1074,6 +1076,17 @@ struct FontColorDialog::Impl {
         const float previewY = optionsRect.bottom + fluent::metrics::sectionGap;
         const float previewBottom = std::max(previewY, buttonY - fluent::metrics::sectionGap);
         previewRect = D2D1::RectF(pad, previewY, std::max(pad, w - pad), previewBottom);
+        fluent::offsetDialogRects(content.offsetX, {
+            &titleRect, &subtitleRect, &globalLabelRect, &tabsRect,
+            &optionsRect, &previewRect, &alphaSliderRect, &alphaValueRect,
+            &okRect, &cancelRect, &globalToggleRect, &tabDarkRect,
+            &tabLightRect});
+        for (auto& rect : labelRects)
+            fluent::offsetDialogRects(content.offsetX, {&rect});
+        for (auto& rect : swatchRects)
+            fluent::offsetDialogRects(content.offsetX, {&rect});
+        for (auto& rect : toggleRects)
+            fluent::offsetDialogRects(content.offsetX, {&rect});
         layoutAlphaEditor();
     }
 

@@ -87,6 +87,7 @@ struct Impl {
     D2D1_RECT_F messageRect{};
 
     fluent::FluentDialogSurface surface;
+    bool backdrop = false;
     fluent::FluentButton primaryButton;
     fluent::FluentButton secondaryButton;
 
@@ -252,8 +253,8 @@ struct Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_CREATE:
-            fluent::styleDialogWindow(hwnd);
-            surface.initialize(hwnd, false);
+            backdrop = fluent::styleDialogWindow(hwnd);
+            surface.initialize(hwnd, backdrop);
             createControls();
             layout();
             return 0;
@@ -268,7 +269,8 @@ struct Impl {
             return 0;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
-            fluent::restyleDialogWindow(hwnd, false);
+            backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
+            surface.setBackdrop(backdrop);
             refreshTheme();
             RedrawWindow(hwnd, nullptr, nullptr,
                          RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -276,7 +278,7 @@ struct Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            surface.paint(hdc, false,
+            surface.paint(hdc, backdrop,
                           [this](fluent::FluentDialogSurface::Painter& painter, float, float) {
                               auto* format = painter.textFormat(kMessageFontSizeDip, 400, false);
                               painter.drawText(message, format, messageRect,
@@ -286,7 +288,7 @@ struct Impl {
             return 0;
         }
         case WM_ERASEBKGND:
-            surface.eraseBackground(reinterpret_cast<HDC>(wp), false);
+            surface.eraseBackground(reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_COMMAND:
             if (HIWORD(wp) != BN_CLICKED)

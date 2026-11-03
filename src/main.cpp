@@ -4936,7 +4936,7 @@ void App::drawUpdatePromptButton(fluent::FluentDialogSurface::Painter& painter,
     const D2D1_COLOR_F textColor = accent ? p.textOnAccent : p.text;
     painter.fillRoundRect(fill, rect);
     if (!accent)
-        painter.strokeRoundRect(p.cardStroke, rect);
+        painter.strokeRoundRect(p.controlStroke, rect);
     if (updatePromptFocusedId_ == id && updatePromptFocusVisible_) {
         painter.strokeRoundRect(
             accent ? p.textOnAccent : p.accent,

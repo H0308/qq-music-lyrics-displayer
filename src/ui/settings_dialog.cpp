@@ -112,12 +112,13 @@ constexpr float kMinClientWidthDip = 780.0f;
 constexpr float kMinClientHeightDip = 718.0f;
 constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 constexpr float kNavW = 176.0f;
+constexpr float kContentMaxWidthDip = 1000.0f;
 constexpr float kNavIconSize = 16.0f;
 constexpr float kNavIconLeft = 18.0f;
 constexpr float kNavItemH = 40.0f;
 constexpr float kNavIconTextGap = 10.0f;
 constexpr float kRowH = 56.0f;
-constexpr float kRowTallH = 96.0f;
+constexpr float kRowTallH = 72.0f;
 constexpr float kHeaderH = 30.0f;
 constexpr float kTitleMinHeight = 22.0f;
 constexpr float kTitleTopPadding = 12.0f;
@@ -147,14 +148,13 @@ constexpr float kSongToastPositionCardGap = 8.0f;
 constexpr float kSongToastPositionRowH = 144.0f;
 constexpr float kHoverControlStyleCardH = 156.0f;
 constexpr float kHoverControlStyleRowH = 292.0f;
-constexpr float kSliderValueW = 44.0f;
+constexpr float kSliderValueW = 62.0f;
 constexpr float kSliderValueGap = 10.0f;
-constexpr float kSliderEditorW = kSliderValueW;
+constexpr float kSliderSuffixW = 16.0f;
 constexpr UINT_PTR kSliderEditSubclassId = 1;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
-constexpr float kScrollBarOutsideGap = 8.0f;
 constexpr float kScrollMinThumbHeight = 24.0f;
 constexpr float kScrollWheelDip = 72.0f;
 constexpr float kRowIconSize = 16.0f;
@@ -178,13 +178,6 @@ constexpr float kIdleQuoteBackgroundRowH = 324.0f;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
-
-float estimateRadioWidth(const std::vector<std::wstring>& options) {
-    float w = 0.0f;
-    for (const auto& option : options)
-        w += 16.0f + 8.0f + static_cast<float>(option.size()) * 14.0f + 20.0f;
-    return w > 0.0f ? w - 20.0f : 0.0f;
-}
 
 fluent::ThemeMode themeModeFromIndex(int index) {
     switch (index) {
@@ -442,6 +435,7 @@ struct SettingsDialog::Impl {
         std::vector<std::wstring> options;
         std::vector<bool> optionEnabled;
         bool showHint = false;
+        bool choiceInline = false;
         bool checked = false;
         bool enabled = true;
         int selected = -1;
@@ -452,6 +446,7 @@ struct SettingsDialog::Impl {
         float controlW = 0.0f;
         float minHeight = kRowH;
         float height = kRowH;
+        float gapAfter = 0.0f;
         float titleHeight = kTitleMinHeight;
         float valueHeight = 0.0f;
         D2D1_RECT_F cardRect{};
@@ -618,6 +613,12 @@ struct SettingsDialog::Impl {
                            row.controlRect.right, row.controlRect.bottom);
     }
 
+    static D2D1_RECT_F sliderNumberRect(const Row& row) {
+        const auto rect = sliderValueRect(row);
+        return D2D1::RectF(rect.left + 4.0f, rect.top + 1.0f,
+                           rect.right - 4.0f - kSliderSuffixW, rect.bottom - 1.0f);
+    }
+
     void hideSliderEditor() {
         sliderEditOpen = false;
         sliderEditRowId = 0;
@@ -669,11 +670,11 @@ struct SettingsDialog::Impl {
             return;
         }
 
-        const D2D1_RECT_F valueRect = sliderValueRect(*row);
+        const D2D1_RECT_F valueRect = sliderNumberRect(*row);
         const float s = surface.dipScale();
-        const int x = static_cast<int>(std::lround((valueRect.right - kSliderEditorW) * s));
+        const int x = static_cast<int>(std::lround(valueRect.left * s));
         const int y = static_cast<int>(std::lround(valueRect.top * s));
-        const int w = static_cast<int>(std::lround(kSliderEditorW * s));
+        const int w = static_cast<int>(std::lround((valueRect.right - valueRect.left) * s));
         const int h = static_cast<int>(std::lround((valueRect.bottom - valueRect.top) * s));
         sliderValueEdit.move(x, y, std::max(1, w), std::max(1, h));
     }
@@ -849,8 +850,7 @@ struct SettingsDialog::Impl {
 
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height) {
-        Row& row = addRow(page, id, ControlKind::Radio, text, hint,
-                          estimateRadioWidth(options), height);
+        Row& row = addRow(page, id, ControlKind::Radio, text, hint, 0.0f, height);
         row.options = std::move(options);
         row.optionEnabled.assign(row.options.size(), true);
         row.selected = selected;
@@ -1050,7 +1050,11 @@ struct SettingsDialog::Impl {
         const float usable = std::max(0.0f, trackHeight - thumbHeight);
         const float thumbTop =
             trackTop + contentScroll / std::max(1.0f, contentMaxScroll) * usable;
-        const float trackLeft = contentViewportRect.right + kScrollBarOutsideGap;
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        const float clientWidth = static_cast<float>(client.right - client.left) /
+                                  surface.dipScale();
+        const float trackLeft = clientWidth - kScrollBarInset - kScrollBarWidth;
         scrollTrackRect =
             D2D1::RectF(trackLeft, trackTop, trackLeft + kScrollBarWidth, trackBottom);
         scrollThumbRect = D2D1::RectF(scrollTrackRect.left, thumbTop, scrollTrackRect.right,
@@ -1091,18 +1095,18 @@ struct SettingsDialog::Impl {
         const bool vertical = state.verticalTaskbar;
         addHeader(0, L"主题");
         addRadio(0, kIdTaskbarTheme, L"任务栏内容主题",
-             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+             L"“系统”和“应用”分别跟随 Windows 的系统模式与应用模式。",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
                  true, kRowTallH);
         addRadio(0, kIdWindowTheme, L"对话框与悬浮窗主题",
-             L"系统表示跟随Windows系统/全局深浅色，应用表示跟随自定义应用深浅色模式",
+             L"独立设置普通对话框与悬浮窗的深浅色，不影响任务栏内容。",
                  {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
                  true, kRowTallH);
         addHeader(0, L"字体");
         Row& font = addButton(0, kIdPickFont, L"通用字体", kFontSettingNotice,
                               L"选择字体…", kRowTallH);
         font.valueText = state.fontDesc;
-        addHeader(0, L"任务栏歌词");
+        addHeader(0, L"歌曲信息与封面");
         Row& songInfo = addToggle(0, kIdSongInfo, L"显示歌曲信息",
                                   vertical ? false : state.songInfoVisible);
         songInfo.enabled = !vertical;
@@ -1113,6 +1117,7 @@ struct SettingsDialog::Impl {
         addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
                  minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
                  state.albumCoverVisible && !minimal, kCoverEffectRowH);
+        addHeader(0, L"菜单交互");
         Row& taskbarContextMenu = addRow(
             0, kIdTaskbarContextMenu, ControlKind::Toggle, L"右键显示任务栏歌词菜单",
             L"关闭后，右键任务栏歌词不再弹出菜单；托盘图标的右键菜单不受影响。",
@@ -1131,6 +1136,7 @@ struct SettingsDialog::Impl {
         addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
                  L"当前仅支持水平顶部和底部。", {L"顶部", L"底部"},
                  std::clamp(state.appBarEdge, 0, 1), state.taskbarViewMode == 2, kRowH);
+        addHeader(kTaskbarModePage, L"沉浸模式背景");
         addRadio(kTaskbarModePage, kIdImmersiveBackgroundAdjustment, L"调整方式", nullptr,
                  {L"模糊程度", L"不透明度"},
                  std::clamp(state.immersiveBackgroundAdjustment, 0, 1),
@@ -1170,6 +1176,7 @@ struct SettingsDialog::Impl {
             row->enabled = state.taskbarViewMode == 2;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
             row->enabled = state.taskbarViewMode == 2;
+        addHeader(kIdlePage, L"空闲内容");
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
             L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
@@ -1195,6 +1202,7 @@ struct SettingsDialog::Impl {
                  L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
                  {L"左对齐", L"居中", L"右对齐"}, vertical ? 0 : state.idleQuoteAlignment,
                  state.idleQuoteEnabled && !vertical, kRowH);
+        addHeader(kIdlePage, L"快捷启动");
         Row& idleApps = addRow(
             kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
             L"可拖动应用条目调整快速启动顺序；通过文件选择器添加本地 EXE，最多添加 10 个应用；开关统一控制名称显示。",
@@ -1224,6 +1232,7 @@ struct SettingsDialog::Impl {
                   L"删除本机保存的滴答清单 API 口令。",
                   L"断开", kRowH);
         updateTickTickRows();
+        addHeader(0, L"背景效果");
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
             L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
@@ -1252,10 +1261,11 @@ struct SettingsDialog::Impl {
                     state.idleQuoteBackgroundScope,
                     !minimal && state.idleQuoteBackground != 0,
                     kModeGridMinH);
+        addHeader(kMediaPopupPage, L"播放控件");
         addToggle(kMediaPopupPage, kIdHoverControls, L"悬浮时显示播放控件",
                   state.hoverControls);
         addRadio(kMediaPopupPage, kIdHoverControlStyle, L"悬浮控件样式",
-                 L"内嵌控件：在歌词和频谱上悬浮显示上一首、播放和下一首，没有多余信息；媒体卡片额外支持显示歌词进度信息，并且支持点击软件图标或者软件名称快速打开音乐软件",
+                 L"内嵌控件仅显示播放操作；媒体卡片另有歌词进度，点击应用图标或名称可打开播放器。",
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
                  kHoverControlStyleRowH);
@@ -1288,6 +1298,7 @@ struct SettingsDialog::Impl {
             40.0f, kRowTallH);
         floatingCardAutoTextContrast.checked = state.floatingCardAutoTextContrast;
         updateFloatingCardRowsEnabled();
+        addHeader(kSongToastPage, L"显示与时长");
         Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
                                 L"切歌时弹出歌曲信息",
                                 L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
@@ -1305,10 +1316,12 @@ struct SettingsDialog::Impl {
             addToggle(kSongToastPage, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
                       state.songToastSkipFullscreen);
         songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
+        addHeader(kSongToastPage, L"弹出位置");
         addRadio(kSongToastPage, kIdSongToastPosition, L"切歌弹窗位置", nullptr,
                  {L"中上", L"中下"},
                  state.songToastPosition, !minimal && state.songToastEnabled,
                  kSongToastPositionRowH);
+        addHeader(kPerformancePage, L"渲染与资源占用");
         addModeGrid(kPerformancePage, kIdRenderMode, L"性能模式",
                     L"模式仅本次运行有效，重启软件后恢复正常模式",
                     {L"正常", L"低渲染", L"完全停止", L"极简"},
@@ -1317,6 +1330,7 @@ struct SettingsDialog::Impl {
                     std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
 
         const bool spectrumEnabled = !minimal && !vertical;
+        addHeader(kSpectrumPage, L"启用与配色");
         Row& spectrum = addToggle(kSpectrumPage, kIdSpectrum, L"频谱",
                                   spectrumEnabled ? state.spectrumOn : false);
         spectrum.enabled = spectrumEnabled;
@@ -1330,6 +1344,7 @@ struct SettingsDialog::Impl {
             L"只在上面选择“自定义颜色”时生效。",
             colorText(state.spectrumColor).c_str(), kRowTallH);
         spectrumColor.enabled = state.spectrumOn && state.spectrumCustomColor && spectrumEnabled;
+        addHeader(kSpectrumPage, L"样式与效果");
         addRadio(kSpectrumPage, kIdSpectrumStyle, L"频谱样式", nullptr,
                  {L"默认", L"柱状图", L"梦幻波浪"}, vertical ? 0 : state.spectrumStyle,
                  state.spectrumOn && spectrumEnabled,
@@ -1349,14 +1364,17 @@ struct SettingsDialog::Impl {
         // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
         updateProgressBackgroundRowsEnabled();
 
+        addHeader(kLyricsPage, L"排版");
         addToggle(kLyricsPage, kIdDoubleLine, L"双行歌词",
                   vertical ? false : state.doubleLineLyrics).enabled = !vertical;
         addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
                  {L"左对齐", L"居中", L"右对齐"},
                  vertical ? 0 : state.lyricAlignment,
                  !vertical && state.taskbarViewMode == 0, kRowH);
+        addHeader(kLyricsPage, L"颜色与效果");
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
         addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
+        addHeader(kLyricsPage, L"翻译与罗马音");
         addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
                   vertical ? false : state.secondaryEnabled).enabled = !vertical;
         const wchar_t* secondaryHint = state.secondaryAvailability == 1
@@ -1368,11 +1386,12 @@ struct SettingsDialog::Impl {
                  {L"翻译", L"罗马音"}, vertical ? 0 : (state.preferRomanization ? 1 : 0),
                  !vertical && state.secondaryEnabled && state.secondaryAvailability == 0,
                  *secondaryHint ? kRowTallH : kRowH);
+        addHeader(kLyricsPage, L"本地歌词");
         addToggle(kLyricsPage, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
                   state.qqLocalLyricsEnabled);
         Row& persistOrder = addRow(kLyricsPage, kIdQqLocalLyricsPersistOrder,
                                    ControlKind::Toggle,
-                                   L"切换版本持久化",
+                                   L"记住歌词版本选择",
                                    L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
                                    40.0f, kRowTallH);
         persistOrder.checked = state.qqLocalLyricsPersistOrder;
@@ -1380,7 +1399,7 @@ struct SettingsDialog::Impl {
         const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
                                                 ? std::wstring(L"未配置")
                                                 : state.qqLocalLyricsPath;
-        Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ音乐本地歌词目录",
+        Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ 音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
         updateImmersiveRowsEnabled();
@@ -1389,7 +1408,7 @@ struct SettingsDialog::Impl {
     void createSliderEditor() {
         if (!sliderValueEdit.create(hwnd, kIdSliderValueEdit, nullptr, false, 12.0f))
             return;
-        sliderValueEdit.setContentPadding(4.0f, 0.0f);
+        sliderValueEdit.setEmbeddedNumberStyle();
         if (HWND edit = sliderValueEdit.editHwnd()) {
             LONG_PTR style = GetWindowLongPtrW(edit, GWL_STYLE);
             SetWindowLongPtrW(edit, GWL_STYLE, style | ES_NUMBER);
@@ -1424,12 +1443,48 @@ struct SettingsDialog::Impl {
                                  kHintTextSize);
     }
 
+    static bool isSegmentedChoice(const Row& row) {
+        return row.kind == ControlKind::Radio && row.id != kIdCoverEffect &&
+               row.id != kIdSpectrumStyle && row.id != kIdHoverControlStyle &&
+               row.id != kIdSongToastPosition && row.id != kIdIdleQuoteBackground;
+    }
+
     void updateHintHeights(fluent::FluentDialogSurface::Painter& painter) {
         bool changed = false;
         for (auto& row : rows[activePage]) {
             if (row.kind == ControlKind::Header)
                 continue;
-            const float labelW = row.labelRect.right - row.labelRect.left;
+            float labelW = row.labelRect.right - row.labelRect.left;
+            if (isSegmentedChoice(row)) {
+                const float availableWidth = std::max(
+                    0.0f, contentViewportRect.right - contentViewportRect.left -
+                              32.0f - kRowIconSlotW);
+                float optionWidth = 0.0f;
+                auto* optionFormat = painter.textFormat(13.0f, 400, false, true);
+                for (const auto& option : row.options)
+                    optionWidth = std::max(optionWidth,
+                        painter.measureTextWidth(option, optionFormat));
+                const float controlWidth =
+                    std::max(64.0f, std::ceil(optionWidth) + 24.0f) *
+                    static_cast<float>(row.options.size());
+                const float textWidth = std::max(
+                    painter.measureTextWidth(row.text,
+                        painter.textFormat(14.0f, 400, false, true)),
+                    row.showHint ? painter.measureTextWidth(row.hint,
+                        painter.textFormat(kHintTextSize, 400, false, true)) : 0.0f);
+                const bool inlineChoice =
+                    std::ceil(textWidth) + fluent::metrics::pagePadding + controlWidth <=
+                    availableWidth;
+                if (row.choiceInline != inlineChoice ||
+                    std::fabs(row.controlW - controlWidth) > 0.5f) {
+                    row.choiceInline = inlineChoice;
+                    row.controlW = controlWidth;
+                    changed = true;
+                }
+                labelW = inlineChoice
+                             ? availableWidth - controlWidth - fluent::metrics::pagePadding
+                             : availableWidth;
+            }
             const float measuredTitleHeight =
                 measureTextHeight(painter, row.text, labelW, 14.0f);
             const float titleHeight =
@@ -1443,7 +1498,16 @@ struct SettingsDialog::Impl {
                     ? std::max(kTitleMinHeight, measuredValueHeight)
                     : 0.0f;
             float requiredHeight = row.minHeight;
-            if (row.id == kIdPickFont) {
+            if (isSegmentedChoice(row)) {
+                const float hintHeight = row.showHint
+                    ? measureTextHeight(painter, row.hint, labelW, kHintTextSize) : 0.0f;
+                const float controlBlockHeight = row.choiceInline
+                    ? 0.0f : kModeGridTopGap + fluent::metrics::controlHeight;
+                requiredHeight = std::max(
+                    requiredHeight, kTitleTopPadding + titleHeight +
+                                        (hintHeight > 0.0f ? kTitleHintGap + hintHeight : 0.0f) +
+                                        controlBlockHeight + kHintBottomPadding);
+            } else if (row.id == kIdPickFont) {
                 const float hintHeight =
                     measureTextHeight(painter, row.hint, labelW, kHintTextSize);
                 if (hintHeight > 0.0f) {
@@ -1516,8 +1580,11 @@ struct SettingsDialog::Impl {
             pageTitleRects[i] = D2D1::RectF(0, 0, 0, 0);
         }
 
-        const float contentX = 12.0f + kNavW + 16.0f;
-        const float contentW = std::max(20.0f, w - contentX - 24.0f);
+        const float contentLeft = 12.0f + kNavW + 16.0f;
+        const float availableContentW = std::max(20.0f, w - contentLeft - 24.0f);
+        const float contentW = std::min(availableContentW, kContentMaxWidthDip);
+        // 内容达到最大宽度后，在导航栏右侧的可用区域内居中。
+        const float contentX = contentLeft + (availableContentW - contentW) * 0.5f;
         pageTitleIconRects[activePage] =
             D2D1::RectF(contentX, 18.0f, contentX + kPageTitleIconSize,
                         18.0f + kPageTitleIconSize);
@@ -1530,10 +1597,17 @@ struct SettingsDialog::Impl {
             D2D1::RectF(contentX, contentTop, contentX + contentW, contentBottom);
 
         float contentEnd = contentTop;
-        for (const auto& row : rows[activePage])
-            contentEnd += row.height + kRowGap;
+        auto& pageRows = rows[activePage];
+        for (size_t i = 0; i < pageRows.size(); ++i) {
+            auto& row = pageRows[i];
+            // 同组设置连续排列，仅在标题和分组之间留白。
+            row.gapAfter = row.kind == ControlKind::Header ? kRowGap : 0.0f;
+            if (i + 1 < pageRows.size() && pageRows[i + 1].kind == ControlKind::Header)
+                row.gapAfter = fluent::metrics::sectionGap;
+            contentEnd += row.height + row.gapAfter;
+        }
         if (!rows[activePage].empty())
-            contentEnd -= kRowGap;
+            contentEnd -= rows[activePage].back().gapAfter;
         contentHeight = std::max(0.0f, contentEnd - contentTop);
         const float viewportHeight =
             std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
@@ -1565,7 +1639,7 @@ struct SettingsDialog::Impl {
                 // 分组标题无卡片，文字贴内容区左缘、垂直居中
                 row.labelRect = D2D1::RectF(contentX + 4.0f, y, contentX + contentW,
                                             y + rowH);
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             row.cardRect = D2D1::RectF(contentX, y, contentX + contentW, y + rowH);
@@ -1616,7 +1690,7 @@ struct SettingsDialog::Impl {
                     y + rowH - 44.0f,
                     innerX + (innerRight - innerX + 132.0f) * 0.5f,
                     y + rowH - 12.0f);
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdCoverEffect) {
@@ -1633,7 +1707,7 @@ struct SettingsDialog::Impl {
                     row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdIdleQuoteBackground) {
@@ -1651,7 +1725,7 @@ struct SettingsDialog::Impl {
                     row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdHoverControlStyle) {
@@ -1668,7 +1742,7 @@ struct SettingsDialog::Impl {
                     row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdSongToastPosition) {
@@ -1680,7 +1754,7 @@ struct SettingsDialog::Impl {
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
                 row.controlRect = D2D1::RectF(
                     innerX, gridTop, innerRight, gridTop + kSongToastPositionCardH);
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdSpectrumStyle) {
@@ -1692,7 +1766,7 @@ struct SettingsDialog::Impl {
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
                 row.controlRect = D2D1::RectF(
                     innerX, gridTop, innerRight, gridTop + kSpectrumStyleCardH);
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.id == kIdSpectrumBackground) {
@@ -1716,7 +1790,7 @@ struct SettingsDialog::Impl {
                 const float controlY = y + (rowH - controlH) * 0.5f;
                 row.controlRect = D2D1::RectF(controlX, controlY,
                                               controlX + row.controlW, controlY + controlH);
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
                 continue;
             }
             if (row.kind == ControlKind::ModeGrid) {
@@ -1735,7 +1809,29 @@ struct SettingsDialog::Impl {
                     row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                               y + rowH - kHintBottomPadding);
                 }
-                y += rowH + kRowGap;
+                y += rowH + row.gapAfter;
+                continue;
+            }
+
+            if (isSegmentedChoice(row)) {
+                const float labelRight = row.choiceInline
+                    ? innerRight - row.controlW - fluent::metrics::pagePadding : innerRight;
+                const float titleTop = row.choiceInline && !row.showHint
+                    ? y + (rowH - row.titleHeight) * 0.5f : y + kTitleTopPadding;
+                placeIcon(titleTop);
+                row.labelRect = D2D1::RectF(labelX, titleTop, labelRight,
+                                            titleTop + row.titleHeight);
+                const float hintTop = row.labelRect.bottom + kTitleHintGap;
+                const float controlTop = row.choiceInline
+                    ? y + (rowH - fluent::metrics::controlHeight) * 0.5f
+                    : y + rowH - kHintBottomPadding - fluent::metrics::controlHeight;
+                row.hintRect = D2D1::RectF(labelX, hintTop, labelRight,
+                    row.choiceInline ? y + rowH - kHintBottomPadding
+                                     : controlTop - kModeGridTopGap);
+                row.controlRect = D2D1::RectF(
+                    row.choiceInline ? innerRight - row.controlW : labelX, controlTop, innerRight,
+                    controlTop + fluent::metrics::controlHeight);
+                y += rowH + row.gapAfter;
                 continue;
             }
 
@@ -1775,7 +1871,7 @@ struct SettingsDialog::Impl {
             row.controlRect = D2D1::RectF(controlX, controlY,
                                           controlX + row.controlW,
                                           controlY + controlH);
-            y += rowH + kRowGap;
+            y += rowH + row.gapAfter;
         }
         layoutSliderEditor();
     }
@@ -1799,8 +1895,7 @@ struct SettingsDialog::Impl {
 
     void drawNav(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
-        painter.fillRoundRect(p.cardFill, navRect, fluent::metrics::cardRadius);
-        painter.strokeRoundRect(p.cardStroke, navRect, 1.0f, fluent::metrics::cardRadius);
+        // 导航融入窗口底色，右侧设置卡片承担主要的表面层级。
         if (focusedId == kIdNav && focusVisible) {
             painter.strokeRoundRect(
                 p.accent,
@@ -1808,7 +1903,7 @@ struct SettingsDialog::Impl {
                             navRect.bottom - 1.5f),
                 1.5f, fluent::metrics::cardRadius - 1.0f);
         }
-        auto* format = painter.textFormat(13.0f, 400, false, true);
+        auto* format = painter.textFormat(14.0f, 400, false, true);
         for (int i = 0; i < kSettingsPageCount; ++i) {
             const bool selected = i == activePage;
             const bool hovered = hoverId == kIdNav && hoverOption == i;
@@ -1860,7 +1955,7 @@ struct SettingsDialog::Impl {
         if (!row.enabled)
             fill = p.listHover;
         painter.fillRoundRect(fill, row.controlRect);
-        painter.strokeRoundRect(p.cardStroke, row.controlRect);
+        painter.strokeRoundRect(p.controlStroke, row.controlRect);
         if (focusedId == row.id && focusVisible && row.enabled) {
             painter.strokeRoundRect(
                 p.accent,
@@ -1913,12 +2008,12 @@ struct SettingsDialog::Impl {
                                         : track.left + trackH * 0.5f;
         if (!enabled) {
             painter.fillRoundRect(p.listHover, track, radius);
-            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            painter.strokeRoundRect(p.controlStroke, track, 1.0f, radius);
         } else if (row.checked) {
             painter.fillRoundRect(hovered ? p.accentHover : p.accent, track, radius);
         } else {
             painter.fillRoundRect(hovered ? p.controlHover : p.controlFill, track, radius);
-            painter.strokeRoundRect(p.cardStroke, track, 1.0f, radius);
+            painter.strokeRoundRect(p.textSecondary, track, 1.0f, radius);
         }
         if (auto* br = painter.brush(!enabled ? p.disabled
                                                : row.checked ? p.textOnAccent : p.textSecondary)) {
@@ -1962,13 +2057,20 @@ struct SettingsDialog::Impl {
             painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), 7.0f, 7.0f),
                                                        br);
         }
-        if (!(sliderEditOpen && sliderEditRowId == row.id)) {
-            painter.drawText(std::to_wstring(row.value) + row.valueSuffix,
-                             painter.textFormat(12.0f, 400, false, true),
-                             D2D1::RectF(trackRight + kSliderValueGap, row.controlRect.top,
-                                         row.controlRect.right, row.controlRect.bottom),
-                             row.enabled ? p.textSecondary : p.disabled);
+        const bool editing = sliderEditOpen && sliderEditRowId == row.id;
+        const auto valueRect = sliderValueRect(row);
+        const auto numberRect = sliderNumberRect(row);
+        painter.fillRoundRect(row.enabled ? p.controlFill : p.listHover, valueRect);
+        painter.strokeRoundRect(editing ? p.accent : p.controlStroke, valueRect);
+        if (!editing) {
+            painter.drawText(std::to_wstring(row.value),
+                             painter.textFormat(12.0f, 600, true, true), numberRect,
+                             row.enabled ? p.text : p.disabled);
         }
+        painter.drawText(row.valueSuffix, painter.textFormat(12.0f, 600, true, true),
+                         D2D1::RectF(numberRect.right, numberRect.top,
+                                     valueRect.right - 4.0f, numberRect.bottom),
+                         row.enabled ? p.text : p.disabled);
         if (focusedId == row.id && focusVisible && row.enabled)
             painter.strokeRoundRect(p.accent,
                                     D2D1::RectF(track.left - 3.0f, track.top - 5.0f,
@@ -3025,14 +3127,13 @@ struct SettingsDialog::Impl {
         }
 
         const auto& p = fluent::palette();
-        auto* format = painter.textFormat(13.0f, 400, false, true);
+        auto* format = painter.textFormat(13.0f, 400, true, true);
         if (!format)
             return;
-        const float cy = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
-        constexpr float kCircle = 16.0f;
-        constexpr float kTextGap = 8.0f;
-        constexpr float kOptionGap = 20.0f;
-        float x = row.controlRect.left;
+        const float width = row.controlRect.right - row.controlRect.left;
+        const float optionWidth =
+            width / static_cast<float>(std::max<size_t>(1, row.options.size()));
+        painter.fillRoundRect(p.listHover, row.controlRect);
         row.optionRects.clear();
         for (size_t i = 0; i < row.options.size(); ++i) {
             const bool optionEnabled = row.enabled && isOptionEnabled(row, i);
@@ -3041,36 +3142,31 @@ struct SettingsDialog::Impl {
                                  hoverOption == static_cast<int>(i);
             const bool pressed = optionEnabled && pressedId == row.id &&
                                   pressedOption == static_cast<int>(i);
-            const float textW = painter.measureTextWidth(row.options[i], format);
-            D2D1_ELLIPSE circle{D2D1::Point2F(x + kCircle * 0.5f, cy), kCircle * 0.5f,
-                                kCircle * 0.5f};
-            if (!optionEnabled) {
-                if (auto* br = painter.brush(p.disabled)) {
-                    painter.target()->DrawEllipse(circle, br, 1.0f);
-                    if (selected)
-                        painter.target()->FillEllipse(
-                            D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
-                }
-            } else if (selected) {
-                if (auto* br = painter.brush(hovered || pressed ? p.accentHover : p.accent))
-                    painter.target()->FillEllipse(circle, br);
-                if (auto* br = painter.brush(p.textOnAccent))
-                    painter.target()->FillEllipse(D2D1::Ellipse(circle.point, 4.0f, 4.0f), br);
-            } else {
-                if (hovered)
-                    painter.target()->FillEllipse(circle, painter.brush(p.listHover));
-                if (auto* br = painter.brush(p.textSecondary))
-                    painter.target()->DrawEllipse(circle, br, pressed ? 1.5f : 1.0f);
+            const float left = row.controlRect.left + static_cast<float>(i) * optionWidth;
+            const D2D1_RECT_F optionRect = D2D1::RectF(
+                left, row.controlRect.top, left + optionWidth, row.controlRect.bottom);
+            const D2D1_RECT_F face = D2D1::RectF(
+                optionRect.left + 2.0f, optionRect.top + 2.0f,
+                optionRect.right - 2.0f, optionRect.bottom - 2.0f);
+            if (selected) {
+                painter.fillRoundRect(
+                    optionEnabled ? (pressed ? p.accentPressed : hovered ? p.accentHover : p.accent)
+                                  : p.listSelected,
+                    face);
+            } else if (hovered || pressed) {
+                painter.fillRoundRect(pressed ? p.controlPressed : p.controlHover, face);
             }
+            if (selected && optionEnabled && focusedId == row.id && focusVisible)
+                painter.strokeRoundRect(
+                    p.textOnAccent,
+                    D2D1::RectF(face.left + 1.5f, face.top + 1.5f,
+                                face.right - 1.5f, face.bottom - 1.5f),
+                    1.0f, fluent::metrics::controlRadius - 1.0f);
             painter.drawText(row.options[i], format,
-                             D2D1::RectF(x + kCircle + kTextGap, row.controlRect.top,
-                                         x + kCircle + kTextGap + textW + 1.0f,
-                                         row.controlRect.bottom),
-                              optionEnabled ? p.text : p.disabled);
-            row.optionRects.push_back(D2D1::RectF(
-                x, row.controlRect.top, x + kCircle + kTextGap + textW,
-                row.controlRect.bottom));
-            x += kCircle + kTextGap + textW + kOptionGap;
+                             D2D1::RectF(face.left + 4.0f, face.top,
+                                         face.right - 4.0f, face.bottom),
+                             optionEnabled ? (selected ? p.textOnAccent : p.text) : p.disabled);
+            row.optionRects.push_back(optionRect);
         }
     }
 
@@ -3277,6 +3373,37 @@ struct SettingsDialog::Impl {
                               kScrollBarWidth * 0.5f);
     }
 
+    void drawSettingGroups(fluent::FluentDialogSurface::Painter& painter) {
+        const auto& p = fluent::palette();
+        const auto& pageRows = rows[activePage];
+        for (size_t first = 0; first < pageRows.size();) {
+            if (pageRows[first].kind == ControlKind::Header) {
+                ++first;
+                continue;
+            }
+            size_t end = first + 1;
+            while (end < pageRows.size() && pageRows[end].kind != ControlKind::Header)
+                ++end;
+            const auto& top = pageRows[first].cardRect;
+            const auto& bottom = pageRows[end - 1].cardRect;
+            const auto group = D2D1::RectF(top.left, top.top, top.right, bottom.bottom);
+            if (group.bottom > contentViewportRect.top && group.top < contentViewportRect.bottom) {
+                painter.fillRoundRect(p.cardFill, group, fluent::metrics::cardRadius);
+                painter.strokeRoundRect(p.cardStroke, group, 1.0f, fluent::metrics::cardRadius);
+                if (auto* brush = painter.brush(p.separator)) {
+                    for (size_t i = first + 1; i < end; ++i) {
+                        const float y = pageRows[i].cardRect.top;
+                        if (y > contentViewportRect.top && y < contentViewportRect.bottom)
+                            painter.target()->DrawLine(
+                                D2D1::Point2F(group.left + 16.0f, y),
+                                D2D1::Point2F(group.right - 16.0f, y), brush, 1.0f);
+                    }
+                }
+            }
+            first = end;
+        }
+    }
+
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
         updateHintHeights(painter);
         const auto& p = fluent::palette();
@@ -3292,14 +3419,16 @@ struct SettingsDialog::Impl {
 
         painter.target()->PushAxisAlignedClip(
             contentViewportRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        drawSettingGroups(painter);
         for (auto& row : rows[activePage]) {
             if (row.kind == ControlKind::Header) {
-                painter.drawText(row.text, painter.textFormat(12.0f, 600), row.labelRect,
-                                 p.textSecondary);
+                painter.drawText(row.text, painter.textFormat(13.0f, 600), row.labelRect,
+                                 p.text);
                 continue;
             }
-            painter.fillRoundRect(p.cardFill, row.cardRect, fluent::metrics::cardRadius);
-            painter.strokeRoundRect(p.cardStroke, row.cardRect, 1.0f, fluent::metrics::cardRadius);
+            if (row.cardRect.bottom <= contentViewportRect.top ||
+                row.cardRect.top >= contentViewportRect.bottom)
+                continue;
             const auto icon = iconForRow(row.id);
             if (icon != settings_icon::Kind::None) {
                 if (auto* iconBrush = painter.brush(row.enabled ? p.textSecondary : p.disabled))
@@ -3346,6 +3475,8 @@ struct SettingsDialog::Impl {
         }
         if (contains(scrollBarHitRect(), x, y))
             return kIdContentScrollBar;
+        if (!contains(contentViewportRect, x, y))
+            return 0;
         for (const auto& row : rows[activePage]) {
             if (!row.enabled)
                 continue;
@@ -3425,6 +3556,14 @@ struct SettingsDialog::Impl {
         index = (index + direction + static_cast<int>(order.size())) % order.size();
         focusedId = order[index];
         focusVisible = true;
+        // 焦点跟随分组后的真实行位置，避免 Tab 导航停在可视区域之外。
+        if (const Row* row = findRow(focusedId == kIdIdleAppNames ? kIdIdleApps : focusedId)) {
+            const float viewHeight = contentViewportRect.bottom - contentViewportRect.top;
+            if (row->cardRect.top < contentViewportRect.top || row->height > viewHeight)
+                setContentScroll(contentScroll + row->cardRect.top - contentViewportRect.top);
+            else if (row->cardRect.bottom > contentViewportRect.bottom)
+                setContentScroll(contentScroll + row->cardRect.bottom - contentViewportRect.bottom);
+        }
         surface.invalidate();
     }
 

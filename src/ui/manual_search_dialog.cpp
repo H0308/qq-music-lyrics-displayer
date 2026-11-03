@@ -414,7 +414,9 @@ struct ManualSearchDialog::Impl {
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const float scale = surface.dipScale();
-        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / scale);
+        const float clientWidth = std::max(0.0f, static_cast<float>(rc.right - rc.left) / scale);
+        const auto content = fluent::centeredDialogLayout(clientWidth);
+        const float w = content.width;
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / scale);
         const float pad = fluent::metrics::pagePadding;
         const float gap = fluent::metrics::controlGap;
@@ -490,6 +492,11 @@ struct ManualSearchDialog::Impl {
         cancelRect = D2D1::RectF(w - pad - cancelW, buttonY, w - pad, buttonY + buttonH);
         applyRect = D2D1::RectF(w - pad - cancelW - gap - applyW, buttonY,
                                 w - pad - cancelW - gap, buttonY + buttonH);
+        fluent::offsetDialogRects(content.offsetX, {
+            &titleRect, &subtitleRect, &titleEditRect, &artistEditRect,
+            &searchRect, &statusRect, &hintRect, &compatibilityRect,
+            &candidateListRect, &previewRect, &previewRomanizationRect, &previewTranslationRect,
+            &advanceRect, &delayRect, &applyRect, &cancelRect});
         candidateScroll = std::clamp(candidateScroll, 0.0f, candidateMaxScroll());
         syncPreviewToCurrentLine();
     }
@@ -877,7 +884,7 @@ struct ManualSearchDialog::Impl {
         const bool hovered = hoverId == id;
         const bool pressed = pressedId == id;
         const bool showFill = hovered || pressed;
-        const D2D1_COLOR_F border = checked || hovered || pressed ? p.accent : p.cardStroke;
+        const D2D1_COLOR_F border = checked || hovered || pressed ? p.accent : p.controlStroke;
         const D2D1_COLOR_F textColor = checked ? p.accent : (hovered ? p.text : p.textSecondary);
         if (showFill) {
             painter.fillRoundRect(pressed ? p.controlPressed : p.controlHover, rect,
@@ -898,13 +905,14 @@ struct ManualSearchDialog::Impl {
                        const D2D1_RECT_F& rect, const TextField& field, int id) {
         const auto& p = fluent::palette();
         painter.fillRoundRect(p.cardFill, rect);
-        painter.strokeRoundRect(p.cardStroke, rect);
-        if (focusedId == id && focusVisible) {
-            painter.strokeRoundRect(
-                p.accent,
-                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
-                            rect.bottom - 1.5f),
-                1.5f, fluent::metrics::controlRadius - 1.0f);
+        painter.strokeRoundRect(p.controlStroke, rect);
+        const bool focused = focusedId == id;
+        const float underlineHeight = focused ? 2.0f : 1.0f;
+        if (auto* br = painter.brush(focused ? p.accent : p.textSecondary)) {
+            painter.target()->FillRectangle(
+                D2D1::RectF(rect.left + 1.0f, rect.bottom - underlineHeight,
+                            rect.right - 1.0f, rect.bottom),
+                br);
         }
 
         auto* format = painter.textFormat(14.0f, 400, false, true);
@@ -975,7 +983,7 @@ struct ManualSearchDialog::Impl {
         }
         painter.fillRoundRect(fill, rect);
         if (!accent || !enabled)
-            painter.strokeRoundRect(p.cardStroke, rect);
+            painter.strokeRoundRect(p.controlStroke, rect);
         if (focusedId == id && focusVisible && enabled) {
             painter.strokeRoundRect(
                 accent ? p.textOnAccent : p.accent,

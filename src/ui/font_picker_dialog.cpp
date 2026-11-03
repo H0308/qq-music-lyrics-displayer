@@ -599,10 +599,10 @@ struct FontPickerDialog::Impl {
         const auto& p = fluent::palette();
         const bool focused = focusedId == id;
         painter.fillRoundRect(p.cardFill, rect, fluent::metrics::controlRadius);
-        painter.strokeRoundRect(p.cardStroke, rect, 1.0f, fluent::metrics::controlRadius);
+        painter.strokeRoundRect(p.controlStroke, rect, 1.0f, fluent::metrics::controlRadius);
 
         const float underlineHeight = focused ? 2.0f : 1.0f;
-        if (auto* br = painter.brush(focused ? p.accent : p.separator)) {
+        if (auto* br = painter.brush(focused ? p.accent : p.textSecondary)) {
             painter.target()->FillRectangle(
                 D2D1::RectF(rect.left + 1.0f, rect.bottom - underlineHeight, rect.right - 1.0f,
                             rect.bottom),
@@ -813,7 +813,7 @@ struct FontPickerDialog::Impl {
         const D2D1_COLOR_F textColor = accent ? p.textOnAccent : p.text;
         painter.fillRoundRect(fill, rect);
         if (!accent)
-            painter.strokeRoundRect(p.cardStroke, rect);
+            painter.strokeRoundRect(p.controlStroke, rect);
         if (focusedId == id && focusVisible) {
             painter.strokeRoundRect(
                 accent ? p.textOnAccent : p.accent,
@@ -1249,7 +1249,9 @@ struct FontPickerDialog::Impl {
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const float s = surface.dipScale();
-        const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const float clientWidth = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
+        const auto content = fluent::centeredDialogLayout(clientWidth);
+        const float w = content.width;
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
         const float pad = fluent::metrics::pagePadding;
         const float gap = fluent::metrics::controlGap;
@@ -1298,6 +1300,10 @@ struct FontPickerDialog::Impl {
         cancelRect = D2D1::RectF(w - pad - cancelW, buttonY, w - pad, buttonY + buttonH);
         okRect = D2D1::RectF(w - pad - cancelW - gap - okW, buttonY,
                              w - pad - cancelW - gap, buttonY + buttonH);
+        fluent::offsetDialogRects(content.offsetX, {
+            &titleRect, &subtitleRect, &filterRect, &styleLabelRect,
+            &styleRect, &familyListRect, &sizeEditRect, &sizeListRect,
+            &previewRect, &okRect, &cancelRect});
         styleOptionRects.clear();
         clampScroll(true);
         clampScroll(false);
