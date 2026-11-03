@@ -1058,6 +1058,7 @@ struct TaskbarHost::Impl {
     bool mouseOver_ = false;
     bool trackingLeave_ = false;
     int immersiveControlHover_ = -1;
+    int inlineControlHover_ = -1;
     int immersiveControlPressed_ = -1;
     bool dragPress_ = false;
     bool lyricDragging_ = false;
@@ -6407,9 +6408,20 @@ struct TaskbarHost::Impl {
 
         if (brushHover_) {
             for (int i = 0; i < kExpandedControlCount; ++i) {
-                if (expandedControlVisible(i) && immersiveControlHover_ == i)
-                    rt->FillEllipse(D2D1::Ellipse(centers[i], r + 4.0f, r + 4.0f),
-                                    brushHover_);
+                if (expandedControlVisible(i) && immersiveControlHover_ == i) {
+                    const auto color = brushHover_->GetColor();
+                    auto fill = color;
+                    if (immersiveControlPressed_ == i)
+                        fill.a = std::min(1.0f, color.a * 1.8f);
+                    brushHover_->SetColor(fill);
+                    const float half = r + 4.0f;
+                    const float corner = std::min(6.0f, half * 0.4f);
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(
+                        D2D1::RectF(centers[i].x - half, centers[i].y - half,
+                                    centers[i].x + half, centers[i].y + half),
+                        corner, corner), brushHover_);
+                    brushHover_->SetColor(color);
+                }
             }
         }
         drawButton(kImmersiveControlPrevious, centers[kImmersiveControlPrevious], r);
@@ -6458,10 +6470,31 @@ struct TaskbarHost::Impl {
         }
     }
 
+    void drawInlineControlBackground(int index, const D2D1_POINT_2F& center,
+                                     float radius, bool enabled) {
+        auto* rt = drawTarget();
+        if (!rt || !brushHover_ || !enabled || isExpandedView() ||
+            !mouseOver_ || inlineControlHover_ != index)
+            return;
+        const bool pressed = dragPress_ && !lyricDragging_ && GetCapture() == hwnd;
+        const auto color = brushHover_->GetColor();
+        auto fill = color;
+        if (pressed)
+            fill.a = std::min(1.0f, color.a * 1.8f);
+        brushHover_->SetColor(fill);
+        const float half = radius + 2.0f;
+        const float corner = std::min(6.0f, half * 0.4f);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(center.x - half, center.y - half,
+                        center.x + half, center.y + half), corner, corner), brushHover_);
+        brushHover_->SetColor(color);
+    }
+
     void drawVolumeButton(const D2D1_POINT_2F& c, float r) {
         auto* rt = drawTarget();
         if (!rt)
             return;
+        drawInlineControlBackground(3, c, r, appVolume_.available);
         ID2D1SolidColorBrush* brush =
             appVolume_.available ? brushBtn_ : brushBtnDisabled_;
         const int level = !appVolume_.available || appVolume_.muted
@@ -6672,6 +6705,7 @@ struct TaskbarHost::Impl {
         if (!rt)
             return;
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
+        drawInlineControlBackground(idx, c, r, enabled);
         ID2D1SolidColorBrush* brush = enabled ? brushBtn_ : brushBtnDisabled_;
 
         media_control::draw(rt, controlGeometry, idx, media.playing, c, r, brush);
@@ -9581,6 +9615,12 @@ struct TaskbarHost::Impl {
             const bool volHover = isExpandedView()
                                       ? immersiveHover == kImmersiveControlVolume
                                       : hitVolumeButton(mouseX, mouseY);
+            const int inlineHover = isExpandedView() ? -1
+                : volHover ? 3 : hitButton(mouseX, mouseY);
+            if (inlineHover != inlineControlHover_) {
+                inlineControlHover_ = inlineHover;
+                requestFrameAndFlush();
+            }
             if (volHover != volumeHover_) {
                 volumeHover_ = volHover;
                 if (!volHover)
@@ -9600,6 +9640,7 @@ struct TaskbarHost::Impl {
             trackingLeave_ = false;
             volumeHover_ = false;
             immersiveControlHover_ = -1;
+            inlineControlHover_ = -1;
             volumePopup_.onAnchorLeave();
             mediaPopup.onAnchorLeave();
             requestFrameAndFlush();
@@ -9638,6 +9679,7 @@ struct TaskbarHost::Impl {
                                         static_cast<float>(GET_Y_LPARAM(lp)));
                 if (immersiveControlPressed_ >= 0)
                     SetCapture(hwnd);
+                requestFrameAndFlush();
                 return 0;
             }
             dragPress_ = true;
@@ -9645,6 +9687,8 @@ struct TaskbarHost::Impl {
             dragCursorScreen_ = dragPressScreen_;
             dragCandidateMode_ = positionMode_;
             SetCapture(hwnd);
+            if (inlineControlHover_ >= 0)
+                requestFrameAndFlush();
             return 0;
         }
         case WM_LBUTTONUP: {
@@ -9660,12 +9704,15 @@ struct TaskbarHost::Impl {
                 // 确实收到同一控件的按下事件，才把随后到达的松开解释为点击。
                 if (pressed >= 0 && pressed == released)
                     activateImmersiveControl(pressed);
+                requestFrameAndFlush();
                 return 0;
             }
             const bool hadPress = dragPress_ || lyricDragging_;
             const bool wasDragging = lyricDragging_;
             if (hadPress)
                 finishLyricDrag(true);
+            if (hadPress && inlineControlHover_ >= 0)
+                requestFrameAndFlush();
             if (wasDragging)
                 return 0;
             if (hadPress) {
