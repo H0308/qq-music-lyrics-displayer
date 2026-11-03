@@ -286,6 +286,7 @@ struct MediaPopup::Impl {
     float categoryTransitionArtistScrollOffset = 0.0f;
     float categoryTransitionIdleQuoteScrollOffset = 0.0f;
     float categoryTransitionIdleQuoteSourceScrollOffset = 0.0f;
+    float categoryTransitionIdleScrollOffset = 0.0f;
     int categoryTransitionDirection = 1;
     // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
     // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
@@ -2236,14 +2237,15 @@ struct MediaPopup::Impl {
                                 !entering && !closing && !categoryTransitionActive &&
                                 !quickExpandTransitionActive;
         if (composited) {
+            // 收尾预绘制时保持滚动内容透明，避免它叠在仍可见的转场快照上。
+            idleScrollView.setContentVisible(!categoryLayersActive && !quickExpandLayersBuilt);
             idleScrollView.layout(
                 D2D1::RectF(idleListRect.left, idleListRect.top + cardOriginDip,
                             idleListRect.right, idleListRect.bottom + cardOriginDip),
-                idleQuickListContentHeight(content), dpi);
+                idleQuickListContentHeight(content), dpi, false);
             if (!idleScrollView.animating())
                 idleScrollView.setOffset(idleScrollOffset);
             idleScrollOffset = idleScrollView.offset();
-            idleScrollView.setVisible(true);
             idleScrollView.paint([&](fluent::FluentDialogSurface::Painter& painter,
                                      const D2D1_RECT_F& bounds, float position) {
                 auto* target = static_cast<ID2D1DeviceContext*>(painter.target());
@@ -2258,6 +2260,7 @@ struct MediaPopup::Impl {
                 idleScrollOffset = previous;
                 target->SetTransform(saved);
             });
+            idleScrollView.setVisible(true);
             if (idleScrollMax > 0.0f) {
                 rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f),
                                           brushProgressTrack);
@@ -2265,7 +2268,9 @@ struct MediaPopup::Impl {
                                           brushSecondary);
             }
         } else {
-            idleScrollView.setVisible(false);
+            // 离屏快照只负责绘制，不能提前隐藏仍在屏幕上显示的滚动层。
+            if (updateHitTest)
+                idleScrollView.setVisible(false);
             drawIdleQuickListContent(rt, w, content);
         }
     }
@@ -2726,7 +2731,10 @@ struct MediaPopup::Impl {
 
         drawIdleQuickDivider(rt, w, layout.headerTop, content);
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
+        const float savedScrollOffset = idleScrollOffset;
+        idleScrollOffset = categoryTransitionIdleScrollOffset;
         drawIdleQuickList(rt, w, layout.listTop, content, false);
+        idleScrollOffset = savedScrollOffset;
         releaseCom(snapshotQuoteLayout);
         releaseCom(snapshotSourceLayout);
     }
@@ -2893,6 +2901,9 @@ struct MediaPopup::Impl {
             return false;
         categoryLayersActive = true;
         renderer.commit();
+        // 滚动子窗口位于父合成树上方，等转场层真正可见后再交出列表。
+        renderer.waitForCommitCompletion();
+        idleScrollView.setVisible(false);
         // 合成器动画在 kCategoryTransitionMs 后停在终点；定时器稍加余量收尾：
         // 先预绘制目标页，再撤层提交。余量内层已静止在终点，交接无跳变。
         SetTimer(hwnd, kCategoryTimer, static_cast<UINT>(kCategoryTransitionMs) + 32,
@@ -3112,7 +3123,7 @@ struct MediaPopup::Impl {
     bool render() {
         if (!hwnd)
             return false;
-        if (!idleMode || !popupVisible || entering || closing) {
+        if ((!idleMode && !categoryTransitionActive) || !popupVisible || entering || closing) {
             idleScrollOffset = idleScrollView.offset();
             idleScrollView.stop();
             idleScrollView.setVisible(false);
@@ -3292,6 +3303,8 @@ struct MediaPopup::Impl {
             else
                 renderer.commit();
             stopLayerTransition(transitionActive, layersActive, timer);
+            if (idleMode)
+                idleScrollView.setContentVisible(true);
             renderer.commit();
         } else {
             stopLayerTransition(transitionActive, layersActive, timer);
@@ -3516,6 +3529,11 @@ struct MediaPopup::Impl {
         if (from == target)
             return;
 
+        if (from == PopupPage::Idle) {
+            idleScrollOffset = idleScrollView.offset();
+            idleScrollView.stop();
+        }
+
         const RECT fromCardRect = popupCardScreenRect();
         const bool hasFromCardRect = popupVisible && cardWidthPx > 0 && cardHeightPx > 0;
         if (hwnd)
@@ -3542,11 +3560,11 @@ struct MediaPopup::Impl {
             categoryTransitionArtistScrollOffset = artistScrollOffset;
             categoryTransitionIdleQuoteScrollOffset = idleQuoteScrollOffset;
             categoryTransitionIdleQuoteSourceScrollOffset = idleQuoteSourceScrollOffset;
+            categoryTransitionIdleScrollOffset = idleScrollOffset;
             categoryTransitionDirection = categoryDirection(from, target);
         }
         idleContentTransitionActive = false;
         idleScrollOffset = 0.0f;
-        idleScrollView.setOffset(0.0f);
         idleQuoteScrollOffset = 0.0f;
         idleQuoteSourceScrollOffset = 0.0f;
         scrollTickMs = 0;

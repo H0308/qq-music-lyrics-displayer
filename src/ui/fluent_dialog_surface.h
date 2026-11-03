@@ -152,12 +152,15 @@ public:
     ~CompositedScrollView();
     bool create(HWND parent, UINT_PTR timer, Changed changed,
                 DCompRenderer* drawingDeviceSource = nullptr);
-    void layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi);
+    void layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi,
+                bool showWindow = true);
     void paint(const Draw& draw, bool redraw = true);
     void scrollBy(float delta, bool smooth = true);
     void setOffset(float offset);
     void stop();
     void setVisible(bool visible);
+    // 只更新合成层透明度，调用方可与父层变更一起提交。
+    void setContentVisible(bool visible);
     bool tick(WPARAM timer);
     float offset() const;
     bool animating() const { return animating_; }
@@ -182,6 +185,7 @@ private:
     float cacheTop_ = 0.0f;
     float cacheHeight_ = 0.0f;
     bool ready_ = false;
+    bool contentVisible_ = true;
     bool animating_ = false;
     std::chrono::steady_clock::time_point started_{};
     Changed changed_;

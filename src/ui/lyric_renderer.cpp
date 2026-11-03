@@ -371,7 +371,8 @@ bool DCompRenderer::createFactories() {
 
 bool DCompRenderer::createDevice() {
     if (dc_ && sharedDevice_ && !sharedDevice_->invalid &&
-        (!drawingDeviceSource_ || d2dDevice_ == drawingDeviceSource_->d2dDevice_))
+        (!drawingDeviceSource_ || (d2dDevice_ == drawingDeviceSource_->d2dDevice_ &&
+                                   dcomp_ == drawingDeviceSource_->dcomp_)))
         return true;
     if (dc_)
         discard();
@@ -404,9 +405,16 @@ bool DCompRenderer::createDevice() {
         hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
     if (SUCCEEDED(hr))
         dc_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
-    if (SUCCEEDED(hr))
-        hr = DCompositionCreateDevice2(d2dDevice_, __uuidof(IDCompositionDevice),
-                                       reinterpret_cast<void**>(&dcomp_));
+    if (SUCCEEDED(hr)) {
+        if (drawingDeviceSource_) {
+            // 同一弹窗的滚动层与转场层共用提交事务，保证可见性同步交接。
+            dcomp_ = drawingDeviceSource_->dcomp_;
+            dcomp_->AddRef();
+        } else {
+            hr = DCompositionCreateDevice2(d2dDevice_, __uuidof(IDCompositionDevice),
+                                           reinterpret_cast<void**>(&dcomp_));
+        }
+    }
     if (FAILED(hr)) {
         discard();
         return false;

@@ -495,7 +495,8 @@ bool CompositedScrollView::create(HWND parent, UINT_PTR timer, Changed changed,
     return true;
 }
 
-void CompositedScrollView::layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi) {
+void CompositedScrollView::layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi,
+                                 bool showWindow) {
     const float scale = static_cast<float>(dpi) / 96.0f;
     const bool changed = viewport.left != viewport_.left || viewport.top != viewport_.top ||
                          viewport.right != viewport_.right || viewport.bottom != viewport_.bottom ||
@@ -516,7 +517,7 @@ void CompositedScrollView::layout(const D2D1_RECT_F& viewport, float contentHeig
                      std::max(1, static_cast<int>(std::ceil(viewport.right * scale)) - left),
                      std::max(1, static_cast<int>(std::ceil(viewport.bottom * scale)) - top),
                      SWP_NOZORDER | SWP_NOACTIVATE);
-        ShowWindow(window_, viewport.right > viewport.left && viewport.bottom > viewport.top
+        ShowWindow(window_, showWindow && viewport.right > viewport.left && viewport.bottom > viewport.top
                                 ? SW_SHOWNA : SW_HIDE);
     }
 }
@@ -596,6 +597,7 @@ void CompositedScrollView::paint(const Draw& draw, bool redraw) {
         return;
     }
     applyAnimation();
+    renderer_.setRootOpacity(contentVisible_ ? 1.0f : 0.0f);
     ready_ = renderer_.present();
     if (!ready_)
         renderer_.discard();
@@ -614,8 +616,16 @@ void CompositedScrollView::setOffset(float position) {
 void CompositedScrollView::stop() { setOffset(offset()); }
 
 void CompositedScrollView::setVisible(bool visible) {
-    if (window_ && ((GetWindowLongPtrW(window_, GWL_STYLE) & WS_VISIBLE) != 0) != visible)
+    if (window_ && ((GetWindowLongPtrW(window_, GWL_STYLE) & WS_VISIBLE) != 0) != visible) {
+        if (visible)
+            renderer_.waitForCommitCompletion();
         ShowWindow(window_, visible ? SW_SHOWNA : SW_HIDE);
+    }
+}
+
+void CompositedScrollView::setContentVisible(bool visible) {
+    contentVisible_ = visible;
+    renderer_.setRootOpacity(visible ? 1.0f : 0.0f);
 }
 
 void CompositedScrollView::scrollBy(float delta, bool smooth) {
@@ -675,6 +685,7 @@ void CompositedScrollView::reset() {
     height_ = maximum_ = cacheTop_ = cacheHeight_ = 0.0f;
     changed_ = {};
     ready_ = animating_ = false;
+    contentVisible_ = true;
     from_ = target_ = speed_ = 0.0f;
 }
 
