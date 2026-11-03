@@ -2,6 +2,7 @@
 
 #include <windowsx.h>
 #include <commctrl.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <cmath>
@@ -365,6 +366,8 @@ FluentEdit::~FluentEdit() {
 
 bool FluentEdit::create(HWND parent, int id, const wchar_t* cueBanner, bool directEdit,
                         float fontSizeDip, bool wrapText) {
+    static const bool bufferedPaintReady = SUCCEEDED(BufferedPaintInit());
+    (void)bufferedPaintReady;
     id_ = id;
     directEdit_ = directEdit;
     fontSizeDip_ = fontSizeDip;
@@ -435,28 +438,49 @@ LRESULT CALLBACK FluentEdit::editCueProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
             return 0;
         }
     }
-    if (msg == WM_PAINT && self && GetWindowTextLengthW(h) == 0) {
-        LRESULT result = DefSubclassProc(h, msg, wp, lp);
-        HDC hdc = GetDC(h);
-        if (hdc) {
+    if (msg == WM_PAINT && self) {
+        // 对话框客户区使用 DWM 材质时，GDI 写出的 alpha 为 0，深色文字会被当成透明。
+        // 先在缓冲区完成原生绘制，再统一设为不透明，浅色模式文字才能正常显示。
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(h, &ps);
+        RECT client{};
+        GetClientRect(h, &client);
+        HDC paintDc = hdc;
+        HPAINTBUFFER buffer =
+            BeginBufferedPaint(hdc, &client, BPBF_TOPDOWNDIB, nullptr, &paintDc);
+        DefSubclassProc(h, WM_PRINTCLIENT, reinterpret_cast<WPARAM>(paintDc),
+                        PRF_CLIENT | PRF_ERASEBKGND);
+        if (GetWindowTextLengthW(h) == 0 && !self->cueBanner_.empty()) {
             RECT rc{};
             SendMessageW(h, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&rc));
             HFONT oldFont = self->editFont_
-                                ? static_cast<HFONT>(SelectObject(hdc, self->editFont_))
+                                ? static_cast<HFONT>(SelectObject(paintDc, self->editFont_))
                                 : nullptr;
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, toColorRef(palette().textSecondary));
-            DrawTextW(hdc, self->cueBanner_.c_str(),
+            SetBkMode(paintDc, TRANSPARENT);
+            SetTextColor(paintDc, toColorRef(palette().textSecondary));
+            DrawTextW(paintDc, self->cueBanner_.c_str(),
                       static_cast<int>(self->cueBanner_.size()), &rc,
                       DT_LEFT | DT_TOP | DT_NOPREFIX | DT_EDITCONTROL |
                           (self->wrapText_ ? DT_WORDBREAK : DT_SINGLELINE));
             if (oldFont)
-                SelectObject(hdc, oldFont);
-            ReleaseDC(h, hdc);
+                SelectObject(paintDc, oldFont);
         }
-        return result;
+        if (buffer) {
+            BufferedPaintSetAlpha(buffer, nullptr, 255);
+            EndBufferedPaint(buffer, TRUE);
+        }
+        EndPaint(h, &ps);
+        return 0;
     }
-    return DefSubclassProc(h, msg, wp, lp);
+    const LRESULT result = DefSubclassProc(h, msg, wp, lp);
+    const bool selectionDrag = msg == WM_MOUSEMOVE && (wp & MK_LBUTTON);
+    if (selectionDrag || msg == WM_KEYDOWN || msg == WM_CHAR || msg == WM_LBUTTONDOWN ||
+        msg == WM_LBUTTONUP || msg == WM_LBUTTONDBLCLK || msg == WM_SETFOCUS ||
+        msg == WM_KILLFOCUS || msg == EM_SETSEL || msg == EM_REPLACESEL ||
+        msg == WM_CUT || msg == WM_CLEAR || msg == WM_UNDO || msg == WM_IME_COMPOSITION) {
+        RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+    }
+    return result;
 }
 
 std::wstring FluentEdit::text() const {
