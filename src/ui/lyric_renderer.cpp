@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <memory>
@@ -306,7 +307,8 @@ IDWriteFactory* LyricRenderer::dwrite() const {
 
 // ---------- DCompRenderer ----------
 
-DCompRenderer::DCompRenderer() = default;
+DCompRenderer::DCompRenderer(bool contentAboveChildren)
+    : contentAboveChildren_(contentAboveChildren) {}
 
 DCompRenderer::~DCompRenderer() {
     releaseAll();
@@ -314,6 +316,11 @@ DCompRenderer::~DCompRenderer() {
 
 bool DCompRenderer::initialize() {
     return createFactories();
+}
+
+void DCompRenderer::setDrawingDeviceSource(DCompRenderer* source) {
+    releaseAll();
+    drawingDeviceSource_ = source;
 }
 
 void DCompRenderer::setDpi(UINT dpi) {
@@ -335,6 +342,16 @@ IDWriteFactory* DCompRenderer::dwrite() const {
 }
 
 bool DCompRenderer::createFactories() {
+    if (drawingDeviceSource_) {
+        if (!drawingDeviceSource_->createFactories())
+            return false;
+        if (d2d1_ != drawingDeviceSource_->d2d1_) {
+            if (d2d1_)
+                d2d1_->Release();
+            d2d1_ = drawingDeviceSource_->d2d1_;
+            d2d1_->AddRef();
+        }
+    }
     if (!d2d1_) {
         D2D1_FACTORY_OPTIONS opts{};
         HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
@@ -353,14 +370,21 @@ bool DCompRenderer::createFactories() {
 }
 
 bool DCompRenderer::createDevice() {
-    if (dc_ && sharedDevice_ && !sharedDevice_->invalid)
+    if (dc_ && sharedDevice_ && !sharedDevice_->invalid &&
+        (!drawingDeviceSource_ || d2dDevice_ == drawingDeviceSource_->d2dDevice_))
         return true;
     if (dc_)
         discard();
     if (!d2d1_)
         return false;
 
-    sharedDevice_ = acquireSharedDevice();
+    if (drawingDeviceSource_) {
+        if (!drawingDeviceSource_->createDevice())
+            return false;
+        sharedDevice_ = drawingDeviceSource_->sharedDevice_;
+    } else {
+        sharedDevice_ = acquireSharedDevice();
+    }
     if (!sharedDevice_)
         return false;
 
@@ -368,8 +392,14 @@ bool DCompRenderer::createDevice() {
     d3d_ = sharedDevice_->d3d;
     dxgiDevice_ = sharedDevice_->dxgi;
 
-    // D2D 设备与上下文保持窗口级隔离，避免不同弹窗的绘制状态互相影响。
-    HRESULT hr = d2d1_->CreateDevice(dxgiDevice_, &d2dDevice_);
+    // 嵌入的滚动层复用父设备的绘图资源；每个窗口仍使用独立上下文。
+    HRESULT hr = S_OK;
+    if (drawingDeviceSource_) {
+        d2dDevice_ = drawingDeviceSource_->d2dDevice_;
+        d2dDevice_->AddRef();
+    } else {
+        hr = d2d1_->CreateDevice(dxgiDevice_, &d2dDevice_);
+    }
     if (SUCCEEDED(hr))
         hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
     if (SUCCEEDED(hr))
@@ -446,7 +476,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
         if (FAILED(hr))
             return false;
 
-        hr = dcomp_->CreateTargetForHwnd(hwnd, TRUE, &target_);
+        hr = dcomp_->CreateTargetForHwnd(hwnd, contentAboveChildren_ ? TRUE : FALSE, &target_);
         if (SUCCEEDED(hr))
             hr = dcomp_->CreateVisual(&visual_);
         if (SUCCEEDED(hr))
@@ -1057,6 +1087,51 @@ void DCompRenderer::resetRoot() {
 void DCompRenderer::setRootOpacity(float opacity) {
     if (rootOpacity_)
         rootOpacity_->SetOpacity(std::clamp(opacity, 0.0f, 1.0f));
+}
+
+void DCompRenderer::setRootOffsetY(float offset) {
+    if (visual_)
+        visual_->SetOffsetY(offset);
+}
+
+bool DCompRenderer::animateRootScroll(float from, float to, float velocity, float frequency) {
+    if (!dcomp_ || !visual_ || frequency <= 0.0f)
+        return false;
+    IDCompositionAnimation* animation = nullptr;
+    HRESULT hr = dcomp_->CreateAnimation(&animation);
+    if (FAILED(hr))
+        return false;
+    constexpr int segmentCount = 32;
+    constexpr double duration = 0.5;
+    constexpr double step = duration / segmentCount;
+    const double displacement = static_cast<double>(from) - to;
+    const double coefficient = velocity + frequency * displacement;
+    const auto positionAt = [&](double time) {
+        return to + (displacement + coefficient * time) * std::exp(-frequency * time);
+    };
+    const auto velocityAt = [&](double time) {
+        return (velocity - frequency * coefficient * time) * std::exp(-frequency * time);
+    };
+    for (int segment = 0; segment < segmentCount && SUCCEEDED(hr); ++segment) {
+        const double begin = segment * step;
+        const double start = positionAt(begin);
+        const double end = positionAt(begin + step);
+        const double startVelocity = velocityAt(begin);
+        const double endVelocity = velocityAt(begin + step);
+        const double quadratic =
+            (3.0 * (end - start) / step - 2.0 * startVelocity - endVelocity) / step;
+        const double cubic =
+            (2.0 * (start - end) / step + startVelocity + endVelocity) / (step * step);
+        hr = animation->AddCubic(begin, static_cast<float>(start),
+                                 static_cast<float>(startVelocity), static_cast<float>(quadratic),
+                                 static_cast<float>(cubic));
+    }
+    if (SUCCEEDED(hr))
+        hr = animation->End(duration, to);
+    if (SUCCEEDED(hr))
+        hr = visual_->SetOffsetY(animation);
+    animation->Release();
+    return SUCCEEDED(hr);
 }
 
 void DCompRenderer::commit() {

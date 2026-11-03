@@ -88,6 +88,9 @@ struct FontPickerDialog::Impl {
     bool backdrop = false;
 
     fluent::FluentDialogSurface surface;
+    fluent::CompositedScrollView familyScrollView;
+    fluent::CompositedScrollView sizeScrollView;
+    bool scrollOnlyPaint = false;
 
     std::wstring initFamily;
     float initSize = 16.0f;
@@ -431,6 +434,8 @@ struct FontPickerDialog::Impl {
         focusVisible = false;
         familyScroll = 0.0f;
         sizeScroll = 0.0f;
+        familyScrollView.setOffset(0.0f);
+        sizeScrollView.setOffset(0.0f);
         familyWheelAccum = 0;
         sizeWheelAccum = 0;
         rebuildFamilyList(L"");
@@ -458,6 +463,7 @@ struct FontPickerDialog::Impl {
         if (familySelected < 0 && !filtered.empty())
             familySelected = 0;
         familyScroll = 0.0f;
+        familyScrollView.setOffset(0.0f);
         ensureVisible(true, familySelected);
     }
 
@@ -546,16 +552,20 @@ struct FontPickerDialog::Impl {
         return row >= 0 && row < count ? row : -1;
     }
 
+    void invalidateListScroll(bool family, bool redraw) {
+        const auto& rect = listRect(family);
+        const float scale = surface.dipScale();
+        const RECT dirty{
+            static_cast<LONG>(std::floor((redraw ? rect.left : rect.right - kScrollBarHitWidth) * scale)),
+            static_cast<LONG>(std::floor(rect.top * scale)),
+            static_cast<LONG>(std::ceil(rect.right * scale)),
+            static_cast<LONG>(std::ceil(rect.bottom * scale))};
+        surface.invalidate(&dirty);
+    }
+
     void scrollBy(bool family, int delta) {
-        int& accumulator = family ? familyWheelAccum : sizeWheelAccum;
-        accumulator += delta;
-        const int notches = accumulator / WHEEL_DELTA;
-        if (notches == 0)
-            return;
-        accumulator -= notches * WHEEL_DELTA;
-        listScroll(family) = std::clamp(listScroll(family) - notches * 3.0f * kListRowHeight,
-                                        0.0f, listMaxScroll(family));
-        surface.invalidate();
+        auto& view = family ? familyScrollView : sizeScrollView;
+        view.scrollBy(-static_cast<float>(delta) / WHEEL_DELTA * 3.0f * kListRowHeight);
     }
 
     bool listHasScroll(bool family) const {
@@ -716,15 +726,22 @@ struct FontPickerDialog::Impl {
                 1.5f, fluent::metrics::cardRadius - 1.0f);
         }
 
-        painter.target()->PushAxisAlignedClip(
-            D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom),
-            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        auto& view = family ? familyScrollView : sizeScrollView;
+        view.layout(D2D1::RectF(rect.left + 2.0f, rect.top + 2.0f,
+                                rect.right - kScrollBarHitWidth, rect.bottom - 2.0f),
+                    std::max(0.0f, listContentHeight(family) - 4.0f), surface.dpi());
+        if (!view.animating())
+            view.setOffset(scroll);
+        scroll = view.offset();
+        view.paint([&](fluent::FluentDialogSurface::Painter& painter,
+                       const D2D1_RECT_F& paintBounds, float position) {
+        painter.fillRoundRect(p.cardFill, paintBounds, 0.0f);
         const int count = family ? static_cast<int>(filtered.size())
                                  : static_cast<int>(_countof(kSizePresets));
         for (int i = 0; i < count; ++i) {
-            const float y = rect.top + i * kListRowHeight - scroll;
+            const float y = rect.top + i * kListRowHeight - position;
             const D2D1_RECT_F rowRect = D2D1::RectF(rect.left, y, rect.right, y + kListRowHeight);
-            if (rowRect.bottom < rect.top || rowRect.top > rect.bottom)
+            if (rowRect.bottom < paintBounds.top || rowRect.top > paintBounds.bottom)
                 continue;
             const bool selected = i == (family ? familySelected : sizeSelected);
             const bool hovered = hoverId == (family ? kIdFamilyList : kIdSizeList) &&
@@ -763,6 +780,7 @@ struct FontPickerDialog::Impl {
             }
         }
 
+        }, !scrollOnlyPaint);
         const float contentHeight = listContentHeight(family);
         if (contentHeight > height && height > 0.0f) {
             const auto bar = scrollBarGeometry(height, contentHeight);
@@ -773,7 +791,6 @@ struct FontPickerDialog::Impl {
                             rect.right - kScrollBarInset, thumbY + bar.thumbHeight),
                 kScrollBarWidth * 0.5f);
         }
-        painter.target()->PopAxisAlignedClip();
     }
 
     void drawPreview(fluent::FluentDialogSurface::Painter& painter) {
@@ -964,14 +981,31 @@ struct FontPickerDialog::Impl {
 
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+        case WM_TIMER:
+            if (familyScrollView.tick(wp) || sizeScrollView.tick(wp))
+                return 0;
+            break;
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
             surface.initialize(hwnd, backdrop);
+            if (!familyScrollView.create(hwnd, 0x6201, [this](float position, bool redraw) {
+                    familyScroll = position;
+                    invalidateListScroll(true, redraw);
+                }) ||
+                !sizeScrollView.create(hwnd, 0x6202, [this](float position, bool redraw) {
+                    sizeScroll = position;
+                    invalidateListScroll(false, redraw);
+                }))
+                return -1;
             enumerateFonts();
             createControls();
             layout();
             return 0;
         case WM_SIZE:
+            familyScroll = familyScrollView.offset();
+            sizeScroll = sizeScrollView.offset();
+            familyScrollView.stop();
+            sizeScrollView.stop();
             layout();
             surface.invalidate();
             return 0;
@@ -994,6 +1028,10 @@ struct FontPickerDialog::Impl {
             return TRUE;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
+            familyScroll = familyScrollView.offset();
+            sizeScroll = sizeScrollView.offset();
+            familyScrollView.stop();
+            sizeScrollView.stop();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             surface.setBackdrop(backdrop);
             surface.invalidate();
@@ -1001,6 +1039,12 @@ struct FontPickerDialog::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
+            const float scale = surface.dipScale();
+            const auto onlyBar = [&](const D2D1_RECT_F& rect) {
+                return ps.rcPaint.left >= std::floor((rect.right - kScrollBarHitWidth) * scale) &&
+                       ps.rcPaint.right <= std::ceil(rect.right * scale);
+            };
+            scrollOnlyPaint = onlyBar(familyListRect) || onlyBar(sizeListRect);
             surface.paint(hdc, backdrop,
                           [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
                               paint(painter, w, h);
@@ -1041,6 +1085,10 @@ struct FontPickerDialog::Impl {
             surface.invalidate();
             return 0;
         case WM_LBUTTONDOWN: {
+            familyScroll = familyScrollView.offset();
+            sizeScroll = sizeScrollView.offset();
+            familyScrollView.stop();
+            sizeScrollView.stop();
             SetFocus(hwnd);
             focusVisible = false;
             const float s = surface.dipScale();
@@ -1135,6 +1183,10 @@ struct FontPickerDialog::Impl {
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB | DLGC_WANTCHARS;
         case WM_KEYDOWN:
+            familyScroll = familyScrollView.offset();
+            sizeScroll = sizeScrollView.offset();
+            familyScrollView.stop();
+            sizeScrollView.stop();
             if (wp == VK_TAB) {
                 focusStep(isShiftDown() ? -1 : 1);
                 return 0;
@@ -1235,6 +1287,8 @@ struct FontPickerDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            familyScrollView.reset();
+            sizeScrollView.reset();
             surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)

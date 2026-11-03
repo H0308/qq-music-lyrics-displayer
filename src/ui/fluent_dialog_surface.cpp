@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace fluent {
 
@@ -28,6 +29,11 @@ void excludeVisibleChildren(HWND parent, HDC hdc) {
     for (HWND child = GetWindow(parent, GW_CHILD); child;
          child = GetWindow(child, GW_HWNDNEXT)) {
         if (!IsWindowVisible(child))
+            continue;
+
+        // 合成子窗口只提供视觉层，透明间隙仍依赖父窗口的根背景。
+        // 排除它的整个矩形会使底面无法清理，缩放后透出旧画面。
+        if (GetWindowLongPtrW(child, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP)
             continue;
 
         RECT childRect{};
@@ -179,8 +185,9 @@ void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* propose
     }
 }
 
-FluentDialogSurface::Painter::Painter(ID2D1DCRenderTarget* target, IDWriteFactory* dwrite)
-    : target_(target), dwrite_(dwrite) {}
+FluentDialogSurface::Painter::Painter(ID2D1RenderTarget* target, IDWriteFactory* dwrite,
+                                       TextCache* textCache)
+    : target_(target), dwrite_(dwrite), textCache_(textCache) {}
 
 FluentDialogSurface::Painter::~Painter() {
     for (auto* layout : layouts_) {
@@ -224,6 +231,12 @@ IDWriteTextFormat* FluentDialogSurface::Painter::textFormat(float dipSize, int w
 
     IDWriteTextFormat* format = nullptr;
     const wchar_t* familyName = family ? family : uiFontFamily();
+    const TextCache::FormatKey key{dipSize, weight, center, noWrap, familyName};
+    if (textCache_) {
+        const auto found = textCache_->formats.find(key);
+        if (found != textCache_->formats.end())
+            return found->second.Get();
+    }
     HRESULT hr = dwrite_->CreateTextFormat(
         familyName, nullptr, static_cast<DWRITE_FONT_WEIGHT>(weight), DWRITE_FONT_STYLE_NORMAL,
         DWRITE_FONT_STRETCH_NORMAL, dipSize, L"zh-cn", &format);
@@ -236,7 +249,10 @@ IDWriteTextFormat* FluentDialogSurface::Painter::textFormat(float dipSize, int w
         format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
     if (noWrap)
         format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    formats_.push_back(format);
+    if (textCache_)
+        textCache_->formats[key].Attach(format);
+    else
+        formats_.push_back(format);
     return format;
 }
 
@@ -282,6 +298,22 @@ void FluentDialogSurface::Painter::strokeRoundRect(D2D1_COLOR_F color,
 void FluentDialogSurface::Painter::drawText(const std::wstring& text, IDWriteTextFormat* format,
                                             const D2D1_RECT_F& rect, D2D1_COLOR_F color,
                                             D2D1_DRAW_TEXT_OPTIONS options) {
+    if (textCache_ && dwrite_ && format && !text.empty()) {
+        const float width = std::max(1.0f, std::round((rect.right - rect.left) * 64.0f) / 64.0f);
+        const float height = std::max(1.0f, std::round((rect.bottom - rect.top) * 64.0f) / 64.0f);
+        const TextCache::LayoutKey key{text, reinterpret_cast<std::uintptr_t>(format),
+                                       width, height};
+        auto found = textCache_->layouts.find(key);
+        if (found == textCache_->layouts.end()) {
+            Microsoft::WRL::ComPtr<IDWriteTextLayout> layout;
+            if (FAILED(dwrite_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+                                                format, width, height, layout.GetAddressOf())))
+                return;
+            found = textCache_->layouts.emplace(key, std::move(layout)).first;
+        }
+        drawTextLayout(found->second.Get(), D2D1::Point2F(rect.left, rect.top), color, options);
+        return;
+    }
     if (format) {
         if (auto* br = brush(color)) {
         target_->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), format, rect, br,
@@ -327,7 +359,9 @@ FluentDialogSurface::~FluentDialogSurface() {
     hwnd_ = nullptr;
 }
 
-bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop) {
+bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop, bool cacheText) {
+    textCache_.clear();
+    cacheText_ = cacheText;
     hwnd_ = hwnd;
     dpi_ = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
     if (dpi_ == 0)
@@ -338,6 +372,7 @@ bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop) {
 }
 
 void FluentDialogSurface::setBackdrop(bool backdrop) {
+    textCache_.clear();
     (void)backdrop;
     hasPainted_ = false;
 }
@@ -357,9 +392,15 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     if (width <= 0 || height <= 0)
         return false;
 
+    const UINT previousDpi = dpi_;
     dpi_ = GetDpiForWindow(hwnd_);
     if (dpi_ == 0)
         dpi_ = 96;
+    if (dpi_ != previousDpi || width != textCacheWidth_ || height != textCacheHeight_) {
+        textCache_.clear();
+        textCacheWidth_ = width;
+        textCacheHeight_ = height;
+    }
     if (!renderer_.initialize())
         return false;
     renderer_.setDpi(dpi_);
@@ -368,7 +409,7 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
         return false;
 
     // 对话框表面使用当前 WM_PAINT 的 DC，材质仅位于顶层窗口根背景。
-    // 父窗口本身带 WS_CLIPCHILDREN，且额外排除可见子窗口，原生控件由系统单独绘制。
+    // 仅排除有独立绘制表面的原生子控件，合成滚动层下方仍需绘制根背景。
     RECT renderRect{0, 0, width, height};
     excludeVisibleChildren(hwnd_, hdc);
     if (FAILED(target->BindDC(hdc, &renderRect)))
@@ -377,13 +418,21 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     // Mica 窗口留出透明根背景；卡片和原生输入框仍使用各自的不透明表面。
     target->BeginDraw();
     target->SetTransform(D2D1::Matrix3x2F::Identity());
+    RECT dirty{};
+    GetClipBox(hdc, &dirty);
+    const float scale = dipScale();
+    target->PushAxisAlignedClip(
+        D2D1::RectF(dirty.left / scale, dirty.top / scale,
+                    dirty.right / scale, dirty.bottom / scale),
+        D2D1_ANTIALIAS_MODE_ALIASED);
     target->Clear(backdrop ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f)
                            : fluent::palette().windowBg);
-    Painter painter(target, renderer_.dwrite());
+    Painter painter(target, renderer_.dwrite(), cacheText_ ? &textCache_ : nullptr);
     if (callback)
         callback(painter, static_cast<float>(width) / dipScale(),
                  static_cast<float>(height) / dipScale());
 
+    target->PopAxisAlignedClip();
     HRESULT hr = target->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) {
         renderer_.discard();
@@ -403,7 +452,230 @@ void FluentDialogSurface::invalidate(const RECT* rect) const {
 }
 
 void FluentDialogSurface::discard() {
+    textCache_.clear();
     renderer_.releaseAll();
+}
+
+CompositedScrollView::~CompositedScrollView() { reset(); }
+
+LRESULT CALLBACK CompositedScrollView::windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
+    if (message == WM_NCHITTEST)
+        return HTTRANSPARENT;
+    if (message == WM_ERASEBKGND)
+        return 1;
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        BeginPaint(window, &paint);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wp, lp);
+}
+
+bool CompositedScrollView::create(HWND parent, UINT_PTR timer, Changed changed,
+                                  DCompRenderer* drawingDeviceSource) {
+    reset();
+    renderer_.setDrawingDeviceSource(drawingDeviceSource);
+    const HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent, GWLP_HINSTANCE));
+    constexpr wchar_t className[] = L"QQMusicLyricScrollView";
+    WNDCLASSW windowClass{};
+    windowClass.hInstance = instance;
+    windowClass.lpfnWndProc = windowProc;
+    windowClass.lpszClassName = className;
+    if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return false;
+    window_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, className, L"",
+                              WS_CHILD | WS_DISABLED | WS_VISIBLE, 0, 0, 1, 1,
+                              parent, nullptr, instance, nullptr);
+    if (!window_)
+        return false;
+    parent_ = parent;
+    timer_ = timer;
+    changed_ = std::move(changed);
+    return true;
+}
+
+void CompositedScrollView::layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi) {
+    const float scale = static_cast<float>(dpi) / 96.0f;
+    const bool changed = viewport.left != viewport_.left || viewport.top != viewport_.top ||
+                         viewport.right != viewport_.right || viewport.bottom != viewport_.bottom ||
+                         contentHeight != height_ || dpi != dpi_;
+    if (!changed)
+        return;
+    stop();
+    viewport_ = viewport;
+    height_ = std::max(0.0f, contentHeight);
+    dpi_ = dpi;
+    maximum_ = std::max(0.0f, height_ - (viewport.bottom - viewport.top));
+    from_ = target_ = std::clamp(target_, 0.0f, maximum_);
+    ready_ = false;
+    if (window_) {
+        const int left = static_cast<int>(std::floor(viewport.left * scale));
+        const int top = static_cast<int>(std::floor(viewport.top * scale));
+        SetWindowPos(window_, nullptr, left, top,
+                     std::max(1, static_cast<int>(std::ceil(viewport.right * scale)) - left),
+                     std::max(1, static_cast<int>(std::ceil(viewport.bottom * scale)) - top),
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        ShowWindow(window_, viewport.right > viewport.left && viewport.bottom > viewport.top
+                                ? SW_SHOWNA : SW_HIDE);
+    }
+}
+
+float CompositedScrollView::offset() const {
+    if (!animating_)
+        return target_;
+    const float elapsed = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - started_).count();
+    const float displacement = from_ - target_;
+    return std::clamp(target_ + (displacement + (speed_ + 28.0f * displacement) * elapsed) *
+                                   std::exp(-28.0f * elapsed), 0.0f, maximum_);
+}
+
+float CompositedScrollView::velocity() const {
+    if (!animating_)
+        return 0.0f;
+    const float elapsed = std::chrono::duration<float>(
+        std::chrono::steady_clock::now() - started_).count();
+    return (speed_ - 28.0f * (speed_ + 28.0f * (from_ - target_)) * elapsed) *
+           std::exp(-28.0f * elapsed);
+}
+
+bool CompositedScrollView::needsCache(float position) const {
+    const float viewHeight = viewport_.bottom - viewport_.top;
+    return !ready_ ||
+           (cacheTop_ > 0.0f && position < cacheTop_ + viewHeight * 0.5f) ||
+           (cacheTop_ + cacheHeight_ < height_ &&
+            position + viewHeight > cacheTop_ + cacheHeight_ - viewHeight * 0.5f);
+}
+
+void CompositedScrollView::applyAnimation() {
+    const float scale = static_cast<float>(dpi_) / 96.0f;
+    const float position = offset();
+    if (animating_)
+        renderer_.animateRootScroll((cacheTop_ - position) * scale,
+                                    (cacheTop_ - target_) * scale, -velocity() * scale, 28.0f);
+    else
+        renderer_.setRootOffsetY((cacheTop_ - position) * scale);
+}
+
+void CompositedScrollView::paint(const Draw& draw, bool redraw) {
+    if (!window_ || viewport_.bottom <= viewport_.top || viewport_.right <= viewport_.left)
+        return;
+    const float position = offset();
+    if ((animating_ || !redraw) && !needsCache(position))
+        return;
+    const float scale = static_cast<float>(dpi_) / 96.0f;
+    const float viewHeight = viewport_.bottom - viewport_.top;
+    cacheHeight_ = std::max(viewHeight, std::min(height_ + 2.0f,
+                                               std::min(viewHeight * 3.0f, 8192.0f / scale)));
+    cacheTop_ = std::round(std::clamp(position - viewHeight, 0.0f,
+                                     std::max(0.0f, height_ - cacheHeight_)) * scale) / scale;
+    const float left = std::floor(viewport_.left * scale) / scale;
+    const float top = std::floor(viewport_.top * scale) / scale;
+    const int width = std::max(1, static_cast<int>(std::ceil(viewport_.right * scale) -
+                                                 std::floor(viewport_.left * scale)));
+    const int height = std::max(1, static_cast<int>(std::ceil(cacheHeight_ * scale)));
+    renderer_.setDpi(dpi_);
+    if (!renderer_.bind(window_, width, height)) {
+        ready_ = false;
+        return;
+    }
+    auto* target = renderer_.renderTarget();
+    target->BeginDraw();
+    target->SetTransform(D2D1::Matrix3x2F::Translation(-left, position - cacheTop_ - top));
+    target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    {
+        Painter painter(target, renderer_.dwrite());
+        draw(painter, D2D1::RectF(viewport_.left, viewport_.top + cacheTop_ - position,
+                                 viewport_.right, viewport_.top + cacheTop_ - position + cacheHeight_),
+             position);
+    }
+    if (FAILED(target->EndDraw())) {
+        renderer_.discard();
+        ready_ = false;
+        return;
+    }
+    applyAnimation();
+    ready_ = renderer_.present();
+    if (!ready_)
+        renderer_.discard();
+}
+
+void CompositedScrollView::setOffset(float position) {
+    animating_ = false;
+    if (parent_)
+        KillTimer(parent_, timer_);
+    from_ = target_ = std::clamp(position, 0.0f, maximum_);
+    speed_ = 0.0f;
+    applyAnimation();
+    renderer_.commit();
+}
+
+void CompositedScrollView::stop() { setOffset(offset()); }
+
+void CompositedScrollView::setVisible(bool visible) {
+    if (window_ && ((GetWindowLongPtrW(window_, GWL_STYLE) & WS_VISIBLE) != 0) != visible)
+        ShowWindow(window_, visible ? SW_SHOWNA : SW_HIDE);
+}
+
+void CompositedScrollView::scrollBy(float delta, bool smooth) {
+    BOOL enabled = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0);
+    const float position = offset();
+    const float next = std::clamp(
+        (animating_ && delta * (target_ - position) > 0.0f ? target_ : position) + delta,
+        0.0f, maximum_);
+    if (std::fabs(next - position) < 0.01f && !animating_)
+        return;
+    if (!smooth || !enabled) {
+        setOffset(next);
+    } else {
+        const float currentVelocity = velocity();
+        from_ = position;
+        target_ = next;
+        speed_ = delta * currentVelocity < 0.0f ? 0.0f : currentVelocity;
+        const float maximumSpeed = 28.0f * std::fabs(target_ - from_);
+        speed_ = std::clamp(speed_, -maximumSpeed, maximumSpeed);
+        started_ = std::chrono::steady_clock::now();
+        if (!animating_)
+            animating_ = SetTimer(parent_, timer_, USER_TIMER_MINIMUM, nullptr) != 0;
+        if (!animating_)
+            setOffset(next);
+    }
+    if (changed_)
+        changed_(offset(), needsCache(offset()));
+    if (parent_)
+        UpdateWindow(parent_);
+    applyAnimation();
+    renderer_.commit();
+}
+
+bool CompositedScrollView::tick(WPARAM timer) {
+    if (timer != timer_ || !animating_)
+        return false;
+    const float position = offset();
+    if (std::fabs(position - target_) < 0.1f && std::fabs(velocity()) < 2.0f)
+        setOffset(target_);
+    if (changed_)
+        changed_(offset(), needsCache(offset()) || !animating_);
+    return true;
+}
+
+void CompositedScrollView::reset() {
+    if (parent_ && IsWindow(parent_))
+        KillTimer(parent_, timer_);
+    renderer_.releaseAll();
+    if (window_ && IsWindow(window_))
+        DestroyWindow(window_);
+    parent_ = nullptr;
+    window_ = nullptr;
+    timer_ = 0;
+    dpi_ = 96;
+    viewport_ = {};
+    height_ = maximum_ = cacheTop_ = cacheHeight_ = 0.0f;
+    changed_ = {};
+    ready_ = animating_ = false;
+    from_ = target_ = speed_ = 0.0f;
 }
 
 } // namespace fluent

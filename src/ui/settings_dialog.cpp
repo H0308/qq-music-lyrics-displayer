@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <climits>
 #include <cwctype>
@@ -34,6 +35,11 @@ constexpr int kLyricsPage = 6;
 constexpr int kSongToastPage = 7;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
+constexpr UINT_PTR kNavIndicatorTimer = 1;
+constexpr UINT kNavIndicatorDurationMs = 180;
+constexpr UINT kNavIndicatorFrameMs = USER_TIMER_MINIMUM;
+constexpr UINT_PTR kContentScrollTimer = 2;
+constexpr float kContentScrollFrequency = 28.0f;
 constexpr int kRenderModeMinimal = 3;
 constexpr int kIdSongInfo = 410;
 constexpr int kIdAlbumCover = 411;
@@ -469,6 +475,9 @@ struct SettingsDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
     HWND notifyHwnd = nullptr;
+    HWND contentWindow = nullptr;
+    DCompRenderer contentRenderer;
+    bool contentLayerReady = false;
     bool backdrop = false;
     SettingsState state;
     SettingsActions actions;
@@ -489,6 +498,12 @@ struct SettingsDialog::Impl {
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
+    bool navIndicatorAnimating = false;
+    ULONGLONG navIndicatorStartMs = 0;
+    float navIndicatorFrom = 0.0f;
+    float navIndicatorPosition = 0.0f;
+    float navIndicatorStretch = 0.0f;
+    float navIndicatorFromStretch = 0.0f;
     std::array<D2D1_RECT_F, kSettingsPageCount> pageTitleIconRects{};
     std::array<D2D1_RECT_F, kSettingsPageCount> pageTitleRects{};
     D2D1_RECT_F contentViewportRect{};
@@ -496,6 +511,11 @@ struct SettingsDialog::Impl {
     D2D1_RECT_F scrollThumbRect{};
     float contentHeight = 0.0f;
     float contentScroll = 0.0f;
+    float contentPaintScroll = 0.0f;
+    bool contentScrollAnimating = false;
+    std::chrono::steady_clock::time_point contentScrollLastTick{};
+    float contentScrollVelocity = 0.0f;
+    float contentScrollTarget = 0.0f;
     float contentMaxScroll = 0.0f;
     bool scrollDragging = false;
     float scrollDragOffset = 0.0f;
@@ -511,6 +531,34 @@ struct SettingsDialog::Impl {
     int pressedOption = -1;
     int focusedId = kIdNav;
     bool focusVisible = false;
+
+    static LRESULT CALLBACK contentWndProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
+        if (message == WM_NCHITTEST)
+            return HTTRANSPARENT;
+        if (message == WM_ERASEBKGND)
+            return 1;
+        if (message == WM_PAINT) {
+            PAINTSTRUCT paint{};
+            BeginPaint(window, &paint);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        return DefWindowProcW(window, message, wp, lp);
+    }
+
+    bool createContentWindow() {
+        constexpr wchar_t className[] = L"QQMusicLyricSettingsContent";
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = contentWndProc;
+        windowClass.hInstance = inst;
+        windowClass.lpszClassName = className;
+        if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+            return false;
+        contentWindow = CreateWindowExW(
+            WS_EX_NOREDIRECTIONBITMAP, className, L"", WS_CHILD | WS_DISABLED | WS_VISIBLE,
+            0, 0, 1, 1, hwnd, nullptr, inst, nullptr);
+        return contentWindow != nullptr;
+    }
 
     static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         Impl* self = nullptr;
@@ -1083,13 +1131,79 @@ struct SettingsDialog::Impl {
                                       thumbTop + thumbHeight);
     }
 
-    void setContentScroll(float offset) {
+    void stopContentScroll() {
+        if (hwnd)
+            KillTimer(hwnd, kContentScrollTimer);
+        contentScrollAnimating = false;
+        contentScrollVelocity = 0.0f;
+        contentScrollTarget = contentScroll;
+        contentRenderer.setRootOffsetY(-contentScroll * surface.dipScale());
+        contentRenderer.commit();
+    }
+
+    void applyContentScroll(float offset) {
         const float next = std::clamp(offset, 0.0f, contentMaxScroll);
-        if (std::fabs(next - contentScroll) < 0.01f)
-            return;
         contentScroll = next;
-        layout();
-        surface.invalidate();
+        const float scale = surface.dipScale();
+        const float paintScroll = std::round(next * scale) / scale;
+        const float displacement = contentPaintScroll - paintScroll;
+        if (!contentScrollAnimating) {
+            contentRenderer.setRootOffsetY(-contentScroll * scale);
+            contentRenderer.commit();
+        }
+        if (displacement == 0.0f)
+            return;
+        contentPaintScroll = paintScroll;
+        const auto shift = [displacement](D2D1_RECT_F& rect) {
+            if (rect.right > rect.left && rect.bottom > rect.top) {
+                rect.top += displacement;
+                rect.bottom += displacement;
+            }
+        };
+        for (auto& row : rows[activePage]) {
+            for (auto* rect : {&row.cardRect, &row.iconRect, &row.labelRect, &row.valueRect,
+                               &row.hintRect, &row.controlRect, &row.artworkRect,
+                               &row.addAppRect})
+                shift(*rect);
+            for (auto* rects : {&row.appItemRects, &row.appEditRects, &row.appDeleteRects,
+                                &row.optionRects}) {
+                for (auto& rect : *rects)
+                    shift(rect);
+            }
+        }
+        updateScrollBarGeometry();
+        layoutSliderEditor();
+        RECT dirty{};
+        GetClientRect(hwnd, &dirty);
+        dirty.left = static_cast<LONG>(std::floor((scrollTrackRect.left - kScrollBarHitWidth) * scale));
+        dirty.top = static_cast<LONG>(std::floor(contentViewportRect.top * surface.dipScale()));
+        surface.invalidate(&dirty);
+    }
+
+    void setContentScroll(float offset) {
+        stopContentScroll();
+        applyContentScroll(offset);
+    }
+
+    void advanceContentScroll() {
+        if (!contentScrollAnimating)
+            return;
+        const auto now = std::chrono::steady_clock::now();
+        const float elapsed = std::chrono::duration<float>(now - contentScrollLastTick).count();
+        contentScrollLastTick = now;
+        contentScrollTarget = std::clamp(contentScrollTarget, 0.0f, contentMaxScroll);
+        const float displacement = contentScroll - contentScrollTarget;
+        const float coefficient = contentScrollVelocity + kContentScrollFrequency * displacement;
+        const float decay = std::exp(-kContentScrollFrequency * elapsed);
+        const float next = contentScrollTarget + (displacement + coefficient * elapsed) * decay;
+        contentScrollVelocity =
+            (contentScrollVelocity - kContentScrollFrequency * coefficient * elapsed) * decay;
+        applyContentScroll(next);
+        if (std::fabs(next - contentScrollTarget) < 0.1f &&
+            std::fabs(contentScrollVelocity) < 2.0f) {
+            applyContentScroll(contentScrollTarget);
+            stopContentScroll();
+        }
     }
 
     void scrollFromPointer(float y) {
@@ -1106,10 +1220,48 @@ struct SettingsDialog::Impl {
         setContentScroll(ratio * contentMaxScroll);
     }
 
-    void scrollBy(float delta) {
+    void scrollBy(float delta, bool smooth = false) {
         if (contentMaxScroll <= 0.0f)
             return;
-        setContentScroll(contentScroll + delta);
+        BOOL animations = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+        if (!smooth || !animations) {
+            setContentScroll(contentScroll + delta);
+            return;
+        }
+        advanceContentScroll();
+        const bool continuing = contentScrollAnimating &&
+                                delta * (contentScrollTarget - contentScroll) > 0.0f;
+        const float target = std::clamp(
+            (continuing ? contentScrollTarget : contentScroll) + delta,
+            0.0f, contentMaxScroll);
+        if (std::fabs(target - contentScroll) < 0.01f) {
+            stopContentScroll();
+            return;
+        }
+        if (delta * contentScrollVelocity < 0.0f)
+            contentScrollVelocity = 0.0f;
+        contentScrollTarget = target;
+        contentScrollLastTick = std::chrono::steady_clock::now();
+        if (!contentScrollAnimating) {
+            if (SetTimer(hwnd, kContentScrollTimer, USER_TIMER_MINIMUM, nullptr))
+                contentScrollAnimating = true;
+            else
+                setContentScroll(target);
+        }
+        if (contentScrollAnimating) {
+            if (sliderEditOpen)
+                commitSliderEditor();
+            if (!contentLayerReady) {
+                surface.invalidate();
+                UpdateWindow(hwnd);
+            }
+            contentRenderer.animateRootScroll(-contentScroll * surface.dipScale(),
+                                               -contentScrollTarget * surface.dipScale(),
+                                               -contentScrollVelocity * surface.dipScale(),
+                                               kContentScrollFrequency);
+            contentRenderer.commit();
+        }
     }
 
     void createControls() {
@@ -1623,6 +1775,15 @@ struct SettingsDialog::Impl {
         const float contentBottom = std::max(contentTop, h - 12.0f);
         contentViewportRect =
             D2D1::RectF(contentX, contentTop, contentX + contentW, contentBottom);
+        if (contentWindow) {
+            const int left = static_cast<int>(std::floor(contentViewportRect.left * s));
+            const int top = static_cast<int>(std::floor(contentViewportRect.top * s));
+            const int right = static_cast<int>(std::ceil(contentViewportRect.right * s));
+            const int bottom = static_cast<int>(std::ceil(contentViewportRect.bottom * s));
+            SetWindowPos(contentWindow, nullptr, left, top, std::max(1, right - left),
+                         std::max(1, bottom - top), SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        contentLayerReady = false;
 
         float contentEnd = contentTop;
         auto& pageRows = rows[activePage];
@@ -1641,9 +1802,10 @@ struct SettingsDialog::Impl {
             std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
         contentMaxScroll = std::max(0.0f, contentHeight - viewportHeight);
         contentScroll = std::clamp(contentScroll, 0.0f, contentMaxScroll);
+        contentPaintScroll = std::round(contentScroll * surface.dipScale()) / surface.dipScale();
         updateScrollBarGeometry();
 
-        float y = contentTop - contentScroll;
+        float y = contentTop - contentPaintScroll;
         for (auto& page : rows) {
             for (auto& row : page) {
                 row.cardRect = D2D1::RectF(0, 0, 0, 0);
@@ -1904,12 +2066,65 @@ struct SettingsDialog::Impl {
         layoutSliderEditor();
     }
 
+    void stopNavIndicator() {
+        if (hwnd)
+            KillTimer(hwnd, kNavIndicatorTimer);
+        navIndicatorAnimating = false;
+        navIndicatorPosition = static_cast<float>(activePage);
+        navIndicatorStretch = 0.0f;
+    }
+
+    void advanceNavIndicator() {
+        if (!navIndicatorAnimating)
+            return;
+        const float progress = std::clamp(
+            static_cast<float>(GetTickCount64() - navIndicatorStartMs) /
+                static_cast<float>(kNavIndicatorDurationMs),
+            0.0f, 1.0f);
+        if (progress >= 1.0f) {
+            stopNavIndicator();
+            return;
+        }
+        float lower = 0.0f;
+        float upper = 1.0f;
+        for (int iteration = 0; iteration < 16; ++iteration) {
+            const float parameter = (lower + upper) * 0.5f;
+            const float inverse = 1.0f - parameter;
+            const float sample = 3.0f * inverse * inverse * parameter * 0.77f +
+                                 3.0f * inverse * parameter * parameter * 0.175f +
+                                 parameter * parameter * parameter;
+            if (sample < progress)
+                lower = parameter;
+            else
+                upper = parameter;
+        }
+        const float parameter = (lower + upper) * 0.5f;
+        const float eased = parameter * parameter * (3.0f - 2.0f * parameter);
+        navIndicatorPosition = navIndicatorFrom +
+                               (static_cast<float>(activePage) - navIndicatorFrom) * eased;
+        navIndicatorStretch = navIndicatorFromStretch * (1.0f - eased) +
+                              8.0f * 4.0f * eased * (1.0f - eased);
+    }
+
     void showPage(int page) {
         if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
+        stopContentScroll();
         if (sliderEditOpen)
             commitSliderEditor();
+        advanceNavIndicator();
+        navIndicatorFrom = navIndicatorPosition;
+        navIndicatorFromStretch = navIndicatorStretch;
         activePage = page;
+        BOOL animations = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animations, 0);
+        if (animations && hwnd && IsWindowVisible(hwnd) &&
+            SetTimer(hwnd, kNavIndicatorTimer, kNavIndicatorFrameMs, nullptr)) {
+            navIndicatorAnimating = true;
+            navIndicatorStartMs = GetTickCount64();
+        } else {
+            stopNavIndicator();
+        }
         hoverId = 0;
         hoverOption = -1;
         pressedId = 0;
@@ -1957,14 +2172,6 @@ struct SettingsDialog::Impl {
                 if (auto* iconBrush = painter.brush(selected ? p.accent : p.textSecondary))
                     settings_icon::draw(painter.target(), icon, iconRect, iconBrush);
             }
-            if (selected)
-                painter.fillRoundRect(
-                    p.accent,
-                    D2D1::RectF(navItemRects[i].left + 7.0f,
-                                (navItemRects[i].top + navItemRects[i].bottom) / 2.0f - 8.0f,
-                                navItemRects[i].left + 10.0f,
-                                (navItemRects[i].top + navItemRects[i].bottom) / 2.0f + 8.0f),
-                    1.5f);
             painter.drawText(navItems[i], format,
                              D2D1::RectF(navItemRects[i].left + kNavIconLeft + kNavIconSize +
                                              kNavIconTextGap,
@@ -1972,6 +2179,14 @@ struct SettingsDialog::Impl {
                                          navItemRects[i].right - 12.0f, navItemRects[i].bottom),
                              p.text);
         }
+        advanceNavIndicator();
+        const float centerY = navRect.top + (navIndicatorPosition + 0.5f) * kNavItemH;
+        const float halfHeight = 8.0f + navIndicatorStretch * 0.5f;
+        painter.fillRoundRect(
+            p.accent,
+            D2D1::RectF(navRect.left + 7.0f, centerY - halfHeight,
+                        navRect.left + 10.0f, centerY + halfHeight),
+            1.5f);
     }
 
     void drawButton(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
@@ -3415,16 +3630,15 @@ struct SettingsDialog::Impl {
             const auto& top = pageRows[first].cardRect;
             const auto& bottom = pageRows[end - 1].cardRect;
             const auto group = D2D1::RectF(top.left, top.top, top.right, bottom.bottom);
-            if (group.bottom > contentViewportRect.top && group.top < contentViewportRect.bottom) {
+            {
                 painter.fillRoundRect(p.cardFill, group, fluent::metrics::cardRadius);
                 painter.strokeRoundRect(p.cardStroke, group, 1.0f, fluent::metrics::cardRadius);
                 if (auto* brush = painter.brush(p.separator)) {
                     for (size_t i = first + 1; i < end; ++i) {
                         const float y = pageRows[i].cardRect.top;
-                        if (y > contentViewportRect.top && y < contentViewportRect.bottom)
-                            painter.target()->DrawLine(
-                                D2D1::Point2F(group.left + 16.0f, y),
-                                D2D1::Point2F(group.right - 16.0f, y), brush, 1.0f);
+                        painter.target()->DrawLine(
+                            D2D1::Point2F(group.left + 16.0f, y),
+                            D2D1::Point2F(group.right - 16.0f, y), brush, 1.0f);
                     }
                 }
             }
@@ -3432,21 +3646,36 @@ struct SettingsDialog::Impl {
         }
     }
 
-    void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
-        updateHintHeights(painter);
-        const auto& p = fluent::palette();
-        drawNav(painter);
-        if (const auto icon = iconForPage(activePage);
-            icon != settings_icon::Kind::None) {
-            if (auto* iconBrush = painter.brush(p.accent))
-                settings_icon::draw(painter.target(), icon, pageTitleIconRects[activePage],
-                                    iconBrush, 1.35f);
+    void paint(fluent::FluentDialogSurface::Painter& painter, float, float,
+               bool navOnly = false, bool contentOnly = false, bool scrollBarOnly = false) {
+        if (scrollBarOnly) {
+            drawScrollBar(painter);
+            return;
         }
-        painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
-                         pageTitleRects[activePage], p.text);
+        if (!navOnly && !contentOnly && !contentScrollAnimating)
+            updateHintHeights(painter);
+        const auto& p = fluent::palette();
+        if (!contentOnly)
+            drawNav(painter);
+        if (navOnly)
+            return;
+        if (!contentOnly) {
+            if (const auto icon = iconForPage(activePage);
+                icon != settings_icon::Kind::None) {
+                if (auto* iconBrush = painter.brush(p.accent))
+                    settings_icon::draw(painter.target(), icon, pageTitleIconRects[activePage],
+                                        iconBrush, 1.35f);
+            }
+            painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
+                             pageTitleRects[activePage], p.text);
+        }
 
-        painter.target()->PushAxisAlignedClip(
-            contentViewportRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        renderContentLayer();
+        drawScrollBar(painter);
+    }
+
+    void paintContent(fluent::FluentDialogSurface::Painter& painter) {
+        const auto& p = fluent::palette();
         drawSettingGroups(painter);
         for (auto& row : rows[activePage]) {
             if (row.kind == ControlKind::Header) {
@@ -3454,9 +3683,6 @@ struct SettingsDialog::Impl {
                                  p.text);
                 continue;
             }
-            if (row.cardRect.bottom <= contentViewportRect.top ||
-                row.cardRect.top >= contentViewportRect.bottom)
-                continue;
             const auto icon = iconForRow(row.id);
             if (icon != settings_icon::Kind::None) {
                 if (auto* iconBrush = painter.brush(row.enabled ? p.textSecondary : p.disabled))
@@ -3487,8 +3713,49 @@ struct SettingsDialog::Impl {
             else
                 drawButton(painter, row);
         }
-        painter.target()->PopAxisAlignedClip();
-        drawScrollBar(painter);
+    }
+
+    void renderContentLayer() {
+        if (!contentWindow)
+            return;
+        const float scale = surface.dipScale();
+        const float left = std::floor(contentViewportRect.left * scale) / scale;
+        const float top = std::floor(contentViewportRect.top * scale) / scale;
+        const int width = static_cast<int>(std::ceil(contentViewportRect.right * scale) -
+                                           std::floor(contentViewportRect.left * scale));
+        const int height = static_cast<int>(std::ceil(
+            std::max(contentHeight + 2.0f,
+                     contentViewportRect.bottom - contentViewportRect.top) * scale));
+        contentRenderer.setDpi(surface.dpi());
+        if (!contentRenderer.bind(contentWindow, std::max(1, width), std::max(1, height))) {
+            contentLayerReady = false;
+            return;
+        }
+        auto* target = contentRenderer.renderTarget();
+        target->BeginDraw();
+        target->SetTransform(D2D1::Matrix3x2F::Translation(-left, contentPaintScroll - top));
+        target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        {
+            fluent::FluentDialogSurface::Painter painter(target, contentRenderer.dwrite());
+            paintContent(painter);
+        }
+        const HRESULT result = target->EndDraw();
+        if (FAILED(result)) {
+            contentRenderer.discard();
+            contentLayerReady = false;
+            return;
+        }
+        if (contentScrollAnimating) {
+            advanceContentScroll();
+            contentRenderer.animateRootScroll(-contentScroll * scale, -contentScrollTarget * scale,
+                                               -contentScrollVelocity * scale,
+                                               kContentScrollFrequency);
+        } else {
+            contentRenderer.setRootOffsetY(-contentScroll * scale);
+        }
+        contentLayerReady = contentRenderer.present();
+        if (!contentLayerReady)
+            contentRenderer.discard();
     }
 
     int hitTest(float x, float y, int* option = nullptr) const {
@@ -3575,6 +3842,8 @@ struct SettingsDialog::Impl {
     }
 
     void focusStep(int direction) {
+        advanceContentScroll();
+        stopContentScroll();
         const auto order = focusOrder();
         if (order.empty())
             return;
@@ -4267,14 +4536,35 @@ struct SettingsDialog::Impl {
 
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+        case WM_TIMER:
+            if (wp == kContentScrollTimer) {
+                advanceContentScroll();
+                UpdateWindow(hwnd);
+                return 0;
+            }
+            if (wp == kNavIndicatorTimer) {
+                const float scale = surface.dipScale();
+                const RECT dirty{
+                    static_cast<LONG>(std::floor((navRect.left + 6.0f) * scale)),
+                    static_cast<LONG>(std::floor(navRect.top * scale)),
+                    static_cast<LONG>(std::ceil((navRect.left + 11.0f) * scale)),
+                    static_cast<LONG>(std::ceil(navRect.bottom * scale))};
+                surface.invalidate(&dirty);
+                UpdateWindow(hwnd);
+                return 0;
+            }
+            break;
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd, false);
-            surface.initialize(hwnd, backdrop);
+            surface.initialize(hwnd, backdrop, true);
+            if (!createContentWindow())
+                return -1;
             createControls();
             createSliderEditor();
             layout();
             return 0;
         case WM_SIZE:
+            stopContentScroll();
             layout();
             surface.invalidate();
             return 0;
@@ -4288,6 +4578,7 @@ struct SettingsDialog::Impl {
                                                      kMinClientAspectRatio);
             return TRUE;
         case WM_DPICHANGED: {
+            stopContentScroll();
             fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
                                          kDialogExStyle, kMinClientWidthDip,
                                          kMinClientHeightDip);
@@ -4297,6 +4588,8 @@ struct SettingsDialog::Impl {
         }
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
+            stopContentScroll();
+            stopNavIndicator();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
             sliderValueEdit.refreshTheme();
@@ -4305,9 +4598,20 @@ struct SettingsDialog::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
+            const bool navOnly = ps.rcPaint.right <=
+                                 static_cast<LONG>(std::floor(navRect.right * surface.dipScale()));
+            const bool contentOnly =
+                ps.rcPaint.left >= static_cast<LONG>(
+                    std::floor(contentViewportRect.left * surface.dipScale())) &&
+                ps.rcPaint.top >= static_cast<LONG>(
+                    std::floor(contentViewportRect.top * surface.dipScale()));
+            const bool scrollBarOnly = contentOnly && contentLayerReady &&
+                                      ps.rcPaint.left >= static_cast<LONG>(
+                                          std::ceil(contentViewportRect.right * surface.dipScale()));
             surface.paint(hdc, backdrop,
-                          [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
-                              paint(painter, w, h);
+                          [this, navOnly, contentOnly, scrollBarOnly](
+                              fluent::FluentDialogSurface::Painter& painter, float w, float h) {
+                              paint(painter, w, h, navOnly, contentOnly, scrollBarOnly);
                           });
             EndPaint(hwnd, &ps);
             return 0;
@@ -4316,6 +4620,7 @@ struct SettingsDialog::Impl {
             surface.eraseBackground(reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_MOUSEMOVE: {
+            advanceContentScroll();
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
             TrackMouseEvent(&tme);
             const float s = surface.dipScale();
@@ -4392,6 +4697,8 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_LBUTTONDOWN: {
+            advanceContentScroll();
+            stopContentScroll();
             SetFocus(hwnd);
             focusVisible = false;
             const float s = surface.dipScale();
@@ -4505,7 +4812,7 @@ struct SettingsDialog::Impl {
                 contentMaxScroll > 0.0f) {
                 const int delta = GET_WHEEL_DELTA_WPARAM(wp);
                 scrollBy(-static_cast<float>(delta) / static_cast<float>(WHEEL_DELTA) *
-                         kScrollWheelDip);
+                         kScrollWheelDip, true);
             }
             return 0;
         }
@@ -4649,6 +4956,11 @@ struct SettingsDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            stopContentScroll();
+            stopNavIndicator();
+            contentRenderer.releaseAll();
+            contentLayerReady = false;
+            contentWindow = nullptr;
             surface.discard();
             hwnd = nullptr;
             if (notifyHwnd)

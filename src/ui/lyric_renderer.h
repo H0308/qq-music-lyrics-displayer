@@ -68,10 +68,11 @@ private:
 // 绘制代码无需感知差异。
 class DCompRenderer {
 public:
-    DCompRenderer();
+    explicit DCompRenderer(bool contentAboveChildren = true);
     ~DCompRenderer();
 
     bool initialize();
+    void setDrawingDeviceSource(DCompRenderer* source);
     void setDpi(UINT dpi);
 
     // 设备上下文，作为 ID2D1RenderTarget 使用；调用前必须先 bind()。
@@ -131,6 +132,8 @@ public:
     void resetRoot();
     // 直接设置根视觉透明度（取消其上的透明度动画），不改变位移。
     void setRootOpacity(float opacity);
+    void setRootOffsetY(float offset);
+    bool animateRootScroll(float from, float to, float velocity, float frequency);
     // 给弹出卡片的根视觉设置物理像素圆角裁剪；未调用时根视觉保持矩形。
     bool setRootRoundedClip(float top, float bottom, float cornerRadius);
     void commit();
@@ -180,4 +183,6 @@ private:
     int width_ = 0;
     int height_ = 0;
     UINT dpi_ = 96;
+    bool contentAboveChildren_ = true;
+    DCompRenderer* drawingDeviceSource_ = nullptr;
 };

@@ -1002,7 +1002,31 @@ std::vector<MarkdownBlock> parseMarkdown(const std::wstring& markdown) {
 // 由 AboutDialog 的单一绘制表面调用 paint()。
 class ReleaseNotesModel {
 public:
+    bool create(HWND parent) {
+        parent_ = parent;
+        return scrollView_.create(parent, 0x6301, [this](float position, bool redraw) {
+            scrollY_ = position;
+            scrollOnlyPaint_ = !redraw;
+            const float scale = fluent::dipScale(GetDpiForWindow(parent_));
+            const RECT dirty{
+                static_cast<LONG>(std::floor((redraw ? panelRect_.left : scrollbarRight_ - 10.0f) * scale)),
+                static_cast<LONG>(std::floor(panelRect_.top * scale)),
+                static_cast<LONG>(std::ceil((scrollbarRight_ + 4.0f) * scale)),
+                static_cast<LONG>(std::ceil(panelRect_.bottom * scale))};
+            InvalidateRect(parent_, &dirty, FALSE);
+        });
+    }
+    bool tick(WPARAM timer) { return scrollView_.tick(timer); }
+    void stop() {
+        scrollY_ = scrollView_.offset();
+        scrollView_.stop();
+        scrollOnlyPaint_ = false;
+    }
+    void reset() { scrollView_.reset(); parent_ = nullptr; }
+
     void setRelease(ReleaseInfo release) {
+        scrollView_.setOffset(0.0f);
+        scrollOnlyPaint_ = false;
         release_ = std::move(release);
         blocks_ = parseMarkdown(release_->body);
         message_.clear();
@@ -1010,17 +1034,21 @@ public:
     }
 
     void setMessage(const std::wstring& message) {
+        scrollView_.setOffset(0.0f);
+        scrollOnlyPaint_ = false;
         release_.reset();
         blocks_.clear();
         message_ = message;
         scrollY_ = 0.0f;
     }
 
-    void scrollBy(float delta) { scrollY_ += delta; }
+    void scrollBy(float delta) { scrollView_.scrollBy(delta); }
     float contentHeight() const { return contentHeight_; }
     bool dragging() const { return dragging_; }
     void endDrag() { dragging_ = false; }
     bool beginScroll(float x, float y) {
+        scrollY_ = scrollView_.offset();
+        scrollView_.stop();
         if (maxScroll_ <= 0.0f || x < scrollTrack_.left - 4.5f ||
             x > scrollTrack_.right + 4.5f || y < scrollTrack_.top || y > scrollTrack_.bottom)
             return false;
@@ -1072,10 +1100,20 @@ private:
 public:
     void paint(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
                float scrollbarRight) {
+        if (rect.left != panelRect_.left || rect.top != panelRect_.top ||
+            rect.right != panelRect_.right || rect.bottom != panelRect_.bottom)
+            scrollOnlyPaint_ = false;
+        panelRect_ = rect;
+        scrollbarRight_ = scrollbarRight;
+        if (scrollOnlyPaint_) {
+            scrollOnlyPaint_ = false;
+            drawScrollBar(painter, rect, scrollbarRight);
+            return;
+        }
         scrollTrack_ = {};
         scrollThumb_ = {};
         maxScroll_ = 0.0f;
-        ID2D1DCRenderTarget* rt = painter.target();
+        ID2D1RenderTarget* rt = painter.target();
         if (!rt)
             return;
 
@@ -1093,6 +1131,7 @@ public:
         if (bodyFormat)
             bodyFormat->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         if (!release_) {
+            scrollView_.layout({}, 0.0f, GetDpiForWindow(parent_));
             const std::wstring& message = message_.empty() ? emptyMessage() : message_;
             painter.drawText(message, bodyFormat,
                              D2D1::RectF(rect.left + 16.0f, rect.top + 12.0f,
@@ -1133,6 +1172,7 @@ public:
         const float bodyTop = rect.top + 48.0f;
         const float bodyViewHeight = std::max(0.0f, hDip - 48.0f);
         if (blocks_.empty()) {
+            scrollView_.layout({}, 0.0f, GetDpiForWindow(parent_));
             painter.drawText(L"暂无发布说明", bodyFormat,
                              D2D1::RectF(rect.left + 16.0f, bodyTop,
                                           std::max(rect.left + 16.0f, rect.right - 16.0f),
@@ -1208,13 +1248,22 @@ public:
         viewHeight_ = bodyViewHeight;
         scrollY_ = std::clamp(scrollY_, 0.0f, maxScroll);
 
-        rt->PushAxisAlignedClip(D2D1::RectF(rect.left, bodyTop, rect.right, rect.bottom),
-                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        float y = bodyTop - scrollY_;
+        scrollView_.layout(D2D1::RectF(rect.left + 2.0f, bodyTop,
+                                       rect.right - 2.0f, rect.bottom - 2.0f),
+                           std::max(0.0f, contentHeight_ - 2.0f), GetDpiForWindow(parent_));
+        if (!scrollView_.animating())
+            scrollView_.setOffset(scrollY_);
+        scrollY_ = scrollView_.offset();
+        scrollView_.paint([&](fluent::FluentDialogSurface::Painter& painter,
+                              const D2D1_RECT_F& paintBounds, float position) {
+        auto* rt = painter.target();
+        auto* linkBrush = painter.createBrush(palette.accent);
+        painter.fillRoundRect(palette.cardFill, paintBounds, 0.0f);
+        float y = bodyTop - position;
         for (const auto& item : rendered) {
             const auto& block = *item.block;
             if (block.kind == MarkdownBlockKind::Rule) {
-                if (y + item.height >= bodyTop && y <= rect.bottom) {
+                if (y + item.height >= paintBounds.top && y <= paintBounds.bottom) {
                     if (auto* br = painter.brush(palette.separator)) {
                         const float lineY = y + item.height / 2.0f;
                         rt->DrawLine(D2D1::Point2F(rect.left + 16.0f, lineY),
@@ -1223,7 +1272,8 @@ public:
                                      br, 1.0f);
                     }
                 }
-            } else if (item.layout && y + item.height >= bodyTop && y <= rect.bottom) {
+            } else if (item.layout && y + item.height >= paintBounds.top && y <= paintBounds.bottom) {
+                applyMarkdownStyles(item.layout, block, linkBrush);
                 if (block.kind == MarkdownBlockKind::Code) {
                     D2D1_RECT_F codeRect = D2D1::RectF(
                         rect.left + 16.0f, y, std::max(rect.left + 16.0f, rect.right - 16.0f),
@@ -1242,8 +1292,16 @@ public:
             }
             y += item.height + item.gap;
         }
-        rt->PopAxisAlignedClip();
+        });
+        drawScrollBar(painter, rect, scrollbarRight);
+    }
 
+    void drawScrollBar(fluent::FluentDialogSurface::Painter& painter,
+                       const D2D1_RECT_F& rect, float scrollbarRight) {
+        const auto& palette = fluent::palette();
+        const float bodyTop = rect.top + 48.0f;
+        const float bodyViewHeight = std::max(0.0f, rect.bottom - bodyTop);
+        const float maxScroll = maxScroll_;
         if (contentHeight_ > bodyViewHeight && bodyViewHeight > 0.0f) {
             const float trackTop = bodyTop + 8.0f;
             const float trackHeight = std::max(0.0f, bodyViewHeight - 16.0f);
@@ -1276,6 +1334,11 @@ public:
     float viewHeight_ = 0.0f;
     float dragOffset_ = 0.0f;
     bool dragging_ = false;
+    HWND parent_ = nullptr;
+    fluent::CompositedScrollView scrollView_;
+    bool scrollOnlyPaint_ = false;
+    D2D1_RECT_F panelRect_{};
+    float scrollbarRight_ = 0.0f;
 };
 
 } // namespace
@@ -1612,13 +1675,20 @@ struct AboutDialog::Impl {
 
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
+        case WM_TIMER:
+            if (releaseNotes.tick(wp))
+                return 0;
+            break;
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
             surface.initialize(hwnd, backdrop);
+            if (!releaseNotes.create(hwnd))
+                return -1;
             createControls();
             layout();
             return 0;
         case WM_SIZE:
+            releaseNotes.stop();
             layout();
             surface.invalidate();
             return 0;
@@ -1641,6 +1711,7 @@ struct AboutDialog::Impl {
         }
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
+            releaseNotes.stop();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             surface.setBackdrop(backdrop);
             surface.invalidate();
@@ -1875,6 +1946,7 @@ struct AboutDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            releaseNotes.reset();
             discardPendingUpdateResults(hwnd);
             discardPendingDownloadMessages(hwnd);
             surface.discard();

@@ -4,6 +4,7 @@
 
 #include "dock_pet.h"
 #include "fluent_theme.h"
+#include "fluent_dialog_surface.h"
 #include "lyric_renderer.h"
 #include "media_control_icons.h"
 #include "platform_icon.h"
@@ -36,6 +37,7 @@ constexpr UINT_PTR kVolumeTimer = 6;
 constexpr UINT_PTR kIdleQuickExpandTimer = 7;
 constexpr UINT_PTR kCategoryTimer = 8;
 constexpr UINT_PTR kCopyFeedbackTimer = 9;
+constexpr UINT_PTR kIdleSmoothScrollTimer = 10;
 constexpr UINT kShowDelayMs = 100;
 constexpr UINT kHideDelayMs = 180;
 constexpr UINT kOpenAnimationMs = 180;
@@ -370,7 +372,8 @@ struct MediaPopup::Impl {
     bool idleIconsDirty = true;
     std::vector<ID2D1Bitmap*> idleIconBitmaps;
 
-    DCompRenderer renderer;
+    DCompRenderer renderer{false};
+    fluent::CompositedScrollView idleScrollView;
     uint64_t deviceGeneration = 0;
     DockPet pet;
     ID2D1SolidColorBrush* brushBackground = nullptr;
@@ -801,6 +804,9 @@ struct MediaPopup::Impl {
     }
 
     void killTimers() {
+        idleScrollOffset = idleScrollView.offset();
+        idleScrollView.stop();
+        idleScrollView.setVisible(false);
         if (!hwnd)
             return;
         KillTimer(hwnd, kShowTimer);
@@ -842,6 +848,9 @@ struct MediaPopup::Impl {
     }
 
     void releaseDeviceResources() {
+        idleScrollOffset = idleScrollView.offset();
+        idleScrollView.stop();
+        idleScrollView.setVisible(false);
         stopCategoryTransition();
         stopQuickExpandTransition();
         releaseVisualResources();
@@ -2021,7 +2030,8 @@ struct MediaPopup::Impl {
         }
     }
 
-    void drawIdleTodayTasks(ID2D1DeviceContext* rt, const IdlePresentation& content) {
+    void drawIdleTodayTasks(ID2D1DeviceContext* rt, const IdlePresentation& content,
+                            const D2D1_RECT_F* paintBounds = nullptr) {
         if (!rt)
             return;
         if (content.todayTasks.empty()) {
@@ -2046,7 +2056,8 @@ struct MediaPopup::Impl {
             const D2D1_RECT_F row =
                 D2D1::RectF(idleListRect.left, rowTop, idleListRect.right,
                             rowTop + kIdleTaskRowHeightDip);
-            if (row.bottom < idleListRect.top || row.top > idleListRect.bottom)
+            const auto& bounds = paintBounds ? *paintBounds : idleListRect;
+            if (row.bottom < bounds.top || row.top > bounds.bottom)
                 continue;
 
             const bool hovered = static_cast<int>(i) == hoverIdleTask;
@@ -2132,19 +2143,20 @@ struct MediaPopup::Impl {
     }
 
     void drawIdleQuickListContent(ID2D1DeviceContext* rt, float w,
-                                  const IdlePresentation& content) {
+                                  const IdlePresentation& content,
+                                  const D2D1_RECT_F* paintBounds = nullptr) {
         if (!rt)
             return;
         // 方块边框以几何边界为中心绘制；给可视裁剪区留出 1 DIP，避免首行
         // 的上边框被裁掉，同时不改变列表的布局和命中区域。
-        const D2D1_RECT_F visualClip =
+        const D2D1_RECT_F visualClip = paintBounds ? *paintBounds :
             D2D1::RectF(idleListRect.left,
                         idleListRect.top - kIdleQuickVisualClipPaddingDip,
                         idleListRect.right,
                         idleListRect.bottom + kIdleQuickVisualClipPaddingDip);
         rt->PushAxisAlignedClip(visualClip, D2D1_ANTIALIAS_MODE_ALIASED);
         if (content.todayTasksEnabled && idleQuickTab == IdleQuickTab::TodayTasks) {
-            drawIdleTodayTasks(rt, content);
+            drawIdleTodayTasks(rt, content, paintBounds);
         } else if (content.apps.empty()) {
             drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
         } else {
@@ -2162,7 +2174,7 @@ struct MediaPopup::Impl {
                 const D2D1_RECT_F cell =
                     D2D1::RectF(cellLeft, cellTop, cellLeft + kIdleQuickCellSizeDip,
                                 cellTop + kIdleQuickCellSizeDip);
-                if (cell.bottom < idleListRect.top || cell.top > idleListRect.bottom)
+                if (cell.bottom < visualClip.top || cell.top > visualClip.bottom)
                     continue;
                 const bool hovered = static_cast<int>(i) == hoverIdleApp;
                 const bool valid = content.apps[i].pathValid;
@@ -2204,7 +2216,7 @@ struct MediaPopup::Impl {
             }
         }
         rt->PopAxisAlignedClip();
-        if (idleScrollMax > 0.0f) {
+        if (!paintBounds && idleScrollMax > 0.0f) {
             rt->FillRoundedRectangle(
                 D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f), brushProgressTrack);
             rt->FillRoundedRectangle(
@@ -2220,7 +2232,42 @@ struct MediaPopup::Impl {
         const float progress = idleQuickExpandProgress(content);
         drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress, content), progress,
                           content, updateHitTest);
-        drawIdleQuickListContent(rt, w, content);
+        const bool composited = updateHitTest && popupVisible && idleMode &&
+                                !entering && !closing && !categoryTransitionActive &&
+                                !quickExpandTransitionActive;
+        if (composited) {
+            idleScrollView.layout(
+                D2D1::RectF(idleListRect.left, idleListRect.top + cardOriginDip,
+                            idleListRect.right, idleListRect.bottom + cardOriginDip),
+                idleQuickListContentHeight(content), dpi);
+            if (!idleScrollView.animating())
+                idleScrollView.setOffset(idleScrollOffset);
+            idleScrollOffset = idleScrollView.offset();
+            idleScrollView.setVisible(true);
+            idleScrollView.paint([&](fluent::FluentDialogSurface::Painter& painter,
+                                     const D2D1_RECT_F& bounds, float position) {
+                auto* target = static_cast<ID2D1DeviceContext*>(painter.target());
+                D2D1_MATRIX_3X2_F saved{};
+                target->GetTransform(&saved);
+                target->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip) * saved);
+                const auto localBounds = D2D1::RectF(bounds.left, bounds.top - cardOriginDip,
+                                                     bounds.right, bounds.bottom - cardOriginDip);
+                const float previous = idleScrollOffset;
+                idleScrollOffset = position;
+                drawIdleQuickListContent(target, w, content, &localBounds);
+                idleScrollOffset = previous;
+                target->SetTransform(saved);
+            });
+            if (idleScrollMax > 0.0f) {
+                rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f),
+                                          brushProgressTrack);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollThumbRect, 1.5f, 1.5f),
+                                          brushSecondary);
+            }
+        } else {
+            idleScrollView.setVisible(false);
+            drawIdleQuickListContent(rt, w, content);
+        }
     }
 
     void drawIdle(ID2D1DeviceContext* rt, float w, bool updateHitTest) {
@@ -3065,6 +3112,11 @@ struct MediaPopup::Impl {
     bool render() {
         if (!hwnd)
             return false;
+        if (!idleMode || !popupVisible || entering || closing) {
+            idleScrollOffset = idleScrollView.offset();
+            idleScrollView.stop();
+            idleScrollView.setVisible(false);
+        }
         // 合成层已经覆盖卡片时，任何额外的交换链 Present 都可能把透明底单独
         // 推给合成器；状态会在转场收尾时统一预绘制并交接。
         if ((categoryTransitionActive && categoryLayersActive) ||
@@ -3154,8 +3206,10 @@ struct MediaPopup::Impl {
         const bool categoryLayersCoverCard = categoryTransitionActive && categoryLayersActive;
         const bool quickExpandLayersCoverCard =
             quickExpandTransitionActive && quickExpandLayersBuilt;
-        if (categoryLayersCoverCard || quickExpandLayersCoverCard)
+        if (categoryLayersCoverCard || quickExpandLayersCoverCard) {
+            idleScrollView.setVisible(false);
             return true;
+        }
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
@@ -3492,6 +3546,7 @@ struct MediaPopup::Impl {
         }
         idleContentTransitionActive = false;
         idleScrollOffset = 0.0f;
+        idleScrollView.setOffset(0.0f);
         idleQuoteScrollOffset = 0.0f;
         idleQuoteSourceScrollOffset = 0.0f;
         scrollTickMs = 0;
@@ -3654,14 +3709,14 @@ struct MediaPopup::Impl {
             y - idleScrollDragOffset, idleScrollTrackRect.top,
             idleScrollTrackRect.bottom - thumbHeight);
         idleScrollOffset = (thumbTop - idleScrollTrackRect.top) / usable * idleScrollMax;
+        idleScrollView.setOffset(idleScrollOffset);
         renderOrDefer();
     }
 
     void scrollIdleBy(float delta) {
         if (!idleMode || idleScrollMax <= 0.0f)
             return;
-        idleScrollOffset = std::clamp(idleScrollOffset + delta, 0.0f, idleScrollMax);
-        renderOrDefer();
+        idleScrollView.scrollBy(delta);
     }
 
     // 拖动/点击滑块：按 x 坐标换算百分比，本地即时反馈并上报
@@ -3859,6 +3914,9 @@ struct MediaPopup::Impl {
         if (!popupVisible || closing || categoryTransitionActive ||
             quickExpandTransitionActive)
             return;
+        idleScrollOffset = idleScrollView.offset();
+        idleScrollView.stop();
+        idleScrollView.setVisible(false);
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kScrollTimer);
@@ -3868,6 +3926,10 @@ struct MediaPopup::Impl {
         entering = false;
         deferredRender = false;
         closing = true;
+        if (!render()) {
+            hideImmediate();
+            return;
+        }
         runtime_log::writef(L"[action][media-popup] hide");
         const float toX = sideAnchored
                               ? (popupOnRightOfAnchor ? -animationTravelPx
@@ -3928,6 +3990,9 @@ struct MediaPopup::Impl {
     }
 
     void hideImmediate() {
+        idleScrollOffset = idleScrollView.offset();
+        idleScrollView.stop();
+        idleScrollView.setVisible(false);
         if (playbackScene && idleMode && !inlineControls)
             idleMode = false;
         idlePanelManual = false;
@@ -4045,6 +4110,8 @@ struct MediaPopup::Impl {
             renderOrDefer();
             return 0;
         case WM_LBUTTONDOWN: {
+            idleScrollOffset = idleScrollView.offset();
+            idleScrollView.stop();
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
             if (idleMode) {
@@ -4269,9 +4336,8 @@ struct MediaPopup::Impl {
             if (idleMode) {
                 const float localY = y - cardOriginDip;
                 if (contains(idleListRect, x, localY) || hitIdleScrollBar(x, y)) {
-                    const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
-                    if (steps != 0)
-                        scrollIdleBy(-static_cast<float>(steps) * 32.0f);
+                    scrollIdleBy(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) /
+                                 WHEEL_DELTA * 32.0f);
                 }
                 return 0;
             }
@@ -4316,6 +4382,8 @@ struct MediaPopup::Impl {
             return HTCLIENT;
         }
         case WM_TIMER:
+            if (idleScrollView.tick(wp))
+                return 0;
             if (wp == kShowTimer) {
                 KillTimer(hwnd, kShowTimer);
                 if (anchorHover && opensOnHover())
@@ -4352,7 +4420,7 @@ struct MediaPopup::Impl {
                 KillTimer(hwnd, kEnterTimer);
                 entering = false;
                 if (popupVisible && !closing) {
-                    if (deferredRender) {
+                    if (deferredRender || idleMode) {
                         deferredRender = false;
                         render();
                     }
@@ -4435,6 +4503,7 @@ struct MediaPopup::Impl {
             hideImmediate();
             return 0;
         case WM_DESTROY:
+            idleScrollView.reset();
             killTimers();
             releaseDrawingResources();
             hwnd = nullptr;
@@ -4473,6 +4542,14 @@ bool MediaPopup::create(HINSTANCE inst, HWND anchor) {
                                   WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    if (!impl_->idleScrollView.create(impl_->hwnd, kIdleSmoothScrollTimer,
+                                      [impl = impl_.get()](float position, bool) {
+        impl->idleScrollOffset = position;
+        impl->renderOrDefer();
+    }, &impl_->renderer)) {
+        DestroyWindow(impl_->hwnd);
+        return false;
+    }
     impl_->dpi = GetDpiForWindow(impl_->hwnd);
     if (impl_->dpi == 0)
         impl_->dpi = GetDpiForSystem();
@@ -4745,6 +4822,10 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
 
     const bool changed = quoteChanged || appsChanged || appIconsChanged || tasksChanged;
+    if (appsChanged || appIconsChanged || tasksChanged) {
+        impl_->idleScrollOffset = impl_->idleScrollView.offset();
+        impl_->idleScrollView.stop();
+    }
 
     if (quoteContentChanged || !content.showQuote || !content.copyEnabled ||
         content.loading || content.sentence.empty()) {
@@ -4782,6 +4863,7 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         impl_->pressedIdleTask = -1;
         impl_->pressedIdleTaskCheckbox = -1;
         impl_->idleScrollOffset = 0.0f;
+        impl_->idleScrollView.setOffset(0.0f);
         impl_->idleScrollDragging = false;
     }
     if (!content.quickStartEnabled) {

@@ -115,6 +115,10 @@ struct ManualSearchDialog::Impl {
     bool backdrop = false;
 
     fluent::FluentDialogSurface surface;
+    fluent::CompositedScrollView candidateScrollView;
+    fluent::CompositedScrollView previewScrollView;
+    bool scrollOnlyPaint = false;
+    float previewScrollPadding = 0.0f;
 
     TextField titleEdit;
     TextField artistEdit;
@@ -404,6 +408,7 @@ struct ManualSearchDialog::Impl {
         focusedId = kIdTitleEdit;
         focusVisible = false;
         candidateScroll = 0.0f;
+        candidateScrollView.setOffset(0.0f);
         candidateWheelAccum = 0;
         candidateScrollDragging = false;
         previewWheelAccum = 0;
@@ -543,14 +548,8 @@ struct ManualSearchDialog::Impl {
     }
 
     void scrollCandidatesBy(int delta) {
-        candidateWheelAccum += delta;
-        const int notches = candidateWheelAccum / WHEEL_DELTA;
-        if (notches == 0)
-            return;
-        candidateWheelAccum -= notches * WHEEL_DELTA;
-        candidateScroll = std::clamp(candidateScroll - notches * 3.0f * kCandidateRowHeight,
-                                     0.0f, candidateMaxScroll());
-        surface.invalidate();
+        candidateScrollView.scrollBy(-static_cast<float>(delta) / WHEEL_DELTA *
+                                     3.0f * kCandidateRowHeight);
     }
 
     void ensureCandidateVisible(int row) {
@@ -692,6 +691,7 @@ struct ManualSearchDialog::Impl {
     }
 
     void resetPreviewView() {
+        previewScrollView.setOffset(0.0f);
         previewPositionMs = playbackPositionMs;
         previewCurrentLine = LyricProvider::findLine(previewLines, previewPositionMs);
         previewTopLine = 0;
@@ -725,16 +725,16 @@ struct ManualSearchDialog::Impl {
         previewTopLine = std::clamp(previewTopLine + lines, 0, maxTop);
         previewManualScroll = true;
         previewLastScrollTick = GetTickCount();
-        surface.invalidate();
+        previewScrollView.scrollBy(lines * previewLyricRowHeight());
     }
 
     void scrollPreviewByWheel(int delta) {
-        previewWheelAccum += delta;
-        const int notches = previewWheelAccum / WHEEL_DELTA;
-        if (notches == 0)
+        if (previewLines.empty())
             return;
-        previewWheelAccum -= notches * WHEEL_DELTA;
-        scrollPreviewBy(-notches * kPreviewWheelLinesPerNotch);
+        previewManualScroll = true;
+        previewLastScrollTick = GetTickCount();
+        previewScrollView.scrollBy(-static_cast<float>(delta) / WHEEL_DELTA *
+                                   kPreviewWheelLinesPerNotch * previewLyricRowHeight());
     }
 
     void onPreviewTimer() {
@@ -1012,14 +1012,22 @@ struct ManualSearchDialog::Impl {
                 1.5f, fluent::metrics::cardRadius - 1.0f);
         }
 
-        painter.target()->PushAxisAlignedClip(candidateListRect,
-                                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        float y = candidateListRect.top - candidateScroll;
+        candidateScrollView.layout(
+            D2D1::RectF(candidateListRect.left + 2.0f, candidateListRect.top + 2.0f,
+                        candidateListRect.right - kScrollBarHitWidth, candidateListRect.bottom - 2.0f),
+            std::max(0.0f, candidateContentHeight() - 4.0f), surface.dpi());
+        if (!candidateScrollView.animating())
+            candidateScrollView.setOffset(candidateScroll);
+        candidateScroll = candidateScrollView.offset();
+        candidateScrollView.paint([&](fluent::FluentDialogSurface::Painter& painter,
+                                      const D2D1_RECT_F& paintBounds, float position) {
+        painter.fillRoundRect(p.cardFill, paintBounds, 0.0f);
+        float y = candidateListRect.top - position;
         for (int row = 0; row < static_cast<int>(candidateItems.size()); ++row) {
             const float rowH = candidateItemHeight(row);
             const D2D1_RECT_F rowRect = D2D1::RectF(candidateListRect.left, y,
                                                    candidateListRect.right, y + rowH);
-            if (rowRect.bottom >= candidateListRect.top && rowRect.top <= candidateListRect.bottom) {
+            if (rowRect.bottom >= paintBounds.top && rowRect.top <= paintBounds.bottom) {
                 const auto& item = candidateItems[row];
                 if (!item.header) {
                     const bool selected = row == selectedItemRow;
@@ -1058,6 +1066,7 @@ struct ManualSearchDialog::Impl {
             y += rowH;
         }
 
+        }, !scrollOnlyPaint);
         if (candidateHasScroll() && height > 0.0f) {
             const auto bar = scrollBarGeometry(height, candidateContentHeight());
             const float thumbY = candidateListRect.top +
@@ -1068,7 +1077,6 @@ struct ManualSearchDialog::Impl {
                             candidateListRect.right - kScrollBarInset, thumbY + bar.thumbHeight),
                 kScrollBarWidth * 0.5f);
         }
-        painter.target()->PopAxisAlignedClip();
     }
 
     void drawPreview(fluent::FluentDialogSurface::Painter& painter) {
@@ -1086,6 +1094,7 @@ struct ManualSearchDialog::Impl {
         }
 
         if (previewLines.empty()) {
+            previewScrollView.layout({}, 0.0f, surface.dpi());
             painter.drawText(
                 L"选择左侧歌曲预览歌词", painter.textFormat(15.0f, 400, true),
                 D2D1::RectF(previewRect.left + 12.0f, previewRect.top + height * 0.4f,
@@ -1159,21 +1168,31 @@ struct ManualSearchDialog::Impl {
         const float lyricTop = previewRect.top + contentTop +
                                std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
 
-        painter.target()->PushAxisAlignedClip(
-            D2D1::RectF(previewRect.left, previewRect.top, previewRect.right, previewRect.bottom),
-            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        float rowTop = lyricTop;
-        for (int i = 0; i < count; ++i) {
-            const int lineIndex = top + i;
-            const bool current = previewCurrentLine >= 0 && lineIndex == previewCurrentLine;
-            const float rowHeight = ensureRowMetric(lineIndex);
-            const D2D1_RECT_F rect =
-                D2D1::RectF(lyricLeft, rowTop, lyricRight, rowTop + rowHeight);
-            drawPreviewLyricLine(painter, previewLines[lineIndex], rect,
-                                 mainHeights[lineIndex], current);
-            rowTop += rowHeight;
-        }
-        painter.target()->PopAxisAlignedClip();
+        std::vector<float> rowOffsets(total + 1, 0.0f);
+        for (int index = 0; index < total; ++index)
+            rowOffsets[index + 1] = rowOffsets[index] + ensureRowMetric(index);
+        const float bodyTop = previewRect.top + contentTop;
+        if (!previewManualScroll)
+            previewScrollPadding = lyricTop - bodyTop;
+        previewScrollView.layout(D2D1::RectF(lyricLeft, bodyTop, lyricRight, previewRect.bottom - 2.0f),
+                                  std::max(rowOffsets[total] + previewScrollPadding,
+                                           rowOffsets[total - 1] + availableHeight) - 2.0f,
+                                  surface.dpi());
+        if (!previewManualScroll)
+            previewScrollView.setOffset(rowOffsets[top]);
+        previewScrollView.paint([&](fluent::FluentDialogSurface::Painter& painter,
+                                    const D2D1_RECT_F& paintBounds, float position) {
+            painter.fillRoundRect(p.cardFill, paintBounds, 0.0f);
+            for (int index = 0; index < total; ++index) {
+                const float rowTop = bodyTop + previewScrollPadding + rowOffsets[index] - position;
+                const D2D1_RECT_F rect = D2D1::RectF(
+                    lyricLeft, rowTop, lyricRight, rowTop + rowHeights[index]);
+                if (rect.bottom < paintBounds.top || rect.top > paintBounds.bottom)
+                    continue;
+                drawPreviewLyricLine(painter, previewLines[index], rect,
+                                     mainHeights[index], index == previewCurrentLine);
+            }
+        }, !scrollOnlyPaint);
 
         if (previewHasRomanization)
             drawPreviewToggleButton(painter, previewRomanizationRect, L"音",
@@ -1326,6 +1345,7 @@ struct ManualSearchDialog::Impl {
         selectedIdx = -1;
         hoverItemRow = -1;
         candidateScroll = 0.0f;
+        candidateScrollView.setOffset(0.0f);
         candidateWheelAccum = 0;
         previewOffsetMs = 0;
         setPreviewLines({});
@@ -1353,6 +1373,7 @@ struct ManualSearchDialog::Impl {
         selectedIdx = -1;
         hoverItemRow = -1;
         candidateScroll = 0.0f;
+        candidateScrollView.setOffset(0.0f);
         candidateWheelAccum = 0;
         searching = false;
         previewOffsetMs = 0;
@@ -1518,11 +1539,30 @@ struct ManualSearchDialog::Impl {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd);
             surface.initialize(hwnd, backdrop);
+            if (!candidateScrollView.create(hwnd, 0x6401, [this](float position, bool redraw) {
+                    candidateScroll = position;
+                    const float scale = surface.dipScale();
+                    const RECT dirty{
+                        static_cast<LONG>(std::floor((redraw ? candidateListRect.left :
+                                                      candidateListRect.right - kScrollBarHitWidth) * scale)),
+                        static_cast<LONG>(std::floor(candidateListRect.top * scale)),
+                        static_cast<LONG>(std::ceil(candidateListRect.right * scale)),
+                        static_cast<LONG>(std::ceil(candidateListRect.bottom * scale))};
+                    surface.invalidate(&dirty);
+                }) ||
+                !previewScrollView.create(hwnd, 0x6402, [this](float, bool redraw) {
+                    if (redraw)
+                        surface.invalidate();
+                }))
+                return -1;
             createControls();
             layout();
             SetTimer(hwnd, kPreviewTimerId, 100, nullptr);
             return 0;
         case WM_SIZE:
+            candidateScroll = candidateScrollView.offset();
+            candidateScrollView.stop();
+            previewScrollView.stop();
             layout();
             surface.invalidate();
             return 0;
@@ -1545,6 +1585,9 @@ struct ManualSearchDialog::Impl {
             return TRUE;
         case WM_SETTINGCHANGE:
         case WM_THEMECHANGED:
+            candidateScroll = candidateScrollView.offset();
+            candidateScrollView.stop();
+            previewScrollView.stop();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             surface.setBackdrop(backdrop);
             surface.invalidate();
@@ -1552,6 +1595,10 @@ struct ManualSearchDialog::Impl {
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
+            const float scale = surface.dipScale();
+            scrollOnlyPaint =
+                ps.rcPaint.left >= std::floor((candidateListRect.right - kScrollBarHitWidth) * scale) &&
+                ps.rcPaint.right <= std::ceil(candidateListRect.right * scale);
             surface.paint(hdc, backdrop,
                           [this](fluent::FluentDialogSurface::Painter& painter, float w, float h) {
                               paint(painter, w, h);
@@ -1563,6 +1610,8 @@ struct ManualSearchDialog::Impl {
             surface.eraseBackground(reinterpret_cast<HDC>(wp), backdrop);
             return 1;
         case WM_TIMER:
+            if (candidateScrollView.tick(wp) || previewScrollView.tick(wp))
+                return 0;
             if (wp == kPreviewTimerId)
                 onPreviewTimer();
             return 0;
@@ -1612,6 +1661,9 @@ struct ManualSearchDialog::Impl {
             }
             return 0;
         case WM_LBUTTONDOWN: {
+            candidateScroll = candidateScrollView.offset();
+            candidateScrollView.stop();
+            previewScrollView.stop();
             SetFocus(hwnd);
             focusVisible = false;
             const float scale = surface.dipScale();
@@ -1679,6 +1731,9 @@ struct ManualSearchDialog::Impl {
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB | DLGC_WANTCHARS;
         case WM_KEYDOWN:
+            candidateScroll = candidateScrollView.offset();
+            candidateScrollView.stop();
+            previewScrollView.stop();
             if (wp == VK_TAB) {
                 focusStep(isShiftDown() ? -1 : 1);
                 return 0;
@@ -1757,6 +1812,8 @@ struct ManualSearchDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            candidateScrollView.reset();
+            previewScrollView.reset();
             discardPendingResults(hwnd);
             KillTimer(hwnd, kPreviewTimerId);
             surface.discard();

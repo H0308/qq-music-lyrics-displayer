@@ -446,7 +446,7 @@ struct FontColorDialog::Impl {
         const D2D1_RECT_F panelClip = D2D1::RectF(
             previewRect.left + 1.0f, previewRect.top + 1.0f, previewRect.right - 1.0f,
             previewRect.bottom - 1.0f);
-        ID2D1DCRenderTarget* target = painter.target();
+        ID2D1RenderTarget* target = painter.target();
         target->PushAxisAlignedClip(panelClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         static constexpr float kDirections[8][2] = {

@@ -8,9 +8,14 @@
 #include <windows.h>
 
 #include <functional>
+#include <cstdint>
+#include <chrono>
 #include <initializer_list>
+#include <map>
 #include <string>
+#include <tuple>
 #include <vector>
+#include <wrl/client.h>
 
 namespace fluent {
 
@@ -46,15 +51,28 @@ void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* propose
 // 页面布局、命中测试和业务命令仍由各自的窗口实现。
 class FluentDialogSurface {
 public:
+    struct TextCache {
+        using FormatKey = std::tuple<float, int, bool, bool, std::wstring>;
+        using LayoutKey = std::tuple<std::wstring, std::uintptr_t, float, float>;
+        std::map<FormatKey, Microsoft::WRL::ComPtr<IDWriteTextFormat>> formats;
+        std::map<LayoutKey, Microsoft::WRL::ComPtr<IDWriteTextLayout>> layouts;
+
+        void clear() {
+            layouts.clear();
+            formats.clear();
+        }
+    };
+
     class Painter {
     public:
-        Painter(ID2D1DCRenderTarget* target, IDWriteFactory* dwrite);
+        Painter(ID2D1RenderTarget* target, IDWriteFactory* dwrite,
+                TextCache* textCache = nullptr);
         ~Painter();
 
         Painter(const Painter&) = delete;
         Painter& operator=(const Painter&) = delete;
 
-        ID2D1DCRenderTarget* target() const { return target_; }
+        ID2D1RenderTarget* target() const { return target_; }
         IDWriteFactory* dwrite() const { return dwrite_; }
 
         ID2D1SolidColorBrush* brush(D2D1_COLOR_F color);
@@ -82,8 +100,9 @@ public:
                              const D2D1_RECT_F& rect, D2D1_COLOR_F color);
 
     private:
-        ID2D1DCRenderTarget* target_ = nullptr;
+        ID2D1RenderTarget* target_ = nullptr;
         IDWriteFactory* dwrite_ = nullptr;
+        TextCache* textCache_ = nullptr;
         ID2D1SolidColorBrush* brush_ = nullptr;
         std::vector<ID2D1SolidColorBrush*> brushes_;
         std::vector<IDWriteTextFormat*> formats_;
@@ -98,7 +117,7 @@ public:
     FluentDialogSurface(const FluentDialogSurface&) = delete;
     FluentDialogSurface& operator=(const FluentDialogSurface&) = delete;
 
-    bool initialize(HWND hwnd, bool backdrop);
+    bool initialize(HWND hwnd, bool backdrop, bool cacheText = false);
     void setBackdrop(bool backdrop);
     void eraseBackground(HDC hdc, bool backdrop);
     // 在一次 WM_PAINT 内完成背景准备、D2D 绘制和当前 DC 提交。
@@ -114,7 +133,59 @@ private:
     HWND hwnd_ = nullptr;
     UINT dpi_ = 96;
     bool hasPainted_ = false;
+    bool cacheText_ = false;
+    TextCache textCache_;
+    int textCacheWidth_ = 0;
+    int textCacheHeight_ = 0;
     LyricRenderer renderer_;
+};
+
+class CompositedScrollView {
+public:
+    using Painter = FluentDialogSurface::Painter;
+    using Draw = std::function<void(Painter&, const D2D1_RECT_F&, float)>;
+    using Changed = std::function<void(float, bool)>;
+
+    CompositedScrollView() = default;
+    CompositedScrollView(const CompositedScrollView&) = delete;
+    CompositedScrollView& operator=(const CompositedScrollView&) = delete;
+    ~CompositedScrollView();
+    bool create(HWND parent, UINT_PTR timer, Changed changed,
+                DCompRenderer* drawingDeviceSource = nullptr);
+    void layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi);
+    void paint(const Draw& draw, bool redraw = true);
+    void scrollBy(float delta, bool smooth = true);
+    void setOffset(float offset);
+    void stop();
+    void setVisible(bool visible);
+    bool tick(WPARAM timer);
+    float offset() const;
+    bool animating() const { return animating_; }
+    void reset();
+
+private:
+    static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wp, LPARAM lp);
+    float velocity() const;
+    void applyAnimation();
+    bool needsCache(float offset) const;
+
+    HWND parent_ = nullptr;
+    HWND window_ = nullptr;
+    UINT_PTR timer_ = 0;
+    UINT dpi_ = 96;
+    D2D1_RECT_F viewport_{};
+    float height_ = 0.0f;
+    float maximum_ = 0.0f;
+    float from_ = 0.0f;
+    float target_ = 0.0f;
+    float speed_ = 0.0f;
+    float cacheTop_ = 0.0f;
+    float cacheHeight_ = 0.0f;
+    bool ready_ = false;
+    bool animating_ = false;
+    std::chrono::steady_clock::time_point started_{};
+    Changed changed_;
+    DCompRenderer renderer_;
 };
 
 } // namespace fluent
