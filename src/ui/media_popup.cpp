@@ -2900,10 +2900,9 @@ struct MediaPopup::Impl {
                                          durationSec))
             return false;
         categoryLayersActive = true;
+        // 滚动层与转场层共用合成设备，在同一事务中交接，避免重复显示。
+        idleScrollView.setContentVisible(false);
         renderer.commit();
-        // 滚动子窗口位于父合成树上方，等转场层真正可见后再交出列表。
-        renderer.waitForCommitCompletion();
-        idleScrollView.setVisible(false);
         // 合成器动画在 kCategoryTransitionMs 后停在终点；定时器稍加余量收尾：
         // 先预绘制目标页，再撤层提交。余量内层已静止在终点，交接无跳变。
         SetTimer(hwnd, kCategoryTimer, static_cast<UINT>(kCategoryTransitionMs) + 32,
@@ -3116,6 +3115,8 @@ struct MediaPopup::Impl {
                 (opening ? expandedListHeight : collapsedListHeight) * s, durationSec))
             return false;
         quickExpandLayersBuilt = true;
+        // 原列表不能留在移动快照上方；与动画启动一起提交隐藏操作。
+        idleScrollView.setContentVisible(false);
         renderer.commit();
         return true;
     }
@@ -3768,10 +3769,12 @@ struct MediaPopup::Impl {
     void toggleIdleQuickExpand() {
         if (!hwnd || !idleMode || !idle.quickStartEnabled || !idle.showText)
             return;
-        // 上一次层动画还在进行时再次点击：合成器动画无法中途取值反向，
-        // 直接停掉（瞬时落到当前目标状态），再从新目标重新起步。
+        // 再次点击时先完成上一目标的图层交接，再从该状态反向展开/收起。
         if (quickExpandTransitionActive)
-            stopQuickExpandTransition();
+            finishLayerTransition(quickExpandTransitionActive, quickExpandLayersBuilt,
+                                  kIdleQuickExpandTimer);
+        idleScrollOffset = idleScrollView.offset();
+        idleScrollView.stop();
         idleQuickExpanded = !idleQuickExpanded;
         idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
         idleQuickExpandOpening = false;
