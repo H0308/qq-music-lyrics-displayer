@@ -1019,6 +1019,7 @@ struct App {
     // 每日一言任务栏入口：句子缓存与应用图标属于播放链路之外的独立状态。
     bool idleEntryEnabled_ = true;
     bool idleQuoteEnabled_ = true;
+    bool idleWelcomeEnabled_ = true;
     bool idleAppNamesVisible_ = true;
     // 自定义欢迎语：非空时在关闭每日一言后始终显示，不再随时间和日期变化。
     std::wstring idleCustomWelcome_;
@@ -1081,6 +1082,7 @@ struct App {
     bool dockBackgroundBlurLogPending_ = false;
     int immersiveBackgroundAdjustment_ = 0;
     int dockBackgroundAdjustment_ = 0;
+    bool embeddedResourceMonitor_ = false;
     bool dockResourceGpuUsage_ = false;
     bool dockResourceCpuFrequency_ = false;
     bool taskbarContextMenuEnabled_ = true;
@@ -1654,6 +1656,7 @@ struct App {
             syncTaskbarView(monitor.snapshot());
             syncTaskbarOrientation();
             applyEffectiveTaskbarSettings();
+            publishPresentationFrame(monitor.snapshot(), false, true);
         }
         logSettingInt(L"taskbar-view-mode", mode);
         saveSettings();
@@ -1748,9 +1751,19 @@ struct App {
         if (!taskbarHost)
             return;
         DockResourceVisibility visibility;
+        visibility.embeddedEnabled = embeddedResourceMonitor_;
         visibility.gpuUsage = dockResourceGpuUsage_;
         visibility.cpuFrequency = dockResourceCpuFrequency_;
         forEachHost([&](TaskbarHost* host) { host->setDockResourceVisibility(visibility); });
+    }
+
+    void applyEmbeddedResourceMonitor(bool on) {
+        embeddedResourceMonitor_ = on;
+        applyDockResourceVisibility();
+        publishPresentationFrame(monitor.snapshot(), false, true);
+        refreshSettingsDialog(true);
+        logSettingBool(L"embedded-resource-monitor", on);
+        saveSettings();
     }
 
     void applyDockResourceGpuUsage(bool on) {
@@ -1825,6 +1838,7 @@ struct App {
             host->setImmersiveBackgroundBlur(immersiveBackgroundBlur_);
             host->setDockBackgroundBlur(dockBackgroundBlur_);
             DockResourceVisibility visibility;
+            visibility.embeddedEnabled = embeddedResourceMonitor_;
             visibility.gpuUsage = dockResourceGpuUsage_;
             visibility.cpuFrequency = dockResourceCpuFrequency_;
             host->setDockResourceVisibility(visibility);
@@ -1888,6 +1902,7 @@ struct App {
 
         applyEffectiveTaskbarSettings();
         syncSpectrumWithMode();
+        publishPresentationFrame(monitor.snapshot(), false, true);
         refreshSettingsDialog(true);
     }
 
@@ -2350,8 +2365,15 @@ struct App {
         return tickTickEnabled_ && !tickTickApiToken_.empty();
     }
 
+    bool idleTextVisible() const {
+        return idleQuoteEnabled_ || idleWelcomeEnabled_ ||
+               taskbarViewMode_ != TaskbarViewMode::Embedded || !embeddedResourceMonitor_ ||
+               taskbarVertical_;
+    }
+
     IdlePresentation currentIdlePresentation() const {
         IdlePresentation presentation;
+        presentation.showText = idleTextVisible();
         presentation.showQuote = idleQuoteEnabled_;
         presentation.quickStartEnabled = idleEntryEnabled_;
         presentation.showAppNames = idleAppNamesVisible_;
@@ -2366,7 +2388,7 @@ struct App {
                 presentation.source += L" · ";
                 presentation.source += idleQuoteOrigin_;
             }
-        } else {
+        } else if (presentation.showText) {
             presentation.sentence = idleCustomWelcome_.empty() ? defaultIdleWelcome()
                                                                : idleCustomWelcome_;
         }
@@ -2435,7 +2457,7 @@ struct App {
 
     void refreshIdleWelcome() {
         const SmtcSnapshot snap = monitor.snapshot();
-        if (!idleEntryEnabled_ || idleQuoteEnabled_ || snap.sessionAlive ||
+        if (!idleEntryEnabled_ || idleQuoteEnabled_ || !idleTextVisible() || snap.sessionAlive ||
             !idleCustomWelcome_.empty())
             return;
         if (currentFrame_.idle.sentence == defaultIdleWelcome())
@@ -2459,7 +2481,8 @@ struct App {
         holidayCalendarUpdatedAt_ = static_cast<int64_t>(std::time(nullptr));
         holidayCalendar_ = std::move(payload->result.days);
         saveSettings();
-        if (idleEntryEnabled_ && !idleQuoteEnabled_ && !monitor.snapshot().sessionAlive)
+        if (idleEntryEnabled_ && !idleQuoteEnabled_ && idleTextVisible() &&
+            !monitor.snapshot().sessionAlive)
             publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
@@ -2533,11 +2556,15 @@ struct App {
         publishPresentationFrame(monitor.snapshot(), false, true);
     }
 
-    void applyIdleQuoteEnabled(bool enabled) {
-        if (idleQuoteEnabled_ == enabled)
+    void applyIdleTextMode(int mode) {
+        mode = std::clamp(mode, 0, 2);
+        const bool enabled = mode == 0;
+        const bool welcome = mode == 1;
+        if (idleQuoteEnabled_ == enabled && idleWelcomeEnabled_ == welcome)
             return;
         idleQuoteEnabled_ = enabled;
-        runtime_log::writef(L"[action][idle-quote] enabled=%s", enabled ? L"on" : L"off");
+        idleWelcomeEnabled_ = welcome;
+        runtime_log::writef(L"[action][idle-text] mode=%d", mode);
         if (!enabled) {
             ++idleQuoteRequestGeneration_;
             idleQuoteRequestKey_.clear();
@@ -2854,7 +2881,7 @@ struct App {
         } else if (showStartupTaskLoading) {
             frame.statusText = L"正在同步今日任务…";
         } else if (frame.scene == DisplayScene::Idle)
-            frame.statusText = frame.idle.sentence;
+            frame.statusText = idleTextVisible() ? frame.idle.sentence : L"";
         else if (!snap.sessionAlive)
             frame.statusText = notRunningStatus();
         else if (lyricLoading_)
@@ -4193,6 +4220,7 @@ void App::loadSettings() {
             j.value("immersiveBackgroundAdjustment", 0), 0, 1);
         dockBackgroundAdjustment_ = std::clamp(
             j.value("dockBackgroundAdjustment", 0), 0, 1);
+        embeddedResourceMonitor_ = j.value("embeddedResourceMonitor", false);
         dockResourceGpuUsage_ = j.value("dockResourceGpu", false);
         dockResourceCpuFrequency_ = j.value("dockResourceCpuFrequency", false);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
@@ -4292,6 +4320,7 @@ void App::loadSettings() {
                                 : AlbumCoverEffect::Default;
         idleEntryEnabled_ = j.value("idleEntryEnabled", true);
         idleQuoteEnabled_ = j.value("idleQuoteEnabled", true);
+        idleWelcomeEnabled_ = j.value("idleWelcomeEnabled", !idleQuoteEnabled_);
         idleAppNamesVisible_ = j.value("idleAppNamesVisible", true);
         idleCustomWelcome_ =
             normalizeIdleCustomWelcome(wideOf(j.value("idleCustomWelcome", std::string())));
@@ -4412,6 +4441,7 @@ void App::saveSettings() {
             saveAppearance("Global", globalLyricAppearance_);
         j["idleEntryEnabled"] = idleEntryEnabled_;
         j["idleQuoteEnabled"] = idleQuoteEnabled_;
+        j["idleWelcomeEnabled"] = idleWelcomeEnabled_;
         j["idleAppNamesVisible"] = idleAppNamesVisible_;
         j["idleCustomWelcome"] = utf8Of(idleCustomWelcome_);
         j["idleQuoteSource"] = idleQuoteSourceConfigName(idleQuoteSource_);
@@ -4456,6 +4486,7 @@ void App::saveSettings() {
         j.erase("immersiveMaskOpacity");
         j.erase("dockMaskOpacity");
         j.erase("dockBackgroundBlur");
+        j["embeddedResourceMonitor"] = embeddedResourceMonitor_;
         j["dockResourceGpu"] = dockResourceGpuUsage_;
         j.erase("dockResourceDisk");
         j.erase("dockResourceBattery");
@@ -5746,6 +5777,7 @@ SettingsState App::currentSettingsState() const {
     const bool vertical = taskbarVertical_;
     st.idleEntryEnabled = idleEntryEnabled_;
     st.idleQuoteEnabled = idleQuoteEnabled_;
+    st.idleWelcomeEnabled = idleWelcomeEnabled_;
     st.idleQuoteSource = idleQuoteSource_ == IdleQuoteSource::Jinrishici ? 1
                          : idleQuoteSource_ == IdleQuoteSource::Netease  ? 2
                                                                          : 0;
@@ -5776,6 +5808,7 @@ SettingsState App::currentSettingsState() const {
     st.immersiveBackgroundAdjustment = immersiveBackgroundAdjustment_;
     st.dockBackgroundAdjustment = dockBackgroundAdjustment_;
     st.backgroundBlurSupported = !taskbarHost || taskbarHost->backgroundBlurAvailable();
+    st.embeddedResourceMonitor = embeddedResourceMonitor_;
     st.dockResourceGpuUsage = dockResourceGpuUsage_;
     st.dockResourceCpuFrequency = dockResourceCpuFrequency_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
@@ -5837,7 +5870,7 @@ SettingsState App::currentSettingsState() const {
 SettingsActions App::buildSettingsActions() {
     SettingsActions act;
     act.onIdleEntryEnabled = [this](bool on) { applyIdleEntryEnabled(on); };
-    act.onIdleQuoteEnabled = [this](bool on) { applyIdleQuoteEnabled(on); };
+    act.onIdleTextMode = [this](int mode) { applyIdleTextMode(mode); };
     act.onIdleQuoteSource = [this](int source) { applyIdleQuoteSource(source); };
     act.onIdleQuoteRefreshInterval =
         [this](int interval) { applyIdleQuoteRefreshInterval(interval); };
@@ -5868,6 +5901,8 @@ SettingsActions App::buildSettingsActions() {
         [this](int mode) { applyImmersiveBackgroundAdjustment(mode); };
     act.onDockBackgroundAdjustment =
         [this](int mode) { applyDockBackgroundAdjustment(mode); };
+    act.onEmbeddedResourceMonitor =
+        [this](bool on) { applyEmbeddedResourceMonitor(on); };
     act.onDockResourceGpuUsage =
         [this](bool on) { applyDockResourceGpuUsage(on); };
     act.onDockResourceCpuFrequency =

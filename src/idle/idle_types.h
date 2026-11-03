@@ -82,6 +82,7 @@ struct IdlePresentation {
     std::wstring sentence;
     std::wstring source;
     bool loading = false;
+    bool showText = true;
     bool showQuote = true;
     bool copyEnabled = false;
     bool quickStartEnabled = true;

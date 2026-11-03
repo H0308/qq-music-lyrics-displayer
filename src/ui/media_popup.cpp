@@ -471,6 +471,8 @@ struct MediaPopup::Impl {
     float idleQuickExpandProgress(const IdlePresentation& content) const {
         if (!content.quickStartEnabled)
             return 0.0f;
+        if (!content.showText)
+            return 1.0f;
         const float linear = std::clamp(idleQuickExpandT, 0.0f, 1.0f);
         return linear * linear * (3.0f - 2.0f * linear);
     }
@@ -593,7 +595,9 @@ struct MediaPopup::Impl {
         layout.quoteTop = kIdleQuoteTopDip;
         layout.quoteHeight = quoteHeight;
         layout.sourceTop = layout.quoteTop + quoteHeight + kIdleQuoteSourceGapDip;
-        layout.collapsedHeaderTop = layout.sourceTop + kIdleQuickHeaderGapDip;
+        layout.collapsedHeaderTop = content.showText
+                                        ? layout.sourceTop + kIdleQuickHeaderGapDip
+                                        : kIdleQuickExpandedTopDip;
         layout.headerTop = idleQuickHeaderTop(layout.collapsedHeaderTop, content);
         layout.expandButtonTop = idleQuickExpandButtonTop(layout.headerTop);
         const float progress = idleQuickExpandProgress(content);
@@ -609,7 +613,8 @@ struct MediaPopup::Impl {
         drawIdleQuickExpandButton(rt, w, headerTop, content, updateHitTest);
         const D2D1_RECT_F expandButton = idleQuickExpandLocalRect(w, headerTop, content);
         const float headerRight =
-            content.quickStartEnabled ? expandButton.left - 8.0f : w - 16.0f;
+            content.quickStartEnabled && content.showText ? expandButton.left - 8.0f
+                                                          : w - 16.0f;
         drawText(rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
                  fmtIdleHeader,
                  D2D1::RectF(16.0f, headerTop, headerRight,
@@ -619,7 +624,7 @@ struct MediaPopup::Impl {
 
     void drawIdleQuickDivider(ID2D1DeviceContext* rt, float w, float headerTop,
                               const IdlePresentation& content) {
-        if (!rt || !brushProgressTrack)
+        if (!rt || !brushProgressTrack || !content.showText)
             return;
         const float opacity = 1.0f - idleQuickExpandProgress(content);
         if (opacity <= 0.0f)
@@ -1900,7 +1905,7 @@ struct MediaPopup::Impl {
 
     void drawIdleQuickExpandButton(ID2D1DeviceContext* rt, float w, float headerTop,
                                    const IdlePresentation& content, bool updateHitTest) {
-        if (!rt || !content.quickStartEnabled) {
+        if (!rt || !content.quickStartEnabled || !content.showText) {
             if (updateHitTest)
                 idleQuickExpandRect = {};
             return;
@@ -2207,47 +2212,49 @@ struct MediaPopup::Impl {
         }
         const IdleLayout layout = idleLayout(idle, idleUnitHeight(idle, true));
 
-        // 快速启动区域从底部向上覆盖每日一言；先裁掉被覆盖的旧内容，
-        // 这样在半透明卡片或动态背景下也不会残留文字。
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
-                                D2D1_ANTIALIAS_MODE_ALIASED);
-        drawText(rt, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                 D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
-                 brushText);
+        if (idle.showText) {
+            // 快速启动区域从底部向上覆盖每日一言；先裁掉被覆盖的旧内容，
+            // 这样在半透明卡片或动态背景下也不会残留文字。
+            rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
+                                    D2D1_ANTIALIAS_MODE_ALIASED);
+            drawText(rt, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
+                     D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
+                     brushText);
 
-        if (idleContentTransitionActive && !categoryTransitionActive) {
-            const float progress = idleContentTransitionProgress();
-            if (progress >= 1.0f) {
-                idleContentTransitionActive = false;
-                drawIdleQuoteUnit(rt, w, idle, true);
-            } else {
-                const float travel = w + 24.0f;
-                const float oldOffset = -travel * progress;
-                const float newOffset = travel * (1.0f - progress);
-                const float transitionBottom = std::min(layout.sourceTop + 18.0f,
-                                                        layout.expandButtonTop);
-                if (transitionBottom > kIdleHeaderBottomDip) {
-                    rt->PushAxisAlignedClip(D2D1::RectF(8.0f, kIdleHeaderBottomDip,
-                                                        w - 8.0f, transitionBottom),
-                                            D2D1_ANTIALIAS_MODE_ALIASED);
-                    rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
-                    drawIdleQuoteUnit(rt, w, idleContentTransitionFrom, false);
-                    rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
+            if (idleContentTransitionActive && !categoryTransitionActive) {
+                const float progress = idleContentTransitionProgress();
+                if (progress >= 1.0f) {
+                    idleContentTransitionActive = false;
                     drawIdleQuoteUnit(rt, w, idle, true);
-                    rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
-                    rt->PopAxisAlignedClip();
+                } else {
+                    const float travel = w + 24.0f;
+                    const float oldOffset = -travel * progress;
+                    const float newOffset = travel * (1.0f - progress);
+                    const float transitionBottom = std::min(layout.sourceTop + 18.0f,
+                                                            layout.expandButtonTop);
+                    if (transitionBottom > kIdleHeaderBottomDip) {
+                        rt->PushAxisAlignedClip(D2D1::RectF(8.0f, kIdleHeaderBottomDip,
+                                                            w - 8.0f, transitionBottom),
+                                                D2D1_ANTIALIAS_MODE_ALIASED);
+                        rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
+                        drawIdleQuoteUnit(rt, w, idleContentTransitionFrom, false);
+                        rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
+                        drawIdleQuoteUnit(rt, w, idle, true);
+                        rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
+                        rt->PopAxisAlignedClip();
+                    }
                 }
+            } else {
+                drawIdleQuoteUnit(rt, w, idle, true);
             }
-        } else {
-            drawIdleQuoteUnit(rt, w, idle, true);
+
+            drawIdleCopyButton(rt, w, idle, updateHitTest);
+            rt->PopAxisAlignedClip();
+
+            if (updateHitTest && copyRect.right > copyRect.left &&
+                copyRect.bottom > cardOriginDip + layout.expandButtonTop)
+                copyRect = {};
         }
-
-        drawIdleCopyButton(rt, w, idle, updateHitTest);
-        rt->PopAxisAlignedClip();
-
-        if (updateHitTest && copyRect.right > copyRect.left &&
-            copyRect.bottom > cardOriginDip + layout.expandButtonTop)
-            copyRect = {};
 
         drawIdleQuickDivider(rt, w, layout.headerTop, idle);
         drawIdleQuickHeader(rt, w, layout.headerTop, idle, updateHitTest);
@@ -2615,18 +2622,20 @@ struct MediaPopup::Impl {
                                        : 18.0f;
         const IdleLayout layout = idleLayout(content, quoteHeight);
 
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
-                                D2D1_ANTIALIAS_MODE_ALIASED);
-        drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                 D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
-                 brushText);
-        drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout,
-                          snapshotQuoteWidth, snapshotQuoteHeight,
-                          categoryTransitionIdleQuoteScrollOffset, snapshotSourceLayout,
-                          snapshotSourceWidth, snapshotSourceHeight,
-                          categoryTransitionIdleQuoteSourceScrollOffset);
-        drawIdleCopyButton(rt, w, content, false);
-        rt->PopAxisAlignedClip();
+        if (content.showText) {
+            rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
+                                    D2D1_ANTIALIAS_MODE_ALIASED);
+            drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
+                     D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
+                     brushText);
+            drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout,
+                              snapshotQuoteWidth, snapshotQuoteHeight,
+                              categoryTransitionIdleQuoteScrollOffset, snapshotSourceLayout,
+                              snapshotSourceWidth, snapshotSourceHeight,
+                              categoryTransitionIdleQuoteSourceScrollOffset);
+            drawIdleCopyButton(rt, w, content, false);
+            rt->PopAxisAlignedClip();
+        }
 
         drawIdleQuickDivider(rt, w, layout.headerTop, content);
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
@@ -2874,17 +2883,19 @@ struct MediaPopup::Impl {
         // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
         // 被隐藏/显露。当前交换链后备缓冲已经绘制成无内容基准帧，不会与旧内容重影。
         if (auto* dc = renderer.beginLyricLayerDraw(0)) {
-            drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                     D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
-                                 kIdleHeaderBottomDip),
-                     brushText);
-            drawIdleQuoteUnit(dc, w, idle, true);
-            drawIdleCopyButton(dc, w, idle, false);
-            if (brushProgressTrack) {
-                const float dividerTop = collapsedButtonTop - 4.0f;
-                dc->FillRectangle(
-                    D2D1::RectF(16.0f, dividerTop, w - 16.0f, dividerTop + 1.0f),
-                    brushProgressTrack);
+            if (idle.showText) {
+                drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
+                         D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
+                                     kIdleHeaderBottomDip),
+                         brushText);
+                drawIdleQuoteUnit(dc, w, idle, true);
+                drawIdleCopyButton(dc, w, idle, false);
+                if (brushProgressTrack) {
+                    const float dividerTop = collapsedButtonTop - 4.0f;
+                    dc->FillRectangle(
+                        D2D1::RectF(16.0f, dividerTop, w - 16.0f, dividerTop + 1.0f),
+                        brushProgressTrack);
+                }
             }
             if (!renderer.endLyricLayerDraw(0, dc))
                 return false;
@@ -3479,6 +3490,7 @@ struct MediaPopup::Impl {
 
     bool hitIdleQuickExpand(float x, float y) const {
         return !categoryTransitionActive && idleMode && idle.quickStartEnabled &&
+               idle.showText &&
                idleQuickExpandRect.right > idleQuickExpandRect.left &&
                contains(idleQuickExpandRect, x, y);
     }
@@ -3486,8 +3498,8 @@ struct MediaPopup::Impl {
     int hitIdleQuickTab(float x, float y) const {
         y -= cardOriginDip;
         if (categoryTransitionActive || quickExpandTransitionActive || !idleMode ||
-            !idle.quickStartEnabled || !idle.todayTasksEnabled || !idleQuickExpanded ||
-            idleQuickExpandT < 0.99f)
+            !idle.quickStartEnabled || !idle.todayTasksEnabled ||
+            idleQuickExpandProgress(idle) < 0.99f)
             return -1;
         for (int i = 0; i < 2; ++i) {
             if (contains(idleQuickTabRects[i], x, y))
@@ -3641,7 +3653,7 @@ struct MediaPopup::Impl {
     }
 
     void toggleIdleQuickExpand() {
-        if (!hwnd || !idleMode || !idle.quickStartEnabled)
+        if (!hwnd || !idleMode || !idle.quickStartEnabled || !idle.showText)
             return;
         // 上一次层动画还在进行时再次点击：合成器动画无法中途取值反向，
         // 直接停掉（瞬时落到当前目标状态），再从新目标重新起步。
@@ -4643,12 +4655,14 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
 }
 
 void MediaPopup::setIdleContent(const IdlePresentation& content, bool available) {
+    const bool textVisibilityChanged = content.showText != impl_->idle.showText;
     const bool idleAvailabilityChanged =
         content.quickStartEnabled != impl_->idle.quickStartEnabled;
     const bool quoteContentChanged = content.sentence != impl_->idle.sentence ||
                                      content.loading != impl_->idle.loading ||
                                      content.source != impl_->idle.source;
     const bool quoteChanged = quoteContentChanged ||
+                              content.showText != impl_->idle.showText ||
                               content.showQuote != impl_->idle.showQuote ||
                               content.copyEnabled != impl_->idle.copyEnabled ||
                               content.quickStartEnabled != impl_->idle.quickStartEnabled;
@@ -4729,6 +4743,16 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         impl_->idleScrollDragging = false;
     }
     if (!content.quickStartEnabled) {
+        impl_->idleQuickExpanded = false;
+        impl_->idleQuickExpandOpening = false;
+        impl_->idleQuickExpandT = 0.0f;
+        impl_->stopQuickExpandTransition();
+    } else if (!content.showText) {
+        impl_->idleQuickExpanded = true;
+        impl_->idleQuickExpandOpening = false;
+        impl_->idleQuickExpandT = 1.0f;
+        impl_->stopQuickExpandTransition();
+    } else if (textVisibilityChanged) {
         impl_->idleQuickExpanded = false;
         impl_->idleQuickExpandOpening = false;
         impl_->idleQuickExpandT = 0.0f;

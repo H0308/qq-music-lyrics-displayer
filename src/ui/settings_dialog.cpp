@@ -94,6 +94,7 @@ constexpr int kIdAppBarEdge = 469;
 constexpr int kIdTaskbarMonitor = 470;
 constexpr int kIdImmersiveBackgroundBlur = 471;
 constexpr int kIdDockBackgroundBlur = 474;
+constexpr int kIdEmbeddedResourceMonitor = 481;
 constexpr int kIdDockResourceGpuUsage = 473;
 constexpr int kIdDockResourceCpuFrequency = 477;
 constexpr int kIdSliderValueEdit = 478;
@@ -334,6 +335,7 @@ settings_icon::Kind iconForRow(int id) {
     case kIdImmersiveBackgroundAdjustment:
     case kIdDockBackgroundAdjustment:
         return settings_icon::Kind::Background;
+    case kIdEmbeddedResourceMonitor:
     case kIdDockResourceGpuUsage:
     case kIdDockResourceCpuFrequency:
         return settings_icon::Kind::Performance;
@@ -834,10 +836,15 @@ struct SettingsDialog::Impl {
             row->height = row->minHeight;
         }
         updateBackgroundAdjustmentPresentation();
+        const bool embeddedResources = selectedMode == 0 && !state.verticalTaskbar;
+        if (auto* row = findRow(kIdEmbeddedResourceMonitor))
+            row->enabled = embeddedResources;
+        const bool resourceExtrasEnabled = appBarEnabled ||
+                                           (embeddedResources && state.embeddedResourceMonitor);
         if (auto* row = findRow(kIdDockResourceGpuUsage))
-            row->enabled = appBarEnabled;
+            row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
-            row->enabled = appBarEnabled;
+            row->enabled = resourceExtrasEnabled;
         auto* controls = findRow(kIdHoverControls);
         if (controls)
             controls->enabled = !expandedEnabled;
@@ -953,8 +960,23 @@ struct SettingsDialog::Impl {
         }
     }
 
+    int idleTextMode() const {
+        return state.idleQuoteEnabled ? 0 : state.idleWelcomeEnabled ? 1 : 2;
+    }
+
+    bool embeddedResourceOnlyAvailable() const {
+        return state.taskbarViewMode == 0 && state.embeddedResourceMonitor &&
+               !state.verticalTaskbar;
+    }
+
     void updateIdleRowsEnabled() {
         const bool quoteEnabled = state.idleQuoteEnabled;
+        if (auto* row = findRow(kIdIdleQuote)) {
+            row->selected = idleTextMode();
+            row->optionEnabled.assign(row->options.size(), true);
+            if (row->optionEnabled.size() > 2)
+                row->optionEnabled[2] = embeddedResourceOnlyAvailable() || row->selected == 2;
+        }
         if (auto* row = findRow(kIdIdleQuoteSource))
             row->enabled = quoteEnabled;
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
@@ -962,7 +984,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleQuoteAlignment))
             row->enabled = quoteEnabled && !state.verticalTaskbar;
         if (auto* row = findRow(kIdIdleCustomWelcome))
-            row->enabled = !quoteEnabled;
+            row->enabled = state.idleWelcomeEnabled;
         if (auto* row = findRow(kIdIdleQuoteBackground))
             row->enabled = !minimalModeActive();
         if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
@@ -1161,7 +1183,13 @@ struct SettingsDialog::Impl {
                   backgroundAdjustmentHint(state.backgroundBlurSupported,
                                            state.dockBackgroundAdjustment),
                   kRowTallH);
-        addHeader(kTaskbarModePage, L"Dock 资源监视");
+        addHeader(kTaskbarModePage, L"资源监视");
+        Row& embeddedResources = addRow(
+            kTaskbarModePage, kIdEmbeddedResourceMonitor, ControlKind::Toggle,
+            L"内嵌模式显示资源监视", L"在任务栏右侧显示 CPU、内存和上下行速度；扩展指标可用滚轮切换。",
+            40.0f, kRowTallH);
+        embeddedResources.checked = state.embeddedResourceMonitor;
+        embeddedResources.enabled = state.taskbarViewMode == 0 && !vertical;
         Row& dockResourceGpu = addRow(
             kTaskbarModePage, kIdDockResourceGpuUsage, ControlKind::Toggle,
             L"显示 GPU 使用率", L"示例：GPU: 7%；没有可用 GPU 性能计数器时显示“—”。",
@@ -1172,10 +1200,12 @@ struct SettingsDialog::Impl {
             L"显示 CPU 频率", L"示例：频率: 3.6GHz；系统未提供当前频率时显示“—”。",
             40.0f, kRowTallH);
         dockResourceCpuFrequency.checked = state.dockResourceCpuFrequency;
+        const bool resourceExtrasEnabled = state.taskbarViewMode == 2 ||
+            (state.taskbarViewMode == 0 && !vertical && state.embeddedResourceMonitor);
         if (auto* row = findRow(kIdDockResourceGpuUsage))
-            row->enabled = state.taskbarViewMode == 2;
+            row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
-            row->enabled = state.taskbarViewMode == 2;
+            row->enabled = resourceExtrasEnabled;
         addHeader(kIdlePage, L"空闲内容");
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
@@ -1183,13 +1213,11 @@ struct SettingsDialog::Impl {
             L"关闭后，播放器未运行时隐藏任务栏入口。",
             40.0f, kRowTallH);
         idleEntry.checked = state.idleEntryEnabled;
-        Row& idleQuote = addRow(
-            kIdlePage, kIdIdleQuote, ControlKind::Toggle, L"显示每日一言",
-            L"关闭后显示按时间和日期类型生成的默认欢迎语，可在下方自定义；每日一言来源、更新频率和缓存会保留。",
-            40.0f, kRowTallH);
-        idleQuote.checked = state.idleQuoteEnabled;
+        addRadio(kIdlePage, kIdIdleQuote, L"空闲文字",
+                 L"“不显示”需先开启内嵌模式资源监视；滴答清单仍会在启动时播报一次今日任务。",
+                 {L"每日一言", L"欢迎语", L"不显示"}, idleTextMode(), true, kRowTallH);
         addButton(kIdlePage, kIdIdleCustomWelcome, L"自定义欢迎语",
-                  L"关闭每日一言后始终显示自定义内容，最多 20 个字符且不能为纯空格；留空则恢复按时间和日期类型生成的默认欢迎语。",
+                  L"选择欢迎语时显示自定义内容，最多 20 个字符且不能为纯空格；留空则恢复按时间和日期类型生成的默认欢迎语。",
                   L"编辑…", kRowTallH);
         addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
                  idleQuoteSourceHint(state.idleQuoteSource),
@@ -3608,11 +3636,11 @@ struct SettingsDialog::Impl {
                 actions.onIdleEntryEnabled(row->checked);
             break;
         case kIdIdleQuote:
-            row->checked = !row->checked;
-            state.idleQuoteEnabled = row->checked;
+            state.idleQuoteEnabled = row->selected == 0;
+            state.idleWelcomeEnabled = row->selected == 1;
             updateIdleRowsEnabled();
-            if (actions.onIdleQuoteEnabled)
-                actions.onIdleQuoteEnabled(row->checked);
+            if (actions.onIdleTextMode)
+                actions.onIdleTextMode(row->selected);
             break;
         case kIdIdleCustomWelcome:
             if (actions.onEditIdleWelcome)
@@ -3726,6 +3754,7 @@ struct SettingsDialog::Impl {
             }
             state.taskbarViewMode = std::clamp(row->selected, 0, 2);
             updateImmersiveRowsEnabled();
+            updateIdleRowsEnabled();
             if (actions.onTaskbarViewMode)
                 actions.onTaskbarViewMode(state.taskbarViewMode);
             break;
@@ -3758,6 +3787,14 @@ struct SettingsDialog::Impl {
         case kIdDockBackgroundBlur:
             if (actions.onDockBackgroundBlur)
                 actions.onDockBackgroundBlur(row->value);
+            break;
+        case kIdEmbeddedResourceMonitor:
+            row->checked = !row->checked;
+            state.embeddedResourceMonitor = row->checked;
+            updateImmersiveRowsEnabled();
+            updateIdleRowsEnabled();
+            if (actions.onEmbeddedResourceMonitor)
+                actions.onEmbeddedResourceMonitor(row->checked);
             break;
         case kIdDockResourceGpuUsage:
             row->checked = !row->checked;
@@ -3994,7 +4031,7 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdIdleEntry))
             row->checked = s.idleEntryEnabled;
         if (auto* row = findRow(kIdIdleQuote))
-            row->checked = s.idleQuoteEnabled;
+            row->selected = idleTextMode();
         if (auto* row = findRow(kIdIdleQuoteSource))
             row->selected = std::clamp(s.idleQuoteSource, 0, 2);
         if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
@@ -4067,13 +4104,19 @@ struct SettingsDialog::Impl {
             row->showHint = true;
         }
         updateBackgroundAdjustmentPresentation();
+        if (auto* row = findRow(kIdEmbeddedResourceMonitor)) {
+            row->checked = s.embeddedResourceMonitor;
+            row->enabled = s.taskbarViewMode == 0 && !vertical;
+        }
+        const bool resourceExtrasEnabled = s.taskbarViewMode == 2 ||
+            (s.taskbarViewMode == 0 && !vertical && s.embeddedResourceMonitor);
         if (auto* row = findRow(kIdDockResourceGpuUsage)) {
             row->checked = s.dockResourceGpuUsage;
-            row->enabled = s.taskbarViewMode == 2;
+            row->enabled = resourceExtrasEnabled;
         }
         if (auto* row = findRow(kIdDockResourceCpuFrequency)) {
             row->checked = s.dockResourceCpuFrequency;
-            row->enabled = s.taskbarViewMode == 2;
+            row->enabled = resourceExtrasEnabled;
         }
         if (auto* row = findRow(kIdSpectrum)) {
             row->checked = minimal || vertical ? false : s.spectrumOn;

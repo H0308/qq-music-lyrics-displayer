@@ -1454,6 +1454,26 @@ struct TaskbarHost::Impl {
 
     bool isAppBarView() const { return viewMode_ == TaskbarViewMode::AppBar; }
 
+    bool resourceMonitoringEnabled() const {
+        return isAppBarView() ||
+               (viewMode_ == TaskbarViewMode::Embedded && dockResourceVisibility_.embeddedEnabled);
+    }
+
+    bool embeddedResourceVisible() const {
+        return viewMode_ == TaskbarViewMode::Embedded &&
+               dockResourceVisibility_.embeddedEnabled && !isVerticalTaskbar();
+    }
+
+    bool embeddedResourceOnly() const {
+        return embeddedResourceVisible() && scene_ == DisplayScene::Idle && statusText.empty();
+    }
+
+    float embeddedResourceExtra() const {
+        if (embeddedResourceOnly())
+            return kDockResourceZoneMinW + kDockResourceRightPadding;
+        return embeddedResourceVisible() ? kDockResourceZoneMinW + kDockResourceZoneGap : 0.0f;
+    }
+
     int expandedControlCount() const {
         return isAppBarView() ? kAppBarControlCount : kImmersiveControlCount;
     }
@@ -1899,7 +1919,7 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] volume popup creation failed");
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
-        if (isAppBarView() && !isStoppedMode())
+        if (resourceMonitoringEnabled() && !isStoppedMode())
             startResourceMonitoring();
         if (renderState_.visibilitySuppressed() && !isStoppedMode())
             startPlacementTimer();
@@ -2101,7 +2121,11 @@ struct TaskbarHost::Impl {
         float minWidthDip = vertical ? kVerticalMinLengthDip : kMinWidthDip;
         float maxWidthDip = vertical ? kVerticalMaxLengthDip : kMaxWidthDip;
         float compressedMinWidthDip = minWidthDip * kCompressedMinWidthRatio;
-        if (!vertical && !songInfoVisible_ && scene_ != DisplayScene::Idle) {
+        if (embeddedResourceOnly()) {
+            minWidthDip = 0.0f;
+            compressedMinWidthDip = 0.0f;
+            maxWidthDip = 0.0f;
+        } else if (!vertical && !songInfoVisible_ && scene_ != DisplayScene::Idle) {
             // 保留原歌词区宽度，只扣除歌曲信息区；左侧压缩为可见的封面区域。
             const float compactLeftDip = albumCoverVisible_ ? coverSlotWidth(dip(crossPx)) : 0.0f;
             const float flexibleMinDip = kMinWidthDip * (1.0f - kLeftRatio);
@@ -2112,7 +2136,7 @@ struct TaskbarHost::Impl {
         int minW = (int)std::lround(minWidthDip * scale());
         int compressedMinW = (int)std::lround(compressedMinWidthDip * scale());
         int maxW = (int)std::lround(maxWidthDip * scale());
-        // 仅播放场景的独立频谱区域需要整体加宽；背景波浪复用内容区，不再占用额外宽度。
+        // 独立频谱和内嵌资源区整体加宽；背景波浪复用内容区。
         const float spectrumExtra = spectrumExtraForScene(scene_);
         if (!vertical && spectrumExtra > 0.0f) {
             int extra = (int)std::lround(spectrumExtra * scale());
@@ -3000,8 +3024,7 @@ struct TaskbarHost::Impl {
         clearImmersiveSongContentTransition();
         if (previousMode == TaskbarViewMode::AppBar)
             unregisterAppBar();
-        if (previousMode == TaskbarViewMode::AppBar)
-            stopResourceMonitoring();
+        stopResourceMonitoring();
         viewMode_ = mode;
         bool immersiveBackdropPrepared = false;
         if (mode == TaskbarViewMode::Immersive && !dockBackdrop_.available()) {
@@ -3025,13 +3048,13 @@ struct TaskbarHost::Impl {
             renderState_.setVisibilitySuppressed(false);
             stopPlacementTimer();
             setPlacementStatus(TaskbarPlacementStatus::Safe);
-            if (!isStoppedMode())
-                startResourceMonitoring();
         } else {
             findTaskbar();
             if (!attachToTaskbar(hwnd))
                 scheduleTaskbarAttachRetry();
         }
+        if (!isStoppedMode() && resourceMonitoringEnabled())
+            startResourceMonitoring();
         if (!immersiveBackdropPrepared)
             initializeBackdropForCurrentViewMode();
         // 沉浸模式仍需要完成首次真实探测，才能解除创建阶段的显示抑制；
@@ -3153,15 +3176,24 @@ struct TaskbarHost::Impl {
     }
 
     void setDockResourceVisibility(const DockResourceVisibility& visibility) {
-        if (dockResourceVisibility_.gpuUsage == visibility.gpuUsage &&
+        if (dockResourceVisibility_.embeddedEnabled == visibility.embeddedEnabled &&
+            dockResourceVisibility_.gpuUsage == visibility.gpuUsage &&
             dockResourceVisibility_.cpuFrequency == visibility.cpuFrequency)
             return;
+        const bool embeddedChanged =
+            dockResourceVisibility_.embeddedEnabled != visibility.embeddedEnabled;
         dockResourceVisibility_ = visibility;
+        if (embeddedChanged && viewMode_ == TaskbarViewMode::Embedded && hwnd) {
+            if (visibility.embeddedEnabled && !isStoppedMode())
+                startResourceMonitoring();
+            else
+                stopResourceMonitoring();
+        }
         dockResourcePage_ = 0;
         requestInvalidation(toMask(RenderInvalidation::Layout) |
                             toMask(RenderInvalidation::Paint) |
                             toMask(RenderInvalidation::Text));
-        if (isAppBarView())
+        if (isAppBarView() || viewMode_ == TaskbarViewMode::Embedded)
             adjustPosition();
         requestFrameAndFlush();
     }
@@ -3302,11 +3334,13 @@ struct TaskbarHost::Impl {
         const bool lineChanged = frame.currentLine != currentLine;
         const bool statusChanged = frame.statusText != statusText;
         const bool statusOneShotChanged = frame.statusTextOneShot != statusTextOneShot_;
+        const DisplayScene previousScene = scene_;
         const bool sceneChanged = frame.scene != scene_;
         const bool sceneWidthChanged = sceneWidthPolicyDiffers(scene_, frame.scene);
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
                                  frame.idle.source != idle.source ||
                                  frame.idle.loading != idle.loading ||
+                                 frame.idle.showText != idle.showText ||
                                  frame.idle.showQuote != idle.showQuote ||
                                  frame.idle.copyEnabled != idle.copyEnabled ||
                                  frame.idle.quickStartEnabled != idle.quickStartEnabled ||
@@ -3399,7 +3433,13 @@ struct TaskbarHost::Impl {
             lyricScrollOffset_ = 0.0f;
             lastTickMs_ = 0;
         }
+        const bool resourceOnlyChanged =
+            embeddedResourceVisible() &&
+            ((previousScene == DisplayScene::Idle && statusText.empty()) !=
+             (frame.scene == DisplayScene::Idle && frame.statusText.empty()));
         statusText = frame.statusText;
+        if (resourceOnlyChanged)
+            requestInvalidation(RenderInvalidation::Layout);
 
         // 只对已有曲目之间的切换做入场动画；首次显示、同曲刷新和会话关闭保持即时提交。
         setSongTransitionPending(songChanged && frame.visible && !isMinimalMode() &&
@@ -3520,7 +3560,7 @@ struct TaskbarHost::Impl {
     }
 
     bool hitDockResourceArea(float clientX, float clientY) const {
-        if (!isAppBarView() || !horizontalImmersiveMode() || !dockResourceExtrasVisible())
+        if ((!isAppBarView() && !embeddedResourceVisible()) || !dockResourceExtrasVisible())
             return false;
 
         float x = 0.0f;
@@ -3531,7 +3571,8 @@ struct TaskbarHost::Impl {
         logicalClientPixelSize(pxW, pxH);
         const float width = dip(pxW);
         const float height = dip(pxH);
-        const float resourceW = dockResourceZoneW(width);
+        const float resourceW = embeddedResourceVisible() ? kDockResourceZoneMinW
+                                                         : dockResourceZoneW(width);
         const float resourceX = width - resourceW - kDockResourceRightPadding;
         return x >= resourceX && x <= width - kDockResourceRightPadding && y >= 0.0f &&
                y <= height;
@@ -3569,7 +3610,7 @@ struct TaskbarHost::Impl {
         return horizontalImmersiveMode() ? immersiveSpectrumZoneW(hostW) : spectrumClusterW();
     }
 
-    // 嵌入模式只在独立频谱开启时预留 12 柱宽度；沉浸模式始终保留右侧
+    // 嵌入模式按开关预留独立频谱和资源区；沉浸模式始终保留右侧
     // “频谱 + 时钟/资源状态”固定区，避免开关频谱时歌词安全区发生变化。
     float spectrumExtraForScene(DisplayScene scene, float hostW = -1.0f) const {
         if (hostW <= 0.0f) {
@@ -3588,8 +3629,8 @@ struct TaskbarHost::Impl {
             return extra;
         }
         if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled())
-            return 0.0f;
-        return spectrumContentWForScene(scene, hostW) + kTextPadding;
+            return embeddedResourceExtra();
+        return spectrumContentWForScene(scene, hostW) + kTextPadding + embeddedResourceExtra();
     }
 
     bool sceneUsesCompactWidth(DisplayScene scene) const {
@@ -4039,7 +4080,7 @@ struct TaskbarHost::Impl {
     }
 
     bool refreshResourceSnapshot() {
-        if (!isAppBarView())
+        if (!resourceMonitoringEnabled())
             return false;
 
         const ULONGLONG now = monotonicNowMs();
@@ -4090,7 +4131,7 @@ struct TaskbarHost::Impl {
 
     void drawDockResourceStatus(float x, float h, float width) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !isAppBarView() || width <= 0.0f || !fmtClockTime_ || !brushText_)
+        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !fmtClockTime_ || !brushText_)
             return;
 
         IDWriteTextFormat* resourceFormat = fmtClockTime_;
@@ -4252,7 +4293,7 @@ struct TaskbarHost::Impl {
 
     float backgroundWaveRight(float w) const {
         if (!horizontalImmersiveMode())
-            return w - kTextPadding;
+            return w - kTextPadding - embeddedResourceExtra();
         if (isAppBarView()) {
             return w - dockResourceZoneW(w) - kDockResourceRightPadding -
                    kDockResourceZoneGap;
@@ -6270,7 +6311,8 @@ struct TaskbarHost::Impl {
         // 音量按钮与下一首之间多留 0.9r：音量字形比三角形宽，等间距会显得挤
         const float volumeGap = spacing + r * 0.9f;
         // 组跨度 [cx-spacing, cx+spacing+volumeGap]，整体居中即 cx 左移 volumeGap/2
-        const float cx = layout.leftW + layout.rightW * 0.5f - volumeGap * 0.5f;
+        const float controlsW = std::max(1.0f, layout.rightW - embeddedResourceExtra());
+        const float cx = layout.leftW + controlsW * 0.5f - volumeGap * 0.5f;
         for (int i = 0; i < 3; ++i)
             centers[i] = cx + (i - 1) * spacing;
         centers[3] = cx + spacing + volumeGap;
@@ -8205,7 +8247,7 @@ struct TaskbarHost::Impl {
         } else {
             if (showSpectrum && !isExpandedView()) {
                 const float spectrumW = spectrumContentWForScene(scene_, w);
-                drawSpectrum(w - spectrumW - kTextPadding, h, spectrumW);
+                drawSpectrum(w - embeddedResourceExtra() - spectrumW - kTextPadding, h, spectrumW);
             }
             if (lyricTransitionKind_ == LyricTransitionKind::Scene && isLyricTransitionActive() &&
                 outgoingLyricLayout_) {
@@ -8706,7 +8748,9 @@ struct TaskbarHost::Impl {
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        const float dynamicBackgroundW = showSpectrum
+        const float dynamicBackgroundW = embeddedResourceOnly()
+                                              ? w
+                                          : showSpectrum || embeddedResourceVisible()
                                               ? std::max(1.0f, lyricAreaX + lyricAreaW)
                                               : w;
         // 背景、进度和动态底图由横竖两种布局共用，避免后续修复只落在一条路径。
@@ -8727,6 +8771,9 @@ struct TaskbarHost::Impl {
             if (isAppBarView() && !idleScene)
                 drawDockPet(w, h, leftW);
             drawImmersiveRightSide(w, h, showSpectrum);
+        } else if (embeddedResourceVisible()) {
+            drawDockResourceStatus(w - kDockResourceZoneMinW - kDockResourceRightPadding,
+                                   h, kDockResourceZoneMinW);
         }
 
         bool contentTransitionActive = false;
@@ -8793,7 +8840,7 @@ struct TaskbarHost::Impl {
         } else {
             if (showSpectrum && !isExpandedView()) {
                 const float spectrumW = spectrumContentWForScene(scene_, w);
-                drawSpectrum(w - spectrumW - kTextPadding, h, spectrumW);
+                drawSpectrum(w - embeddedResourceExtra() - spectrumW - kTextPadding, h, spectrumW);
             }
             if (lyricTransitionKind_ == LyricTransitionKind::Scene && isLyricTransitionActive() &&
                 outgoingLyricLayout_) {
@@ -8940,6 +8987,9 @@ struct TaskbarHost::Impl {
                     if (isAppBarView() && !idleScene)
                         drawDockPet(w, h, leftW);
                     drawImmersiveRightSide(w, h, showSpectrum);
+                } else if (embeddedResourceVisible()) {
+                    drawDockResourceStatus(w - kDockResourceZoneMinW - kDockResourceRightPadding,
+                                           h, kDockResourceZoneMinW);
                 }
                 contentTransitionActive = applyImmersiveSongContentTransform(rt);
                 // 失败回退时仍需绘制歌曲内容；这里复用与快照相同的绘制入口，
@@ -9308,10 +9358,11 @@ struct TaskbarHost::Impl {
         const bool wasMinimal = isMinimalMode();
         renderState_.setMode(mode);
         if (leavingStopped) {
+            if (resourceMonitoringEnabled())
+                startResourceMonitoring();
             if (isAppBarView()) {
                 renderState_.setVisibilitySuppressed(false);
                 setPlacementStatus(TaskbarPlacementStatus::Safe);
-                startResourceMonitoring();
             } else {
                 // 完全停止期间避让缓存可能已经过期。恢复显示前必须重新等待一次
                 // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。

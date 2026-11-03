@@ -14,6 +14,7 @@
 struct SettingsState {
     bool idleEntryEnabled = true;
     bool idleQuoteEnabled = true;
+    bool idleWelcomeEnabled = true;
     int idleQuoteSource = 0; // 0 一言 1 今日诗词 2 网易云热评
     int idleQuoteRefreshInterval = 0; // 0 每天 1 每 12 小时 2 每小时
     int idleQuoteAlignment = 0; // 0 左对齐 1 居中 2 右对齐
@@ -40,6 +41,7 @@ struct SettingsState {
     int immersiveBackgroundAdjustment = 0; // 0 模糊程度 1 不透明度
     int dockBackgroundAdjustment = 0; // 0 模糊程度 1 不透明度
     bool backgroundBlurSupported = true;
+    bool embeddedResourceMonitor = false;
     bool dockResourceGpuUsage = false;
     bool dockResourceCpuFrequency = false;
     bool spectrumOn = false;
@@ -85,7 +87,7 @@ struct SettingsState {
 // 设置变更回调：用户操作即时生效（与右键菜单语义一致）
 struct SettingsActions {
     std::function<void(bool)> onIdleEntryEnabled;
-    std::function<void(bool)> onIdleQuoteEnabled;
+    std::function<void(int)> onIdleTextMode; // 0 每日一言 1 欢迎语 2 不显示
     std::function<void(int)> onIdleQuoteSource;
     std::function<void(int)> onIdleQuoteRefreshInterval;
     std::function<void(int)> onIdleQuoteAlignment;
@@ -113,6 +115,7 @@ struct SettingsActions {
     std::function<void(int)> onDockBackgroundBlur;
     std::function<void(int)> onImmersiveBackgroundAdjustment;
     std::function<void(int)> onDockBackgroundAdjustment;
+    std::function<void(bool)> onEmbeddedResourceMonitor;
     std::function<void(bool)> onDockResourceGpuUsage;
     std::function<void(bool)> onDockResourceCpuFrequency;
     std::function<void(bool)> onSpectrum;
