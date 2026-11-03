@@ -381,6 +381,7 @@ bool DCompRenderer::createDevice() {
         discard();
         return false;
     }
+    ++deviceGeneration_;
     return true;
 }
 

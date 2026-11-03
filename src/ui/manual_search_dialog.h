@@ -13,7 +13,7 @@
 // 手动搜索/选择歌词对话框
 class ManualSearchDialog {
 public:
-    using ApplyCallback = std::function<void()>;
+    using ApplyCallback = std::function<void(LyricResult)>;
 
     ManualSearchDialog();
     ~ManualSearchDialog();

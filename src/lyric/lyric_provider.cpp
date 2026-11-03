@@ -1969,10 +1969,6 @@ std::wstring legacyManualFileName(const std::wstring& title, const std::wstring&
 
 struct LyricProvider::Impl {
     mutable std::mutex mtx;
-    std::vector<LyricLine> current;
-    SongInfo currentSongInfo;
-    bool lastLoadWasLocal = false;
-    bool lastLoadWasManual = false;
     std::unordered_map<std::wstring, CacheEntry> cache;
     std::unordered_map<std::wstring, CacheEntry> manualOverrides; // 已加载的手动歌词（懒加载缓存）
     std::wstring overrideDir; // 手动歌词持久化目录（每首歌一个 JSON 文件），空表示不持久化
@@ -2390,47 +2386,39 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
                                  bool forceLocal, bool persistOrder) {
     const std::wstring key = makeKey(title, artist, durationMs);
     uint64_t gen = ++impl_->generation;
-    bool localConfigured = false;
-    runtime_log::writef(L"[lyric][request][QQ] title=\"%ls\" artist=\"%ls\" duration=%lldms",
-                        title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
-    {
-        std::lock_guard<std::mutex> lk(impl_->mtx);
-        impl_->lastLoadWasLocal = false;
-        impl_->lastLoadWasManual = false;
-        // 1) 用户手动选择的歌词优先级最高（内存未命中时按 key 找对应文件）
-        CacheEntry manual;
-        if (impl_->manualOverrideGet(key, title, artist, false, manual)) {
-            impl_->lastLoadWasManual = true;
-            impl_->current = std::move(manual.lines);
-            impl_->currentSongInfo = std::move(manual.info);
-            runtime_log::writef(L"[lyric][source=manual][QQ] title=\"%ls\" artist=\"%ls\"",
-                                title.c_str(), artist.c_str());
-            if (cb) cb(true);
-            return;
-        }
-        localConfigured = impl_->qqLocalLyricsEnabled && !impl_->qqLocalLyricsDir.empty();
-        if (!localConfigured) {
-            // 2) 未配置本地歌词时保持原有在线缓存路径
-            CacheEntry cached;
-            if (impl_->cacheGet(key, cached)) {
-                impl_->current = std::move(cached.lines);
-                impl_->currentSongInfo = std::move(cached.info);
-                runtime_log::writef(
-                    L"[lyric][source=online-cache][QQ] title=\"%ls\" artist=\"%ls\"",
-                    title.c_str(), artist.c_str());
-                if (cb) cb(true);
-                return;
-            }
-        }
-    }
-
     Impl* impl = impl_.get();
     Impl::Worker worker;
     auto done = worker.done;
     worker.thread = std::thread([impl, gen, key, title, artist, durationMs, cb = std::move(cb),
-                                 localConfigured, forceOnline, forceLocal, persistOrder,
-                                 done]() mutable {
+                                 forceOnline, forceLocal, persistOrder, done]() mutable {
         DoneFlag flag{done};
+        runtime_log::writef(L"[lyric][request][QQ] title=\"%ls\" artist=\"%ls\" duration=%lldms",
+                            title.c_str(), artist.c_str(), static_cast<long long>(durationMs));
+        bool localConfigured = false;
+        LyricResult ready;
+        {
+            std::lock_guard<std::mutex> lk(impl->mtx);
+            if (impl->generation != gen)
+                return;
+            CacheEntry entry;
+            if (impl->manualOverrideGet(key, title, artist, false, entry)) {
+                ready = {true, std::move(entry.lines), std::move(entry.info), false, true};
+                runtime_log::writef(L"[lyric][source=manual][QQ] title=\"%ls\" artist=\"%ls\"",
+                                    title.c_str(), artist.c_str());
+            } else {
+                localConfigured = impl->qqLocalLyricsEnabled && !impl->qqLocalLyricsDir.empty();
+                if (!localConfigured && impl->cacheGet(key, entry)) {
+                    ready = {true, std::move(entry.lines), std::move(entry.info)};
+                    runtime_log::writef(L"[lyric][source=online-cache][QQ] title=\"%ls\" artist=\"%ls\"",
+                                        title.c_str(), artist.c_str());
+                }
+            }
+        }
+        if (ready.ok) {
+            if (impl->generation == gen && cb)
+                cb(std::move(ready));
+            return;
+        }
         std::vector<LyricLine> result;
         SongInfo info;
 
@@ -2506,20 +2494,15 @@ void LyricProvider::requestAsync(const std::wstring& title, const std::wstring& 
             }
         }
 
-        if (ok) {
+        {
             std::lock_guard<std::mutex> lk(impl->mtx);
-            if (impl->generation == gen) { // 防止过期请求覆盖新歌
-                impl->lastLoadWasLocal = localHit;
-                impl->lastLoadWasManual = false;
-                impl->current = result;
-                impl->currentSongInfo = info;
-                if (!localHit)
-                    impl->cachePut(key, CacheEntry{std::move(result), std::move(info)});
-                if (cb) cb(true);
-            }
-        } else if (impl->generation == gen && cb) {
-            cb(false);
+            if (impl->generation != gen)
+                return;
+            if (ok && !localHit)
+                impl->cachePut(key, CacheEntry{result, info});
         }
+        if (cb)
+            cb(LyricResult{ok, std::move(result), std::move(info), localHit, false});
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
     impl_->sweepFinished();
@@ -2534,90 +2517,57 @@ void LyricProvider::requestNeteaseAsync(const std::wstring& songId,
                         L"artist=\"%ls\" duration=%lldms",
                         songId.c_str(), title.c_str(), artist.c_str(),
                         static_cast<long long>(durationMs));
-    if (songId.empty()) {
-        runtime_log::writef(L"[lyric][request][Netease] result=failed reason=empty-songid");
-        if (cb)
-            cb(false);
-        return;
-    }
-
-    // 网易云使用歌曲 ID 作为缓存键，避免同名歌曲复用 QQ 或其他网易云歌曲的歌词。
     const std::wstring key = L"netease|" + songId;
-    uint64_t gen = ++impl_->generation;
-    {
-        std::lock_guard<std::mutex> lk(impl_->mtx);
-        impl_->lastLoadWasLocal = false;
-        impl_->lastLoadWasManual = false;
-        // 网易云手动选择按歌曲 ID 保存，优先级高于网络缓存。
-        CacheEntry manual;
-        if (impl_->manualOverrideGet(key, title, artist, true, manual)) {
-            impl_->lastLoadWasManual = true;
-            impl_->current = std::move(manual.lines);
-            impl_->currentSongInfo = std::move(manual.info);
-            runtime_log::writef(L"[lyric][source=manual][Netease] songid=\"%ls\"",
-                                songId.c_str());
-            if (cb)
-                cb(true);
-            return;
-        }
-        CacheEntry cached;
-        if (impl_->cacheGet(key, cached)) {
-            impl_->current = std::move(cached.lines);
-            impl_->currentSongInfo = std::move(cached.info);
-            runtime_log::writef(L"[lyric][source=online-cache][Netease] songid=\"%ls\"",
-                                songId.c_str());
-            if (cb)
-                cb(true);
-            return;
-        }
-    }
-
+    const uint64_t gen = ++impl_->generation;
     Impl* impl = impl_.get();
     Impl::Worker worker;
     auto done = worker.done;
-    worker.thread = std::thread([impl, gen, key, songId, cb = std::move(cb), done]() mutable {
+    worker.thread = std::thread([impl, gen, key, songId, title, artist,
+                                 cb = std::move(cb), done]() mutable {
         DoneFlag flag{done};
+        if (songId.empty()) {
+            runtime_log::writef(L"[lyric][request][Netease] result=failed reason=empty-songid");
+            if (impl->generation == gen && cb)
+                cb(LyricResult{});
+            return;
+        }
+        LyricResult ready;
+        {
+            std::lock_guard<std::mutex> lk(impl->mtx);
+            if (impl->generation != gen)
+                return;
+            CacheEntry entry;
+            if (impl->manualOverrideGet(key, title, artist, true, entry)) {
+                ready = {true, std::move(entry.lines), std::move(entry.info), false, true};
+                runtime_log::writef(L"[lyric][source=manual][Netease] songid=\"%ls\"", songId.c_str());
+            } else if (impl->cacheGet(key, entry)) {
+                ready = {true, std::move(entry.lines), std::move(entry.info)};
+                runtime_log::writef(L"[lyric][source=online-cache][Netease] songid=\"%ls\"", songId.c_str());
+            }
+        }
+        if (ready.ok) {
+            if (impl->generation == gen && cb)
+                cb(std::move(ready));
+            return;
+        }
         std::vector<LyricLine> result;
         SongInfo info;
-        bool ok = impl->fetchNetease(songId, result, info);
-        runtime_log::writef(L"[lyric][source=online][Netease] result=%s songid=\"%ls\" "
-                            L"lines=%zu",
+        const bool ok = impl->fetchNetease(songId, result, info);
+        runtime_log::writef(L"[lyric][source=online][Netease] result=%s songid=\"%ls\" lines=%zu",
                             ok ? L"success" : L"failed", songId.c_str(), result.size());
-        if (ok) {
+        {
             std::lock_guard<std::mutex> lk(impl->mtx);
-            if (impl->generation == gen) {
-                impl->lastLoadWasManual = false;
-                impl->current = result;
-                impl->currentSongInfo = info;
-                impl->cachePut(key, CacheEntry{std::move(result), std::move(info)});
-                if (cb)
-                    cb(true);
-            }
-        } else if (impl->generation == gen && cb) {
-            cb(false);
+            if (impl->generation != gen)
+                return;
+            if (ok)
+                impl->cachePut(key, CacheEntry{result, info});
         }
+        if (cb)
+            cb(LyricResult{ok, std::move(result), std::move(info)});
     });
     std::lock_guard<std::mutex> lk(impl_->mtx);
     impl_->sweepFinished();
     impl_->workers.push_back(std::move(worker));
-}
-
-const std::vector<LyricLine>& LyricProvider::lines() const {
-    return impl_->current;
-}
-
-const SongInfo& LyricProvider::songInfo() const {
-    return impl_->currentSongInfo;
-}
-
-bool LyricProvider::lastLoadWasLocal() const {
-    std::lock_guard<std::mutex> lk(impl_->mtx);
-    return impl_->lastLoadWasLocal;
-}
-
-bool LyricProvider::lastLoadWasManual() const {
-    std::lock_guard<std::mutex> lk(impl_->mtx);
-    return impl_->lastLoadWasManual;
 }
 
 std::wstring LyricProvider::makeKey(const std::wstring& title, const std::wstring& artist,
@@ -2786,10 +2736,6 @@ void LyricProvider::setManualOverride(const std::wstring& title, const std::wstr
                                  : makeKey(title, artist, durationMs);
     auto& stored = impl_->manualOverrides[key]; // 同一首歌重复手动选择时覆盖旧记录
     stored = CacheEntry{std::move(lines), std::move(info)};
-    impl_->lastLoadWasLocal = false;
-    impl_->lastLoadWasManual = true;
-    impl_->current = stored.lines;
-    impl_->currentSongInfo = stored.info;
     // 写入这首歌自己的文件
     std::wstring path = impl_->overrideFilePath(key, title, artist, netease, false);
     if (!path.empty())

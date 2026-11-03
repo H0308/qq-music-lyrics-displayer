@@ -27,6 +27,7 @@
 #include "media/app_volume.h"
 #include "util/dominant_color.h"
 #include "logging/runtime_logger.h"
+#include "settings/settings_store.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -230,7 +231,7 @@ struct QqCoverInfoPayload {
 struct LyricPayload {
     std::wstring key;
     uint64_t requestGeneration = 0;
-    bool ok = false;
+    LyricResult result;
 };
 
 struct QqLocalFolderPayload {
@@ -3232,7 +3233,7 @@ struct App {
             manualSearchDialog.reset();
             return;
         }
-        manualSearchDialog->setApplyCallback([this, manualKey] {
+        manualSearchDialog->setApplyCallback([this, manualKey](LyricResult result) {
             SmtcSnapshot snap = monitor.snapshot();
             if (manualKey.empty() || !snap.sessionAlive || currentKey != manualKey ||
                 makeTrackKey(snap) != manualKey)
@@ -3242,7 +3243,7 @@ struct App {
             ++requestGeneration_;
             cancelLyricDebounce(); // 防止挂起的切歌防抖请求到点后覆盖手动选择
             releaseCurrentLyrics();
-            currentLyrics_ = provider.lines();
+            currentLyrics_ = std::move(result.lines);
             currentLyricsFromLocal_ = false;
             currentLyricsFromManual_ = true;
             lyricLoading_ = false;
@@ -3255,8 +3256,8 @@ struct App {
             if (!lastSmtcThumbnail || lastSmtcThumbnail->empty()) {
                 if (snap.player == SmtcPlayerType::NetEase)
                     requestNeteaseCoverFallback(snap.neteaseSongId);
-                else if (!provider.songInfo().albummid.empty())
-                    requestQqCoverFallback(provider.songInfo().albummid);
+                else if (!result.info.albummid.empty())
+                    requestQqCoverFallback(result.info.albummid);
                 else
                     requestQqCoverInfoFallback(snap);
             }
@@ -3326,9 +3327,9 @@ struct App {
         updateRuntimeLogState(snap);
         const std::wstring requestKey = currentKey;
         const uint64_t generation = requestGeneration_;
-        auto postLyricResult = [this, requestKey, generation](bool ok) {
-            auto* payload = new LyricPayload{requestKey, generation, ok};
-            if (!PostThreadMessageW(mainThread, kMsgLyricReady, ok ? 1 : 0,
+        auto postLyricResult = [threadId = mainThread, requestKey, generation](LyricResult result) {
+            auto* payload = new LyricPayload{requestKey, generation, std::move(result)};
+            if (!PostThreadMessageW(threadId, kMsgLyricReady, 0,
                                     reinterpret_cast<LPARAM>(payload)))
                 delete payload;
         };
@@ -3552,18 +3553,18 @@ struct App {
 
         lyricLoading_ = false;
         std::wstring coverAlbummid;
-        if (payload->ok) {
-            currentLyrics_ = provider.lines();
+        if (payload->result.ok) {
+            currentLyrics_ = std::move(payload->result.lines);
             currentLyricsFromLocal_ = snap.player == SmtcPlayerType::QQMusic &&
-                                      provider.lastLoadWasLocal();
-            currentLyricsFromManual_ = provider.lastLoadWasManual();
+                                      payload->result.fromLocal;
+            currentLyricsFromManual_ = payload->result.fromManual;
             updateLyricCapabilities(currentLyrics_);
             logLyricsCreated(currentLyricsFromManual_
                                  ? L"manual"
                                  : currentLyricsFromLocal_ ? L"local" : L"online");
             runtime_log::writef(L"[lyric] loaded %zu lines: %s", currentLyrics_.size(),
                                 currentKey.c_str());
-            coverAlbummid = provider.songInfo().albummid;
+            coverAlbummid = std::move(payload->result.info.albummid);
         } else {
             if (lyricRequestStale_) {
                 // 时间线不可信期间发出的请求：失败大概率是旧时长触发候选的 15 秒
@@ -4079,24 +4080,19 @@ void App::loadSettings() {
     provider.setQqLyricOrderDir(dir + L"\\manual_lyrics_settings");
     fluent::setThemeModes(taskbarThemeMode_, windowThemeMode_);
     try {
-        std::error_code fileStatusError;
-        const bool settingsFileExists =
-            std::filesystem::exists(std::filesystem::path(settingsPath_), fileStatusError);
-        std::ifstream f(std::filesystem::path(settingsPath_), std::ios::binary);
-        if (!f) {
-            // 首次启动时配置文件不存在是正常情况；只有“文件存在但打不开”
-            // 或文件系统查询本身失败时才提示用户。
-            if (settingsFileExists || fileStatusError)
-                showSettingsError(
-                    L"load-open",
-                    L"无法打开设置文件，可能是权限不足或文件正被其他程序占用。\n\n"
-                    L"程序将继续使用当前可用设置。\n\n"
-                    L"请检查 settings.json 的访问权限。\n\n"
-                    L"设置文件路径：\n" + settingsPath_);
+        auto loaded = settings_store::load(std::filesystem::path(settingsPath_));
+        if (loaded.status == settings_store::LoadStatus::Missing)
+            return;
+        if (loaded.status == settings_store::LoadStatus::OpenError) {
+            showSettingsError(
+                L"load-open",
+                L"无法打开设置文件，可能是权限不足或文件正被其他程序占用。\n\n"
+                L"程序将继续使用当前可用设置。\n\n"
+                L"请检查 settings.json 的访问权限。\n\n"
+                L"设置文件路径：\n" + settingsPath_);
             return;
         }
-        auto j = nlohmann::json::parse(f, nullptr, false);
-        if (f.bad()) {
+        if (loaded.status == settings_store::LoadStatus::ReadError) {
             showSettingsError(
                 L"load-read",
                 L"读取设置文件时发生磁盘或文件系统错误。\n\n"
@@ -4104,7 +4100,7 @@ void App::loadSettings() {
                 L"设置文件路径：\n" + settingsPath_);
             return;
         }
-        if (j.is_discarded()) {
+        if (loaded.status == settings_store::LoadStatus::ParseError) {
             showSettingsError(
                 L"load-parse",
                 L"设置文件内容无法解析，文件可能已经损坏。\n\n"
@@ -4113,6 +4109,7 @@ void App::loadSettings() {
                 L"设置文件路径：\n" + settingsPath_);
             return;
         }
+        const auto& j = loaded.document;
         tickTickEnabled_ = j.value("tickTickEnabled", !tickTickApiToken_.empty());
         const std::wstring configuredLogDirectory =
             wideOf(j.value("logDirectory", utf8Of(logDirectory_)));
@@ -4528,12 +4525,7 @@ void App::saveSettings() {
         j["qqLocalLyricsPath"] = utf8Of(qqLocalLyricsPath_);
         j["logDirectory"] = utf8Of(logDirectory_);
         j["logRetentionDays"] = logRetentionDays_;
-        std::ofstream f;
-        f.exceptions(std::ios::failbit | std::ios::badbit);
-        f.open(std::filesystem::path(settingsPath_), std::ios::binary | std::ios::trunc);
-        f << j.dump();
-        f.flush();
-        f.close();
+        settings_store::save(std::filesystem::path(settingsPath_), j);
     } catch (const std::exception&) {
         showSettingsError(
             L"save-exception",

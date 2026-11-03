@@ -28,6 +28,15 @@ struct SongInfo {
     std::wstring neteaseSongId;
 };
 
+// 每次请求独立交付的结果，不依赖 Provider 内部的可变“当前歌词”。
+struct LyricResult {
+    bool ok = false;
+    std::vector<LyricLine> lines;
+    SongInfo info;
+    bool fromLocal = false;
+    bool fromManual = false;
+};
+
 enum class LyricSource {
     Qrc, // QQ 音乐原生逐字歌词
     Krc, // 酷狗逐字歌词
@@ -51,7 +60,8 @@ struct SearchCandidate {
 // 歌词获取：QQ 使用现有 QRC/KRC/LRC 链路；网易云按歌曲 ID 获取 YRC，失败后回退 LRC。
 class LyricProvider {
 public:
-    using ReadyCallback = std::function<void(bool ok)>; // 在工作线程触发（缓存命中时同步触发）
+    // 所有异步接口均在工作线程回调，调用前已释放内部锁；UI 更新由调用方投递。
+    using ReadyCallback = std::function<void(LyricResult)>;
     using SearchCallback = std::function<void(const std::vector<SearchCandidate>&)>;
     using FetchCallback = std::function<void(bool ok, const std::vector<LyricLine>& lines,
                                              const SongInfo& info)>;
@@ -81,14 +91,14 @@ public:
     void requestQqSongInfoAsync(const std::wstring& title, const std::wstring& artist,
                                 int64_t durationMs, SongInfoCallback cb);
 
-    // 手动搜索候选（网易云 YRC/LRC、QQ QRC/KRC/LRC 各最多 5 条），结果在 UI 线程回调
+    // 手动搜索候选（网易云 YRC/LRC、QQ QRC/KRC/LRC 各最多 5 条）。
     void searchCandidatesAsync(const std::wstring& title, const std::wstring& artist,
                                SearchCallback cb);
 
-    // 按 songmid 异步取歌词（不修改当前播放歌词），结果在 UI 线程回调
+    // 按候选歌曲异步取歌词，不修改当前播放内容。
     void fetchLyricAsync(const SearchCandidate& cand, FetchCallback cb);
 
-    // 设置手动选择：写入缓存并作为当前歌词；QQ 按标题/歌手/时长复用，
+    // 保存手动选择；QQ 按标题/歌手/时长复用，
     // 网易云按歌曲 ID 复用。
     void setManualOverride(const std::wstring& title, const std::wstring& artist,
                            int64_t durationMs, std::vector<LyricLine> lines, SongInfo info);
@@ -101,18 +111,6 @@ public:
 
     // 设置 QQ 版本顺序标记目录；只保存 *_qm.order.json，不保存歌词内容。
     void setQqLyricOrderDir(const std::wstring& dir);
-
-    // 最近一次应用的歌词（仅在 ReadyCallback(true) 之后于 UI 线程读取）
-    const std::vector<LyricLine>& lines() const;
-
-    // 最近一次匹配到的歌曲信息（仅在 ReadyCallback(true) 之后于 UI 线程读取）
-    const SongInfo& songInfo() const;
-
-    // 最近一次成功加载的歌词是否来自 QQ 音乐本地 QRC（仅在 ReadyCallback(true) 后读取）
-    bool lastLoadWasLocal() const;
-
-    // 最近一次成功加载的歌词是否来自手动保存（仅在 ReadyCallback(true) 后读取）
-    bool lastLoadWasManual() const;
 
     // 缓存/覆盖键：标题 + 歌手 + 时长（5 秒分桶），区分同名不同版本
     static std::wstring makeKey(const std::wstring& title, const std::wstring& artist,

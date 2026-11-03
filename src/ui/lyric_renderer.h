@@ -9,6 +9,7 @@
 #include <dwrite.h>
 
 #include <memory>
+#include <cstdint>
 
 struct DCompSharedDevice;
 
@@ -80,6 +81,9 @@ public:
 
     // 确保交换链/Visual 与窗口尺寸匹配并绑定后备缓冲（BeginDraw 前调用）。
     bool bind(HWND hwnd, int width, int height);
+
+    // 每次成功创建窗口级设备链后递增；调用方据此重建设备相关的画刷、位图与图层。
+    uint64_t deviceGeneration() const { return deviceGeneration_; }
 
     // 提交交换链并经 DComposition 上屏；设备丢失返回 false，调用方走 discard。
     bool present();
@@ -158,6 +162,7 @@ private:
     IDXGIDevice* dxgiDevice_ = nullptr;
     // sharedDevice_ 持有 D3D11/DXGI 设备；窗口级 D2D 和合成资源仍由本实例独立管理。
     std::shared_ptr<DCompSharedDevice> sharedDevice_;
+    uint64_t deviceGeneration_ = 0;
     ID2D1Device* d2dDevice_ = nullptr;
     ID2D1DeviceContext* dc_ = nullptr;
     IDXGISwapChain1* swapchain_ = nullptr;

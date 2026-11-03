@@ -54,6 +54,7 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 
 add_executable(QQMusicLyric
     src/main.cpp
+    src/settings/settings_store.cpp
     src/logging/runtime_logger.cpp
     src/media/smtc_monitor.cpp
     src/media/smtc/smtc_common.cpp

@@ -135,6 +135,7 @@ struct SongToast::Impl {
     int cardHeightPx = 0;
 
     DCompRenderer renderer;
+    uint64_t deviceGeneration = 0;
     ID2D1SolidColorBrush* brushBackground = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;
     ID2D1SolidColorBrush* brushText = nullptr;
@@ -303,12 +304,17 @@ struct SongToast::Impl {
         releaseCom(coverLayer);
     }
 
-    void releaseDrawingResources() {
+    void releaseDeviceResources() {
         releaseVisualResources();
-        renderer.discard();
         themeDirty = true;
         coverDirty = true;
         materialNeedsApply = true;
+    }
+
+    void releaseDrawingResources() {
+        releaseDeviceResources();
+        renderer.discard();
+        deviceGeneration = 0;
     }
 
     void releaseAll() {
@@ -725,6 +731,11 @@ struct SongToast::Impl {
             return false;
         if (!renderer.bind(hwnd, pxW, pxH))
             return false;
+        if (deviceGeneration != renderer.deviceGeneration()) {
+            if (deviceGeneration != 0)
+                releaseDeviceResources();
+            deviceGeneration = renderer.deviceGeneration();
+        }
         if (materialNeedsApply) {
             applyWindowMaterial();
             materialNeedsApply = false;

@@ -1146,6 +1146,7 @@ struct TaskbarHost::Impl {
     };
 
     DCompRenderer renderer;
+    uint64_t deviceGeneration_ = 0;
     // 沉浸模式切歌时，歌曲内容会先绘制到独立的 DirectComposition 表面。
     // 绘制辅助函数统一从这里取目标，普通帧保持使用交换链上下文。
     ID2D1DeviceContext* drawTargetOverride_ = nullptr;
@@ -4721,7 +4722,7 @@ struct TaskbarHost::Impl {
         requestFrameAndFlush();
     }
 
-    void discardDeviceResources() {
+    void releaseDeviceResources() {
         cancelSceneWindowResize();
         auto r = [](auto*& p) {
             if (p) {
@@ -4800,7 +4801,6 @@ struct TaskbarHost::Impl {
             platformIconBmp = nullptr;
         }
         drawTargetOverride_ = nullptr;
-        renderer.discard();
         renderState_.setDeviceResourcePhase(RenderState::DeviceResourcePhase::Uninitialized);
         songContentTransition_.reset();
         clearLyricDCompState();
@@ -4810,6 +4810,26 @@ struct TaskbarHost::Impl {
                             toMask(RenderInvalidation::Layout) |
                             toMask(RenderInvalidation::Cover) |
                             toMask(RenderInvalidation::PlatformIcon));
+    }
+
+    void discardDeviceResources() {
+        releaseDeviceResources();
+        renderer.discard();
+        deviceGeneration_ = 0;
+    }
+
+    bool bindRenderer(int width, int height) {
+        if (!renderer.bind(hwnd, width, height))
+            return false;
+        if (deviceGeneration_ != renderer.deviceGeneration()) {
+            // 其他窗口也可能使共享设备失效，不能只依赖本窗口的 Present 失败路径。
+            if (deviceGeneration_ != 0)
+                releaseDeviceResources();
+            deviceGeneration_ = renderer.deviceGeneration();
+        }
+        renderer.setDpi(dpi_);
+        createDeviceResources();
+        return renderState_.deviceResourcePhase() == RenderState::DeviceResourcePhase::Ready;
     }
 
     void refreshTheme() {
@@ -8531,15 +8551,10 @@ struct TaskbarHost::Impl {
         lastLogicalPxW_ = logicalPxW;
         lastLogicalPxH_ = logicalPxH;
 
-        if (!renderer.bind(hwnd, pxW, pxH))
+        if (!bindRenderer(pxW, pxH))
             return;
         auto* rt = renderer.renderTarget();
         if (!rt)
-            return;
-        renderer.setDpi(dpi_);
-        // DComp 设备上下文在首次 bind 后才存在，画刷/图层创建必须排在 bind 之后
-        createDeviceResources();
-        if (renderState_.deviceResourcePhase() != RenderState::DeviceResourcePhase::Ready)
             return;
 
         // 预处理和资源创建阶段可能追加失效项；从这里开始才捕获本次提交快照，
@@ -8552,7 +8567,7 @@ struct TaskbarHost::Impl {
                 buildTextLayouts(0.0f, 0.0f);
             if (updateDragPreviewPlacement()) {
                 clientPixelSize(pxW, pxH);
-                if (pxW <= 0 || pxH <= 0 || !renderer.bind(hwnd, pxW, pxH))
+                if (pxW <= 0 || pxH <= 0 || !bindRenderer(pxW, pxH))
                     return;
                 rt = renderer.renderTarget();
                 if (!rt)

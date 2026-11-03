@@ -1466,15 +1466,15 @@ struct ManualSearchDialog::Impl {
         if (selectedIdx < 0 || selectedIdx >= static_cast<int>(candidates.size()) ||
             previewLines.empty())
             return;
+        SongInfo info = previewInfo;
+        if (!targetNeteaseSongId.empty())
+            info.neteaseSongId = targetNeteaseSongId;
         if (provider) {
-            SongInfo info = previewInfo;
-            if (!targetNeteaseSongId.empty())
-                info.neteaseSongId = targetNeteaseSongId;
             provider->setManualOverride(targetTitle, targetArtist, targetDurationMs,
                                          std::vector<LyricLine>(previewLines), info);
         }
         if (onApply)
-            onApply();
+            onApply(LyricResult{true, previewLines, std::move(info), false, true});
         destroy();
     }
 

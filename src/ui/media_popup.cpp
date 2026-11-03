@@ -364,6 +364,7 @@ struct MediaPopup::Impl {
     std::vector<ID2D1Bitmap*> idleIconBitmaps;
 
     DCompRenderer renderer;
+    uint64_t deviceGeneration = 0;
     ID2D1SolidColorBrush* brushBackground = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;
     ID2D1SolidColorBrush* brushText = nullptr;
@@ -827,14 +828,19 @@ struct MediaPopup::Impl {
                             kIdleQuickExpandTimer);
     }
 
-    void releaseDrawingResources() {
+    void releaseDeviceResources() {
         stopCategoryTransition();
         stopQuickExpandTransition();
         releaseVisualResources();
-        renderer.discard();
         themeDirty = true;
         coverDirty = true;
         materialNeedsApply = true;
+    }
+
+    void releaseDrawingResources() {
+        releaseDeviceResources();
+        renderer.discard();
+        deviceGeneration = 0;
     }
 
     void applyWindowMaterial() {
@@ -3025,6 +3031,11 @@ struct MediaPopup::Impl {
             return false;
         if (!renderer.bind(hwnd, pxW, pxH))
             return false;
+        if (deviceGeneration != renderer.deviceGeneration()) {
+            if (deviceGeneration != 0)
+                releaseDeviceResources();
+            deviceGeneration = renderer.deviceGeneration();
+        }
         if (materialNeedsApply) {
             // 必须在 DirectComposition target 绑定到 HWND 后再设置材质，
             // 否则绑定过程可能重建窗口合成表面并覆盖背景效果。
