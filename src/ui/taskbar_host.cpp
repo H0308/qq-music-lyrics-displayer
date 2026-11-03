@@ -2653,6 +2653,12 @@ struct TaskbarHost::Impl {
         return spectrumBackground_ && spectrumStyle_ == SpectrumStyle::DreamyWave;
     }
 
+    bool backgroundWaveAnimating() const {
+        // 波浪的相位独立于播放状态和音频电平，暂停后仍需要连续刷新。
+        return clientAnimations_ && spectrumVisible_ && backgroundWaveEnabled() &&
+               scene_ != DisplayScene::Idle && !isMinimalMode() && !isStoppedMode();
+    }
+
     void setSpectrumStyle(SpectrumStyle style) {
         if (spectrumStyle_ == style)
             return;
@@ -9210,7 +9216,7 @@ struct TaskbarHost::Impl {
             return true;
         if (songContentTransition_ && !songContentTransition_->compositorLayer)
             return true;
-        if (taskbarDynamicBackgroundAnimating())
+        if (taskbarDynamicBackgroundAnimating() || backgroundWaveAnimating())
             return true;
         if (media.playing && scrollAnimating_ && !songLayerActive)
             return true;
@@ -9354,7 +9360,7 @@ struct TaskbarHost::Impl {
             return true;
         if (songContentTransition_ && !songContentTransition_->compositorLayer)
             return true;
-        if (taskbarDynamicBackgroundAnimating())
+        if (taskbarDynamicBackgroundAnimating() || backgroundWaveAnimating())
             return true;
         if (scrollAnimating_ && !songLayerActive)
             return true;
