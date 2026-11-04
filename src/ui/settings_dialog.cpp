@@ -2681,7 +2681,6 @@ struct SettingsDialog::Impl {
         const D2D1_COLOR_F clay = D2D1::ColorF(0.73f, 0.39f, 0.31f);
         const D2D1_COLOR_F paper = D2D1::ColorF(0.95f, 0.84f, 0.68f);
         const D2D1_COLOR_F ink = D2D1::ColorF(0.13f, 0.14f, 0.16f);
-        const D2D1_COLOR_F vinylColor = D2D1::ColorF(0.10f, 0.11f, 0.13f);
         const D2D1_COLOR_F vinylEdge = D2D1::ColorF(0.25f, 0.26f, 0.28f);
 
         if (!vinyl) {
@@ -2701,19 +2700,62 @@ struct SettingsDialog::Impl {
             return;
         }
 
-        // 黑胶模式：唱片为外层，歌曲封面实际位于中央圆形裁剪区。
-        const float cx = left + (right - left) * 0.54f;
-        const float cy = top + (bottom - top) * 0.52f;
-        const float radius = std::min(right - left, bottom - top) * 0.42f;
+        // 黑胶模式：固定圆角底座、中央唱片和右上方唱臂。
+        const bool light = !fluent::isDarkMode(fluent::ThemeTarget::Taskbar);
+        const auto deckFill = light ? D2D1::ColorF(0.97f, 0.975f, 0.98f)
+                                    : D2D1::ColorF(0.07f, 0.08f, 0.09f);
+        const auto deckStroke = light ? D2D1::ColorF(0.77f, 0.79f, 0.81f) : vinylEdge;
+        const auto platterRim = light ? D2D1::ColorF(0.82f, 0.84f, 0.86f)
+                                      : D2D1::ColorF(0.37f, 0.39f, 0.42f);
+        const auto metal = light ? D2D1::ColorF(0.86f, 0.88f, 0.90f)
+                                 : D2D1::ColorF(0.65f, 0.67f, 0.69f);
+        const auto armShadow = light ? D2D1::ColorF(0.45f, 0.47f, 0.49f, 0.60f) : ink;
+        const auto cartridge = light ? D2D1::ColorF(0.95f, 0.96f, 0.97f) : ink;
+        const auto grooveColor = light ? D2D1::ColorF(0.25f, 0.27f, 0.29f, 0.20f)
+                                       : D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f);
+        const float size = std::max(0.0f, std::min(right - left, bottom - top) - 4.0f);
+        const float deckLeft = (left + right - size) * 0.5f;
+        const float deckTop = (top + bottom - size) * 0.5f;
+        const auto point = [&](float x, float y) {
+            return D2D1::Point2F(deckLeft + size * x, deckTop + size * y);
+        };
+        const auto deck = D2D1::RectF(deckLeft, deckTop, deckLeft + size, deckTop + size);
+        painter.fillRoundRect(tone(deckFill), deck, 6.0f);
+        painter.strokeRoundRect(tone(deckStroke), deck, 0.6f, 6.0f);
+        const float cx = deckLeft + size * 0.5f;
+        const float cy = deckTop + size * 0.5f;
+        const float radius = size * 0.40f;
         const D2D1_POINT_2F center = D2D1::Point2F(cx, cy);
-        fillEllipse(vinylColor, center, radius);
-        drawEllipse(vinylEdge, center, radius - 3.0f, 1.0f);
-        drawEllipse(vinylEdge, center, radius * 0.68f, 0.8f);
-        drawLine(paper, D2D1::Point2F(cx - radius * 0.14f, cy - radius * 0.82f),
-                 D2D1::Point2F(cx + radius * 0.36f, cy - radius * 0.66f), 1.0f);
+        fillEllipse(platterRim, center, radius);
+        const float recordRadius = radius - 0.5f;
+        fillEllipse(clay, center, recordRadius);
+        const D2D1_GRADIENT_STOP stops[] = {
+            {0.00f, tone(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.20f))},
+            {0.22f, tone(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.26f))},
+            {0.38f, tone(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f))},
+            {0.52f, tone(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f))},
+            {0.76f, tone(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.20f))},
+            {1.00f, tone(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.15f))},
+        };
+        ID2D1GradientStopCollection* collection = nullptr;
+        if (SUCCEEDED(painter.target()->CreateGradientStopCollection(stops, _countof(stops),
+                D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &collection))) {
+            ID2D1LinearGradientBrush* surface = nullptr;
+            if (SUCCEEDED(painter.target()->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(
+                        D2D1::Point2F(cx - recordRadius * 0.8f, cy - recordRadius * 0.6f),
+                        D2D1::Point2F(cx + recordRadius * 0.8f, cy + recordRadius * 0.6f)),
+                    collection, &surface))) {
+                painter.target()->FillEllipse(D2D1::Ellipse(center, recordRadius, recordRadius), surface);
+                surface->Release();
+            }
+            collection->Release();
+        }
 
-        // 真实渲染中的圆形封面半径约为封面槽边长的 30%，这里用同样比例表现封面落点。
-        const float coverRadius = std::min(right - left, bottom - top) * 0.30f;
+        // 与真实渲染保持相同的中央封面比例。
+        const float coverRadius = size * 0.25f;
+        for (float groove = coverRadius + 0.9f; groove < recordRadius - 0.4f; groove += 1.1f)
+            drawEllipse(grooveColor, center, groove, 0.35f);
         const D2D1_POINT_2F coverCenter = D2D1::Point2F(cx, cy);
         fillEllipse(paper, coverCenter, coverRadius);
         fillEllipse(clay,
@@ -2723,8 +2765,19 @@ struct SettingsDialog::Impl {
                  D2D1::Point2F(cx + coverRadius * 0.50f, cy - coverRadius * 0.12f), 1.1f);
         drawLine(clay, D2D1::Point2F(cx - coverRadius * 0.52f, cy + coverRadius * 0.48f),
                  D2D1::Point2F(cx + coverRadius * 0.48f, cy - coverRadius * 0.34f), 1.4f);
-        drawEllipse(vinylEdge, coverCenter, coverRadius, 0.9f);
-        fillEllipse(ink, center, 1.7f);
+        drawEllipse(grooveColor, coverCenter, coverRadius, 0.9f);
+        fillEllipse(light ? D2D1::ColorF(0.78f, 0.80f, 0.82f) : ink, center, 1.7f);
+        const auto pivot = point(0.85f, 0.17f);
+        const auto elbow = point(0.81f, 0.55f);
+        const auto stylus = point(0.73f, 0.75f);
+        fillEllipse(armShadow, pivot, size * 0.075f);
+        drawLine(armShadow, pivot, elbow, std::max(1.2f, size * 0.045f));
+        drawLine(armShadow, elbow, stylus, std::max(1.2f, size * 0.045f));
+        drawLine(metal, pivot, elbow, std::max(0.65f, size * 0.023f));
+        drawLine(metal, elbow, stylus, std::max(0.65f, size * 0.023f));
+        fillEllipse(light ? D2D1::ColorF(0.99f, 0.99f, 0.99f) : metal, pivot, size * 0.035f);
+        drawLine(cartridge, point(0.75f, 0.70f), point(0.71f, 0.79f),
+                 std::max(1.5f, size * 0.07f));
     }
 
     void drawCoverEffectRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {

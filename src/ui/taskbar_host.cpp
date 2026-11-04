@@ -141,8 +141,11 @@ constexpr UINT kResourceSnapshotPollMs = 250;
 constexpr float kSpectrumBarGradientDarkFactor = 0.78f;
 constexpr float kSpectrumBarGradientLightMix = 0.22f;
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
-constexpr float kVinylHaloWidth = 2.5f;
-constexpr float kVinylInnerRatio = 0.30f; // 圆形专辑封面半径 / 封面槽边长
+constexpr float kVinylArmParkedAngle = -18.0f;
+constexpr ULONGLONG kVinylArmDurationMs = 240;
+constexpr float kVinylHaloWidth = 0.5f;
+constexpr float kVinylOuterRatio = 0.40f; // 唱片直径约为底座边长的 80%，四边各留约 10%
+constexpr float kVinylInnerRatio = 0.25f; // 圆形专辑封面半径 / 封面槽边长
 constexpr float kCoverBlurStdDev = 6.0f;  // 封面模糊背景的高斯模糊强度（封面按显示尺寸解码，拉伸后等效更强）
 
 // d2d1effects.h 只声明这些 GUID；当前工程的链接配置不提供其外部定义，
@@ -968,9 +971,10 @@ struct TaskbarHost::Impl {
     ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+不透明度）
     ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
     ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
-    ID2D1SolidColorBrush* brushCoverHalo_ = nullptr;    // 黑胶外圈光环（复用已播放色）
     ID2D1SolidColorBrush* brushVinylBase_ = nullptr;    // 黑胶唱片底色
     ID2D1SolidColorBrush* brushVinylGroove_ = nullptr;  // 黑胶纹理线
+    ID2D1LinearGradientBrush* brushVinylSurface_ = nullptr; // 固定光照下的盘面反光
+    ID2D1SolidColorBrush* brushTurntable_ = nullptr;    // 固定底座与唱臂
     COLORREF lyricColor_ = RGB(49, 194, 124);           // 已播放颜色，默认 QQ 绿
     COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);   // 逐字未播放颜色
     int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放不透明度（%）
@@ -995,6 +999,10 @@ struct TaskbarHost::Impl {
     // 仅关闭附加视觉、媒体卡片和切歌弹窗）
     float vinylAngleDeg_ = 0.0f;
     ULONGLONG vinylTickMs_ = 0;
+    float vinylArmAngleDeg_ = kVinylArmParkedAngle;
+    float vinylArmFromDeg_ = kVinylArmParkedAngle;
+    float vinylArmTargetDeg_ = kVinylArmParkedAngle;
+    ULONGLONG vinylArmStartMs_ = 0;
     // 频谱：基色可跟随已播放色、专辑主题色或自定义色（createLyricBrushes），
     // bands 由 UI 线程每帧写入
     ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
@@ -1335,6 +1343,8 @@ struct TaskbarHost::Impl {
             requestInvalidation(RenderInvalidation::SongInfo);
         if (thumbChanged || textChanged || playingChanged)
             vinylTickMs_ = monotonicNowMs();
+        if (playingChanged)
+            updateVinylRotation();
         return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged ||
                dominantColorChanged || durationChanged;
     }
@@ -2327,7 +2337,7 @@ struct TaskbarHost::Impl {
                      : RenderState::DeviceResourcePhase::Uninitialized);
     }
 
-    // 黑胶效果画刷：光环/纹理沿用当前已播放色，保证专辑取色后两处同步变化。
+    // 盘面底色在绘制时跟随专辑，反光以半透明黑白叠加，保留专辑色相。
     void createAlbumCoverBrushes() {
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -2338,17 +2348,31 @@ struct TaskbarHost::Impl {
                 p = nullptr;
             }
         };
-        release(brushCoverHalo_);
         release(brushVinylBase_);
         release(brushVinylGroove_);
-        auto rgb = [](COLORREF c, float a) {
-            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
-                                GetBValue(c) / 255.0f, a);
-        };
-        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.42f), &brushCoverHalo_);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.018f, 0.018f, 0.022f, 0.96f),
+        release(brushVinylSurface_);
+        release(brushTurntable_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.055f, 0.060f, 0.068f),
                                   &brushVinylBase_);
-        rt->CreateSolidColorBrush(rgb(lyricColor_, 0.22f), &brushVinylGroove_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f), &brushVinylGroove_);
+        const D2D1_GRADIENT_STOP stops[] = {
+            {0.00f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.20f)},
+            {0.22f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.26f)},
+            {0.38f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.10f)},
+            {0.52f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f)},
+            {0.76f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.20f)},
+            {1.00f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.15f)},
+        };
+        ID2D1GradientStopCollection* collection = nullptr;
+        if (SUCCEEDED(rt->CreateGradientStopCollection(stops, _countof(stops),
+                D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &collection))) {
+            rt->CreateLinearGradientBrush(
+                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                    D2D1::Point2F(1.0f, 1.0f)),
+                collection, &brushVinylSurface_);
+            collection->Release();
+        }
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.07f, 0.08f, 0.09f), &brushTurntable_);
     }
 
     void releaseAlbumCoverEffectResources() {
@@ -2358,9 +2382,10 @@ struct TaskbarHost::Impl {
                 p = nullptr;
             }
         };
-        release(brushCoverHalo_);
         release(brushVinylBase_);
         release(brushVinylGroove_);
+        release(brushVinylSurface_);
+        release(brushTurntable_);
         release(vinylCoverClip_);
     }
 
@@ -3010,6 +3035,7 @@ struct TaskbarHost::Impl {
             createAlbumCoverBrushes();
         else
             releaseAlbumCoverEffectResources();
+        updateVinylRotation();
         requestFrameAndFlush();
     }
 
@@ -3034,6 +3060,7 @@ struct TaskbarHost::Impl {
         if (playingChanged) {
             media.playing = patch.playing;
             vinylTickMs_ = monotonicNowMs();
+            updateVinylRotation();
             mediaPopup.setMedia(media, mediaPopupAvailable(isSessionVisible()));
             mediaPopup.setPresentationMode(
                 scene_, mediaPopupAvailable(isSessionVisible()),
@@ -4287,8 +4314,23 @@ struct TaskbarHost::Impl {
         if (!rt || s <= 0.0f)
             return;
 
+        // 使用任务栏内容主题，与普通设置窗口的主题来源独立。
+        const auto deckFill = lightTheme_ ? D2D1::ColorF(0.97f, 0.975f, 0.98f)
+                                          : D2D1::ColorF(0.07f, 0.08f, 0.09f);
+        const auto deckStroke = lightTheme_ ? D2D1::ColorF(0.77f, 0.79f, 0.81f)
+                                            : D2D1::ColorF(0.27f, 0.28f, 0.30f);
+        const auto platterRim = lightTheme_ ? D2D1::ColorF(0.82f, 0.84f, 0.86f)
+                                            : D2D1::ColorF(0.37f, 0.39f, 0.42f);
+        const auto armShadow = lightTheme_ ? D2D1::ColorF(0.45f, 0.47f, 0.49f, 0.60f)
+                                           : D2D1::ColorF(0.02f, 0.025f, 0.03f);
+        const auto metal = lightTheme_ ? D2D1::ColorF(0.86f, 0.88f, 0.90f)
+                                       : D2D1::ColorF(0.65f, 0.67f, 0.69f);
+        const auto pivotFill = lightTheme_ ? D2D1::ColorF(0.99f, 0.99f, 0.99f) : metal;
+        const auto cartridge = lightTheme_ ? D2D1::ColorF(0.95f, 0.96f, 0.97f)
+                                           : D2D1::ColorF(0.12f, 0.13f, 0.15f);
+
         D2D1_POINT_2F center = D2D1::Point2F(coverX + s * 0.5f, coverY + s * 0.5f);
-        float outerRadius = std::max(1.0f, s * 0.5f - 0.5f);
+        float outerRadius = std::max(1.0f, s * kVinylOuterRatio);
         float haloWidth = std::min(kVinylHaloWidth, outerRadius * 0.25f);
         float recordRadius = std::max(0.5f, outerRadius - haloWidth);
         float innerRadius = vinylInnerRadius(s);
@@ -4296,27 +4338,48 @@ struct TaskbarHost::Impl {
         D2D1_ELLIPSE record{center, recordRadius, recordRadius};
         D2D1_ELLIPSE inner{center, innerRadius, innerRadius};
 
-        // Direct2D 的正角度就是顺时针旋转；整个唱片组以中心为轴同步旋转。
+        // 固定唱机底座始终位于原封面槽内，不随盘面旋转，也不挤占歌曲文字。
+        if (brushTurntable_) {
+            const auto deck = D2D1::RoundedRect(
+                D2D1::RectF(coverX, coverY, coverX + s, coverY + s), 4.0f, 4.0f);
+            brushTurntable_->SetColor(deckFill);
+            rt->FillRoundedRectangle(deck, brushTurntable_);
+            brushTurntable_->SetColor(deckStroke);
+            rt->DrawRoundedRectangle(deck, brushTurntable_, 0.6f);
+        }
+
+        // 光照固定在唱机上，盘面和封面在光照下旋转。
         D2D1_MATRIX_3X2_F previous{};
         rt->GetTransform(&previous);
-        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center) * previous);
-        if (brushCoverHalo_)
-            rt->FillEllipse(outer, brushCoverHalo_);
-        if (brushVinylBase_)
+        if (brushTurntable_) {
+            brushTurntable_->SetColor(platterRim);
+            rt->FillEllipse(outer, brushTurntable_);
+        }
+        if (brushVinylBase_) {
+            brushVinylBase_->SetColor(media.hasDominantColor
+                ? fluent::toD2D(media.dominantColor)
+                : (lightTheme_ ? D2D1::ColorF(0.72f, 0.73f, 0.74f)
+                                : D2D1::ColorF(0.055f, 0.060f, 0.068f)));
             rt->FillEllipse(record, brushVinylBase_);
+        }
+        if (brushVinylSurface_) {
+            brushVinylSurface_->SetStartPoint(D2D1::Point2F(
+                center.x - recordRadius * 0.8f, center.y - recordRadius * 0.6f));
+            brushVinylSurface_->SetEndPoint(D2D1::Point2F(
+                center.x + recordRadius * 0.8f, center.y + recordRadius * 0.6f));
+            rt->FillEllipse(record, brushVinylSurface_);
+        }
+        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center) * previous);
 
         if (brushVinylGroove_) {
-            // 细密同心纹理和一条短径向高光，让纯色封面也能看出唱片正在转动。
-            for (float radius = innerRadius + 1.5f; radius < recordRadius - 0.5f;
-                 radius += 2.0f) {
-                rt->DrawEllipse(D2D1_ELLIPSE{center, radius, radius}, brushVinylGroove_, 0.55f);
+            brushVinylGroove_->SetColor(lightTheme_
+                ? D2D1::ColorF(0.25f, 0.27f, 0.29f, 0.20f)
+                : D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f));
+            // 细窄的低对比唱纹，避免小尺寸下粗同心圆看起来像一圈圈边框。
+            for (float radius = innerRadius + 0.9f; radius < recordRadius - 0.4f;
+                 radius += 1.1f) {
+                rt->DrawEllipse(D2D1_ELLIPSE{center, radius, radius}, brushVinylGroove_, 0.35f);
             }
-            rt->DrawLine(
-                D2D1::Point2F(center.x - recordRadius * 0.82f,
-                               center.y - recordRadius * 0.18f),
-                D2D1::Point2F(center.x - innerRadius - 1.0f,
-                               center.y - recordRadius * 0.18f),
-                brushVinylGroove_, 0.8f);
         }
 
         D2D1_RECT_F innerRect = D2D1::RectF(center.x - innerRadius, center.y - innerRadius,
@@ -4334,11 +4397,38 @@ struct TaskbarHost::Impl {
         }
         if (brushVinylGroove_)
             rt->DrawEllipse(inner, brushVinylGroove_, 0.8f);
-        if (brushVinylBase_)
+        if (brushVinylBase_) {
+            brushVinylBase_->SetColor(lightTheme_ ? D2D1::ColorF(0.78f, 0.80f, 0.82f)
+                                                  : D2D1::ColorF(0.035f, 0.04f, 0.05f));
             rt->FillEllipse(D2D1_ELLIPSE{center, std::max(0.8f, s * 0.025f),
                                          std::max(0.8f, s * 0.025f)},
                             brushVinylBase_);
+        }
         rt->SetTransform(previous);
+
+        // 唱臂绕固定支点收放，盘面旋转与唱臂动作分别计时。
+        if (brushTurntable_) {
+            const auto point = [&](float x, float y) {
+                return D2D1::Point2F(coverX + s * x, coverY + s * y);
+            };
+            const auto pivot = point(0.85f, 0.17f);
+            const auto elbow = point(0.81f, 0.55f);
+            const auto stylus = point(0.73f, 0.75f);
+            rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylArmAngleDeg_, pivot) * previous);
+            brushTurntable_->SetColor(armShadow);
+            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.075f, s * 0.075f), brushTurntable_);
+            rt->DrawLine(pivot, elbow, brushTurntable_, std::max(1.2f, s * 0.045f));
+            rt->DrawLine(elbow, stylus, brushTurntable_, std::max(1.2f, s * 0.045f));
+            brushTurntable_->SetColor(metal);
+            rt->DrawLine(pivot, elbow, brushTurntable_, std::max(0.65f, s * 0.023f));
+            rt->DrawLine(elbow, stylus, brushTurntable_, std::max(0.65f, s * 0.023f));
+            brushTurntable_->SetColor(pivotFill);
+            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.035f, s * 0.035f), brushTurntable_);
+            brushTurntable_->SetColor(cartridge);
+            rt->DrawLine(point(0.75f, 0.70f), point(0.71f, 0.79f), brushTurntable_,
+                         std::max(1.5f, s * 0.07f));
+            rt->SetTransform(previous);
+        }
     }
 
     void drawPlatformIcon(float coverX, float coverY, float s) {
@@ -4551,9 +4641,10 @@ struct TaskbarHost::Impl {
         r(brushLyricDim_);
         r(brushLyricGlow_);
         r(brushLyricOutline_);
-        r(brushCoverHalo_);
         r(brushVinylBase_);
         r(brushVinylGroove_);
+        r(brushVinylSurface_);
+        r(brushTurntable_);
         r(brushSpectrum_);
         r(brushSpectrumBarGradient_);
         r(brushProgressBg_);
@@ -6015,7 +6106,7 @@ struct TaskbarHost::Impl {
     }
 
     float vinylInnerRadius(float s) const {
-        float outerRadius = std::max(1.0f, s * 0.5f - 0.5f);
+        float outerRadius = std::max(1.0f, s * kVinylOuterRatio);
         float recordRadius = std::max(0.5f, outerRadius -
                                                     std::min(kVinylHaloWidth, outerRadius * 0.25f));
         return std::min(s * kVinylInnerRatio, std::max(1.0f, recordRadius - 1.0f));
@@ -9155,17 +9246,45 @@ struct TaskbarHost::Impl {
     }
 
     void updateVinylRotation() {
-        ULONGLONG now = monotonicNowMs();
+        const ULONGLONG now = monotonicNowMs();
         if (vinylTickMs_ == 0)
             vinylTickMs_ = now;
-        if (albumCoverEffect_ != AlbumCoverEffect::Vinyl || !media.playing ||
-            !clientAnimations_) {
-            // 暂停/切回默认效果时把时间锚点重置，恢复播放不会补算暂停期间的角度。
-            vinylTickMs_ = now;
-            return;
-        }
-        ULONGLONG elapsed = now - vinylTickMs_;
+        const ULONGLONG elapsed = now - vinylTickMs_;
         vinylTickMs_ = now;
+        const float previousArmAngle = vinylArmAngleDeg_;
+        const bool armWasMoving = vinylArmStartMs_ != 0;
+
+        // 先采样尚未结束的动作，快速切换播放状态时从当前位置反向，不跳回端点。
+        if (vinylArmStartMs_ != 0) {
+            const float t = std::min(1.0f,
+                static_cast<float>(now - vinylArmStartMs_) / kVinylArmDurationMs);
+            const float eased = t * t * (3.0f - 2.0f * t);
+            vinylArmAngleDeg_ = vinylArmFromDeg_ +
+                               (vinylArmTargetDeg_ - vinylArmFromDeg_) * eased;
+            if (t >= 1.0f) {
+                vinylArmAngleDeg_ = vinylArmTargetDeg_;
+                vinylArmStartMs_ = 0;
+            }
+        }
+        const float target = media.playing ? 0.0f : kVinylArmParkedAngle;
+        const bool animate = albumCoverEffect_ == AlbumCoverEffect::Vinyl &&
+                             albumCoverVisible_ && clientAnimations_;
+        if (!animate) {
+            vinylArmAngleDeg_ = vinylArmFromDeg_ = vinylArmTargetDeg_ = target;
+            vinylArmStartMs_ = 0;
+        } else if (target != vinylArmTargetDeg_) {
+            vinylArmFromDeg_ = vinylArmAngleDeg_;
+            vinylArmTargetDeg_ = target;
+            vinylArmStartMs_ = vinylArmAngleDeg_ == target ? 0 : now;
+        }
+        // 收尾帧也要重绘，不能在清除动作标记后被静止判定跳过。
+        if (vinylArmAngleDeg_ != previousArmAngle)
+            requestFrame();
+
+        // 暂停立即停盘；恢复播放时等唱臂落稳，下一帧才开始推进角度。
+        if (!animate || !media.playing || armWasMoving || vinylArmStartMs_ != 0 ||
+            vinylArmAngleDeg_ != 0.0f)
+            return;
         vinylAngleDeg_ = std::fmod(
             vinylAngleDeg_ + static_cast<float>(elapsed) * kVinylRotationDegPerSecond / 1000.0f,
             360.0f);
@@ -9208,6 +9327,9 @@ struct TaskbarHost::Impl {
 
     bool hasHighFrequencyAnimation() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
+        if (vinylArmStartMs_ != 0 && clientAnimations_ && albumCoverVisible_ &&
+            albumCoverEffect_ == AlbumCoverEffect::Vinyl && !songLayerActive)
+            return true;
         if (horizontalImmersiveMode() && clientAnimations_ && dockPet_.animating())
             return true;
         if (isLyricTransitionInProgress() && !songLayerActive)
@@ -9350,6 +9472,9 @@ struct TaskbarHost::Impl {
     // 跳过时屏幕上保持上一次 DirectComposition 提交的内容，不会闪烁或丢状态。
     bool needsFrameRender() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
+        if (vinylArmStartMs_ != 0 && clientAnimations_ && albumCoverVisible_ &&
+            albumCoverEffect_ == AlbumCoverEffect::Vinyl && !songLayerActive)
+            return true;
         if (renderState_.hasInvalidation())
             return true;
         if (horizontalImmersiveMode() && clientAnimations_ && dockPet_.animating())
