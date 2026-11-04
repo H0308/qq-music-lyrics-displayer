@@ -14,19 +14,23 @@ namespace fluent {
 
 namespace {
 
-constexpr float kItemH = 32.0f;
-constexpr float kSepH = 9.0f;
-constexpr float kPadY = 6.0f;
-constexpr float kPadX = 6.0f;
-constexpr float kIconLeft = 12.0f;
+constexpr float kItemH = 36.0f;
+constexpr float kSepH = 11.0f;
+constexpr float kPadY = 8.0f;
+constexpr float kPadX = 8.0f;
+constexpr float kItemRadius = 6.0f;
+constexpr float kIconLeft = 18.0f;
 constexpr float kIconSize = 16.0f;
-constexpr float kIconTextGap = 8.0f;
+constexpr float kIconTextGap = 10.0f;
 constexpr float kGutter = kIconLeft + kIconSize + kIconTextGap;
-constexpr float kCheckRightPad = 20.0f;
-constexpr float kSubmenuCheckRightPad = 40.0f;
-constexpr float kRightPad = 26.0f;
-constexpr float kMinWidth = 180.0f;
+constexpr float kCheckRightPad = 28.0f;
+constexpr float kSubmenuCheckRightPad = 48.0f;
+constexpr float kRightPad = 36.0f;
+constexpr float kMinWidth = 208.0f;
+constexpr float kSubmenuGap = 6.0f;
 constexpr UINT kTimerSubmenu = 1;
+constexpr UINT kTimerReveal = 2;
+constexpr ULONGLONG kRevealDurationMs = 100;
 // 子菜单只保留很短的防误触延迟；菜单内容已经在 UI 线程准备完成，
 // 过长的延迟会被感知为打开卡顿。
 constexpr UINT kSubmenuDelayMs = 150;
@@ -37,7 +41,9 @@ struct MenuWnd {
     HWND hwnd = nullptr;
     std::vector<FluentMenuItem> items;
     int hover = -1;
+    ULONGLONG revealStarted = 0;
     MenuWnd* parent = nullptr;
+    int parentRow = -1;
     MenuWnd* child = nullptr;
     FluentMenu::Callback cb; // 仅根菜单持有
     LyricRenderer renderer;
@@ -67,7 +73,7 @@ struct MenuWnd {
     void closeChildren(); // 关闭子菜单链
     void closeChain();    // 关闭整棵菜单树
     void closeChainFrom();// 关闭自身及子链（退回父菜单）
-    void openSubmenu();   // 为当前悬停行打开子菜单
+    void openSubmenu(bool animate = false); // 为当前悬停行打开子菜单
     LRESULT handleMsg(UINT msg, WPARAM wp, LPARAM lp);
 
     void releaseNativeIconBitmaps() {
@@ -153,13 +159,16 @@ struct MenuWnd {
                     layout) {
                     DWRITE_TEXT_METRICS m{};
                     layout->GetMetrics(&m);
-                    maxText = std::max(maxText, m.width);
+                    const float stateSpace = it.checked
+                        ? (it.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
+                        : kRightPad;
+                    maxText = std::max(maxText, m.width + stateSpace);
                     layout->Release();
                 }
             }
             f->Release();
         }
-        wDip = std::max(kMinWidth, maxText + kGutter + 8.0f + kRightPad + kPadX * 2);
+        wDip = std::max(kMinWidth, maxText + kGutter + 18.0f);
     }
 
     void render() {
@@ -181,7 +190,7 @@ struct MenuWnd {
         if (!rt)
             return;
         float s = dipScale(dpi);
-        float wDip = w / s, hDip = h / s;
+        float wDip = w / s;
 
         if (brush) {
             brush->Release();
@@ -204,32 +213,34 @@ struct MenuWnd {
         const Palette& p = palette();
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        brush->SetColor(p.menuFill);
-        rt->Clear(p.menuFill);
-        brush->SetColor(p.menuStroke);
-        rt->DrawRoundedRectangle(
-            D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, wDip - 0.5f, hDip - 0.5f),
-                              metrics::controlRadius, metrics::controlRadius),
-            brush, 1.0f);
+        // 背景、描边和系统阴影保持稳定，只让内容短促淡入，避免整窗动画拖动阴影。
+        rt->Clear(p.windowBg);
+
+        const float reveal = revealStarted == 0 ? 1.0f : std::min(
+            1.0f, static_cast<float>(GetTickCount64() - revealStarted) / kRevealDurationMs);
+        brush->SetOpacity(reveal);
 
         float y = kPadY;
         for (int i = 0; i < static_cast<int>(items.size()); ++i) {
             const auto& it = items[i];
             if (it.separator) {
                 brush->SetColor(p.separator);
-                rt->FillRectangle(D2D1::RectF(kPadX + 6.0f, y + kSepH / 2.0f - 0.5f,
-                                              wDip - kPadX - 6.0f,
+                rt->FillRectangle(D2D1::RectF(kIconLeft, y + kSepH / 2.0f - 0.5f,
+                                              wDip - kIconLeft,
                                               y + kSepH / 2.0f + 0.5f),
                                   brush);
                 y += kSepH;
                 continue;
             }
             bool hov = i == hover && it.enabled;
-            if (hov) {
-                brush->SetColor(p.listHover);
+            if (hov || (it.checked && it.enabled)) {
+                auto fill = hov ? p.listHover : p.accent;
+                if (!hov)
+                    fill.a = 0.07f;
+                brush->SetColor(fill);
                 rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(kPadX, y + 1.0f, wDip - kPadX, y + kItemH - 1.0f),
-                                      4.0f, 4.0f),
+                    D2D1::RoundedRect(D2D1::RectF(kPadX, y + 2.0f, wDip - kPadX, y + kItemH - 2.0f),
+                                      kItemRadius, kItemRadius),
                     brush);
             }
             if (it.checked) {
@@ -248,7 +259,7 @@ struct MenuWnd {
                 D2D1::RectF(kIconLeft, iconTop, kIconLeft + kIconSize,
                             iconTop + kIconSize);
             if (i < static_cast<int>(nativeIconBitmaps.size()) && nativeIconBitmaps[i]) {
-                rt->DrawBitmap(nativeIconBitmaps[i], iconRect, it.enabled ? 1.0f : 0.45f,
+                rt->DrawBitmap(nativeIconBitmaps[i], iconRect, reveal * (it.enabled ? 1.0f : 0.45f),
                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             } else if (it.icon != settings_icon::Kind::None) {
                 brush->SetColor(it.enabled ? (it.checked ? p.accent : p.textSecondary)
@@ -258,12 +269,15 @@ struct MenuWnd {
                     brush, 1.15f);
             }
             brush->SetColor(it.enabled ? p.text : p.disabled);
+            const float stateSpace = it.checked
+                ? (it.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
+                : kRightPad;
             rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,
-                          D2D1::RectF(kGutter, y, wDip - kRightPad, y + kItemH), brush);
+                          D2D1::RectF(kGutter, y, wDip - stateSpace, y + kItemH), brush);
             if (!it.submenu.empty()) {
                 // 子菜单箭头
                 brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
-                float ax = wDip - 16.0f, ay = y + kItemH / 2.0f;
+                float ax = wDip - 22.0f, ay = y + kItemH / 2.0f;
                 rt->DrawLine(D2D1::Point2F(ax, ay - 4.0f), D2D1::Point2F(ax + 3.5f, ay), brush, 1.4f);
                 rt->DrawLine(D2D1::Point2F(ax + 3.5f, ay), D2D1::Point2F(ax, ay + 4.0f), brush, 1.4f);
             }
@@ -345,9 +359,10 @@ void MenuWnd::closeAll() {
 
 // 创建一级菜单窗口（根或子菜单）
 MenuWnd* createMenuLevel(HWND owner, MenuWnd* parent, std::vector<FluentMenuItem> items,
-                         const FluentMenu::Callback* cb, POINT screenPt) {
+                         const FluentMenu::Callback* cb, POINT screenPt, bool animate = true) {
     auto* mw = new MenuWnd();
     mw->parent = parent;
+    mw->parentRow = parent ? parent->hover : -1;
     mw->items = std::move(items);
     if (cb)
         mw->cb = *cb;
@@ -373,9 +388,12 @@ MenuWnd* createMenuLevel(HWND owner, MenuWnd* parent, std::vector<FluentMenuItem
     int x = screenPt.x;
     int y = screenPt.y;
     if (parent) {
-        x = screenPt.x - static_cast<int>(kPadX * s); // 与父菜单项右侧对齐
+        RECT parentRect{};
+        GetWindowRect(parent->hwnd, &parentRect);
+        const int gap = static_cast<int>(std::lround(kSubmenuGap * s));
+        x = parentRect.right + gap;
         if (x + w > mi.rcWork.right)
-            x = screenPt.x - w + static_cast<int>(kPadX * s); // 翻到左侧
+            x = parentRect.left - w - gap; // 右侧不足时，在父菜单左侧保持同样间距。
     }
     if (x + w > mi.rcWork.right)
         x = mi.rcWork.right - w;
@@ -388,7 +406,7 @@ MenuWnd* createMenuLevel(HWND owner, MenuWnd* parent, std::vector<FluentMenuItem
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.style = CS_DROPSHADOW;
+    // 外轮廓和阴影统一由 DWM 绘制，不叠加旧式矩形菜单阴影。
     wc.lpfnWndProc = [](HWND h, UINT msg, WPARAM wp, LPARAM lp) -> LRESULT {
         MenuWnd* self = nullptr;
         if (msg == WM_NCCREATE) {
@@ -413,8 +431,25 @@ MenuWnd* createMenuLevel(HWND owner, MenuWnd* parent, std::vector<FluentMenuItem
         delete mw;
         return nullptr;
     }
-    applyRoundCorners(mw->hwnd, true);
-    suppressBorder(mw->hwnd);
+    applyRoundCorners(mw->hwnd, false);
+    applyDarkCaption(mw->hwnd, isDarkMode(ThemeTarget::Window));
+    const auto& p = palette();
+    const auto stroke = p.controlStroke;
+    const auto borderChannel = [&](float foreground, float background) {
+        return static_cast<BYTE>(std::lround(
+            std::clamp(foreground * stroke.a + background * (1.0f - stroke.a), 0.0f, 1.0f) * 255.0f));
+    };
+    applyBorderColor(mw->hwnd, RGB(borderChannel(stroke.r, p.windowBg.r),
+                                  borderChannel(stroke.g, p.windowBg.g),
+                                  borderChannel(stroke.b, p.windowBg.b)));
+    BOOL clientAnimations = TRUE;
+    BOOL menuAnimations = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
+    SystemParametersInfoW(SPI_GETMENUANIMATION, 0, &menuAnimations, 0);
+    if (animate && clientAnimations && menuAnimations &&
+        SetTimer(mw->hwnd, kTimerReveal, USER_TIMER_MINIMUM, nullptr))
+        mw->revealStarted = GetTickCount64();
+    mw->render();
     ShowWindow(mw->hwnd, SW_SHOWNA);
     return mw;
 }
@@ -443,10 +478,13 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
         TrackMouseEvent(&tme); // 重复武装是幂等的
         if (row != hover) {
+            revealStarted = 0;
+            KillTimer(hwnd, kTimerReveal);
             hover = row;
             render();
             KillTimer(hwnd, kTimerSubmenu);
-            if (selectable(row) && !items[row].submenu.empty())
+            if (selectable(row) && !items[row].submenu.empty() &&
+                (!child || child->parentRow != row))
                 SetTimer(hwnd, kTimerSubmenu, kSubmenuDelayMs, nullptr);
             if (selectable(row) && items[row].submenu.empty())
                 closeChildren();
@@ -463,7 +501,13 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
         if (wp == kTimerSubmenu) {
             KillTimer(hwnd, kTimerSubmenu);
-            openSubmenu();
+            openSubmenu(true);
+        } else if (wp == kTimerReveal) {
+            if (GetTickCount64() - revealStarted >= kRevealDurationMs) {
+                revealStarted = 0;
+                KillTimer(hwnd, kTimerReveal);
+            }
+            render();
         }
         return 0;
     case WM_LBUTTONUP: {
@@ -482,6 +526,11 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_KEYDOWN: {
+        if (revealStarted != 0) {
+            revealStarted = 0;
+            KillTimer(hwnd, kTimerReveal);
+            render();
+        }
         if (wp == VK_ESCAPE) {
             if (parent) {
                 closeChainFrom();
@@ -547,6 +596,7 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_DESTROY: {
         KillTimer(hwnd, kTimerSubmenu);
+        KillTimer(hwnd, kTimerReveal);
         // 只有根菜单持有鼠标钩子
         if (!parent && g_mouseHook) {
             UnhookWindowsHookEx(g_mouseHook);
@@ -586,8 +636,11 @@ void MenuWnd::closeChainFrom() {
         SetForegroundWindow(p->hwnd);
 }
 
-void MenuWnd::openSubmenu() {
+void MenuWnd::openSubmenu(bool animate) {
     if (!selectable(hover) || items[hover].submenu.empty())
+        return;
+    // 返回同一个父菜单项时复用现有子窗口，不重建或重复播放淡入动画。
+    if (child && child->parentRow == hover)
         return;
     if (child)
         closeChildren();
@@ -595,8 +648,8 @@ void MenuWnd::openSubmenu() {
     float y = rowY(hover);
     RECT rc;
     GetWindowRect(hwnd, &rc);
-    POINT pt{rc.right, rc.top + static_cast<int>(y * s)};
-    child = createMenuLevel(hwnd, this, items[hover].submenu, nullptr, pt);
+    POINT pt{rc.right, rc.top + static_cast<int>((y - kPadY) * s)};
+    child = createMenuLevel(hwnd, this, items[hover].submenu, nullptr, pt, animate);
     if (child)
         SetForegroundWindow(child->hwnd);
 }
