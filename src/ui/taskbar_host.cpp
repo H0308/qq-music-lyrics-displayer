@@ -330,9 +330,9 @@ int taskbarCrossPixels(const RECT& rect, UINT edge) {
     return isVerticalTaskbarEdge(edge) ? rect.right - rect.left : rect.bottom - rect.top;
 }
 
-// 以下两个函数都是【阻塞型跨进程调用】（GetWindowText = 同步 SendMessage，UIA = 阻塞 COM），
-// 只允许在探测工作线程上调用。若放在 UI 线程，explorer 同时向我们的任务栏子窗口
-// 发消息时会形成双向死等（WER: AppHangXProcB1，explorer 挂起、对方是本进程）
+// 避让探测统一在工作线程执行；其中 UIA 会阻塞等待 Explorer。
+// UI 线程不能调用 UIA，也不能同步等待探测线程退出，否则 Explorer 同时
+// 等待任务栏子窗口处理消息时会形成循环等待（WER: AppHangXProcB1）。
 
 HWND findTrafficMonitorWnd(HWND taskbar) {
     if (!taskbar)
@@ -726,7 +726,7 @@ struct TaskbarHost::Impl {
     RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
     // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）。
-    // 以上探测数据由工作线程产出、UI 线程拾取（见 probeOut_）
+    // 以上探测数据由工作线程产出、UI 线程拾取（见 probeState_->out）
     std::vector<RECT> uiaButtons_;
     // 酷狗进程中与任务栏相交的可见窗口（屏幕坐标）。
     std::vector<RECT> kugouTaskbarWindows_;
@@ -736,18 +736,23 @@ struct TaskbarHost::Impl {
     bool lightTheme_ = false;
     int positionMode_ = 0; // 0 = 通知区域前；1 = 任务栏起始端
 
-    // 避让探测工作线程：UIA / GetWindowText 等阻塞型跨进程调用全部在这里执行，
-    // UI 线程永不阻塞，从根上避免与 explorer 互相死等。结果经原子指针交付
+    // 工作线程只持有独立状态，不持有 Impl；窗口销毁只发停止信号，不能 join。
+    // 最后一个持有者负责回收尚未拾取的结果，允许跨进程调用晚于窗口销毁返回。
     struct ProbeResult {
         RECT rcTm{};
         std::vector<RECT> buttons;
         std::vector<RECT> kugouWindows;
     };
-    std::thread probeThread_;
-    std::atomic<bool> probeStop_{false};
-    std::atomic<bool> probeFast_{false};
-    std::atomic<ProbeResult*> probeOut_{nullptr};
-    std::atomic<HWND> taskbarAtomic_{nullptr}; // taskbar_ 的线程安全副本（探测线程读）
+    struct ProbeState {
+        std::atomic<bool> stop{false};
+        std::atomic<bool> fast{false};
+        std::atomic<ProbeResult*> out{nullptr};
+        std::atomic<HWND> taskbar{nullptr};
+
+        ~ProbeState() { delete out.exchange(nullptr); }
+    };
+    std::shared_ptr<ProbeState> probeState_ = std::make_shared<ProbeState>();
+    bool probeRunning_ = false;
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -1366,7 +1371,7 @@ struct TaskbarHost::Impl {
 
         targetMonitor_ = display->monitor;
         taskbar_ = display->taskbarWindow;
-        taskbarAtomic_ = taskbar_; // 同步给探测工作线程
+        probeState_->taskbar = taskbar_; // 同步给探测工作线程
         if (!taskbar_ && !isAppBarView())
             return false;
         notify_ = taskbar_ ? FindWindowExW(taskbar_, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
@@ -1732,7 +1737,7 @@ struct TaskbarHost::Impl {
             return;
 
         renderState_.setVisibilitySuppressed(false);
-        probeFast_ = false;
+        probeState_->fast = false;
         stopPlacementTimer();
         if (isSessionVisible() && !isStoppedMode()) {
             // 隐藏期间不运行完整帧定时器；恢复前补一次播放进度/当前行，
@@ -1754,7 +1759,7 @@ struct TaskbarHost::Impl {
         placementStatus_ = status;
         if (status == TaskbarPlacementStatus::NoSpace ||
             status == TaskbarPlacementStatus::Unavailable) {
-            probeFast_ = status == TaskbarPlacementStatus::NoSpace;
+            probeState_->fast = status == TaskbarPlacementStatus::NoSpace;
             startPlacementTimer();
             reconcileWindowVisibility();
             stopFrameTimer();
@@ -1775,7 +1780,7 @@ struct TaskbarHost::Impl {
             // 首次真实探测已经完成：解除“等待首次结果”的抑制，但仍保持隐藏，
             // 后续由低频避让计时器等待空间恢复。
             renderState_.setVisibilitySuppressed(false);
-            probeFast_ = true;
+            probeState_->fast = true;
             startPlacementTimer();
             return;
         }
@@ -1815,7 +1820,7 @@ struct TaskbarHost::Impl {
             return;
         if (allowOverlap_) {
             renderState_.setVisibilitySuppressed(false);
-            probeFast_ = false;
+            probeState_->fast = false;
             stopPlacementTimer();
         }
         renderState_.setSessionVisible(true);
@@ -4496,6 +4501,8 @@ struct TaskbarHost::Impl {
             }
             return;
         }
+        // 旧窗口未收到 WM_DESTROY 时也要停止旧探测，避免迟到结果进入新窗口。
+        stopProbe();
         dockBackdrop_.reset();
         hwnd = nullptr;
         resetImmersivePresence();
@@ -4511,7 +4518,7 @@ struct TaskbarHost::Impl {
         renderState_.setVisibilitySuppressed(true);
         renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
         probeReady_ = false;
-        delete probeOut_.exchange(nullptr);
+        delete probeState_->out.exchange(nullptr);
         if (createWindow(inst, targetMonitorDeviceName_, viewMode_)) {
             if (isAppBarView()) {
                 renderState_.setVisibilitySuppressed(false);
@@ -4755,24 +4762,32 @@ struct TaskbarHost::Impl {
     // 空间不足隐藏时缩短到 1 秒，尽快发现可恢复空间。UIA 属性查询由 explorer
     // 的 UI 线程执行，不能跟随歌词帧率高频调用。
     // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
-    void probeMain() {
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    static void probeMain(const std::shared_ptr<ProbeState>& state) {
+        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(initialized))
+            return;
         IUIAutomation* uia = nullptr;
         CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
                          IID_PPV_ARGS(&uia));
-        while (!probeStop_.load()) {
-            if (HWND tb = taskbarAtomic_.load()) {
-                auto* p = new ProbeResult;
+        while (!state->stop.load()) {
+            if (HWND tb = state->taskbar.load()) {
+                auto p = std::make_unique<ProbeResult>();
                 if (HWND tm = findTrafficMonitorWnd(tb))
                     GetWindowRect(tm, &p->rcTm);
+                if (state->stop.load())
+                    break;
                 queryTaskbarButtonsUia(uia, tb, p->buttons);
+                if (state->stop.load())
+                    break;
                 queryKugouTaskbarWindows(tb, p->kugouWindows);
-                delete probeOut_.exchange(p); // 上一份未被拾取则丢弃
+                if (state->stop.load())
+                    break;
+                delete state->out.exchange(p.release()); // 上一份未被拾取则丢弃
             }
             int elapsed = 0;
-            while (!probeStop_.load()) {
-                const UINT interval = probeFast_.load() ? kNoSpaceProbeIntervalMs
-                                                        : kProbeIntervalMs;
+            while (!state->stop.load()) {
+                const UINT interval = state->fast.load() ? kNoSpaceProbeIntervalMs
+                                                         : kProbeIntervalMs;
                 if (elapsed >= static_cast<int>(interval))
                     break;
                 Sleep(100);
@@ -4785,23 +4800,28 @@ struct TaskbarHost::Impl {
     }
 
     void startProbe() {
-        if (probeThread_.joinable())
+        if (probeRunning_)
             return;
-        probeStop_ = false;
-        probeThread_ = std::thread([this] { probeMain(); });
+        if (probeState_->stop.load()) {
+            auto state = std::make_shared<ProbeState>();
+            state->taskbar = probeState_->taskbar.load();
+            state->fast = probeState_->fast.load();
+            probeState_ = std::move(state);
+        }
+        std::thread([state = probeState_] { probeMain(state); }).detach();
+        probeRunning_ = true;
     }
 
     void stopProbe() {
-        probeStop_ = true;
-        probeFast_ = false;
-        if (probeThread_.joinable())
-            probeThread_.join();
-        delete probeOut_.exchange(nullptr);
+        probeState_->stop = true;
+        probeState_->fast = false;
+        probeRunning_ = false;
+        delete probeState_->out.exchange(nullptr);
     }
 
     // UI 线程慢速分支：拾取探测结果，与缓存比较有变化才更新。返回是否有变化
     bool pickProbeResult() {
-        std::unique_ptr<ProbeResult> p(probeOut_.exchange(nullptr));
+        std::unique_ptr<ProbeResult> p(probeState_->out.exchange(nullptr));
         if (!p)
             return false;
         const bool firstProbe = !probeReady_;
@@ -9400,7 +9420,7 @@ struct TaskbarHost::Impl {
                 // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
                 renderState_.setVisibilitySuppressed(true);
                 probeReady_ = false;
-                delete probeOut_.exchange(nullptr);
+                delete probeState_->out.exchange(nullptr);
             }
             stopFrameTimer();
             stopPlacementTimer();
@@ -9944,6 +9964,8 @@ struct TaskbarHost::Impl {
 TaskbarHost::TaskbarHost() : impl_(std::make_unique<Impl>()) {}
 
 TaskbarHost::~TaskbarHost() {
+    if (impl_)
+        impl_->stopProbe();
     if (impl_ && impl_->hwnd)
         DestroyWindow(impl_->hwnd);
 }
