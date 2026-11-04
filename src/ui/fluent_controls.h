@@ -3,6 +3,7 @@
 #include "ui/lyric_renderer.h"
 #include "ui/fluent_theme.h"
 #include "ui/fluent_dialog_surface.h"
+#include "ui/settings_icons.h"
 
 #include <windows.h>
 
@@ -94,6 +95,7 @@ public:
     void setText(const std::wstring& text);
     // 紧凑型数字输入等场景可缩小原生 EDIT 的内边距，避免小控件裁剪文字。
     void setContentPadding(float horizontalDip, float verticalDip);
+    void setLeadingIcon(settings_icon::Kind icon);
     // 数值框内部的数字编辑区：外框与单位由父窗口统一绘制。
     void setEmbeddedNumberStyle();
     void move(int x, int y, int w, int h);
@@ -132,6 +134,7 @@ private:
     UINT editFontDpi_ = 0;
     float contentPaddingXDip_ = 12.0f;
     float contentPaddingYDip_ = 5.0f;
+    settings_icon::Kind leadingIcon_ = settings_icon::Kind::None;
     int hostX_ = 0;
     int hostY_ = 0;
 };

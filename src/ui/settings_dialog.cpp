@@ -35,6 +35,9 @@ constexpr int kLyricsPage = 6;
 constexpr int kSongToastPage = 7;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
+constexpr int kIdSettingsSearch = 4900;
+constexpr int kIdSearchResult = 4901;
+constexpr float kSearchResultPitch = 80.0f;
 constexpr UINT_PTR kNavIndicatorTimer = 1;
 constexpr UINT kNavIndicatorDurationMs = 180;
 constexpr UINT kNavIndicatorFrameMs = USER_TIMER_MINIMUM;
@@ -333,6 +336,7 @@ settings_icon::Kind iconForRow(int id) {
         return settings_icon::Kind::RenderMode;
     case kIdTaskbarContextMenu:
     case kIdTaskbarViewMode:
+    case kIdTaskbarMonitor:
         return settings_icon::Kind::Display;
     case kIdAppBarEdge:
         return settings_icon::Kind::Position;
@@ -485,6 +489,16 @@ struct SettingsDialog::Impl {
 
     fluent::FluentDialogSurface surface;
     fluent::FluentEdit sliderValueEdit;
+    fluent::FluentEdit settingsSearch;
+    struct SearchResult {
+        int page;
+        int id;
+        std::wstring path;
+    };
+    std::wstring searchQuery;
+    std::vector<SearchResult> searchResults;
+    int selectedSearchResult = -1;
+    int searchLocatedId = 0;
     int sliderEditRowId = 0;
     bool sliderEditOpen = false;
     bool sliderEditCommitting = false;
@@ -586,6 +600,11 @@ struct SettingsDialog::Impl {
             return DefSubclassProc(h, msg, wp, lp);
         }
         if (self && msg == WM_KEYDOWN) {
+            if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                self->settingsSearch.focus();
+                SendMessageW(self->settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
+                return 0;
+            }
             if (wp == VK_RETURN) {
                 self->commitSliderEditor();
                 SetFocus(self->hwnd);
@@ -1585,6 +1604,133 @@ struct SettingsDialog::Impl {
         updateImmersiveRowsEnabled();
     }
 
+    bool searching() const { return !searchQuery.empty(); }
+
+    void refreshSearch() {
+        stopContentScroll();
+        searchQuery = settingsSearch.text();
+        std::transform(searchQuery.begin(), searchQuery.end(), searchQuery.begin(),
+                       [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+        std::vector<std::wstring> terms;
+        for (size_t begin = 0; begin < searchQuery.size();) {
+            while (begin < searchQuery.size() && std::iswspace(searchQuery[begin]))
+                ++begin;
+            size_t end = begin;
+            while (end < searchQuery.size() && !std::iswspace(searchQuery[end]))
+                ++end;
+            if (end > begin)
+                terms.push_back(searchQuery.substr(begin, end - begin));
+            begin = end;
+        }
+        if (terms.empty())
+            searchQuery.clear();
+        searchResults.clear();
+        if (searching()) {
+            for (int page = 0; page < kSettingsPageCount; ++page) {
+                std::wstring group;
+                for (const auto& row : rows[page]) {
+                    if (row.kind == ControlKind::Header) {
+                        group = row.text;
+                        continue;
+                    }
+                    std::wstring text = pageTitles[page] + L" " + group + L" " +
+                                        row.text + L" " + row.hint;
+                    for (const auto& option : row.options)
+                        text += L" " + option;
+                    std::transform(text.begin(), text.end(), text.begin(),
+                        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+                    if (std::all_of(terms.begin(), terms.end(), [&](const std::wstring& term) {
+                            return text.find(term) != std::wstring::npos;
+                        }))
+                        searchResults.push_back({page, row.id, pageTitles[page] +
+                            (group.empty() ? L"" : L" › " + group)});
+                }
+            }
+        }
+        selectedSearchResult = searchResults.empty() ? -1 : 0;
+        searchLocatedId = 0;
+        hoverId = pressedId = 0;
+        hoverOption = pressedOption = -1;
+        contentScroll = contentScrollTarget = 0.0f;
+        layout();
+        surface.invalidate();
+    }
+
+    void selectSearchResult(int direction) {
+        if (searchResults.empty())
+            return;
+        selectedSearchResult = std::clamp(selectedSearchResult + direction, 0,
+                                         static_cast<int>(searchResults.size()) - 1);
+        const float top = selectedSearchResult * kSearchResultPitch;
+        const float height = contentViewportRect.bottom - contentViewportRect.top;
+        if (top < contentScroll)
+            setContentScroll(top);
+        else if (top + kSearchResultPitch > contentScroll + height)
+            setContentScroll(top + kSearchResultPitch - height);
+        surface.invalidate();
+    }
+
+    void openSearchResult(int index) {
+        if (index < 0 || index >= static_cast<int>(searchResults.size()))
+            return;
+        const auto result = searchResults[index];
+        settingsSearch.setText(L"");
+        showPage(result.page);
+        // 先按真实字体测量目标页，再计算定位，避免多行说明改变高度后落点偏移。
+        surface.invalidate();
+        UpdateWindow(hwnd);
+        if (auto* row = findRow(result.id)) {
+            setContentScroll(contentScroll + row->cardRect.top - contentViewportRect.top - 12.0f);
+            searchLocatedId = result.id;
+            focusedId = row->enabled ? result.id : kIdNav;
+            focusVisible = true;
+        }
+        SetFocus(hwnd);
+        surface.invalidate();
+    }
+
+    static LRESULT CALLBACK searchEditProc(HWND edit, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR subclassId, DWORD_PTR refData) {
+        auto* self = reinterpret_cast<Impl*>(refData);
+        if (msg == WM_NCDESTROY) {
+            RemoveWindowSubclass(edit, &Impl::searchEditProc, subclassId);
+            return DefSubclassProc(edit, msg, wp, lp);
+        }
+        if (msg == WM_KEYDOWN) {
+            if (wp == VK_ESCAPE) {
+                self->settingsSearch.setText(L"");
+                SetFocus(self->hwnd);
+                return 0;
+            }
+            if (wp == VK_RETURN && self->searching()) {
+                self->openSearchResult(self->selectedSearchResult);
+                return 0;
+            }
+            if ((wp == VK_UP || wp == VK_DOWN) && self->searching()) {
+                self->selectSearchResult(wp == VK_DOWN ? 1 : -1);
+                return 0;
+            }
+            if (wp == VK_TAB) {
+                self->focusedId = self->searching() ? kIdSearchResult : kIdNav;
+                SetFocus(self->hwnd);
+                return 0;
+            }
+        }
+        if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE || wp == VK_TAB))
+            return 0;
+        return DefSubclassProc(edit, msg, wp, lp);
+    }
+
+    bool createSearchEditor() {
+        if (!settingsSearch.create(hwnd, kIdSettingsSearch, L"搜索设置"))
+            return false;
+        settingsSearch.setLeadingIcon(settings_icon::Kind::Search);
+        SendMessageW(settingsSearch.editHwnd(), EM_SETLIMITTEXT, 120, 0);
+        SetWindowSubclass(settingsSearch.editHwnd(), &Impl::searchEditProc, 2,
+                          reinterpret_cast<DWORD_PTR>(this));
+        return true;
+    }
+
     void createSliderEditor() {
         if (!sliderValueEdit.create(hwnd, kIdSliderValueEdit, nullptr, false, 12.0f))
             return;
@@ -1752,7 +1898,10 @@ struct SettingsDialog::Impl {
         const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
-        navRect = D2D1::RectF(12.0f, 12.0f, 12.0f + kNavW, std::max(12.0f, h - 12.0f));
+        if (settingsSearch.hwnd())
+            settingsSearch.move(static_cast<int>(12.0f * s), static_cast<int>(12.0f * s),
+                                static_cast<int>(kNavW * s), static_cast<int>(32.0f * s));
+        navRect = D2D1::RectF(12.0f, 56.0f, 12.0f + kNavW, std::max(56.0f, h - 12.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * kNavItemH,
                                           navRect.right, navRect.top + (i + 1) * kNavItemH);
@@ -1798,6 +1947,8 @@ struct SettingsDialog::Impl {
         if (!rows[activePage].empty())
             contentEnd -= rows[activePage].back().gapAfter;
         contentHeight = std::max(0.0f, contentEnd - contentTop);
+        if (searching())
+            contentHeight = std::max(72.0f, static_cast<float>(searchResults.size()) * kSearchResultPitch);
         const float viewportHeight =
             std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
         contentMaxScroll = std::max(0.0f, contentHeight - viewportHeight);
@@ -2107,6 +2258,9 @@ struct SettingsDialog::Impl {
     }
 
     void showPage(int page) {
+        if (searching())
+            settingsSearch.setText(L"");
+        searchLocatedId = 0;
         if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
         stopContentScroll();
@@ -3705,7 +3859,7 @@ struct SettingsDialog::Impl {
             drawScrollBar(painter);
             return;
         }
-        if (!navOnly && !contentOnly && !contentScrollAnimating)
+        if (!navOnly && !contentOnly && !contentScrollAnimating && !searching())
             updateHintHeights(painter);
         const auto& p = fluent::palette();
         if (!contentOnly)
@@ -3713,13 +3867,15 @@ struct SettingsDialog::Impl {
         if (navOnly)
             return;
         if (!contentOnly) {
-            if (const auto icon = iconForPage(activePage);
+            if (const auto icon = searching() ? settings_icon::Kind::Search : iconForPage(activePage);
                 icon != settings_icon::Kind::None) {
                 if (auto* iconBrush = painter.brush(p.accent))
                     settings_icon::draw(painter.target(), icon, pageTitleIconRects[activePage],
                                         iconBrush, 1.35f);
             }
-            painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
+            const auto title = searching() ? L"搜索设置（" + std::to_wstring(searchResults.size()) + L"）"
+                                          : pageTitles[activePage];
+            painter.drawText(title, painter.textFormat(20.0f, 600),
                              pageTitleRects[activePage], p.text);
         }
 
@@ -3729,7 +3885,42 @@ struct SettingsDialog::Impl {
 
     void paintContent(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
+        if (searching()) {
+            if (searchResults.empty())
+                painter.drawText(L"未找到匹配的设置，请尝试其他关键词。",
+                    painter.textFormat(14.0f),
+                    D2D1::RectF(contentViewportRect.left + 16.0f, contentViewportRect.top,
+                                contentViewportRect.right - 16.0f, contentViewportRect.top + 64.0f),
+                    p.textSecondary);
+            for (int index = 0; index < static_cast<int>(searchResults.size()); ++index) {
+                const auto& result = searchResults[index];
+                const auto* row = findRow(result.id);
+                if (!row)
+                    continue;
+                const float top = contentViewportRect.top + index * kSearchResultPitch - contentPaintScroll;
+                const auto rect = D2D1::RectF(contentViewportRect.left, top,
+                                              contentViewportRect.right, top + kSearchResultPitch - 8.0f);
+                const bool selected = index == selectedSearchResult;
+                const bool hovered = hoverId == kIdSearchResult && hoverOption == index;
+                painter.fillRoundRect(hovered ? p.controlHover : p.cardFill, rect,
+                                      fluent::metrics::cardRadius);
+                painter.strokeRoundRect(selected ? p.accent : p.cardStroke, rect, 1.0f,
+                                        fluent::metrics::cardRadius);
+                if (auto* brush = painter.brush(p.accent))
+                    settings_icon::draw(painter.target(), iconForRow(result.id),
+                        D2D1::RectF(rect.left + 16.0f, top + 16.0f, rect.left + 32.0f, top + 32.0f),
+                        brush, 1.2f);
+                painter.drawTrimmedText(row->text, painter.textFormat(14.0f, 500),
+                    D2D1::RectF(rect.left + 44.0f, top + 10.0f, rect.right - 16.0f, top + 36.0f), p.text);
+                painter.drawTrimmedText(result.path, painter.textFormat(12.0f),
+                    D2D1::RectF(rect.left + 44.0f, top + 36.0f, rect.right - 16.0f, top + 62.0f),
+                    p.textSecondary);
+            }
+            return;
+        }
         drawSettingGroups(painter);
+        if (const auto* located = findRow(searchLocatedId); located && searchLocatedId != 0)
+            painter.strokeRoundRect(p.accent, located->cardRect, 1.5f, fluent::metrics::cardRadius);
         for (auto& row : rows[activePage]) {
             if (row.kind == ControlKind::Header) {
                 painter.drawText(row.text, painter.textFormat(13.0f, 600), row.labelRect,
@@ -3825,6 +4016,17 @@ struct SettingsDialog::Impl {
             return kIdContentScrollBar;
         if (!contains(contentViewportRect, x, y))
             return 0;
+        if (searching()) {
+            const float offset = y - contentViewportRect.top + contentPaintScroll;
+            const int index = static_cast<int>(offset / kSearchResultPitch);
+            if (index >= 0 && index < static_cast<int>(searchResults.size()) &&
+                offset - index * kSearchResultPitch < kSearchResultPitch - 8.0f) {
+                if (option)
+                    *option = index;
+                return kIdSearchResult;
+            }
+            return 0;
+        }
         for (const auto& row : rows[activePage]) {
             if (!row.enabled)
                 continue;
@@ -4608,12 +4810,18 @@ struct SettingsDialog::Impl {
             }
             break;
         case WM_CREATE:
+            searchQuery.clear();
+            searchResults.clear();
+            selectedSearchResult = -1;
+            searchLocatedId = 0;
             backdrop = fluent::styleDialogWindow(hwnd, false);
             surface.initialize(hwnd, backdrop, true);
             if (!createContentWindow())
                 return -1;
             createControls();
             createSliderEditor();
+            if (!createSearchEditor())
+                return -1;
             layout();
             return 0;
         case WM_SIZE:
@@ -4646,6 +4854,7 @@ struct SettingsDialog::Impl {
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
             sliderValueEdit.refreshTheme();
+            settingsSearch.refreshTheme();
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -4827,6 +5036,9 @@ struct SettingsDialog::Impl {
             }
             if (pressed == kIdNav && hit == kIdNav && option >= 0)
                 showPage(option);
+            else if (pressed == kIdSearchResult && hit == kIdSearchResult &&
+                     pressedOptionValue == option)
+                openSearchResult(option);
             else if (pressed != 0 && pressed == hit) {
                 Row* row = findRow(pressed);
                 if (row && row->enabled) {
@@ -4872,7 +5084,27 @@ struct SettingsDialog::Impl {
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB;
         case WM_KEYDOWN:
+            if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                settingsSearch.focus();
+                SendMessageW(settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
+                return 0;
+            }
+            if (searching()) {
+                if (wp == VK_ESCAPE)
+                    settingsSearch.setText(L"");
+                else if (wp == VK_RETURN)
+                    openSearchResult(selectedSearchResult);
+                else if (wp == VK_UP || wp == VK_DOWN)
+                    selectSearchResult(wp == VK_DOWN ? 1 : -1);
+                else if (wp == VK_TAB)
+                    settingsSearch.focus();
+                return 0;
+            }
             if (wp == VK_TAB) {
+                if ((GetKeyState(VK_SHIFT) & 0x8000) && focusedId == kIdNav) {
+                    settingsSearch.focus();
+                    return 0;
+                }
                 focusStep((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
                 return 0;
             }
@@ -4997,6 +5229,11 @@ struct SettingsDialog::Impl {
                 colorPicker.reset();
             return 0;
         case WM_COMMAND:
+            if (LOWORD(wp) == kIdSettingsSearch) {
+                if (HIWORD(wp) == EN_CHANGE)
+                    refreshSearch();
+                return 0;
+            }
             if (LOWORD(wp) == kIdSliderValueEdit) {
                 if (HIWORD(wp) == EN_KILLFOCUS)
                     commitSliderEditor();

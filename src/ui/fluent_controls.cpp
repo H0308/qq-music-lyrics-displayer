@@ -506,6 +506,13 @@ void FluentEdit::setContentPadding(float horizontalDip, float verticalDip) {
     repaintEdit();
 }
 
+void FluentEdit::setLeadingIcon(settings_icon::Kind icon) {
+    leadingIcon_ = icon;
+    layoutEdit();
+    renderNow();
+    repaintEdit();
+}
+
 void FluentEdit::setEmbeddedNumberStyle() {
     embeddedNumber_ = true;
     editFontDpi_ = 0;
@@ -621,7 +628,10 @@ void FluentEdit::layoutEdit() {
     int padY = static_cast<int>(std::lround(contentPaddingYDip_ * s));
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    int editW = std::max(1, w - padX * 2);
+    const int iconSpace = leadingIcon_ == settings_icon::Kind::None || embeddedNumber_
+                             ? 0 : static_cast<int>(std::lround(24.0f * s));
+    int editW = std::max(1, w - padX * 2 - iconSpace);
+    padX += iconSpace;
     int editH = std::max(1, h - padY * 2);
     if (editFontDpi_ != dpi) {
         if (HFONT font = createUiFont(dpi, fontSizeDip_,
@@ -702,6 +712,13 @@ void FluentEdit::render(FluentDialogSurface::Painter& painter, float wDip, float
     painter.fillRoundRect(p.controlFill, rect);
     painter.strokeRoundRect(focused_ ? p.accent : p.controlStroke, rect,
                             focused_ ? 1.5f : 1.0f);
+    if (leadingIcon_ != settings_icon::Kind::None) {
+        const float top = (hDip - 16.0f) * 0.5f;
+        if (auto* brush = painter.brush(p.textSecondary))
+            settings_icon::draw(painter.target(), leadingIcon_,
+                D2D1::RectF(contentPaddingXDip_, top, contentPaddingXDip_ + 16.0f, top + 16.0f),
+                brush, 1.25f);
+    }
 }
 
 // ---------------- FluentList ----------------
