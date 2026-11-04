@@ -1137,7 +1137,7 @@ struct SettingsDialog::Impl {
         contentScrollAnimating = false;
         contentScrollVelocity = 0.0f;
         contentScrollTarget = contentScroll;
-        contentRenderer.setRootOffsetY(-contentScroll * surface.dipScale());
+        contentRenderer.setRootOffsetY(-std::round(contentScroll * surface.dipScale()));
         contentRenderer.commit();
     }
 
@@ -1148,7 +1148,7 @@ struct SettingsDialog::Impl {
         const float paintScroll = std::round(next * scale) / scale;
         const float displacement = contentPaintScroll - paintScroll;
         if (!contentScrollAnimating) {
-            contentRenderer.setRootOffsetY(-contentScroll * scale);
+            contentRenderer.setRootOffsetY(-std::round(contentScroll * scale));
             contentRenderer.commit();
         }
         if (displacement == 0.0f)
@@ -1257,7 +1257,7 @@ struct SettingsDialog::Impl {
                 UpdateWindow(hwnd);
             }
             contentRenderer.animateRootScroll(-contentScroll * surface.dipScale(),
-                                               -contentScrollTarget * surface.dipScale(),
+                                               -std::round(contentScrollTarget * surface.dipScale()),
                                                -contentScrollVelocity * surface.dipScale(),
                                                kContentScrollFrequency);
             contentRenderer.commit();
@@ -3747,11 +3747,11 @@ struct SettingsDialog::Impl {
         }
         if (contentScrollAnimating) {
             advanceContentScroll();
-            contentRenderer.animateRootScroll(-contentScroll * scale, -contentScrollTarget * scale,
+            contentRenderer.animateRootScroll(-contentScroll * scale, -std::round(contentScrollTarget * scale),
                                                -contentScrollVelocity * scale,
                                                kContentScrollFrequency);
         } else {
-            contentRenderer.setRootOffsetY(-contentScroll * scale);
+            contentRenderer.setRootOffsetY(-std::round(contentScroll * scale));
         }
         contentLayerReady = contentRenderer.present();
         if (!contentLayerReady)

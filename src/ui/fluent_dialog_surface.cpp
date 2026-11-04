@@ -552,11 +552,13 @@ bool CompositedScrollView::needsCache(float position) const {
 void CompositedScrollView::applyAnimation() {
     const float scale = static_cast<float>(dpi_) / 96.0f;
     const float position = offset();
+    // 缓存按物理像素绘制；静止时也必须整像素放置，避免底部的小数偏移使整层发虚。
+    const float destination = std::round((cacheTop_ - target_) * scale);
     if (animating_)
         renderer_.animateRootScroll((cacheTop_ - position) * scale,
-                                    (cacheTop_ - target_) * scale, -velocity() * scale, 28.0f);
+                                    destination, -velocity() * scale, 28.0f);
     else
-        renderer_.setRootOffsetY((cacheTop_ - position) * scale);
+        renderer_.setRootOffsetY(destination);
 }
 
 void CompositedScrollView::paint(const Draw& draw, bool redraw) {
