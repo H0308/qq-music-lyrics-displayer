@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>文档中心 — QQ 音乐 / 网易云任务栏歌词</title>
+  <meta name="description" content="QQ 音乐 / 网易云任务栏歌词使用文档：安装、播放器配置、歌词设置、展示模式、播放控制与故障排查。">
+  <link rel="icon" type="image/png" href="assets/img/logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="assets/css/style.css">
+  <link rel="stylesheet" href="assets/css/pet.css">
+  <link rel="stylesheet" href="assets/css/docs.css">
+  <script>
+    (function () {
+      var saved = localStorage.getItem('theme');
+      var mode = (saved === 'light' || saved === 'dark') ? saved : 'system';
+      var resolved = mode === 'system'
+        ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark')
+        : mode;
+      document.documentElement.dataset.themeMode = mode;
+      document.documentElement.dataset.theme = resolved;
+    })();
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#docsContent">跳到文档正文</a>
+
+  <header class="site-header" id="siteHeader">
+    <div class="container header-inner">
+      <a class="brand" href="index.html">
+        <img src="assets/img/logo.png" alt="logo" width="28" height="28">
+        <span>任务栏歌词</span>
+      </a>
+      <nav class="nav" aria-label="网站导航">
+        <a href="index.html">首页</a>
+        <a href="releases.html">更新日志</a>
+        <a href="feedback.html">意见反馈</a>
+        <a class="nav-github" href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener"><svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span>GitHub</span></a>
+        <a class="nav-gitee" href="https://gitee.com/EPSDA/qq-music-lyrics-displayer" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.984 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.016 0zm6.09 5.333c.328 0 .593.266.592.593v1.482a.594.594 0 0 1-.593.592H9.777c-.982 0-1.778.796-1.778 1.778v5.63c0 .327.266.592.593.592h5.63c.982 0 1.778-.796 1.778-1.778v-.296a.593.593 0 0 0-.592-.593h-4.15a.592.592 0 0 1-.592-.592v-1.482a.593.593 0 0 1 .593-.592h6.815c.327 0 .593.265.593.592v3.408a4 4 0 0 1-4 4H5.926a.593.593 0 0 1-.593-.593V9.778a4.444 4.444 0 0 1 4.445-4.444h8.296Z"/></svg><span>Gitee</span></a>
+      </nav>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="切换主题模式" title="切换主题模式">
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>
+        <svg class="icon-system" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>
+      </button>
+      <button class="nav-burger" id="navBurger" type="button" aria-label="打开导航菜单" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <h1 class="sr-only">任务栏歌词使用文档</h1>
+    <div class="container docs-layout">
+      <aside class="docs-sidebar" aria-label="文档目录">
+        <div class="docs-search-wrap">
+          <label class="docs-search">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+            <span class="sr-only">搜索使用文档</span>
+            <input id="docsSearch" type="search" placeholder="搜索文档" autocomplete="off">
+          </label>
+          <p class="docs-search-status" id="docsSearchStatus" role="status" aria-live="polite"></p>
+        </div>
+        <nav class="docs-toc" id="docsToc" aria-label="文档章节">
+          <a class="active" href="#getting-started">快速开始</a>
+          <a href="#players">配置音乐播放器</a>
+          <div class="docs-toc-group" data-doc-group>
+            <a class="docs-toc-heading" href="#settings-reference">设置参考</a>
+            <div class="docs-toc-children">
+              <a href="#settings-display">显示</a>
+              <a href="#settings-modes">展示模式</a>
+              <a href="#settings-performance">性能</a>
+              <a href="#settings-cards">悬浮卡片</a>
+              <a href="#settings-controls">媒体控件</a>
+              <a href="#settings-spectrum">频谱</a>
+              <a href="#settings-lyrics">歌词</a>
+              <a href="#settings-toast">切歌弹窗</a>
+              <a href="#settings-idle">每日一言与更多</a>
+              <a href="#system-menu">托盘菜单与维护</a>
+              <a href="#troubleshooting">常见问题排查</a>
+            </div>
+          </div>
+        </nav>
+        <p class="docs-help">仍未解决？<a href="feedback.html">提交问题反馈</a></p>
+      </aside>
+
+      <article class="docs-content" id="docsContent">
+        <p class="docs-intro">右键 Windows 通知区域中的软件图标，选择「设置…」。下文按照设置窗口的九个页面编排：先说明选项，再说明相关操作和限制。大多数选项立即生效；字体、颜色等独立对话框需要点击「确定」。</p>
+
+        <section class="doc-section" id="getting-started">
+          <h2>快速开始</h2>
+          <p>软件仅提供 64 位 Windows 版本。推荐使用 Windows 11；Windows 10 22H2 的核心功能基本可用，但任务栏防遮挡存在兼容性问题，沉浸模式与 Dock 模式尚未在该版本实机验证。音频频谱要求 Windows 10 2004 或更高版本。</p>
+          <ol class="doc-steps">
+            <li><strong>下载安装。</strong>从 <a href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">GitHub Releases</a> 或 <a href="https://gitee.com/EPSDA/qq-music-lyrics-displayer/releases" target="_blank" rel="noopener">Gitee Releases</a> 下载安装包。国内网络可优先选择 Gitee。安装后运行 <code>QQMusicLyric.exe</code>。</li>
+            <li><strong>配置播放器。</strong>QQ 音乐需要开启 SMTC；网易云音乐需要安装 BetterNCM 和 InfLink-rs，具体步骤见下一章。</li>
+            <li><strong>播放音乐。</strong>打开已配置的桌面播放器并播放歌曲，封面、歌曲信息和歌词会自动显示在任务栏。两个平台同时运行时，软件会根据当前媒体会话和播放状态自动选择来源。</li>
+            <li><strong>调整显示。</strong>右键托盘图标进入「设置…」，选择展示模式、字体、歌词颜色和其他功能。需要登录 Windows 后自动运行时，在托盘菜单勾选「开机自启动」，无需管理员权限。</li>
+          </ol>
+          <div class="doc-callout"><strong>先确认软件仍在运行</strong><p>关闭歌词显示不会退出软件。需要完全退出时，使用托盘菜单中的「退出」；误选「完全停止」性能模式也会隐藏任务栏歌词。</p></div>
+        </section>
+
+        <section class="doc-section" id="players">
+          <h2>配置音乐播放器</h2>
+          <h3>QQ 音乐桌面版</h3>
+          <p>在 QQ 音乐自身设置中开启「显示系统媒体传输控件（SMTC）」，然后播放歌曲。如果软件已经运行但仍未识别，重启 QQ 音乐和 <code>QQMusicLyric.exe</code> 后重试。已测试 QQ 音乐 2252～2276 版本。</p>
+          <h3>网易云音乐桌面版</h3>
+          <p>网易云音乐官方 SMTC 信息没有可靠的播放进度，需要 InfLink-rs 补充歌曲 ID 和时间轴。适配可用性受 BetterNCM、InfLink-rs 与网易云客户端版本影响。</p>
+          <ol>
+            <li>从 <a href="https://github.com/std-microblock/BetterNCM-Installer/releases/latest" target="_blank" rel="noopener">BetterNCM Installer</a> 下载并安装 BetterNCM。</li>
+            <li>打开网易云音乐的 BetterNCM 插件商店，搜索并安装 <strong>InfLink-rs</strong>。插件商店不可用时，可从 <a href="https://github.com/apoint123/inflink-rs/releases/latest" target="_blank" rel="noopener">InfLink-rs Releases</a> 下载并手动安装。</li>
+            <li>按提示重启网易云音乐，再运行或重启 <code>QQMusicLyric.exe</code>。</li>
+          </ol>
+          <div class="doc-callout doc-callout-warning"><strong>不要混用插件</strong><p>只安装 InfLink-rs，不要同时安装旧版 InfLink。酷狗音乐目前未适配；酷狗歌词仅作为手动搜索的候选来源。</p></div>
+        </section>
+
+        <section class="doc-group-heading" id="settings-reference">
+          <h2>设置参考</h2>
+          <p>选项名称与软件界面保持一致。选项呈灰色时，请先检查当前展示模式、任务栏方向、性能模式及歌曲状态。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-display">
+          <h3 class="doc-section-title">显示</h3>
+          <p>对应「设置 → 显示」，管理任务栏与窗口主题、通用字体、歌曲信息、封面、右键菜单，以及所有任务栏内容背景。</p>
+          <h4>主题</h4>
+          <dl class="doc-settings">
+            <div><dt>任务栏内容主题</dt><dd>可选「系统、应用、浅色、深色」。「系统」和「应用」分别跟随 Windows 的系统模式与应用模式，控制任务栏内的歌词和相关信息。</dd></div>
+            <div><dt>对话框与悬浮窗主题</dt><dd>同样可选「系统、应用、浅色、深色」，独立控制设置等普通对话框与悬浮窗，不改变任务栏内容。</dd></div>
+          </dl>
+          <h4>字体、歌曲信息与封面</h4>
+          <dl class="doc-settings">
+            <div><dt>通用字体</dt><dd>点击「选择字体…」，搜索本机字体，设置字号，并选择常规、加粗、斜体或粗斜体。可实时预览。这里影响任务栏歌词、每日一言、歌曲信息、沉浸模式时间／日期和 Dock 资源占用，不影响设置窗口等界面字体。</dd></div>
+            <div><dt>显示歌曲信息</dt><dd>控制歌名、歌手等歌曲信息；侧边任务栏的竖向模式下固定关闭。</dd></div>
+            <div><dt>显示专辑封面</dt><dd>控制封面是否显示。关闭封面后，平台图标和封面效果也无法设置。</dd></div>
+            <div><dt>显示平台图标</dt><dd>在专辑封面右下角显示 QQ 音乐或网易云音乐图标，便于识别当前播放平台。</dd></div>
+            <div><dt>专辑封面效果</dt><dd>可选「默认」或「黑胶唱片」。黑胶封面播放时旋转，暂停时停在当前角度；极简模式下固定为默认效果。</dd></div>
+          </dl>
+          <h4>菜单交互</h4>
+          <dl class="doc-settings">
+            <div><dt>右键显示任务栏歌词菜单</dt><dd>控制任务栏歌词区域的精简右键菜单。关闭后仍可通过托盘图标右键打开完整菜单。</dd></div>
+          </dl>
+          <h4>背景效果</h4>
+          <dl class="doc-settings">
+            <div><dt>播放进度背景</dt><dd>从窗口左缘到歌词右缘，按歌曲进度填充专辑主题色；没有封面时使用系统强调色。与频谱的「背景波浪」互斥，极简模式下不可用。</dd></div>
+            <div><dt>进度背景不透明度</dt><dd>范围为 0～100%，仅在播放进度背景开启时可调。</dd></div>
+            <div><dt>任务栏内容背景</dt><dd>可选「无、封面模糊、纯色」。封面模糊将专辑封面高斯模糊后铺满；纯色跟随任务栏深浅色。该背景位于最底层，可与播放进度背景或背景波浪叠加。</dd></div>
+            <div><dt>封面背景不透明度</dt><dd>范围为 0～100%，仅在选择「封面模糊」时可调。</dd></div>
+            <div><dt>任务栏内容动态背景</dt><dd>可选「无、落叶、闪烁星星、二进制、流光粒子」。独立频谱容器与悬浮卡片不使用该效果，极简模式下暂时关闭。</dd></div>
+            <div><dt>动态背景作用范围</dt><dd>可选「都不启用、仅待机内容启用、仅歌词启用、都启用」。待机内容包括每日一言和默认欢迎语；只有先选择一种动态背景后才能设置范围。</dd></div>
+          </dl>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-modes">
+          <h3 class="doc-section-title">展示模式</h3>
+          <p>选择歌词显示在原任务栏内、覆盖原任务栏，还是放在独立顶栏或底栏。也可从托盘菜单的「展示模式」切换。</p>
+          <h4>任务栏歌词展示模式</h4>
+          <dl class="doc-settings">
+            <div><dt>内嵌</dt><dd>在主显示器任务栏的空闲区域显示封面、歌曲信息和歌词，封面与歌曲信息可在「显示」页关闭。可选资源监视和频谱，不占用额外桌面工作区。</dd></div>
+            <div><dt>沉浸</dt><dd>覆盖所选的横向任务栏，歌词以整条任务栏中心为锚点。封面和歌曲信息位于左侧，固定操作区提供播放、音量、返回内嵌和完整菜单；右侧为频谱区域和时间日期。频谱是否显示仍由频谱开关与性能模式决定。</dd></div>
+            <div><dt>Dock 模式</dt><dd>在目标显示器顶部或底部显示独立横栏，并为桌面窗口预留工作区。提供歌词、播放操作、返回内嵌、快捷应用及完整菜单；右侧显示频谱和资源监视，不显示沉浸模式的时钟。</dd></div>
+          </dl>
+          <div class="doc-callout"><strong>沉浸模式的前提</strong><p>需要存在播放器媒体会话，且目标任务栏为横向。歌曲暂停不等于媒体会话消失。会话消失后回到主显示器内嵌布局；单选侧边任务栏时使用内嵌布局，选择全部显示器时仅覆盖横向任务栏。</p></div>
+          <h4>显示器、位置与背景</h4>
+          <dl class="doc-settings">
+            <div><dt>目标显示器</dt><dd>沉浸与 Dock 模式可选择单台或全部显示器。内嵌固定使用主显示器；沉浸选择全部时只覆盖横向任务栏。目标显示器断开后切回主显示器。</dd></div>
+            <div><dt>Dock 位置</dt><dd>可选「顶部」或「底部」。Dock 会通过 Windows AppBar 占用对应工作区，不只覆盖在桌面之上。</dd></div>
+            <div><dt>沉浸模式背景</dt><dd>「调整方式」可选「模糊程度」或「不透明度」，随后用 0～100% 滑块调整。模糊从清晰桌面过渡到完全模糊；不透明度从全透明过渡到随 Windows 应用主题变化的纯底色。</dd></div>
+            <div><dt>Dock 背景</dt><dd>同样支持模糊程度或不透明度及 0～100% 调节，与沉浸背景分别保存。切换到对应模式后才能调整；如果背景初始化失败，相关选项会禁用，可打开运行日志查看原因。</dd></div>
+          </dl>
+          <h4>资源监视</h4>
+          <p>基础指标为系统 CPU、内存和网络上下行速率。Dock 自带资源区；横向内嵌需要单独开启，沉浸模式不显示资源区。</p>
+          <dl class="doc-settings">
+            <div><dt>内嵌模式显示资源监视</dt><dd>在横向任务栏的内嵌模式右侧显示 CPU、内存和网络上下行速度；开启后，扩展指标也可用滚轮切换。</dd></div>
+            <div><dt>显示 GPU 使用率</dt><dd>在 Dock 资源区或已开启资源监视的内嵌模式中增加 GPU 指标。系统没有可用 GPU 性能计数器时显示「—」。</dd></div>
+            <div><dt>显示 CPU 频率</dt><dd>增加 CPU 当前频率指标，例如「频率: 3.6GHz」。系统未提供当前频率时显示「—」。GPU 与 CPU 频率属于扩展指标，可在资源区域滚动鼠标翻看。</dd></div>
+          </dl>
+          <h4>内嵌定位与自动避让</h4>
+          <p>在「任务栏位置」中选择锚点，或按住左键拖动任务栏歌词。拖动时会出现吸附预览，松手后保存位置。软件会避开小组件、搜索、任务视图、应用图标、TrafficMonitor 和酷狗官方任务栏歌词；空间不足时会压缩或迁移，所有位置都放不下时自动隐藏，空间恢复后再显示。</p>
+          <h4>沉浸与 Dock 操作</h4>
+          <p>沉浸条的非按钮区域被鼠标悬停时会淡出，露出原任务栏供操作。鼠标离开任务栏且没有按住鼠标按键后再恢复。Dock 不使用这种让出交互；没有媒体会话且关闭空闲入口时，Dock 隐藏并释放工作区。</p>
+          <p>两种模式的返回按钮都切回内嵌模式；要结束程序，请在完整菜单中选择「退出」。Dock 快捷应用按钮使用「每日一言与更多」中配置的应用列表。</p>
+          <p>最大化窗口会避开 Dock 预留的工作区；真正的全屏应用打开时，Dock 按系统通知退到后方，退出全屏后恢复。</p>
+          <h4>侧边任务栏与竖向歌词</h4>
+          <p>Windows 11 任务栏位于左侧或右侧时，内嵌模式会改用窄栏封面、竖排歌词和纵向播放控件，沉浸模式不可用；Dock 是独立顶栏或底栏，不受任务栏方向影响。竖向模式下歌曲信息、双行歌词、横向歌词对齐、辅助歌词、资源监视和频谱不可用，每日一言固定左对齐，播放进度背景仍可使用。切回横向任务栏后，除已重置的频谱外，其余相关设置恢复可用。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-performance">
+          <h3 class="doc-section-title">性能</h3>
+          <p>对应「设置 → 性能」，也可通过托盘菜单切换。性能模式只对本次运行有效，重启软件后恢复正常模式。</p>
+          <div class="doc-table-wrap">
+            <table>
+              <thead><tr><th>模式</th><th>行为</th></tr></thead>
+              <tbody>
+                <tr><td>正常</td><td>按各功能开关显示歌词、转场、频谱、背景和悬浮卡片，不会自动开启已关闭的功能。</td></tr>
+                <tr><td>低渲染</td><td>将播放动画限制在约 30 FPS，并暂停频谱捕获</td></tr>
+                <tr><td>完全停止</td><td>隐藏任务栏歌词，停止帧定时器并释放 GPU 资源，但保留当前会话数据</td></tr>
+                <tr><td>极简</td><td>保持正常歌词刷新率，仅保留基础歌词，关闭逐字高亮、转场、频谱、附加背景、媒体卡片和切歌弹窗</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>从完全停止恢复时，先切换到其他性能模式，再确认任务栏歌词处于开启状态。切回正常模式后，频谱按原开关恢复；极简模式临时关闭的外观效果也按原配置恢复，不会清空偏好。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-cards">
+          <h3 class="doc-section-title">悬浮卡片</h3>
+          <p>媒体卡片、每日一言和快捷启动卡片共用这里的展开方式、背景与文字颜色。卡片在内嵌模式使用；沉浸和 Dock 使用横栏上的固定控件，极简模式不展开卡片。</p>
+          <p>需要先保留空闲入口，或在「媒体控件」中开启播放控件并选择「媒体卡片」，相关卡片设置才可用。背景颜色、专辑色跟随和动态文字颜色仅在磨砂玻璃背景下可调。</p>
+          <dl class="doc-settings">
+            <div><dt>悬浮卡片展开方式</dt><dd>「悬浮展开」需要鼠标在歌词区域停留片刻；「点击展开」可点击歌词区域任意位置立即打开。极简模式下不可用。</dd></div>
+            <div><dt>悬浮卡片背景</dt><dd>可选「纯色」或「磨砂玻璃」，三类卡片统一使用。</dd></div>
+            <div><dt>悬浮卡片背景颜色</dt><dd>点击颜色值打开取色器。磨砂背景未使用有效专辑色时，三类卡片共用该颜色；仅磨砂玻璃模式可设置。</dd></div>
+            <div><dt>磨砂玻璃颜色跟随专辑</dt><dd>播放且成功提取专辑主色时，磨砂卡片使用专辑色；没有播放时回退到自定义背景颜色。</dd></div>
+            <div><dt>磨砂卡片字体颜色动态变化</dt><dd>根据卡片背后内容的明暗自动切换黑色或白色文字，同时作用于媒体卡片、每日一言和快捷启动卡片。</dd></div>
+          </dl>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-controls">
+          <h3 class="doc-section-title">媒体控件</h3>
+          <p>管理内嵌模式的播放操作。歌曲是否支持上一首、下一首等操作取决于当前播放器提供的控制能力。</p>
+          <dl class="doc-settings">
+            <div><dt>显示播放控件</dt><dd>开启后可在歌词区域使用播放控制。沉浸和 Dock 模式自带固定控制区，因此该设置在这两种展开模式下不可用。</dd></div>
+            <div><dt>控件样式</dt><dd>「内嵌控件」在鼠标悬浮时显示，提供播放操作；「媒体卡片」还显示歌曲进度，其展开方式由「悬浮卡片」页决定。点击卡片中的应用图标或名称可打开播放器。只有显示播放控件且非极简模式时可选择。</dd></div>
+          </dl>
+          <h4>播放操作与媒体卡片</h4>
+          <p>内嵌控件和媒体卡片都支持上一首、播放／暂停和下一首。媒体卡片额外显示封面、当前进度和总时长。音量按钮可展开应用音量滑块，支持拖动、滚轮和静音；音量只作用于当前音乐应用，不改变系统主音量。</p>
+          <p>沉浸与 Dock 模式使用自身固定的控制区，不需要另行开启这里的播放控件。切歌提示的时长、位置和全屏应用行为可在「切歌弹窗」中设置。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-spectrum">
+          <h3 class="doc-section-title">频谱</h3>
+          <p>对应「设置 → 频谱」，控制当前 QQ 音乐或网易云音乐进程的音频频谱。侧边任务栏和极简模式下不可用，低渲染与完全停止模式会暂停捕获。</p>
+          <dl class="doc-settings">
+            <div><dt>频谱</dt><dd>频谱总开关，开启后才能设置配色与样式。</dd></div>
+            <div><dt>频谱颜色</dt><dd>可选「跟随已播放色、跟随专辑主题色、自定义颜色」。自定义颜色作为频谱基色。</dd></div>
+            <div><dt>自定义频谱颜色</dt><dd>点击颜色值选择颜色，仅在选择「自定义颜色」时生效。</dd></div>
+            <div><dt>频谱样式</dt><dd>可选「默认、柱状图、梦幻波浪」。样式不同，频谱在内容区的呈现方式也不同。</dd></div>
+            <div><dt>频谱渐变色</dt><dd>基于当前频谱颜色生成渐变配色，不控制频谱区域的宽度。</dd></div>
+            <div><dt>背景波浪</dt><dd>将梦幻波浪用作歌曲信息和歌词背景，仅在频谱开启且选择「梦幻波浪」时可开启。与播放进度背景互斥。</dd></div>
+            <div><dt>背景波浪不透明度</dt><dd>范围为 0～100%，仅在背景波浪实际开启时可调。</dd></div>
+          </dl>
+          <p>频谱只捕获当前 QQ 音乐或网易云音乐进程的音频，不受其他软件发声影响。播放器更换输出设备或重启后，软件会重新绑定音频会话。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-lyrics">
+          <h3 class="doc-section-title">歌词</h3>
+          <p>对应「设置 → 歌词」，管理歌词排版、颜色与效果、辅助歌词和 QQ 音乐本地歌词。</p>
+          <h4>排版、颜色与效果</h4>
+          <dl class="doc-settings">
+            <div><dt>双行歌词</dt><dd>当前行没有正在显示的翻译或罗马音时，额外预览下一行。当前行已有辅助歌词时优先显示辅助歌词，不再叠加下一行。竖向任务栏下不可用。</dd></div>
+            <div><dt>歌词对齐</dt><dd>可选「左对齐、居中、右对齐」，仅内嵌模式的横向歌词可设置；展开模式使用自身布局，竖向模式使用竖排规则。</dd></div>
+            <div><dt>歌词字体颜色与效果</dt><dd>打开独立对话框，设置未播放颜色、已播放颜色、未播放不透明度（5～100%）、光晕颜色与开关、描边颜色与开关，并实时预览。开启「全局设置」后深浅色模式共用一套配置；关闭后可分别设置「深色模式」和「浅色模式」。点击「确定」才应用，取消或关闭不影响现有配置。</dd></div>
+            <div><dt>歌词已播放颜色跟随专辑</dt><dd>让已播放歌词颜色随专辑封面主色变化，优先级高于固定的已播放字体颜色。</dd></div>
+          </dl>
+          <h4>翻译与罗马音</h4>
+          <dl class="doc-settings">
+            <div><dt>开启翻译/罗马音</dt><dd>控制辅助歌词总开关；竖向任务栏下固定关闭。</dd></div>
+            <div><dt>辅助歌词类型</dt><dd>可选「翻译」或「罗马音」。只有辅助歌词开启且当前歌曲存在可用内容时可切换；检查中会显示对应状态。</dd></div>
+          </dl>
+          <p>托盘菜单的「辅助歌词」可快速切换类型或关闭显示。逐字歌词按时间轴平滑填充，普通 LRC 按行显示；极简模式不使用逐字高亮。字体、字号和粗斜体在「显示 → 通用字体」中调整。</p>
+          <h4>本地歌词</h4>
+          <dl class="doc-settings">
+            <div><dt>使用 QQ 音乐本地歌词</dt><dd>启用本地 QRC 索引与本地优先获取，仅用于 QQ 音乐。</dd></div>
+            <div><dt>记住歌词版本选择</dt><dd>按歌曲记住本地版或在线版选择。关闭后不保存新记录，但已经保存的记录仍会读取。</dd></div>
+            <div><dt>QQ 音乐本地歌词目录</dt><dd>点击「选择文件夹…」指定目录，程序会递归索引其中的歌词文件。只有启用本地歌词后可设置。</dd></div>
+          </dl>
+          <h4>手动搜索与进度微调</h4>
+          <p>自动匹配错误时，打开托盘菜单的「手动搜索歌词」，选择 QQ 音乐、网易云音乐或酷狗歌词候选并预览。选择结果会按平台和歌曲标识保存，下次自动使用。对手动选择的歌词，可每次提前或延迟 0.5 秒，调整结果会持久化。</p>
+          <h4>本地歌词的获取顺序</h4>
+          <p>手动选词优先于自动匹配。启用本地歌词后，默认先找本地 QRC，未命中再获取在线歌词；有对应文件时合并翻译和罗马音。版本切换入口要求当前为 QQ 音乐、已配置本地目录、歌词已加载且不是手动选词结果。</p>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-toast">
+          <h3 class="doc-section-title">切歌弹窗</h3>
+          <p>对应「设置 → 切歌弹窗」，控制切歌时主屏幕上的歌曲信息提示。弹窗磨砂半透明，不响应鼠标操作，不会挡住点击。</p>
+          <dl class="doc-settings">
+            <div><dt>切歌时弹出歌曲信息</dt><dd>总开关，弹窗显示封面、歌名和歌手。极简模式下不可用。</dd></div>
+            <div><dt>切歌弹窗显示时长</dt><dd>范围为 1～10 秒，仅在弹窗开启时可调。</dd></div>
+            <div><dt>全屏应用时关闭弹窗</dt><dd>前台存在全屏应用时不弹出，减少对游戏、视频等内容的干扰。</dd></div>
+            <div><dt>切歌弹窗位置</dt><dd>可选「中上」或「中下」，弹窗位于主屏幕对应位置。</dd></div>
+          </dl>
+        </section>
+
+        <section class="doc-section doc-subsection" id="settings-idle">
+          <h3 class="doc-section-title">每日一言与更多</h3>
+          <p>管理没有播放器媒体会话时的任务栏内容、快捷启动和滴答清单。这里的空闲状态与歌曲暂停不同。</p>
+          <h4>空闲内容</h4>
+          <dl class="doc-settings">
+            <div><dt>无播放时保留任务栏入口</dt><dd>控制没有播放器媒体会话时是否保留入口，播放器暂停不等于进入空闲状态。关闭后，没有媒体会话时隐藏入口；Dock 同时释放预留工作区。</dd></div>
+            <div><dt>空闲文字</dt><dd>可选「每日一言、欢迎语、不显示」。只有横向内嵌模式开启资源监视后，才能新选择「不显示」，此时保留资源区。启用滴答清单后，启动且没有媒体会话时仍可播报一次今日任务。</dd></div>
+            <div><dt>自定义欢迎语</dt><dd>选择「欢迎语」时生效，最多 20 个字符且不能为纯空格。留空则恢复根据时间和日期类型生成的默认欢迎语。</dd></div>
+            <div><dt>每日一言来源</dt><dd>可选「一言、今日诗词、网易云热评」。今日诗词会结合客户端网络 IP、时间等信息推荐，并在本地保存接口 Token；网易云热评通过一言的网易云分类获取。</dd></div>
+            <div><dt>每日一言更新频率</dt><dd>可选「每天、每 12 小时、每小时」，程序会缓存当前内容。</dd></div>
+            <div><dt>每日一言字体对齐方式</dt><dd>可选「左对齐、居中、右对齐」，同时影响任务栏与悬浮卡片中的每日一言，不影响正常歌词。竖向任务栏下固定左对齐。</dd></div>
+          </dl>
+          <h4>快捷启动</h4>
+          <p>编辑应用列表需要保留空闲入口，极简模式下不可编辑。Dock 的快捷应用入口复用同一列表。</p>
+          <dl class="doc-settings">
+            <div><dt>可打开的应用</dt><dd>通过文件选择器添加本地 EXE，最多 10 个。可修改显示名称与路径、删除条目、拖动排序，并用统一开关控制名称显示。路径失效时条目会提示重新选择。点击条目启动应用，Dock 模式也可使用同一组快捷应用。</dd></div>
+          </dl>
+          <h4>滴答清单</h4>
+          <dl class="doc-settings">
+            <div><dt>启用滴答清单</dt><dd>开启自动同步和快捷启动卡片中的今日任务入口。关闭只停止同步与入口，不会删除 API 口令。</dd></div>
+            <div><dt>API 口令</dt><dd>填写滴答清单网页版创建的普通用户 API 口令，只保存到 Windows 凭据管理器。</dd></div>
+            <div><dt>连接滴答清单</dt><dd>验证口令并读取今天的未完成任务；已连接时可重新连接。</dd></div>
+            <div><dt>同步今日任务</dt><dd>点击「立即同步」刷新任务。只有启用滴答清单并成功连接后可操作。</dd></div>
+            <div><dt>断开连接</dt><dd>删除本机保存的滴答清单 API 口令。</dd></div>
+          </dl>
+          <h4>空闲卡片操作</h4>
+          <p>保留空闲入口时，可按「悬浮卡片」设置的方式展开卡片，复制每日一言或启动应用。媒体卡片播放中还可切换到每日一言与快捷启动面板。宠物在展开横栏中随场景伴听、休息或漫游；内嵌模式的媒体卡片中原地伴听或休息。极简和完全停止模式不显示宠物。</p>
+          <h4>首次连接与任务操作</h4>
+          <ol>
+            <li>打开 <a href="https://dida365.com/webapp/" target="_blank" rel="noopener">滴答清单网页版</a>，在「设置 → 账号与安全 → API 口令」中创建并复制普通用户 API 口令。</li>
+            <li>在软件的「设置 → 每日一言与更多 → 滴答清单」中填写口令，连接后开启自动同步。无需安装滴答清单本地客户端。</li>
+            <li>没有播放器会话时，在空闲卡片切换到「今日任务」。点击任务打开网页详情，点击左侧复选框完成任务；「立即同步」可手动刷新。</li>
+          </ol>
+        </section>
+
+        <section class="doc-section doc-subsection" id="system-menu">
+          <h3 class="doc-section-title">托盘菜单与维护</h3>
+          <p>右键通知区域的软件图标打开完整菜单；沉浸与 Dock 横栏的菜单按钮也打开同一菜单。歌词区域的右键菜单是精简版，是否显示由「显示」页控制。</p>
+          <dl class="doc-settings">
+            <div><dt>开启／关闭任务栏歌词</dt><dd>只控制显示，不退出程序。完全停止模式下需要先切换其他性能模式。</dd></div>
+            <div><dt>手动搜索与辅助歌词</dt><dd>操作方法见「歌词」章节。切换本地／在线版本需要启用 QQ 音乐本地歌词、配置目录且当前不是手动选词；辅助歌词菜单仅在歌曲存在相关内容时出现。</dd></div>
+            <div><dt>开机自启动</dt><dd>登录当前 Windows 账户后自动运行，无需管理员权限。</dd></div>
+            <div><dt>关于与更新</dt><dd>选择 GitHub 或 Gitee 更新源，检查版本、阅读更新日志、下载并安装更新。可开启启动时自动检查；安装更新时会退出当前程序。</dd></div>
+            <div><dt>运行日志</dt><dd>查看播放、歌词来源、封面来源和软件资源占用，切换查看封面图片。「选择位置」更改日志目录，「打开位置」打开目录；定期清理可选不清理或保留 7、30、90 天。</dd></div>
+            <div><dt>退出</dt><dd>结束软件运行。与沉浸／Dock 横栏的返回内嵌按钮不同。</dd></div>
+          </dl>
+        </section>
+
+        <section class="doc-section doc-subsection" id="troubleshooting">
+          <h3 class="doc-section-title">常见问题排查</h3>
+          <h4>播放歌曲后没有显示歌词</h4>
+          <p>依次确认托盘菜单中的任务栏歌词已开启、性能模式不是「完全停止」，以及播放器配置符合前文要求。内嵌模式下，任务栏空间不足也会自动隐藏歌词；关闭不需要的任务栏按钮或其他任务栏插件后再观察。Windows 10 的防遮挡兼容性有限，可能出现重叠或隐藏异常。</p>
+          <h4>网易云音乐没有歌曲或进度信息</h4>
+          <p>确认安装的是 BetterNCM 与 InfLink-rs，而非旧版 InfLink，并在插件安装后重启网易云音乐和本软件。仍无法识别时，检查插件与当前网易云客户端版本是否兼容。</p>
+          <h4>歌词匹配错误或时间不一致</h4>
+          <p>使用托盘菜单的「手动搜索歌词」选择正确候选，再利用提前／延迟 0.5 秒微调时间轴。QQ 音乐启用本地歌词后，也可在本地版与在线版之间切换，比较哪个版本更准确。</p>
+          <h4>频谱没有跳动</h4>
+          <p>确认系统为 Windows 10 2004 或更高版本、当前播放器正在发声、频谱已开启，并使用「正常」性能模式。低渲染、完全停止和极简模式会暂停频谱，侧边任务栏的竖向模式也会关闭频谱。播放器更换输出设备或重启后，可稍等软件重新绑定音频会话。</p>
+          <h4>沉浸模式没有出现</h4>
+          <p>确认存在活动音乐会话并使用横向任务栏。单独选择侧边任务栏时按内嵌布局显示；选择全部显示器时，沉浸模式只覆盖横向任务栏。</p>
+          <h4>设置没有保存或程序行为异常</h4>
+          <p>检查软件弹出的设置文件读写提示，确认当前 Windows 账户对配置目录具有访问权限，且文件没有被其他程序占用。随后打开「运行日志」查看详细事件；需要协助时，前往<a href="feedback.html">意见反馈</a>，说明系统版本、播放器版本、所用展示模式和问题复现步骤。</p>
+        </section>
+
+        <div class="docs-end">
+          <p>文档未覆盖你的问题？</p>
+          <a class="btn btn-ghost" href="feedback.html">前往意见反馈</a>
+        </div>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <p>QQ 音乐 / 网易云任务栏歌词 · Apache-2.0</p>
+      <p class="footer-links">
+        <a href="https://github.com/H0308/qq-music-lyrics-displayer" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://gitee.com/EPSDA/qq-music-lyrics-displayer" target="_blank" rel="noopener">Gitee</a>
+        <a href="index.html">返回首页</a>
+      </p>
+    </div>
+  </footer>
+
+  <button class="back-to-top" id="backToTop" type="button" aria-label="返回顶部" title="返回顶部">
+    <svg class="progress-ring" viewBox="0 0 48 48" aria-hidden="true"><circle class="ring-track" cx="24" cy="24" r="21"/><circle class="ring-progress" id="ringProgress" cx="24" cy="24" r="21"/></svg>
+    <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+  </button>
+
+  <script src="assets/js/main.js"></script>
+  <script src="assets/js/pet.js"></script>
+  <script src="assets/js/docs.js"></script>
+</body>
+</html>
