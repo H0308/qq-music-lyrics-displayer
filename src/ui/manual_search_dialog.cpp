@@ -126,6 +126,8 @@ struct ManualSearchDialog::Impl {
     TextField artistEdit;
     std::wstring statusText;
     bool searching = false;
+    UINT_PTR searchGeneration = 0;
+    UINT_PTR previewGeneration = 0;
 
     LyricProvider* provider = nullptr;
     std::wstring targetTitle;
@@ -1363,6 +1365,8 @@ struct ManualSearchDialog::Impl {
     void doSearch() {
         if (!provider)
             return;
+        const UINT_PTR generation = ++searchGeneration;
+        ++previewGeneration;
         searching = true;
         candidateItems.clear();
         candidates.clear();
@@ -1381,11 +1385,11 @@ struct ManualSearchDialog::Impl {
         const std::wstring artist = artistEdit.text;
         HWND hwndCopy = hwnd;
         provider->searchCandidatesAsync(title, artist,
-            [hwndCopy](const std::vector<SearchCandidate>& result) {
+            [hwndCopy, generation](const std::vector<SearchCandidate>& result) {
                 if (!IsWindow(hwndCopy))
                     return;
                 auto* payload = new std::vector<SearchCandidate>(result);
-                if (!PostMessageW(hwndCopy, kMsgCandidatesReady, 0,
+                if (!PostMessageW(hwndCopy, kMsgCandidatesReady, generation,
                                   reinterpret_cast<LPARAM>(payload)))
                     delete payload;
             });
@@ -1479,14 +1483,15 @@ struct ManualSearchDialog::Impl {
 
         HWND hwndCopy = hwnd;
         const int index = selectedIdx;
+        const UINT_PTR generation = ++previewGeneration;
         provider->fetchLyricAsync(candidates[index],
-            [hwndCopy, index](bool ok, const std::vector<LyricLine>& lines,
+            [hwndCopy, index, generation](bool ok, const std::vector<LyricLine>& lines,
                               const SongInfo& info) {
                 if (!IsWindow(hwndCopy))
                     return;
                 auto* payload = new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(
                     index, ok, lines, info);
-                if (!PostMessageW(hwndCopy, kMsgPreviewLyricReady, 0,
+                if (!PostMessageW(hwndCopy, kMsgPreviewLyricReady, generation,
                                   reinterpret_cast<LPARAM>(payload)))
                     delete payload;
             });
@@ -1652,7 +1657,8 @@ struct ManualSearchDialog::Impl {
         case kMsgCandidatesReady: {
             auto* payload = reinterpret_cast<std::vector<SearchCandidate>*>(lp);
             if (payload) {
-                handleCandidatesReady(*payload);
+                if (wp == searchGeneration)
+                    handleCandidatesReady(*payload);
                 delete payload;
             }
             return 0;
@@ -1661,8 +1667,9 @@ struct ManualSearchDialog::Impl {
             auto* payload =
                 reinterpret_cast<std::tuple<int, bool, std::vector<LyricLine>, SongInfo>*>(lp);
             if (payload) {
-                handlePreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
-                                        std::get<2>(*payload), std::get<3>(*payload));
+                if (wp == previewGeneration)
+                    handlePreviewLyricReady(std::get<0>(*payload), std::get<1>(*payload),
+                                            std::get<2>(*payload), std::get<3>(*payload));
                 delete payload;
             }
             return 0;
@@ -1938,7 +1945,7 @@ void ManualSearchDialog::onCandidatesReady(const std::vector<SearchCandidate>& c
     if (!impl_->hwnd)
         return;
     auto* payload = new std::vector<SearchCandidate>(cands);
-    if (!PostMessageW(impl_->hwnd, kMsgCandidatesReady, 0,
+    if (!PostMessageW(impl_->hwnd, kMsgCandidatesReady, impl_->searchGeneration,
                       reinterpret_cast<LPARAM>(payload)))
         delete payload;
 }
@@ -1950,7 +1957,7 @@ void ManualSearchDialog::onPreviewLyricReady(int idx, bool ok,
         return;
     auto* payload =
         new std::tuple<int, bool, std::vector<LyricLine>, SongInfo>(idx, ok, lines, info);
-    if (!PostMessageW(impl_->hwnd, kMsgPreviewLyricReady, 0,
+    if (!PostMessageW(impl_->hwnd, kMsgPreviewLyricReady, impl_->previewGeneration,
                       reinterpret_cast<LPARAM>(payload)))
         delete payload;
 }
@@ -1962,4 +1969,28 @@ void ManualSearchDialog::setApplyCallback(ApplyCallback cb) {
 void ManualSearchDialog::setPlaybackPosition(int64_t positionMs) {
     impl_->playbackPositionMs = positionMs;
     impl_->setPreviewPosition(positionMs);
+}
+
+void ManualSearchDialog::setTargetSong(const std::wstring& title, const std::wstring& artist,
+                                      int64_t durationMs, const std::wstring& neteaseSongId) {
+    const bool changed = title != impl_->targetTitle || artist != impl_->targetArtist ||
+                         neteaseSongId != impl_->targetNeteaseSongId;
+    impl_->targetDurationMs = durationMs;
+    if (!changed)
+        return;
+    impl_->targetTitle = title;
+    impl_->targetArtist = artist;
+    impl_->targetNeteaseSongId = neteaseSongId;
+    ++impl_->searchGeneration;
+    ++impl_->previewGeneration;
+    impl_->candidateItems.clear();
+    impl_->candidates.clear();
+    impl_->selectedItemRow = -1;
+    impl_->selectedIdx = -1;
+    impl_->hoverItemRow = -1;
+    impl_->previewOffsetMs = 0;
+    impl_->previewInfo = {};
+    impl_->setPreviewLines({});
+    impl_->createControls();
+    impl_->surface.invalidate();
 }

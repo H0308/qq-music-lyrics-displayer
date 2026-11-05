@@ -39,6 +39,10 @@ public:
     // 同步当前播放进度（用于预览面板高亮/滚动）
     void setPlaybackPosition(int64_t positionMs);
 
+    // 切歌时更新搜索目标；同曲目的进度、时长更新不覆盖手动输入。
+    void setTargetSong(const std::wstring& title, const std::wstring& artist,
+                       int64_t durationMs, const std::wstring& neteaseSongId);
+
     void setApplyCallback(ApplyCallback cb);
 
 private:

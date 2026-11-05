@@ -691,6 +691,7 @@ struct App {
     bool taskbarEnabledBeforeStopped_ = false;
     std::unique_ptr<AboutDialog> aboutDialog;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
+    std::wstring manualSearchTrackKey;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;
     std::unique_ptr<FontColorDialog> fontColorDialog;
     std::unique_ptr<IdleAppNameDialog> idleAppNameDialog;
@@ -3029,17 +3030,17 @@ struct App {
             manualTarget.player == SmtcPlayerType::NetEase
                 ? manualTarget.neteaseSongId
                 : L"";
-        const std::wstring manualKey = currentKey;
+        manualSearchTrackKey = currentKey;
         manualSearchDialog = std::make_unique<ManualSearchDialog>();
         if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist,
                                         currentDurationMs, targetNeteaseSongId)) {
             manualSearchDialog.reset();
             return;
         }
-        manualSearchDialog->setApplyCallback([this, manualKey](LyricResult result) {
+        manualSearchDialog->setApplyCallback([this](LyricResult result) {
             SmtcSnapshot snap = monitor.snapshot();
-            if (manualKey.empty() || !snap.sessionAlive || currentKey != manualKey ||
-                makeTrackKey(snap) != manualKey)
+            if (manualSearchTrackKey.empty() || !snap.sessionAlive ||
+                currentKey != manualSearchTrackKey || makeTrackKey(snap) != manualSearchTrackKey)
                 return;
 
             // 手动覆盖是新的内容事务，使仍在队列中的自动歌词/封面结果失效。
@@ -3234,6 +3235,12 @@ struct App {
         }
 
         const std::wstring key = makeTrackKey(snap);
+        if (manualSearchDialog && manualSearchDialog->isOpen() && !snap.title.empty()) {
+            manualSearchDialog->setTargetSong(
+                snap.title, snap.artist, snap.timelineStale ? 0 : snap.durationMs,
+                snap.player == SmtcPlayerType::NetEase ? snap.neteaseSongId : L"");
+            manualSearchTrackKey = key;
+        }
         const bool trackChanged = key != currentKey && !snap.title.empty();
         // QQ 的时间线可能晚于媒体属性到达：同一首歌先以未知时长（0）进入，
         // 随后补上真实时长会让包含时长的 trackKey 变化。这个补齐不是换歌，
