@@ -24,7 +24,7 @@ public:
     // provider 必须比对话框生命周期长
     bool create(HINSTANCE inst, HWND parent, LyricProvider* provider,
                 const std::wstring& targetTitle, const std::wstring& targetArtist,
-                int64_t targetDurationMs,
+                int64_t targetDurationMs, bool targetIsNetease,
                 const std::wstring& targetNeteaseSongId = {});
     void show();
     void destroy();
@@ -41,7 +41,7 @@ public:
 
     // 切歌时更新搜索目标；同曲目的进度、时长更新不覆盖手动输入。
     void setTargetSong(const std::wstring& title, const std::wstring& artist,
-                       int64_t durationMs, const std::wstring& neteaseSongId);
+                       int64_t durationMs, bool isNetease, const std::wstring& neteaseSongId);
 
     void setApplyCallback(ApplyCallback cb);
 

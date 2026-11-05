@@ -3033,7 +3033,9 @@ struct App {
         manualSearchTrackKey = currentKey;
         manualSearchDialog = std::make_unique<ManualSearchDialog>();
         if (!manualSearchDialog->create(inst, trayHwnd, &provider, currentTitle, currentArtist,
-                                        currentDurationMs, targetNeteaseSongId)) {
+                                        currentDurationMs,
+                                        manualTarget.player == SmtcPlayerType::NetEase,
+                                        targetNeteaseSongId)) {
             manualSearchDialog.reset();
             return;
         }
@@ -3238,6 +3240,7 @@ struct App {
         if (manualSearchDialog && manualSearchDialog->isOpen() && !snap.title.empty()) {
             manualSearchDialog->setTargetSong(
                 snap.title, snap.artist, snap.timelineStale ? 0 : snap.durationMs,
+                snap.player == SmtcPlayerType::NetEase,
                 snap.player == SmtcPlayerType::NetEase ? snap.neteaseSongId : L"");
             manualSearchTrackKey = key;
         }
