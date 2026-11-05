@@ -43,6 +43,8 @@ struct SettingsState {
     bool backgroundBlurSupported = true;
     bool embeddedResourceMonitor = false;
     bool dockResourceGpuUsage = false;
+    bool dockResourceDownload = true;
+    bool dockResourceUpload = true;
     bool dockResourceCpuFrequency = false;
     bool spectrumOn = false;
     int spectrumStyle = 0; // 0 默认 1 柱状图 2 梦幻波浪
@@ -117,6 +119,8 @@ struct SettingsActions {
     std::function<void(int)> onDockBackgroundAdjustment;
     std::function<void(bool)> onEmbeddedResourceMonitor;
     std::function<void(bool)> onDockResourceGpuUsage;
+    std::function<void(bool)> onDockResourceDownload;
+    std::function<void(bool)> onDockResourceUpload;
     std::function<void(bool)> onDockResourceCpuFrequency;
     std::function<void(bool)> onSpectrum;
     std::function<void(int)> onSpectrumStyle;

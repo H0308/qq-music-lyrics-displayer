@@ -1244,7 +1244,8 @@ struct TaskbarHost::Impl {
     }
 
     float resourceZoneWidth() const {
-        return resourceLeftColumnW_ + kDockResourceZoneGap + resourceRightColumnW_;
+        return resourceLeftColumnW_ +
+               (resourceRightColumnW_ > 0.0f ? kDockResourceZoneGap + resourceRightColumnW_ : 0.0f);
     }
 
     float embeddedResourceExtra() const {
@@ -2985,6 +2986,8 @@ struct TaskbarHost::Impl {
 
     void setDockResourceVisibility(const DockResourceVisibility& visibility) {
         if (dockResourceVisibility_.embeddedEnabled == visibility.embeddedEnabled &&
+            dockResourceVisibility_.download == visibility.download &&
+            dockResourceVisibility_.upload == visibility.upload &&
             dockResourceVisibility_.gpuUsage == visibility.gpuUsage &&
             dockResourceVisibility_.cpuFrequency == visibility.cpuFrequency)
             return;
@@ -3342,25 +3345,33 @@ struct TaskbarHost::Impl {
     }
 
     bool dockResourceExtrasVisible() const {
-        return dockResourceVisibility_.gpuUsage || dockResourceVisibility_.cpuFrequency;
+        return dockResourcePageCount() > 1;
     }
 
-    std::vector<DockResourceRow> dockResourceExtraRows() const {
-        std::vector<std::wstring> cells;
+    std::vector<DockResourceRow> dockResourceRows() const {
+        std::vector<std::wstring> cells{L"CPU: " + resourceCpuText_,
+                                       L"内存: " + resourceMemoryText_};
+        if (dockResourceVisibility_.download)
+            cells.push_back(L"下行: " + resourceDownloadText_);
+        if (dockResourceVisibility_.upload)
+            cells.push_back(L"上行: " + resourceUploadText_);
         if (dockResourceVisibility_.gpuUsage)
             cells.push_back(L"GPU: " + resourceGpuText_);
         if (dockResourceVisibility_.cpuFrequency)
             cells.push_back(L"频率: " + resourceCpuFrequencyText_);
 
         std::vector<DockResourceRow> rows;
-        for (size_t i = 0; i < cells.size(); i += 2)
-            rows.push_back({cells[i], i + 1 < cells.size() ? cells[i + 1] : L""});
+        for (size_t i = 0; i < cells.size(); i += 4) {
+            rows.push_back({cells[i], i + 2 < cells.size() ? cells[i + 2] : L""});
+            rows.push_back({i + 1 < cells.size() ? cells[i + 1] : L"",
+                            i + 3 < cells.size() ? cells[i + 3] : L""});
+        }
         return rows;
     }
 
     size_t dockResourcePageCount() const {
-        const auto rows = dockResourceExtraRows();
-        return 1 + (rows.size() + 1) / 2;
+        const auto rows = dockResourceRows();
+        return rows.size() / 2;
     }
 
     float dockResourceZoneW(float hostW) const {
@@ -3952,25 +3963,13 @@ struct TaskbarHost::Impl {
             !ensureResourceFormat())
             return;
 
-        const std::wstring baseCells[] = {L"CPU: " + resourceCpuText_,
-                                          L"内存: " + resourceMemoryText_,
-                                          L"下行: " + resourceDownloadText_,
-                                          L"上行: " + resourceUploadText_};
-        const auto extraRows = dockResourceExtraRows();
-        const size_t pageCount = 1 + (extraRows.size() + 1) / 2;
+        const auto rows = dockResourceRows();
+        const size_t pageCount = rows.size() / 2;
         const size_t page = std::min(dockResourcePage_, pageCount - 1);
 
         std::array<DockResourceRow, 2> visibleRows{};
-        if (page == 0) {
-            visibleRows[0] = {baseCells[0], baseCells[2]};
-            visibleRows[1] = {baseCells[1], baseCells[3]};
-        } else {
-            const size_t start = (page - 1) * 2;
-            if (start < extraRows.size())
-                visibleRows[0] = extraRows[start];
-            if (start + 1 < extraRows.size())
-                visibleRows[1] = extraRows[start + 1];
-        }
+        visibleRows[0] = rows[page * 2];
+        visibleRows[1] = rows[page * 2 + 1];
 
         const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
@@ -4652,48 +4651,39 @@ struct TaskbarHost::Impl {
         const std::wstring decimalDigits = twoDigits + L"." + singleDigit;
 
         float leftMaxWidth = 0.0f;
-        auto measureLeft = [&](const std::wstring& sample) {
-            leftMaxWidth = std::max(leftMaxWidth,
-                                    measureResourceTextWidth(dwrite, fmtResource_, sample));
-        };
-        measureLeft(L"CPU: 100%");
-        measureLeft(L"CPU: " + twoDigits + L"%");
-        measureLeft(L"内存: 100%");
-        measureLeft(L"内存: " + twoDigits + L"%");
-        if (dockResourceVisibility_.gpuUsage) {
-            measureLeft(L"GPU: 100%");
-            measureLeft(L"GPU: " + twoDigits + L"%");
-        }
-
         float rightMaxWidth = 0.0f;
-        auto measureRight = [&](const std::wstring& sample) {
-            rightMaxWidth = std::max(rightMaxWidth,
-                                     measureResourceTextWidth(dwrite, fmtResource_, sample));
+        size_t cellIndex = 0;
+        auto measureCell = [&](const std::vector<std::wstring>& samples) {
+            float& columnWidth = cellIndex % 4 < 2 ? leftMaxWidth : rightMaxWidth;
+            for (const auto& sample : samples)
+                columnWidth = std::max(columnWidth,
+                    measureResourceTextWidth(dwrite, fmtResource_, sample));
+            ++cellIndex;
         };
-        static constexpr const wchar_t* ratePrefixes[] = {L"下行: ", L"上行: "};
+        measureCell({L"CPU: 100%", L"CPU: " + twoDigits + L"%"});
+        measureCell({L"内存: 100%", L"内存: " + twoDigits + L"%"});
         static constexpr const wchar_t* rateUnits[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s", L"TB/s"};
-        for (const wchar_t* prefixLabel : ratePrefixes) {
+        auto measureRate = [&](const wchar_t* prefixLabel) {
+            std::vector<std::wstring> samples;
             for (const wchar_t* unitLabel : rateUnits) {
-                measureRight(std::wstring(prefixLabel) + decimalDigits + unitLabel);
-                measureRight(std::wstring(prefixLabel) + threeDigits + unitLabel);
+                samples.push_back(std::wstring(prefixLabel) + decimalDigits + unitLabel);
+                samples.push_back(std::wstring(prefixLabel) + threeDigits + unitLabel);
             }
-        }
-        float singleRowMaxWidth = 0.0f;
-        if (dockResourceVisibility_.cpuFrequency) {
-            const std::wstring freqSample = L"频率: " + decimalDigits + L"GHz";
-            if (dockResourceVisibility_.gpuUsage)
-                measureRight(freqSample);
-            else
-                singleRowMaxWidth = measureResourceTextWidth(dwrite, fmtResource_, freqSample);
-        }
+            measureCell(samples);
+        };
+        if (dockResourceVisibility_.download)
+            measureRate(L"下行: ");
+        if (dockResourceVisibility_.upload)
+            measureRate(L"上行: ");
+        if (dockResourceVisibility_.gpuUsage)
+            measureCell({L"GPU: 100%", L"GPU: " + twoDigits + L"%"});
+        if (dockResourceVisibility_.cpuFrequency)
+            measureCell({L"频率: " + decimalDigits + L"GHz"});
 
         const float nextLeftWidth =
             std::max(1.0f, std::ceil(leftMaxWidth) + kResourceCellSafetyPadding);
-        float nextRightWidth =
-            std::max(1.0f, std::ceil(rightMaxWidth) + kResourceCellSafetyPadding);
-        const float minTotalWidth = std::ceil(singleRowMaxWidth) + kResourceCellSafetyPadding;
-        if (nextLeftWidth + kDockResourceZoneGap + nextRightWidth < minTotalWidth)
-            nextRightWidth = minTotalWidth - nextLeftWidth - kDockResourceZoneGap;
+        const float nextRightWidth = rightMaxWidth > 0.0f
+            ? std::ceil(rightMaxWidth) + kResourceCellSafetyPadding : 0.0f;
 
         const bool changed = nextLeftWidth != resourceLeftColumnW_ ||
                              nextRightWidth != resourceRightColumnW_;

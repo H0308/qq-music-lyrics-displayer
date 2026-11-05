@@ -51,9 +51,11 @@ enum class TaskbarPlacementStatus {
     ForcedOverlap,
 };
 
-// 复用 Dock 资源区；内嵌模式可独立开启，CPU、内存、下行和上行作为基础指标。
+// 复用 Dock 资源区；CPU、内存为基础指标，其余指标按开关紧凑排列。
 struct DockResourceVisibility {
     bool embeddedEnabled = false;
+    bool download = true;
+    bool upload = true;
     bool gpuUsage = false;
     bool cpuFrequency = false;
 };

@@ -821,6 +821,8 @@ struct App {
     int dockBackgroundAdjustment_ = 0;
     bool embeddedResourceMonitor_ = false;
     bool dockResourceGpuUsage_ = false;
+    bool dockResourceDownload_ = true;
+    bool dockResourceUpload_ = true;
     bool dockResourceCpuFrequency_ = false;
     bool taskbarContextMenuEnabled_ = true;
     bool hoverPlaybackControls_ = true;
@@ -1520,6 +1522,8 @@ struct App {
             return;
         DockResourceVisibility visibility;
         visibility.embeddedEnabled = embeddedResourceMonitor_;
+        visibility.download = dockResourceDownload_;
+        visibility.upload = dockResourceUpload_;
         visibility.gpuUsage = dockResourceGpuUsage_;
         visibility.cpuFrequency = dockResourceCpuFrequency_;
         forEachHost([&](TaskbarHost* host) { host->setDockResourceVisibility(visibility); });
@@ -1538,6 +1542,13 @@ struct App {
         dockResourceGpuUsage_ = on;
         applyDockResourceVisibility();
         logSettingBool(L"dock-resource-gpu", on);
+        saveSettings();
+    }
+
+    void applyDockResourceNetwork(bool download, bool on) {
+        (download ? dockResourceDownload_ : dockResourceUpload_) = on;
+        applyDockResourceVisibility();
+        logSettingBool(download ? L"dock-resource-download" : L"dock-resource-upload", on);
         saveSettings();
     }
 
@@ -1608,6 +1619,8 @@ struct App {
             DockResourceVisibility visibility;
             visibility.embeddedEnabled = embeddedResourceMonitor_;
             visibility.gpuUsage = dockResourceGpuUsage_;
+            visibility.download = dockResourceDownload_;
+            visibility.upload = dockResourceUpload_;
             visibility.cpuFrequency = dockResourceCpuFrequency_;
             host->setDockResourceVisibility(visibility);
         });
@@ -4005,6 +4018,8 @@ void App::loadSettings() {
             j.value("dockBackgroundAdjustment", 0), 0, 1);
         embeddedResourceMonitor_ = j.value("embeddedResourceMonitor", false);
         dockResourceGpuUsage_ = j.value("dockResourceGpu", false);
+        dockResourceDownload_ = j.value("dockResourceDownload", true);
+        dockResourceUpload_ = j.value("dockResourceUpload", true);
         dockResourceCpuFrequency_ = j.value("dockResourceCpuFrequency", false);
         taskbarContextMenuEnabled_ = j.value("taskbarContextMenu", true);
         // 性能模式只对本次运行有效；忽略旧版本可能留下的持久化值，启动始终回到正常模式。
@@ -4271,6 +4286,8 @@ void App::saveSettings() {
         j.erase("dockBackgroundBlur");
         j["embeddedResourceMonitor"] = embeddedResourceMonitor_;
         j["dockResourceGpu"] = dockResourceGpuUsage_;
+        j["dockResourceDownload"] = dockResourceDownload_;
+        j["dockResourceUpload"] = dockResourceUpload_;
         j.erase("dockResourceDisk");
         j.erase("dockResourceBattery");
         j.erase("dockResourceTemperature");
@@ -5511,6 +5528,8 @@ SettingsState App::currentSettingsState() const {
     st.backgroundBlurSupported = !taskbarHost || taskbarHost->backgroundBlurAvailable();
     st.embeddedResourceMonitor = embeddedResourceMonitor_;
     st.dockResourceGpuUsage = dockResourceGpuUsage_;
+    st.dockResourceDownload = dockResourceDownload_;
+    st.dockResourceUpload = dockResourceUpload_;
     st.dockResourceCpuFrequency = dockResourceCpuFrequency_;
     st.songInfoVisible = vertical ? false : songInfoVisible_;
     st.albumCoverVisible = albumCoverVisible_;
@@ -5606,6 +5625,10 @@ SettingsActions App::buildSettingsActions() {
         [this](bool on) { applyEmbeddedResourceMonitor(on); };
     act.onDockResourceGpuUsage =
         [this](bool on) { applyDockResourceGpuUsage(on); };
+    act.onDockResourceDownload =
+        [this](bool on) { applyDockResourceNetwork(true, on); };
+    act.onDockResourceUpload =
+        [this](bool on) { applyDockResourceNetwork(false, on); };
     act.onDockResourceCpuFrequency =
         [this](bool on) { applyDockResourceCpuFrequency(on); };
     act.onSpectrum = [this](bool on) { applySpectrumOn(on); };

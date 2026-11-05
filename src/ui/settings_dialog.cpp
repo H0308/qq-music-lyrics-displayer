@@ -121,6 +121,8 @@ constexpr int kIdTaskbarMonitor = 470;
 constexpr int kIdImmersiveBackgroundBlur = 471;
 constexpr int kIdDockBackgroundBlur = 474;
 constexpr int kIdEmbeddedResourceMonitor = 481;
+constexpr int kIdDockResourceDownload = 482;
+constexpr int kIdDockResourceUpload = 483;
 constexpr int kIdDockResourceGpuUsage = 473;
 constexpr int kIdDockResourceCpuFrequency = 477;
 constexpr int kIdSliderValueEdit = 478;
@@ -364,6 +366,8 @@ settings_icon::Kind iconForRow(int id) {
         return settings_icon::Kind::Background;
     case kIdEmbeddedResourceMonitor:
     case kIdDockResourceGpuUsage:
+    case kIdDockResourceDownload:
+    case kIdDockResourceUpload:
     case kIdDockResourceCpuFrequency:
         return settings_icon::Kind::Performance;
     case kIdHoverControls:
@@ -959,6 +963,10 @@ struct SettingsDialog::Impl {
             row->enabled = embeddedResources;
         const bool resourceExtrasEnabled = appBarEnabled ||
                                            (embeddedResources && state.embeddedResourceMonitor);
+        if (auto* row = findRow(kIdDockResourceDownload))
+            row->enabled = resourceExtrasEnabled;
+        if (auto* row = findRow(kIdDockResourceUpload))
+            row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceGpuUsage))
             row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
@@ -1408,10 +1416,20 @@ struct SettingsDialog::Impl {
         addHeader(kTaskbarModePage, L"资源监视");
         Row& embeddedResources = addRow(
             kTaskbarModePage, kIdEmbeddedResourceMonitor, ControlKind::Toggle,
-            L"内嵌模式显示资源监视", L"在任务栏右侧显示 CPU、内存和上下行速度；扩展指标可用滚轮切换。",
+            L"内嵌模式显示资源监视", L"在任务栏右侧显示 CPU 和内存；扩展指标依次补位，超出一页可用滚轮切换。",
             40.0f, kRowTallH);
         embeddedResources.checked = state.embeddedResourceMonitor;
         embeddedResources.enabled = state.taskbarViewMode == 0 && !vertical;
+        Row& download = addRow(
+            kTaskbarModePage, kIdDockResourceDownload, ControlKind::Toggle,
+            L"显示下行速度", L"扩展指标；关闭后由后续指标补位，没有其他指标时释放对应宽度。",
+            40.0f, kRowTallH);
+        download.checked = state.dockResourceDownload;
+        Row& upload = addRow(
+            kTaskbarModePage, kIdDockResourceUpload, ControlKind::Toggle,
+            L"显示上行速度", L"扩展指标；关闭后由后续指标补位，没有其他指标时释放对应宽度。",
+            40.0f, kRowTallH);
+        upload.checked = state.dockResourceUpload;
         Row& dockResourceGpu = addRow(
             kTaskbarModePage, kIdDockResourceGpuUsage, ControlKind::Toggle,
             L"显示 GPU 使用率", L"示例：GPU: 7%；没有可用 GPU 性能计数器时显示“—”。",
@@ -1424,6 +1442,10 @@ struct SettingsDialog::Impl {
         dockResourceCpuFrequency.checked = state.dockResourceCpuFrequency;
         const bool resourceExtrasEnabled = state.taskbarViewMode == 2 ||
             (state.taskbarViewMode == 0 && !vertical && state.embeddedResourceMonitor);
+        if (auto* row = findRow(kIdDockResourceDownload))
+            row->enabled = resourceExtrasEnabled;
+        if (auto* row = findRow(kIdDockResourceUpload))
+            row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceGpuUsage))
             row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
@@ -5395,6 +5417,18 @@ struct SettingsDialog::Impl {
             if (actions.onDockResourceGpuUsage)
                 actions.onDockResourceGpuUsage(row->checked);
             break;
+        case kIdDockResourceDownload:
+            row->checked = !row->checked;
+            state.dockResourceDownload = row->checked;
+            if (actions.onDockResourceDownload)
+                actions.onDockResourceDownload(row->checked);
+            break;
+        case kIdDockResourceUpload:
+            row->checked = !row->checked;
+            state.dockResourceUpload = row->checked;
+            if (actions.onDockResourceUpload)
+                actions.onDockResourceUpload(row->checked);
+            break;
         case kIdDockResourceCpuFrequency:
             row->checked = !row->checked;
             if (actions.onDockResourceCpuFrequency)
@@ -5704,6 +5738,14 @@ struct SettingsDialog::Impl {
         }
         const bool resourceExtrasEnabled = s.taskbarViewMode == 2 ||
             (s.taskbarViewMode == 0 && !vertical && s.embeddedResourceMonitor);
+        if (auto* row = findRow(kIdDockResourceDownload)) {
+            row->checked = s.dockResourceDownload;
+            row->enabled = resourceExtrasEnabled;
+        }
+        if (auto* row = findRow(kIdDockResourceUpload)) {
+            row->checked = s.dockResourceUpload;
+            row->enabled = resourceExtrasEnabled;
+        }
         if (auto* row = findRow(kIdDockResourceGpuUsage)) {
             row->checked = s.dockResourceGpuUsage;
             row->enabled = resourceExtrasEnabled;
