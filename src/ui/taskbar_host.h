@@ -165,6 +165,7 @@ public:
 
     bool isTaskbar() const override;
     bool isVerticalTaskbar() const;
+    bool isCompactTaskbar() const;
     int currentLine() const override;
     const std::wstring& statusText() const override;
 

@@ -79,6 +79,7 @@ struct SettingsState {
     fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
     bool verticalTaskbar = false; // 侧边任务栏：禁用不适合窄栏的设置项
+    bool compactTaskbar = false; // 小任务栏仅临时限制显示，保留用户偏好。
     bool followAlbum = false;
     bool doubleLineLyrics = false;
     uint32_t lyricEffects = 0;

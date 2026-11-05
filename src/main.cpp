@@ -856,6 +856,7 @@ struct App {
     // 3 极简（不降低歌词刷新率，只关闭附加视觉与弹窗）
     int renderMode_ = 0;
     bool taskbarVertical_ = false; // 当前任务栏是否为左右侧的竖向布局
+    bool taskbarCompact_ = false;
     bool mediaSessionAlive_ = false; // 用于同步依赖播放会话的设置可用态
 
     // 频谱（任务栏歌词独有）：开关持久化，开启时捕获线程跟随任务栏宿主启停
@@ -1709,6 +1710,11 @@ struct App {
     void syncTaskbarOrientation() {
         if (!taskbarHost)
             return;
+        const bool compact = taskbarHost->isCompactTaskbar();
+        if (compact != taskbarCompact_) {
+            taskbarCompact_ = compact;
+            refreshSettingsDialog(true);
+        }
         const bool vertical = taskbarHost->isVerticalTaskbar();
         if (vertical == taskbarVertical_)
             return;
@@ -5676,6 +5682,7 @@ SettingsState App::currentSettingsState() const {
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = vertical ? false : doubleLineLyricsEnabled_;
+    st.compactTaskbar = taskbarHost && taskbarHost->isCompactTaskbar();
     st.lyricEffects = lyricEffects_;
     st.lyricAlignment = vertical
                             ? 0

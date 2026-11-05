@@ -1733,6 +1733,7 @@ struct SettingsDialog::Impl {
         Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ 音乐本地歌词目录",
                                    localPathHint.c_str(), L"选择文件夹…", kRowTallH);
         localPath.enabled = state.qqLocalLyricsEnabled;
+        updateCompactLyricRows();
         updateImmersiveRowsEnabled();
     }
 
@@ -6039,6 +6040,30 @@ struct SettingsDialog::Impl {
             surface.invalidate();
     }
 
+    void updateCompactLyricRows() {
+        const wchar_t* compactHint = L"小任务栏下暂时停用，恢复正常大小后自动恢复；已保留开关偏好。";
+        for (int id : {kIdDoubleLine, kIdSecondaryOn}) {
+            if (auto* row = findRow(id)) {
+                row->hint = state.compactTaskbar ? compactHint : L"";
+                row->showHint = state.compactTaskbar;
+                row->minHeight = row->showHint ? kRowTallH : kRowH;
+                row->height = row->minHeight;
+                if (state.compactTaskbar)
+                    row->enabled = false;
+            }
+        }
+        if (auto* row = findRow(kIdLyricEffectFirst)) {
+            row->hint = state.compactTaskbar ? compactHint
+                : L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。";
+            if (state.compactTaskbar)
+                row->enabled = false;
+        }
+        if (state.compactTaskbar) {
+            if (auto* row = findRow(kIdSecondaryType))
+                row->enabled = false;
+        }
+    }
+
     void updateState(const SettingsState& s) {
         if (sliderEditOpen)
             commitSliderEditor();
@@ -6290,6 +6315,7 @@ struct SettingsDialog::Impl {
             row->height = row->minHeight;
             row->enabled = s.qqLocalLyricsEnabled;
         }
+        updateCompactLyricRows();
         updateImmersiveRowsEnabled();
         layout();
         surface.invalidate();

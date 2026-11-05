@@ -115,6 +115,7 @@ constexpr float kLyricPreviewScale = kLyricPreviewFontScale / kLyricMainFontScal
 constexpr float kMinFont = 9.0f;
 constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
+constexpr float kCompactTaskbarHeightDip = 36.0f;
 constexpr float kSpectrumBarW = 5.0f;  // 频谱柱宽
 constexpr float kSpectrumGap = 3.0f;   // 频谱柱间隙
 constexpr float kSpectrumBottomPadding = 1.0f;
@@ -789,6 +790,7 @@ struct TaskbarHost::Impl {
 
     // 字体：默认字体族与软件普通窗口一致（fluent::uiFontFamily）
     float fontSize_ = kBaseFontSize;
+    float compactTaskbarHeight_ = 0.0f;
     std::wstring fontFamily_ = fluent::uiFontFamily();
     LyricFontStyle fontStyle_ = LyricFontStyle::Normal;
 
@@ -903,6 +905,7 @@ struct TaskbarHost::Impl {
     size_t dockResourcePage_ = 0;
     float resourceLeftColumnW_ = kDefaultResourceLeftColumnW;
     float resourceRightColumnW_ = kDefaultResourceRightColumnW;
+    std::array<float, 2> resourceSingleLineWidths_{};
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -1316,6 +1319,17 @@ struct TaskbarHost::Impl {
     }
 
     float resourceZoneWidth() const {
+        if (compactTaskbarHeight_ > 0.0f) {
+            float width = 0.0f;
+            int count = 0;
+            for (float cellWidth : resourceSingleLineWidths_) {
+                if (cellWidth > 0.0f) {
+                    width += cellWidth;
+                    ++count;
+                }
+            }
+            return width + std::max(0, count - 1) * kDockResourceZoneGap;
+        }
         return resourceLeftColumnW_ +
                (resourceRightColumnW_ > 0.0f ? kDockResourceZoneGap + resourceRightColumnW_ : 0.0f);
     }
@@ -1963,6 +1977,7 @@ struct TaskbarHost::Impl {
             placement.width = client.right - client.left;
             placement.height = client.bottom - client.top;
             placement.availableMajor = vertical ? placement.height : placement.width;
+            syncCompactTaskbarLayout(placement.height);
             return finishStatus(TaskbarPlacementStatus::Safe);
         }
 
@@ -1973,6 +1988,7 @@ struct TaskbarHost::Impl {
             crossPx = taskbarCross;
         if (crossPx <= 0)
             return finishStatus(TaskbarPlacementStatus::Unavailable);
+        syncCompactTaskbarLayout(vertical ? 0 : crossPx);
 
         const int effectivePositionMode = positionMode < 0 ? positionMode_ : positionMode;
 
@@ -2623,6 +2639,8 @@ struct TaskbarHost::Impl {
         if (lyricGlow_ == on)
             return;
         lyricGlow_ = on;
+        if (compactTaskbarHeight_ > 0.0f)
+            recreateFormats();
         ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
         requestFrameAndFlush();
     }
@@ -2631,6 +2649,8 @@ struct TaskbarHost::Impl {
         if (lyricOutline_ == on)
             return;
         lyricOutline_ = on;
+        if (compactTaskbarHeight_ > 0.0f)
+            recreateFormats();
         ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
         requestFrameAndFlush();
     }
@@ -3608,6 +3628,11 @@ struct TaskbarHost::Impl {
             cells.push_back(L"频率: " + resourceCpuFrequencyText_);
 
         std::vector<DockResourceRow> rows;
+        if (compactTaskbarHeight_ > 0.0f) {
+            for (size_t i = 0; i < cells.size(); i += 2)
+                rows.push_back({cells[i], i + 1 < cells.size() ? cells[i + 1] : L""});
+            return rows;
+        }
         for (size_t i = 0; i < cells.size(); i += 4) {
             rows.push_back({cells[i], i + 2 < cells.size() ? cells[i + 2] : L""});
             rows.push_back({i + 1 < cells.size() ? cells[i + 1] : L"",
@@ -3618,7 +3643,7 @@ struct TaskbarHost::Impl {
 
     size_t dockResourcePageCount() const {
         const auto rows = dockResourceRows();
-        return rows.size() / 2;
+        return compactTaskbarHeight_ > 0.0f ? rows.size() : rows.size() / 2;
     }
 
     float dockResourceZoneW(float hostW) const {
@@ -4315,7 +4340,23 @@ struct TaskbarHost::Impl {
     // 默认保留原有的中线对称频谱效果；柱状图样式从窗口下边缘向上增长。
     // 沉浸模式中，柱状频谱在右侧宽频谱区内居中，梦幻波浪则铺满整个区域。
     void drawSpectrum(float x, float h, float width) {
+        auto* rt = drawTarget();
+        if (!rt || width <= 0.0f || h <= 0.0f)
+            return;
+        D2D1_MATRIX_3X2_F previous{};
+        const bool compact = compactTaskbarHeight_ > 0.0f && h > 6.0f;
+        if (compact) {
+            rt->GetTransform(&previous);
+            rt->PushAxisAlignedClip(D2D1::RectF(x, 2.0f, x + width, h - 2.0f),
+                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            rt->SetTransform(D2D1::Matrix3x2F::Scale(1.0f, (h - 6.0f) / h) *
+                             D2D1::Matrix3x2F::Translation(0.0f, 3.0f) * previous);
+        }
         drawSpectrumWithEffects(x, h, width, [&] { drawSpectrumShape(x, h, width); });
+        if (compact) {
+            rt->SetTransform(previous);
+            rt->PopAxisAlignedClip();
+        }
     }
 
     void drawSpectrumShape(float x, float h, float width) {
@@ -4495,13 +4536,32 @@ struct TaskbarHost::Impl {
             return;
 
         const auto rows = dockResourceRows();
-        const size_t pageCount = rows.size() / 2;
+        const size_t pageCount = compactTaskbarHeight_ > 0.0f ? rows.size() : rows.size() / 2;
         const size_t page = std::min(dockResourcePage_, pageCount - 1);
+
+        if (compactTaskbarHeight_ > 0.0f) {
+            const std::array<const std::wstring*, 2> cells{&rows[page].left, &rows[page].right};
+            rt->PushAxisAlignedClip(D2D1::RectF(x, 0.0f, x + width, h),
+                                    D2D1_ANTIALIAS_MODE_ALIASED);
+            float cellX = x;
+            for (size_t i = 0; i < cells.size(); ++i) {
+                if (cells[i]->empty())
+                    continue;
+                const float cellRight = std::min(x + width, cellX + resourceSingleLineWidths_[i]);
+                if (cellRight <= cellX)
+                    break;
+                rt->DrawTextW(cells[i]->c_str(), static_cast<UINT32>(cells[i]->size()), fmtResource_,
+                              D2D1::RectF(cellX, 0.0f, cellRight, h), brushText_,
+                              D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                cellX += resourceSingleLineWidths_[i] + kDockResourceZoneGap;
+            }
+            rt->PopAxisAlignedClip();
+            return;
+        }
 
         std::array<DockResourceRow, 2> visibleRows{};
         visibleRows[0] = rows[page * 2];
         visibleRows[1] = rows[page * 2 + 1];
-
         const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
         const float rowH = blockH * 0.5f;
@@ -5113,8 +5173,11 @@ struct TaskbarHost::Impl {
                 fluent::applyUiFontFallback(*out);
             }
         };
-        make(13.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtClockTime_);
-        make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
+        make(fitCompactFontSize(13.5f, (compactTaskbarHeight_ - 2.0f) * 0.56f,
+                               DWRITE_FONT_WEIGHT_SEMI_BOLD),
+             DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtClockTime_);
+        make(fitCompactFontSize(11.0f, (compactTaskbarHeight_ - 2.0f) * 0.44f),
+             DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
     }
 
     static float measureResourceTextWidth(IDWriteFactory* dwrite, IDWriteTextFormat* format,
@@ -5151,7 +5214,8 @@ struct TaskbarHost::Impl {
         const DWRITE_FONT_WEIGHT effectiveWeight = dwriteWeightOf(fontStyle_);
         dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
                                  dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL,
-                                 kResourceFontSize, L"zh-cn", &fmtResource_);
+                                 fitCompactFontSize(kResourceFontSize, compactTaskbarHeight_ - 2.0f),
+                                 L"zh-cn", &fmtResource_);
         if (!fmtResource_)
             return false;
         fmtResource_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
@@ -5186,12 +5250,15 @@ struct TaskbarHost::Impl {
 
         float leftMaxWidth = 0.0f;
         float rightMaxWidth = 0.0f;
+        std::array<float, 2> singleLineWidths{};
         size_t cellIndex = 0;
         auto measureCell = [&](const std::vector<std::wstring>& samples) {
             float& columnWidth = cellIndex % 4 < 2 ? leftMaxWidth : rightMaxWidth;
-            for (const auto& sample : samples)
-                columnWidth = std::max(columnWidth,
-                    measureResourceTextWidth(dwrite, fmtResource_, sample));
+            for (const auto& sample : samples) {
+                const float measured = measureResourceTextWidth(dwrite, fmtResource_, sample);
+                columnWidth = std::max(columnWidth, measured);
+                singleLineWidths[cellIndex % 2] = std::max(singleLineWidths[cellIndex % 2], measured);
+            }
             ++cellIndex;
         };
         measureCell({L"CPU: 100%", L"CPU: " + twoDigits + L"%"});
@@ -5218,11 +5285,16 @@ struct TaskbarHost::Impl {
             std::max(1.0f, std::ceil(leftMaxWidth) + kResourceCellSafetyPadding);
         const float nextRightWidth = rightMaxWidth > 0.0f
             ? std::ceil(rightMaxWidth) + kResourceCellSafetyPadding : 0.0f;
+        for (float& cellWidth : singleLineWidths)
+            if (cellWidth > 0.0f)
+                cellWidth = std::ceil(cellWidth) + kResourceCellSafetyPadding;
 
         const bool changed = nextLeftWidth != resourceLeftColumnW_ ||
-                             nextRightWidth != resourceRightColumnW_;
+                             nextRightWidth != resourceRightColumnW_ ||
+                             singleLineWidths != resourceSingleLineWidths_;
         resourceLeftColumnW_ = nextLeftWidth;
         resourceRightColumnW_ = nextRightWidth;
+        resourceSingleLineWidths_ = singleLineWidths;
         return changed;
     }
 
@@ -5233,6 +5305,58 @@ struct TaskbarHost::Impl {
         }
         if (updateResourceColumnWidths())
             requestInvalidation(RenderInvalidation::Layout);
+    }
+
+    float fitCompactFontSize(float requested, float budget,
+                             DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL) {
+        if (compactTaskbarHeight_ <= 0.0f)
+            return requested;
+        auto* dwrite = renderer.dwrite();
+        if (!dwrite)
+            return requested;
+        IDWriteTextFormat* format = nullptr;
+        if (FAILED(dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr,
+                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight,
+                dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, requested,
+                L"zh-cn", &format)))
+            return requested;
+        fluent::applyUiFontFallback(format);
+        IDWriteTextLayout* sample = nullptr;
+        float fitted = requested;
+        if (SUCCEEDED(dwrite->CreateTextLayout(L"永Ag", 3, format, 4096.0f, 4096.0f, &sample))) {
+            DWRITE_TEXT_METRICS metrics{};
+            if (SUCCEEDED(sample->GetMetrics(&metrics)) && metrics.height > 0.0f)
+                fitted *= std::min(1.0f, std::max(1.0f, budget) / metrics.height);
+            sample->Release();
+        }
+        format->Release();
+        return fitted;
+    }
+
+    void syncCompactTaskbarLayout(int heightPixels) {
+        const float height = dip(heightPixels);
+        const float taskbarHeight = dip(rcTaskbar_.bottom - rcTaskbar_.top);
+        const float compactHeight = !isVerticalTaskbar() && !isAppBarView() &&
+            taskbarHeight > 0.0f && taskbarHeight < kCompactTaskbarHeightDip &&
+            height > 0.0f ? height : 0.0f;
+        if (compactHeight == compactTaskbarHeight_)
+            return;
+        const bool wasCompact = compactTaskbarHeight_ > 0.0f;
+        compactTaskbarHeight_ = compactHeight;
+        if (!wasCompact && compactHeight > 0.0f)
+            dockResourcePage_ *= 2;
+        else if (wasCompact && compactHeight <= 0.0f)
+            dockResourcePage_ /= 2;
+        dockResourcePage_ = std::min(dockResourcePage_, dockResourcePageCount() - 1);
+        resetLyricTransition();
+        clearImmersiveSongContentTransition();
+        releaseSpectrumEffectResources();
+        recreateFormats();
+        requestInvalidation(toMask(RenderInvalidation::Text) |
+                            toMask(RenderInvalidation::SongInfo) |
+                            toMask(RenderInvalidation::Layout) |
+                            toMask(RenderInvalidation::Geometry) |
+                            toMask(RenderInvalidation::Cover));
     }
 
     void recreateFormats() {
@@ -5261,11 +5385,18 @@ struct TaskbarHost::Impl {
             }
         };
         // 歌名/歌手固定字号，不随歌词字号调整；只有歌词跟随 fontSize_
-        make(kBaseFontSize * 1.05f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        make(fitCompactFontSize(kBaseFontSize * 1.05f,
+                               (compactTaskbarHeight_ - 6.0f) * 1.05f / 1.97f,
+                               DWRITE_FONT_WEIGHT_SEMI_BOLD),
+             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtTitle_);
-        make(kBaseFontSize * 0.92f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+        make(fitCompactFontSize(kBaseFontSize * 0.92f,
+                               (compactTaskbarHeight_ - 6.0f) * 0.92f / 1.97f),
+             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtArtist_);
-        make(fontSize_ * kLyricMainFontScale, DWRITE_FONT_WEIGHT_NORMAL,
+        const float lyricPad = lyricGlow_ ? 6.0f : lyricOutline_ ? 4.0f : 2.0f;
+        make(fitCompactFontSize(fontSize_ * kLyricMainFontScale, compactTaskbarHeight_ - lyricPad),
+             DWRITE_FONT_WEIGHT_NORMAL,
              DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
              &fmtLyric_);
         // 双行模式的下一行：比翻译字号（0.78）略大，但明显小于核心歌词（1.18）。
@@ -5295,10 +5426,12 @@ struct TaskbarHost::Impl {
         const float effectPad = lyricGlow_ ? 4.8f : lyricOutline_ ? 2.4f : 0.0f;
         context.availableDip = std::max(0.0f, crossAxis - 4.0f - effectPad);
         context.mainScale = kLyricMainFontScale;
-        if (!vertical && doubleLineLyricsEnabled_) {
+        if (compactTaskbarHeight_ > 0.0f && fmtLyric_ && fontSize_ > 0.0f)
+            context.mainScale = fmtLyric_->GetFontSize() / fontSize_;
+        if (!vertical && compactTaskbarHeight_ <= 0.0f && doubleLineLyricsEnabled_) {
             context.extraScale = kLyricPreviewFontScale;
             context.gapDip = kLyricPreviewGap;
-        } else if (!vertical && (translationEnabled_ || romanizationEnabled_)) {
+        } else if (!vertical && compactTaskbarHeight_ <= 0.0f && (translationEnabled_ || romanizationEnabled_)) {
             context.extraScale = 0.78f;
             context.gapDip = 1.0f;
         }
@@ -5721,6 +5854,8 @@ struct TaskbarHost::Impl {
     }
 
     std::wstring selectedSecondary(const LyricLine& line) const {
+        if (compactTaskbarHeight_ > 0.0f)
+            return {};
         if (translationEnabled_)
             return line.translation;
         if (romanizationEnabled_)
@@ -5729,7 +5864,7 @@ struct TaskbarHost::Impl {
     }
 
     bool useDoubleLineLyricsForLine(int lineIndex) const {
-        return doubleLineLyricsEnabled_ && lineIndex >= 0 &&
+        return compactTaskbarHeight_ <= 0.0f && doubleLineLyricsEnabled_ && lineIndex >= 0 &&
                static_cast<size_t>(lineIndex) < lines.size() &&
                selectedSecondary(lines[static_cast<size_t>(lineIndex)]).empty();
     }
@@ -7899,7 +8034,7 @@ struct TaskbarHost::Impl {
         const bool singleLine = lineIndex == outgoingLyricEffectLine_
             ? !outgoingDoubleLine_ : !useDoubleLineLyrics();
         return lineIndex >= 0 && static_cast<size_t>(lineIndex) < lines.size() &&
-            !lines[lineIndex].chars.empty() && singleLine &&
+            !lines[lineIndex].chars.empty() && singleLine && compactTaskbarHeight_ <= 0.0f &&
             (!doubleLineLyricsEnabled_ || isVerticalTaskbar()) && clientAnimations_ &&
             !isMinimalMode() && !isStoppedMode() && scene_ == DisplayScene::Lyrics &&
             lyricEffectEnabled(LyricEffect::Stardust);
@@ -9790,6 +9925,12 @@ struct TaskbarHost::Impl {
         if (!isWindowVisible() || !hwnd)
             return;
 
+        int currentWidth = 0;
+        int currentHeight = 0;
+        clientPixelSize(currentWidth, currentHeight);
+        if (currentHeight > 0)
+            syncCompactTaskbarLayout(currentHeight);
+
         if (isExpandedView() && isSceneResizeActive())
             cancelSceneWindowResize();
         if (isSceneResizeActive())
@@ -9828,6 +9969,8 @@ struct TaskbarHost::Impl {
         }
         lastLogicalPxW_ = logicalPxW;
         lastLogicalPxH_ = logicalPxH;
+
+        syncCompactTaskbarLayout(pxH);
 
         if (!bindRenderer(pxW, pxH))
             return;
@@ -11402,6 +11545,10 @@ bool TaskbarHost::isTaskbar() const {
 
 bool TaskbarHost::isVerticalTaskbar() const {
     return impl_ && impl_->isVerticalTaskbar();
+}
+
+bool TaskbarHost::isCompactTaskbar() const {
+    return impl_ && impl_->compactTaskbarHeight_ > 0.0f;
 }
 
 int TaskbarHost::currentLine() const {
