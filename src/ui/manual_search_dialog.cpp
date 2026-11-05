@@ -46,6 +46,8 @@ constexpr float kScrollBarInset = 8.0f;
 constexpr UINT kPreviewTimerId = 1;
 constexpr DWORD kPreviewResumeDelayMs = 2000;
 constexpr int kPreviewWheelLinesPerNotch = 3;
+constexpr float kPreviewLineScrollFrequency = 18.0f;
+constexpr float kPreviewResumeScrollFrequency = 14.0f;
 constexpr float kLyricTextWidthDip = 240.0f;
 constexpr float kLyricRowHeightDip = 50.0f;
 constexpr float kPreviewSecondaryLineHeight = 18.0f;
@@ -150,6 +152,9 @@ struct ManualSearchDialog::Impl {
     int previewTopLine = 0;
     int previewCurrentLine = -1;
     bool previewManualScroll = false;
+    bool previewSnapNextSync = true;
+    bool previewAutoResumePending = false;
+    bool previewContentDirty = true;
     DWORD previewLastScrollTick = 0;
     int previewWheelAccum = 0;
 
@@ -696,6 +701,9 @@ struct ManualSearchDialog::Impl {
         previewCurrentLine = LyricProvider::findLine(previewLines, previewPositionMs);
         previewTopLine = 0;
         previewManualScroll = false;
+        previewSnapNextSync = true;
+        previewAutoResumePending = false;
+        previewContentDirty = true;
         previewLastScrollTick = 0;
         previewWheelAccum = 0;
         syncPreviewToCurrentLine();
@@ -710,10 +718,18 @@ struct ManualSearchDialog::Impl {
     }
 
     void setPreviewPosition(int64_t positionMs) {
+        const int nextLine = LyricProvider::findLine(previewLines, positionMs);
+        const bool lineChanged = nextLine != previewCurrentLine;
+        const bool karaokeActive =
+            nextLine >= 0 && nextLine < static_cast<int>(previewLines.size()) &&
+            !previewLines[nextLine].chars.empty() && positionMs != previewPositionMs;
         previewPositionMs = positionMs;
-        previewCurrentLine = LyricProvider::findLine(previewLines, positionMs);
+        previewCurrentLine = nextLine;
         if (!previewManualScroll)
             syncPreviewToCurrentLine();
+        if (!lineChanged && !karaokeActive)
+            return;
+        previewContentDirty = true;
         if (hwnd)
             surface.invalidate();
     }
@@ -724,6 +740,8 @@ struct ManualSearchDialog::Impl {
         const int maxTop = std::max(0, static_cast<int>(previewLines.size()) - 1);
         previewTopLine = std::clamp(previewTopLine + lines, 0, maxTop);
         previewManualScroll = true;
+        previewAutoResumePending = false;
+        previewSnapNextSync = false;
         previewLastScrollTick = GetTickCount();
         previewScrollView.scrollBy(lines * previewLyricRowHeight());
     }
@@ -732,6 +750,8 @@ struct ManualSearchDialog::Impl {
         if (previewLines.empty())
             return;
         previewManualScroll = true;
+        previewAutoResumePending = false;
+        previewSnapNextSync = false;
         previewLastScrollTick = GetTickCount();
         previewScrollView.scrollBy(-static_cast<float>(delta) / WHEEL_DELTA *
                                    kPreviewWheelLinesPerNotch * previewLyricRowHeight());
@@ -741,6 +761,8 @@ struct ManualSearchDialog::Impl {
         if (previewManualScroll &&
             GetTickCount() - previewLastScrollTick >= kPreviewResumeDelayMs) {
             previewManualScroll = false;
+            previewAutoResumePending = true;
+            previewContentDirty = true;
             syncPreviewToCurrentLine();
             surface.invalidate();
         }
@@ -1121,65 +1143,64 @@ struct ManualSearchDialog::Impl {
         const float lyricRight = lyricLeft + lyricWidth;
 
         const int total = static_cast<int>(previewLines.size());
-        const int visibleEstimate = visiblePreviewRows(height);
-        const int maxTop = std::max(0, total - 1);
-        if (!previewManualScroll) {
-            if (previewCurrentLine >= 0)
-                previewTopLine =
-                    std::clamp(previewCurrentLine - visibleEstimate / 2, 0, maxTop);
-            else
-                previewTopLine = std::clamp(previewTopLine, 0, maxTop);
-        }
-        const float availableHeight = std::max(0.0f, height - contentTop);
+        const float bodyTop = previewRect.top + contentTop;
+        const float bodyBottom = std::max(bodyTop, previewRect.bottom - 2.0f);
+        const float availableHeight = std::max(0.0f, bodyBottom - bodyTop);
 
         std::vector<float> mainHeights(total, kLyricRowHeightDip);
         std::vector<float> rowHeights(total, previewLyricRowHeight());
-        std::vector<bool> measured(total, false);
-        auto ensureRowMetric = [&](int index) {
-            if (!measured[index]) {
-                mainHeights[index] =
-                    measurePreviewMainHeight(painter, previewLines[index].text, lyricWidth);
-                rowHeights[index] = mainHeights[index] + previewSecondaryHeight();
-                measured[index] = true;
-            }
-            return rowHeights[index];
-        };
-        auto countRowsFrom = [&](int start, float& blockHeight) {
-            blockHeight = 0.0f;
-            int count = 0;
-            for (int index = start; index < total; ++index) {
-                const float rowHeight = ensureRowMetric(index);
-                if (count > 0 && blockHeight + rowHeight > availableHeight)
-                    break;
-                blockHeight += rowHeight;
-                ++count;
-            }
-            return std::max(1, count);
-        };
-
-        int top = std::clamp(previewTopLine, 0, maxTop);
-        float lyricBlockHeight = 0.0f;
-        int count = countRowsFrom(top, lyricBlockHeight);
-        if (!previewManualScroll && previewCurrentLine >= top + count) {
-            top = std::clamp(previewCurrentLine, 0, maxTop);
-            count = countRowsFrom(top, lyricBlockHeight);
-        }
-        previewTopLine = top;
-        const float lyricTop = previewRect.top + contentTop +
-                               std::max(0.0f, (availableHeight - lyricBlockHeight) * 0.5f);
-
         std::vector<float> rowOffsets(total + 1, 0.0f);
-        for (int index = 0; index < total; ++index)
-            rowOffsets[index + 1] = rowOffsets[index] + ensureRowMetric(index);
-        const float bodyTop = previewRect.top + contentTop;
-        if (!previewManualScroll)
-            previewScrollPadding = lyricTop - bodyTop;
-        previewScrollView.layout(D2D1::RectF(lyricLeft, bodyTop, lyricRight, previewRect.bottom - 2.0f),
-                                  std::max(rowOffsets[total] + previewScrollPadding,
-                                           rowOffsets[total - 1] + availableHeight) - 2.0f,
-                                  surface.dpi());
-        if (!previewManualScroll)
-            previewScrollView.setOffset(rowOffsets[top]);
+        for (int index = 0; index < total; ++index) {
+            mainHeights[index] =
+                measurePreviewMainHeight(painter, previewLines[index].text, lyricWidth);
+            rowHeights[index] = mainHeights[index] + previewSecondaryHeight();
+            rowOffsets[index + 1] = rowOffsets[index] + rowHeights[index];
+        }
+
+        float totalScrollContentHeight = availableHeight;
+        if (rowOffsets[total] <= availableHeight) {
+            previewScrollPadding =
+                std::max(0.0f, (availableHeight - rowOffsets[total]) * 0.5f);
+        } else {
+            float firstPageHeight = 0.0f;
+            for (int index = 0; index < total; ++index) {
+                if (index > 0 && firstPageHeight + rowHeights[index] > availableHeight)
+                    break;
+                firstPageHeight += rowHeights[index];
+            }
+            previewScrollPadding = std::max(6.0f, (availableHeight - firstPageHeight) * 0.5f);
+            totalScrollContentHeight = rowOffsets[total] + previewScrollPadding * 2.0f;
+        }
+        const float maxScrollOffset =
+            std::max(0.0f, totalScrollContentHeight - availableHeight);
+
+        previewScrollView.layout(D2D1::RectF(lyricLeft, bodyTop, lyricRight, bodyBottom),
+                                 totalScrollContentHeight, surface.dpi());
+        if (!previewManualScroll) {
+            float desiredOffset = 0.0f;
+            if (previewCurrentLine >= 0 && previewCurrentLine < total) {
+                const float lineCenterY =
+                    previewScrollPadding + rowOffsets[previewCurrentLine] +
+                    rowHeights[previewCurrentLine] * 0.5f;
+                desiredOffset = std::clamp(lineCenterY - availableHeight * 0.5f,
+                                           0.0f, maxScrollOffset);
+            }
+            if (previewSnapNextSync) {
+                previewSnapNextSync = false;
+                previewAutoResumePending = false;
+                previewScrollView.setOffset(desiredOffset);
+            } else if (previewAutoResumePending) {
+                previewAutoResumePending = false;
+                previewScrollView.scrollTo(desiredOffset, true,
+                                           kPreviewResumeScrollFrequency, false);
+            } else if (std::fabs(previewScrollView.targetOffset() - desiredOffset) > 0.5f) {
+                previewScrollView.scrollTo(desiredOffset, true,
+                                           kPreviewLineScrollFrequency, false);
+            }
+        }
+
+        const bool forcePreviewRedraw = previewContentDirty;
+        previewContentDirty = false;
         previewScrollView.paint([&](fluent::FluentDialogSurface::Painter& painter,
                                     const D2D1_RECT_F& paintBounds, float position) {
             painter.fillRoundRect(p.cardFill, paintBounds, 0.0f);
@@ -1192,7 +1213,7 @@ struct ManualSearchDialog::Impl {
                 drawPreviewLyricLine(painter, previewLines[index], rect,
                                      mainHeights[index], index == previewCurrentLine);
             }
-        }, !scrollOnlyPaint);
+        }, !scrollOnlyPaint, forcePreviewRedraw);
 
         if (previewHasRomanization)
             drawPreviewToggleButton(painter, previewRomanizationRect, L"音",
@@ -1312,6 +1333,10 @@ struct ManualSearchDialog::Impl {
             previewShowRomanization = !previewShowRomanization;
             runtime_log::writef(L"[action][manual-search] preview-romanization=%s",
                                 previewShowRomanization ? L"on" : L"off");
+            previewManualScroll = false;
+            previewSnapNextSync = true;
+            previewAutoResumePending = false;
+            previewContentDirty = true;
             syncPreviewToCurrentLine();
             surface.invalidate();
             break;
@@ -1319,6 +1344,10 @@ struct ManualSearchDialog::Impl {
             previewShowTranslation = !previewShowTranslation;
             runtime_log::writef(L"[action][manual-search] preview-translation=%s",
                                 previewShowTranslation ? L"on" : L"off");
+            previewManualScroll = false;
+            previewSnapNextSync = true;
+            previewAutoResumePending = false;
+            previewContentDirty = true;
             syncPreviewToCurrentLine();
             surface.invalidate();
             break;
@@ -1563,6 +1592,9 @@ struct ManualSearchDialog::Impl {
             candidateScroll = candidateScrollView.offset();
             candidateScrollView.stop();
             previewScrollView.stop();
+            if (!previewManualScroll)
+                previewSnapNextSync = true;
+            previewContentDirty = true;
             layout();
             surface.invalidate();
             return 0;
@@ -1570,6 +1602,9 @@ struct ManualSearchDialog::Impl {
             fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
                                          kDialogExStyle, kMinClientWidthDip,
                                          kMinClientHeightDip);
+            if (!previewManualScroll)
+                previewSnapNextSync = true;
+            previewContentDirty = true;
             layout();
             surface.invalidate();
             return 0;
@@ -1588,6 +1623,9 @@ struct ManualSearchDialog::Impl {
             candidateScroll = candidateScrollView.offset();
             candidateScrollView.stop();
             previewScrollView.stop();
+            if (!previewManualScroll)
+                previewSnapNextSync = true;
+            previewContentDirty = true;
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop);
             surface.setBackdrop(backdrop);
             surface.invalidate();
@@ -1663,13 +1701,16 @@ struct ManualSearchDialog::Impl {
         case WM_LBUTTONDOWN: {
             candidateScroll = candidateScrollView.offset();
             candidateScrollView.stop();
-            previewScrollView.stop();
             SetFocus(hwnd);
             focusVisible = false;
             const float scale = surface.dipScale();
             const float x = GET_X_LPARAM(lp) / scale;
             const float y = GET_Y_LPARAM(lp) / scale;
             const int id = hitTest(x, y);
+            if (id == kIdPreview && previewManualScroll) {
+                previewScrollView.stop();
+                previewLastScrollTick = GetTickCount();
+            }
             focusedId = id;
             pressedId = 0;
 
@@ -1733,7 +1774,6 @@ struct ManualSearchDialog::Impl {
         case WM_KEYDOWN:
             candidateScroll = candidateScrollView.offset();
             candidateScrollView.stop();
-            previewScrollView.stop();
             if (wp == VK_TAB) {
                 focusStep(isShiftDown() ? -1 : 1);
                 return 0;

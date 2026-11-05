@@ -1110,8 +1110,8 @@ bool DCompRenderer::animateRootScroll(float from, float to, float velocity, floa
     if (FAILED(hr))
         return false;
     constexpr int segmentCount = 32;
-    constexpr double duration = 0.5;
-    constexpr double step = duration / segmentCount;
+    const double duration = std::clamp(12.0 / static_cast<double>(frequency), 0.5, 1.2);
+    const double step = duration / segmentCount;
     const double displacement = static_cast<double>(from) - to;
     const double coefficient = velocity + frequency * displacement;
     const auto positionAt = [&](double time) {

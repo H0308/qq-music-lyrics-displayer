@@ -528,8 +528,10 @@ float CompositedScrollView::offset() const {
     const float elapsed = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - started_).count();
     const float displacement = from_ - target_;
-    return std::clamp(target_ + (displacement + (speed_ + 28.0f * displacement) * elapsed) *
-                                   std::exp(-28.0f * elapsed), 0.0f, maximum_);
+    return std::clamp(
+        target_ + (displacement + (speed_ + frequency_ * displacement) * elapsed) *
+                      std::exp(-frequency_ * elapsed),
+        0.0f, maximum_);
 }
 
 float CompositedScrollView::velocity() const {
@@ -537,8 +539,8 @@ float CompositedScrollView::velocity() const {
         return 0.0f;
     const float elapsed = std::chrono::duration<float>(
         std::chrono::steady_clock::now() - started_).count();
-    return (speed_ - 28.0f * (speed_ + 28.0f * (from_ - target_)) * elapsed) *
-           std::exp(-28.0f * elapsed);
+    return (speed_ - frequency_ * (speed_ + frequency_ * (from_ - target_)) * elapsed) *
+           std::exp(-frequency_ * elapsed);
 }
 
 bool CompositedScrollView::needsCache(float position) const {
@@ -556,23 +558,41 @@ void CompositedScrollView::applyAnimation() {
     const float destination = std::round((cacheTop_ - target_) * scale);
     if (animating_)
         renderer_.animateRootScroll((cacheTop_ - position) * scale,
-                                    destination, -velocity() * scale, 28.0f);
+                                    destination, -velocity() * scale, frequency_);
     else
         renderer_.setRootOffsetY(destination);
 }
 
-void CompositedScrollView::paint(const Draw& draw, bool redraw) {
+void CompositedScrollView::paint(const Draw& draw, bool redraw, bool forceRedraw) {
     if (!window_ || viewport_.bottom <= viewport_.top || viewport_.right <= viewport_.left)
         return;
     const float position = offset();
-    if ((animating_ || !redraw) && !needsCache(position))
-        return;
     const float scale = static_cast<float>(dpi_) / 96.0f;
     const float viewHeight = viewport_.bottom - viewport_.top;
-    cacheHeight_ = std::max(viewHeight, std::min(height_ + 2.0f,
-                                               std::min(viewHeight * 3.0f, 8192.0f / scale)));
-    cacheTop_ = std::round(std::clamp(position - viewHeight, 0.0f,
-                                     std::max(0.0f, height_ - cacheHeight_)) * scale) / scale;
+    const float maxTextureDip = 8192.0f / scale;
+    const bool cacheMiss = needsCache(position);
+    const bool targetOutsideCache =
+        animating_ &&
+        (target_ < cacheTop_ || target_ + viewHeight > cacheTop_ + cacheHeight_) &&
+        cacheHeight_ < std::min(height_ + 2.0f, maxTextureDip) - 1.0f;
+    if (!forceRedraw && (animating_ || !redraw) && !cacheMiss && !targetOutsideCache)
+        return;
+    if (!ready_ || cacheMiss || targetOutsideCache || !animating_) {
+        const float travelSpan =
+            animating_ ? std::fabs(target_ - position) + viewHeight * 1.5f : 0.0f;
+        cacheHeight_ = std::max(
+            viewHeight,
+            std::min(height_ + 2.0f,
+                     std::min(std::max(viewHeight * 3.0f, travelSpan), maxTextureDip)));
+        const float desiredCacheTop =
+            animating_ ? std::min(position, target_) - viewHeight * 0.5f
+                       : position - viewHeight;
+        cacheTop_ = std::round(
+                        std::clamp(desiredCacheTop, 0.0f,
+                                   std::max(0.0f, height_ - cacheHeight_)) *
+                        scale) /
+                    scale;
+    }
     const float left = std::floor(viewport_.left * scale) / scale;
     const float top = std::floor(viewport_.top * scale) / scale;
     const int width = std::max(1, static_cast<int>(std::ceil(viewport_.right * scale) -
@@ -643,10 +663,11 @@ void CompositedScrollView::scrollBy(float delta, bool smooth) {
         setOffset(next);
     } else {
         const float currentVelocity = velocity();
+        frequency_ = 28.0f;
         from_ = position;
         target_ = next;
         speed_ = delta * currentVelocity < 0.0f ? 0.0f : currentVelocity;
-        const float maximumSpeed = 28.0f * std::fabs(target_ - from_);
+        const float maximumSpeed = frequency_ * std::fabs(target_ - from_);
         speed_ = std::clamp(speed_, -maximumSpeed, maximumSpeed);
         started_ = std::chrono::steady_clock::now();
         if (!animating_)
@@ -658,6 +679,47 @@ void CompositedScrollView::scrollBy(float delta, bool smooth) {
         changed_(offset(), needsCache(offset()));
     if (parent_)
         UpdateWindow(parent_);
+    applyAnimation();
+    renderer_.commit();
+}
+
+void CompositedScrollView::scrollTo(float targetPosition, bool smooth, float frequency,
+                                    bool notifyParent) {
+    BOOL enabled = TRUE;
+    SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0);
+    const float clampedTarget = std::clamp(targetPosition, 0.0f, maximum_);
+    const float position = offset();
+    if (animating_ && std::fabs(clampedTarget - target_) < 0.05f &&
+        std::fabs(frequency - frequency_) < 0.05f) {
+        return;
+    }
+    if (std::fabs(clampedTarget - position) < 0.05f && !animating_) {
+        target_ = clampedTarget;
+        return;
+    }
+    if (!smooth || !enabled || frequency <= 0.0f) {
+        setOffset(clampedTarget);
+    } else {
+        const float currentVelocity = velocity();
+        const float delta = clampedTarget - position;
+        frequency_ = frequency;
+        from_ = position;
+        target_ = clampedTarget;
+        speed_ = delta * currentVelocity < 0.0f ? 0.0f : currentVelocity;
+        const float maximumSpeed = frequency_ * std::fabs(target_ - from_);
+        speed_ = std::clamp(speed_, -maximumSpeed, maximumSpeed);
+        started_ = std::chrono::steady_clock::now();
+        if (!animating_)
+            animating_ = SetTimer(parent_, timer_, USER_TIMER_MINIMUM, nullptr) != 0;
+        if (!animating_)
+            setOffset(clampedTarget);
+    }
+    if (notifyParent) {
+        if (changed_)
+            changed_(offset(), needsCache(offset()));
+        if (parent_)
+            UpdateWindow(parent_);
+    }
     applyAnimation();
     renderer_.commit();
 }
@@ -689,6 +751,7 @@ void CompositedScrollView::reset() {
     ready_ = animating_ = false;
     contentVisible_ = true;
     from_ = target_ = speed_ = 0.0f;
+    frequency_ = 28.0f;
 }
 
 } // namespace fluent

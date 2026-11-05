@@ -154,8 +154,10 @@ public:
                 DCompRenderer* drawingDeviceSource = nullptr);
     void layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi,
                 bool showWindow = true);
-    void paint(const Draw& draw, bool redraw = true);
+    void paint(const Draw& draw, bool redraw = true, bool forceRedraw = false);
     void scrollBy(float delta, bool smooth = true);
+    void scrollTo(float targetPosition, bool smooth = true, float frequency = 28.0f,
+                  bool notifyParent = true);
     void setOffset(float offset);
     void stop();
     void setVisible(bool visible);
@@ -163,6 +165,7 @@ public:
     void setContentVisible(bool visible);
     bool tick(WPARAM timer);
     float offset() const;
+    float targetOffset() const { return target_; }
     bool animating() const { return animating_; }
     void reset();
 
@@ -182,6 +185,7 @@ private:
     float from_ = 0.0f;
     float target_ = 0.0f;
     float speed_ = 0.0f;
+    float frequency_ = 28.0f;
     float cacheTop_ = 0.0f;
     float cacheHeight_ = 0.0f;
     bool ready_ = false;
