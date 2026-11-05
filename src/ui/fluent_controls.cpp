@@ -515,11 +515,27 @@ void FluentEdit::setLeadingIcon(settings_icon::Kind icon) {
 
 void FluentEdit::setEmbeddedNumberStyle() {
     embeddedNumber_ = true;
+    chromeless_ = false;
     editFontDpi_ = 0;
     contentPaddingXDip_ = 0.0f;
     contentPaddingYDip_ = 0.0f;
     const LONG_PTR style = GetWindowLongPtrW(hEdit_, GWL_STYLE);
     SetWindowLongPtrW(hEdit_, GWL_STYLE, (style & ~(ES_CENTER | ES_RIGHT)) | ES_CENTER);
+    SendMessageW(hEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+    layoutEdit();
+    renderNow();
+    repaintEdit();
+}
+
+void FluentEdit::setChromelessStyle(bool menuSurface) {
+    chromeless_ = true;
+    chromelessMenuSurface_ = menuSurface;
+    embeddedNumber_ = false;
+    editFontDpi_ = 0;
+    contentPaddingXDip_ = 0.0f;
+    contentPaddingYDip_ = 0.0f;
+    const LONG_PTR style = GetWindowLongPtrW(hEdit_, GWL_STYLE);
+    SetWindowLongPtrW(hEdit_, GWL_STYLE, style & ~(ES_CENTER | ES_RIGHT));
     SendMessageW(hEdit_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
     layoutEdit();
     renderNow();
@@ -542,6 +558,7 @@ void FluentEdit::focus() {
 
 void FluentEdit::refreshTheme() {
     renderNow();
+    repaintEdit();
 }
 
 void FluentEdit::renderNow() {
@@ -628,7 +645,7 @@ void FluentEdit::layoutEdit() {
     int padY = static_cast<int>(std::lround(contentPaddingYDip_ * s));
     int w = rc.right - rc.left;
     int h = rc.bottom - rc.top;
-    const int iconSpace = leadingIcon_ == settings_icon::Kind::None || embeddedNumber_
+    const int iconSpace = leadingIcon_ == settings_icon::Kind::None || embeddedNumber_ || chromeless_
                              ? 0 : static_cast<int>(std::lround(24.0f * s));
     int editW = std::max(1, w - padX * 2 - iconSpace);
     padX += iconSpace;
@@ -688,7 +705,9 @@ void FluentEdit::onEditNotification(UINT code) {
 LRESULT FluentEdit::colorEdit(HDC hdc) {
     const Palette& p = palette();
     // EDIT 背景与卡片同色，视觉上融为一体
-    COLORREF bg = toColorRef(p.controlFill);
+    const D2D1_COLOR_F surfaceFill =
+        chromeless_ && chromelessMenuSurface_ ? p.menuFill : p.controlFill;
+    COLORREF bg = toColorRef(surfaceFill);
     if (!editBrush_ || editBrushColor_ != bg) {
         if (editBrush_)
             DeleteObject(editBrush_);
@@ -702,8 +721,10 @@ LRESULT FluentEdit::colorEdit(HDC hdc) {
 
 void FluentEdit::render(FluentDialogSurface::Painter& painter, float wDip, float hDip) {
     const Palette& p = palette();
-    if (embeddedNumber_) {
-        if (auto* brush = painter.brush(p.controlFill))
+    if (embeddedNumber_ || chromeless_) {
+        const D2D1_COLOR_F surfaceFill =
+            chromeless_ && chromelessMenuSurface_ ? p.menuFill : p.controlFill;
+        if (auto* brush = painter.brush(surfaceFill))
             painter.target()->FillRectangle(D2D1::RectF(0.0f, 0.0f, wDip, hDip), brush);
         return;
     }

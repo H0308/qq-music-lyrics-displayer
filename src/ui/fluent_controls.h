@@ -98,6 +98,7 @@ public:
     void setLeadingIcon(settings_icon::Kind icon);
     // 数值框内部的数字编辑区：外框与单位由父窗口统一绘制。
     void setEmbeddedNumberStyle();
+    void setChromelessStyle(bool menuSurface = true);
     void move(int x, int y, int w, int h);
     void focus();
     void refreshTheme();
@@ -129,6 +130,8 @@ private:
     bool focused_ = false;
     bool directEdit_ = false;
     bool embeddedNumber_ = false;
+    bool chromeless_ = false;
+    bool chromelessMenuSurface_ = false;
     bool wrapText_ = false;
     float fontSizeDip_ = 14.0f;
     UINT editFontDpi_ = 0;

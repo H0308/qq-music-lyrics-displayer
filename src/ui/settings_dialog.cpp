@@ -10,6 +10,7 @@
 #include "ui/settings_icons.h"
 
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -36,12 +37,28 @@ constexpr int kSongToastPage = 7;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kIdSettingsSearch = 4900;
-constexpr int kIdSearchResult = 4901;
-constexpr float kSearchResultPitch = 80.0f;
+constexpr float kSearchPaletteHeaderH = 52.0f;
+constexpr float kSearchPaletteFooterH = 32.0f;
+constexpr float kSearchPaletteRowH = 56.0f;
+constexpr float kSearchPaletteListPadY = 6.0f;
+constexpr int kSearchPaletteMaxVisibleRows = 6;
+constexpr float kSearchPaletteEmptyPromptH = 54.0f;
+constexpr float kSearchPaletteNoResultH = 70.0f;
+constexpr int kSearchPaletteHitNone = 0;
+constexpr int kSearchPaletteHitClear = 1;
+constexpr int kSearchPaletteHitClose = 2;
+constexpr int kSearchPaletteHitRow = 3;
 constexpr UINT_PTR kNavIndicatorTimer = 1;
 constexpr UINT kNavIndicatorDurationMs = 180;
 constexpr UINT kNavIndicatorFrameMs = USER_TIMER_MINIMUM;
 constexpr UINT_PTR kContentScrollTimer = 2;
+constexpr UINT_PTR kSearchLocateTimer = 3;
+constexpr UINT_PTR kSearchPaletteAnimTimer = 4;
+constexpr ULONGLONG kSearchLocateFadeMs = 800;
+constexpr float kSearchPaletteOpenDurationMs = 165.0f;
+constexpr float kSearchPaletteCloseDurationMs = 120.0f;
+constexpr float kSearchPaletteOpenSlideDip = -10.0f;
+constexpr float kSearchPaletteCloseSlideDip = -8.0f;
 constexpr float kContentScrollFrequency = 28.0f;
 constexpr int kRenderModeMinimal = 3;
 constexpr int kIdSongInfo = 410;
@@ -499,6 +516,41 @@ struct SettingsDialog::Impl {
     std::vector<SearchResult> searchResults;
     int selectedSearchResult = -1;
     int searchLocatedId = 0;
+    ULONGLONG searchLocatedStartMs = 0;
+    bool searchLocateFading = false;
+    POINT searchLocateInitialCursorPt{LONG_MIN, LONG_MIN};
+    D2D1_RECT_F searchTriggerRect{};
+    HWND searchScrimHwnd = nullptr;
+    LyricRenderer searchScrimRenderer;
+    int searchScrimLastWidth = 0;
+    int searchScrimLastHeight = 0;
+    UINT searchScrimLastDpi = 0;
+    bool searchScrimLastDark = false;
+    bool searchScrimLastZoomed = false;
+    HWND searchPaletteHwnd = nullptr;
+    fluent::FluentDialogSurface searchPaletteSurface;
+    bool searchPaletteOpen = false;
+    bool closingSearchPalette = false;
+    bool suppressNextSearchTriggerPress = false;
+    bool searchPaletteAnimating = false;
+    ULONGLONG searchPaletteAnimStartMs = 0;
+    float searchPaletteAnimDurationMs = kSearchPaletteOpenDurationMs;
+    float searchPaletteAnimFrom = 0.0f;
+    float searchPaletteAnimTarget = 0.0f;
+    float searchPaletteProgress = 0.0f;
+    int searchPaletteBaseX = 0;
+    int searchPaletteBaseY = 0;
+    float searchPaletteScale = 1.0f;
+    float searchPaletteScroll = 0.0f;
+    float searchPaletteMaxScroll = 0.0f;
+    int searchPaletteHoverKind = kSearchPaletteHitNone;
+    int searchPaletteHoverRow = -1;
+    int searchPalettePressedKind = kSearchPaletteHitNone;
+    int searchPalettePressedRow = -1;
+    POINT searchPaletteLastMovePt{-1, -1};
+    D2D1_RECT_F searchPaletteClearRect{};
+    D2D1_RECT_F searchPaletteEscRect{};
+    D2D1_RECT_F searchPaletteListRect{};
     int sliderEditRowId = 0;
     bool sliderEditOpen = false;
     bool sliderEditCommitting = false;
@@ -601,8 +653,7 @@ struct SettingsDialog::Impl {
         }
         if (self && msg == WM_KEYDOWN) {
             if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                self->settingsSearch.focus();
-                SendMessageW(self->settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
+                self->openSearchPalette();
                 return 0;
             }
             if (wp == VK_RETURN) {
@@ -1607,10 +1658,11 @@ struct SettingsDialog::Impl {
     bool searching() const { return !searchQuery.empty(); }
 
     void refreshSearch() {
-        stopContentScroll();
         searchQuery = settingsSearch.text();
         std::transform(searchQuery.begin(), searchQuery.end(), searchQuery.begin(),
-                       [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+                       [](wchar_t character) {
+                           return static_cast<wchar_t>(std::towlower(character));
+                       });
         std::vector<std::wstring> terms;
         for (size_t begin = 0; begin < searchQuery.size();) {
             while (begin < searchQuery.size() && std::iswspace(searchQuery[begin]))
@@ -1638,7 +1690,9 @@ struct SettingsDialog::Impl {
                     for (const auto& option : row.options)
                         text += L" " + option;
                     std::transform(text.begin(), text.end(), text.begin(),
-                        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+                        [](wchar_t character) {
+                            return static_cast<wchar_t>(std::towlower(character));
+                        });
                     if (std::all_of(terms.begin(), terms.end(), [&](const std::wstring& term) {
                             return text.find(term) != std::wstring::npos;
                         }))
@@ -1648,44 +1702,114 @@ struct SettingsDialog::Impl {
             }
         }
         selectedSearchResult = searchResults.empty() ? -1 : 0;
-        searchLocatedId = 0;
-        hoverId = pressedId = 0;
-        hoverOption = pressedOption = -1;
-        contentScroll = contentScrollTarget = 0.0f;
-        layout();
-        surface.invalidate();
+        searchPaletteScroll = 0.0f;
+        searchPaletteHoverKind = kSearchPaletteHitNone;
+        searchPaletteHoverRow = -1;
+        if (searchPaletteOpen) {
+            layoutSearchPalette();
+            searchPaletteSurface.invalidate();
+        }
     }
 
     void selectSearchResult(int direction) {
         if (searchResults.empty())
             return;
-        selectedSearchResult = std::clamp(selectedSearchResult + direction, 0,
-                                         static_cast<int>(searchResults.size()) - 1);
-        const float top = selectedSearchResult * kSearchResultPitch;
-        const float height = contentViewportRect.bottom - contentViewportRect.top;
-        if (top < contentScroll)
-            setContentScroll(top);
-        else if (top + kSearchResultPitch > contentScroll + height)
-            setContentScroll(top + kSearchResultPitch - height);
-        surface.invalidate();
+        const int count = static_cast<int>(searchResults.size());
+        if (direction == 1 || direction == -1) {
+            const int base = selectedSearchResult < 0 ? 0 : selectedSearchResult;
+            selectedSearchResult = (base + direction + count) % count;
+        } else {
+            selectedSearchResult = std::clamp(selectedSearchResult + direction, 0, count - 1);
+        }
+        const float rowTop = kSearchPaletteListPadY + selectedSearchResult * kSearchPaletteRowH;
+        const float rowBottom = rowTop + kSearchPaletteRowH + kSearchPaletteListPadY;
+        const float viewportHeight =
+            std::max(0.0f, searchPaletteListRect.bottom - searchPaletteListRect.top);
+        if (rowTop < searchPaletteScroll + kSearchPaletteListPadY) {
+            searchPaletteScroll =
+                std::clamp(rowTop - kSearchPaletteListPadY, 0.0f, searchPaletteMaxScroll);
+        } else if (rowBottom > searchPaletteScroll + viewportHeight) {
+            searchPaletteScroll =
+                std::clamp(rowBottom - viewportHeight, 0.0f, searchPaletteMaxScroll);
+        }
+        searchPaletteSurface.invalidate();
+    }
+
+    void stopSearchLocateHighlight() {
+        searchLocatedId = 0;
+        searchLocatedStartMs = 0;
+        searchLocateFading = false;
+        searchLocateInitialCursorPt = {LONG_MIN, LONG_MIN};
+        if (hwnd)
+            KillTimer(hwnd, kSearchLocateTimer);
+    }
+
+    void startSearchLocateHighlight(int rowId) {
+        stopSearchLocateHighlight();
+        if (rowId == 0)
+            return;
+        searchLocatedId = rowId;
+        searchLocatedStartMs = 0;
+        searchLocateFading = false;
+        POINT cursor{};
+        if (hwnd && GetCursorPos(&cursor) && ScreenToClient(hwnd, &cursor))
+            searchLocateInitialCursorPt = cursor;
+    }
+
+    bool pointerOverLocatedRow(float pointerX, float pointerY) const {
+        if (searchLocatedId == 0 || !contains(contentViewportRect, pointerX, pointerY))
+            return false;
+        const Row* located = findRow(searchLocatedId);
+        return located && contains(located->cardRect, pointerX, pointerY);
+    }
+
+    void beginSearchLocateFade() {
+        if (searchLocatedId == 0 || searchLocateFading)
+            return;
+        BOOL clientAnimations = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
+        if (!clientAnimations || !hwnd) {
+            stopSearchLocateHighlight();
+            renderContentLayer();
+            return;
+        }
+        searchLocateFading = true;
+        searchLocatedStartMs = GetTickCount64();
+        SetTimer(hwnd, kSearchLocateTimer, kNavIndicatorFrameMs, nullptr);
+    }
+
+    float searchLocatedAlpha() const {
+        if (searchLocatedId == 0)
+            return 0.0f;
+        if (!searchLocateFading)
+            return 1.0f;
+        if (searchLocatedStartMs == 0)
+            return 0.0f;
+        const ULONGLONG fadeElapsed = GetTickCount64() - searchLocatedStartMs;
+        if (fadeElapsed >= kSearchLocateFadeMs)
+            return 0.0f;
+        const float progress =
+            static_cast<float>(fadeElapsed) / static_cast<float>(kSearchLocateFadeMs);
+        const float remaining = 1.0f - std::clamp(progress, 0.0f, 1.0f);
+        return remaining * remaining * (3.0f - 2.0f * remaining);
     }
 
     void openSearchResult(int index) {
         if (index < 0 || index >= static_cast<int>(searchResults.size()))
             return;
         const auto result = searchResults[index];
-        settingsSearch.setText(L"");
+        closeSearchPalette(true);
         showPage(result.page);
         // 先按真实字体测量目标页，再计算定位，避免多行说明改变高度后落点偏移。
         surface.invalidate();
         UpdateWindow(hwnd);
         if (auto* row = findRow(result.id)) {
             setContentScroll(contentScroll + row->cardRect.top - contentViewportRect.top - 12.0f);
-            searchLocatedId = result.id;
+            startSearchLocateHighlight(result.id);
             focusedId = row->enabled ? result.id : kIdNav;
-            focusVisible = true;
         }
         SetFocus(hwnd);
+        focusVisible = false;
         surface.invalidate();
     }
 
@@ -1696,13 +1820,12 @@ struct SettingsDialog::Impl {
             RemoveWindowSubclass(edit, &Impl::searchEditProc, subclassId);
             return DefSubclassProc(edit, msg, wp, lp);
         }
-        if (msg == WM_KEYDOWN) {
+        if (self && msg == WM_KEYDOWN) {
             if (wp == VK_ESCAPE) {
-                self->settingsSearch.setText(L"");
-                SetFocus(self->hwnd);
+                self->closeSearchPalette(true);
                 return 0;
             }
-            if (wp == VK_RETURN && self->searching()) {
+            if (wp == VK_RETURN && self->searching() && self->selectedSearchResult >= 0) {
                 self->openSearchResult(self->selectedSearchResult);
                 return 0;
             }
@@ -1710,25 +1833,941 @@ struct SettingsDialog::Impl {
                 self->selectSearchResult(wp == VK_DOWN ? 1 : -1);
                 return 0;
             }
+            if ((wp == VK_PRIOR || wp == VK_NEXT) && self->searching()) {
+                self->selectSearchResult(wp == VK_NEXT ? 5 : -5);
+                return 0;
+            }
+            if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                SendMessageW(edit, EM_SETSEL, 0, -1);
+                return 0;
+            }
             if (wp == VK_TAB) {
-                self->focusedId = self->searching() ? kIdSearchResult : kIdNav;
-                SetFocus(self->hwnd);
                 return 0;
             }
         }
-        if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE || wp == VK_TAB))
+        if (self && msg == WM_MOUSEWHEEL && self->searchPaletteHwnd) {
+            SendMessageW(self->searchPaletteHwnd, msg, wp, lp);
+            return 0;
+        }
+        if (msg == WM_CHAR &&
+            (wp == VK_RETURN || wp == VK_ESCAPE || wp == VK_TAB || wp == 6))
             return 0;
         return DefSubclassProc(edit, msg, wp, lp);
     }
 
-    bool createSearchEditor() {
-        if (!settingsSearch.create(hwnd, kIdSettingsSearch, L"搜索设置"))
+    void styleSearchPaletteWindow() {
+        if (!searchPaletteHwnd)
+            return;
+        BOOL disableTransitions = TRUE;
+        DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_TRANSITIONS_FORCEDISABLED,
+                              &disableTransitions, sizeof(disableTransitions));
+        fluent::applyRoundCorners(searchPaletteHwnd, false);
+        const bool dark = fluent::isDarkMode();
+        fluent::applyDarkCaption(searchPaletteHwnd, dark);
+        fluent::applyBorderColor(searchPaletteHwnd,
+                                 dark ? RGB(68, 68, 68) : RGB(214, 214, 214));
+    }
+
+    static void setWindowClickThrough(HWND window, bool clickThrough) {
+        if (!window || !IsWindow(window))
+            return;
+        const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
+        const LONG_PTR nextStyle =
+            clickThrough ? (exStyle | WS_EX_TRANSPARENT)
+                         : (exStyle & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
+        if (nextStyle != exStyle)
+            SetWindowLongPtrW(window, GWL_EXSTYLE, nextStyle);
+    }
+
+    BYTE searchPaletteAlphaByte() const {
+        return static_cast<BYTE>(std::clamp(
+            static_cast<int>(std::lround(searchPaletteProgress * 255.0f)), 0, 255));
+    }
+
+    int searchPaletteOffsetYPx(float scale) const {
+        const float slideDip = searchPaletteAnimTarget > 0.5f
+                                   ? kSearchPaletteOpenSlideDip
+                                   : kSearchPaletteCloseSlideDip;
+        return static_cast<int>(
+            std::lround((1.0f - searchPaletteProgress) * slideDip * scale));
+    }
+
+    void applySearchPaletteAnimationVisuals() {
+        const BYTE alphaByte = searchPaletteAlphaByte();
+        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+            SetLayeredWindowAttributes(searchPaletteHwnd, 0, alphaByte, LWA_ALPHA);
+            SetWindowPos(searchPaletteHwnd, nullptr, searchPaletteBaseX,
+                         searchPaletteBaseY + searchPaletteOffsetYPx(searchPaletteScale),
+                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
+            searchScrimRenderer.present(searchScrimHwnd, alphaByte);
+    }
+
+    void finalizeSearchPaletteClosed() {
+        if (hwnd)
+            KillTimer(hwnd, kSearchPaletteAnimTimer);
+        searchPaletteAnimating = false;
+        searchPaletteProgress = 0.0f;
+        searchPaletteAnimFrom = 0.0f;
+        searchPaletteAnimTarget = 0.0f;
+        closingSearchPalette = true;
+        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+            ShowWindow(searchPaletteHwnd, SW_HIDE);
+            setWindowClickThrough(searchPaletteHwnd, false);
+            settingsSearch.setText(L"");
+        }
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
+            ShowWindow(searchScrimHwnd, SW_HIDE);
+            setWindowClickThrough(searchScrimHwnd, false);
+        }
+        searchQuery.clear();
+        searchResults.clear();
+        selectedSearchResult = -1;
+        searchPaletteScroll = 0.0f;
+        searchPaletteMaxScroll = 0.0f;
+        closingSearchPalette = false;
+    }
+
+    void advanceSearchPaletteAnimation() {
+        if (!searchPaletteAnimating)
+            return;
+        const float elapsed =
+            static_cast<float>(GetTickCount64() - searchPaletteAnimStartMs);
+        const float rawProgress =
+            searchPaletteAnimDurationMs <= 1.0f
+                ? 1.0f
+                : std::clamp(elapsed / searchPaletteAnimDurationMs, 0.0f, 1.0f);
+        const float inverse = 1.0f - rawProgress;
+        if (searchPaletteAnimTarget > 0.5f) {
+            const float eased = 1.0f - inverse * inverse * inverse;
+            searchPaletteProgress =
+                searchPaletteAnimFrom + (1.0f - searchPaletteAnimFrom) * eased;
+        } else {
+            const float eased = 1.0f - inverse * inverse;
+            searchPaletteProgress = searchPaletteAnimFrom * (1.0f - eased);
+        }
+        if (rawProgress >= 1.0f) {
+            if (searchPaletteAnimTarget <= 0.5f) {
+                finalizeSearchPaletteClosed();
+                return;
+            }
+            if (hwnd)
+                KillTimer(hwnd, kSearchPaletteAnimTimer);
+            searchPaletteAnimating = false;
+            searchPaletteProgress = 1.0f;
+        }
+        applySearchPaletteAnimationVisuals();
+    }
+
+    float searchPaletteDesiredHeightDip() const {
+        if (!searching())
+            return kSearchPaletteHeaderH + kSearchPaletteEmptyPromptH;
+        if (searchResults.empty())
+            return kSearchPaletteHeaderH + kSearchPaletteNoResultH;
+        const int visibleCount = std::min(static_cast<int>(searchResults.size()),
+                                          kSearchPaletteMaxVisibleRows);
+        const float bodyHeight =
+            kSearchPaletteListPadY * 2.0f + visibleCount * kSearchPaletteRowH;
+        return kSearchPaletteHeaderH + bodyHeight + kSearchPaletteFooterH;
+    }
+
+    void layoutSearchPalette() {
+        if (!searchPaletteHwnd || !hwnd || !IsWindow(hwnd))
+            return;
+        RECT ownerClient{};
+        GetClientRect(hwnd, &ownerClient);
+        POINT topLeft{ownerClient.left, ownerClient.top};
+        POINT bottomRight{ownerClient.right, ownerClient.bottom};
+        ClientToScreen(hwnd, &topLeft);
+        ClientToScreen(hwnd, &bottomRight);
+
+        UINT dpi = GetDpiForWindow(searchPaletteHwnd);
+        if (dpi == 0)
+            dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0)
+            dpi = 96;
+        const float scale = fluent::dipScale(dpi);
+        auto toPx = [scale](float dipValue) {
+            return static_cast<int>(std::lround(dipValue * scale));
+        };
+
+        const int ownerWidthPx = std::max(1, static_cast<int>(bottomRight.x - topLeft.x));
+        const int ownerHeightPx = std::max(1, static_cast<int>(bottomRight.y - topLeft.y));
+        const float ownerWidthDip = static_cast<float>(ownerWidthPx) / scale;
+        const float ownerHeightDip = static_cast<float>(ownerHeightPx) / scale;
+
+        const float maxAllowedWidthDip = std::max(320.0f, ownerWidthDip - 48.0f);
+        const float paletteWidthDip =
+            std::min(maxAllowedWidthDip, std::clamp(ownerWidthDip * 0.58f, 480.0f, 560.0f));
+        const float maxAllowedHeightDip = std::max(132.0f, ownerHeightDip - 88.0f);
+        const float paletteHeightDip =
+            std::min(searchPaletteDesiredHeightDip(), maxAllowedHeightDip);
+
+        const bool hasInputText =
+            settingsSearch.editHwnd() && GetWindowTextLengthW(settingsSearch.editHwnd()) > 0;
+        searchPaletteEscRect =
+            D2D1::RectF(paletteWidthDip - 48.0f, 16.0f, paletteWidthDip - 16.0f, 36.0f);
+        searchPaletteClearRect =
+            hasInputText
+                ? D2D1::RectF(paletteWidthDip - 80.0f, 14.0f, paletteWidthDip - 56.0f, 38.0f)
+                : D2D1_RECT_F{};
+        const float editLeftDip = 46.0f;
+        const float editRightDip =
+            hasInputText ? searchPaletteClearRect.left - 8.0f : searchPaletteEscRect.left - 10.0f;
+
+        if (searching() && !searchResults.empty()) {
+            const float listTop = kSearchPaletteHeaderH;
+            const float listBottom =
+                std::max(listTop, paletteHeightDip - kSearchPaletteFooterH);
+            searchPaletteListRect = D2D1::RectF(0.0f, listTop, paletteWidthDip, listBottom);
+            const float totalListHeight =
+                kSearchPaletteListPadY * 2.0f +
+                static_cast<float>(searchResults.size()) * kSearchPaletteRowH;
+            const float viewportHeight = std::max(0.0f, listBottom - listTop);
+            searchPaletteMaxScroll = std::max(0.0f, totalListHeight - viewportHeight);
+            searchPaletteScroll = std::clamp(searchPaletteScroll, 0.0f, searchPaletteMaxScroll);
+        } else {
+            searchPaletteListRect = D2D1_RECT_F{};
+            searchPaletteMaxScroll = 0.0f;
+            searchPaletteScroll = 0.0f;
+        }
+
+        const int paletteWidthPx = std::max(1, toPx(paletteWidthDip));
+        const int paletteHeightPx = std::max(1, toPx(paletteHeightDip));
+        int screenX = topLeft.x + (ownerWidthPx - paletteWidthPx) / 2;
+        int screenY = topLeft.y + toPx(64.0f);
+
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize = sizeof(monitorInfo);
+        const bool hasWorkArea =
+            monitor != nullptr && GetMonitorInfoW(monitor, &monitorInfo) != FALSE;
+        if (hasWorkArea) {
+            const RECT& workArea = monitorInfo.rcWork;
+            if (screenX + paletteWidthPx > workArea.right - 8)
+                screenX = workArea.right - 8 - paletteWidthPx;
+            if (screenX < workArea.left + 8)
+                screenX = workArea.left + 8;
+            if (screenY + paletteHeightPx > workArea.bottom - 8)
+                screenY = workArea.bottom - 8 - paletteHeightPx;
+            if (screenY < workArea.top + 8)
+                screenY = workArea.top + 8;
+        }
+
+        searchPaletteBaseX = screenX;
+        searchPaletteBaseY = screenY;
+        searchPaletteScale = scale;
+        const int animatedScreenY = screenY + searchPaletteOffsetYPx(scale);
+        SetWindowPos(searchPaletteHwnd, HWND_TOP, screenX, animatedScreenY, paletteWidthPx,
+                     paletteHeightPx, SWP_NOACTIVATE);
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
+            RECT scrimBounds{};
+            if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
+                                             &scrimBounds, sizeof(scrimBounds))) ||
+                scrimBounds.right <= scrimBounds.left ||
+                scrimBounds.bottom <= scrimBounds.top) {
+                scrimBounds = {topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+            } else if (IsZoomed(hwnd) != FALSE && hasWorkArea) {
+                scrimBounds.left = std::max(scrimBounds.left, monitorInfo.rcWork.left);
+                scrimBounds.top = std::max(scrimBounds.top, monitorInfo.rcWork.top);
+                scrimBounds.right = std::min(scrimBounds.right, monitorInfo.rcWork.right);
+                scrimBounds.bottom = std::min(scrimBounds.bottom, monitorInfo.rcWork.bottom);
+            }
+            const int scrimWidthPx =
+                std::max(1, static_cast<int>(scrimBounds.right - scrimBounds.left));
+            const int scrimHeightPx =
+                std::max(1, static_cast<int>(scrimBounds.bottom - scrimBounds.top));
+            SetWindowPos(searchScrimHwnd, searchPaletteHwnd, scrimBounds.left,
+                         scrimBounds.top, scrimWidthPx, scrimHeightPx, SWP_NOACTIVATE);
+            renderSearchScrim(scrimWidthPx, scrimHeightPx, dpi);
+        }
+        if (settingsSearch.hwnd()) {
+            settingsSearch.move(toPx(editLeftDip), toPx(10.0f),
+                                std::max(1, toPx(editRightDip - editLeftDip)), toPx(32.0f));
+        }
+    }
+
+    void renderSearchScrim(int widthPx, int heightPx, UINT dpi) {
+        if (!searchScrimHwnd || widthPx <= 0 || heightPx <= 0)
+            return;
+        const bool dark = fluent::isDarkMode();
+        const bool zoomed = hwnd && IsZoomed(hwnd) != FALSE;
+        const BYTE alphaByte = searchPaletteAlphaByte();
+        if (widthPx == searchScrimLastWidth && heightPx == searchScrimLastHeight &&
+            dpi == searchScrimLastDpi && dark == searchScrimLastDark &&
+            zoomed == searchScrimLastZoomed) {
+            searchScrimRenderer.present(searchScrimHwnd, alphaByte);
+            return;
+        }
+        if (!searchScrimRenderer.initialize())
+            return;
+        searchScrimRenderer.setDpi(dpi);
+        if (!searchScrimRenderer.bindDC(widthPx, heightPx))
+            return;
+        auto* target = searchScrimRenderer.renderTarget();
+        if (!target)
+            return;
+
+        const float scale = fluent::dipScale(dpi);
+        const float widthDip = static_cast<float>(widthPx) / scale;
+        const float heightDip = static_cast<float>(heightPx) / scale;
+        DWORD cornerPreference = 0;
+        constexpr DWORD kWindowCornerPreferenceAttr = 33;
+        const bool roundedWindow =
+            !zoomed && hwnd &&
+            SUCCEEDED(DwmGetWindowAttribute(hwnd, kWindowCornerPreferenceAttr,
+                                            &cornerPreference, sizeof(cornerPreference))) &&
+            cornerPreference != 1;
+        const float cornerRadius =
+            roundedWindow ? std::min(fluent::metrics::cardRadius,
+                                     std::min(widthDip * 0.5f, heightDip * 0.5f))
+                          : 0.0f;
+        const D2D1_COLOR_F scrimColor =
+            D2D1::ColorF(0.0f, 0.0f, 0.0f, dark ? 0.46f : 0.28f);
+
+        target->BeginDraw();
+        target->SetTransform(D2D1::Matrix3x2F::Identity());
+        target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        ID2D1SolidColorBrush* scrimBrush = nullptr;
+        if (SUCCEEDED(target->CreateSolidColorBrush(scrimColor, &scrimBrush)) && scrimBrush) {
+            if (cornerRadius > 0.0f) {
+                target->FillRoundedRectangle(
+                    D2D1::RoundedRect(
+                        D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
+                        cornerRadius, cornerRadius),
+                    scrimBrush);
+            } else {
+                target->FillRectangle(D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
+                                      scrimBrush);
+            }
+            scrimBrush->Release();
+        }
+        if (FAILED(target->EndDraw())) {
+            searchScrimRenderer.discard();
+            return;
+        }
+        if (searchScrimRenderer.present(searchScrimHwnd, alphaByte)) {
+            searchScrimLastWidth = widthPx;
+            searchScrimLastHeight = heightPx;
+            searchScrimLastDpi = dpi;
+            searchScrimLastDark = dark;
+            searchScrimLastZoomed = zoomed;
+        }
+    }
+
+    static LRESULT CALLBACK searchScrimWndProc(HWND window, UINT message, WPARAM wp,
+                                               LPARAM lp) {
+        Impl* self = nullptr;
+        if (message == WM_NCCREATE) {
+            self = static_cast<Impl*>(
+                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            self->searchScrimHwnd = window;
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<Impl*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        }
+        if (!self)
+            return DefWindowProcW(window, message, wp, lp);
+
+        switch (message) {
+        case WM_MOUSEACTIVATE:
+            return MA_NOACTIVATE;
+        case WM_SETCURSOR:
+            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+            return TRUE;
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+            self->closeSearchPalette(true);
+            return 0;
+        case WM_MOUSEWHEEL:
+            if (self->searchPaletteOpen && self->searchPaletteHwnd)
+                SendMessageW(self->searchPaletteHwnd, message, wp, lp);
+            return 0;
+        case WM_DESTROY:
+            self->searchScrimRenderer.releaseAll();
+            self->searchScrimLastWidth = 0;
+            self->searchScrimLastHeight = 0;
+            self->searchScrimHwnd = nullptr;
+            return 0;
+        }
+        return DefWindowProcW(window, message, wp, lp);
+    }
+
+    bool ensureSearchScrimWindow() {
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
+            return true;
+        WNDCLASSEXW scrimClass{};
+        scrimClass.cbSize = sizeof(scrimClass);
+        scrimClass.lpfnWndProc = &Impl::searchScrimWndProc;
+        scrimClass.hInstance = inst;
+        scrimClass.lpszClassName = L"QQMusicLyricSettingsSearchScrim";
+        scrimClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&scrimClass);
+
+        searchScrimHwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            L"QQMusicLyricSettingsSearchScrim", L"",
+            WS_POPUP, 0, 0, 1, 1, hwnd, nullptr, inst, this);
+        searchScrimLastWidth = 0;
+        searchScrimLastHeight = 0;
+        return searchScrimHwnd != nullptr;
+    }
+
+    int searchPaletteHitTest(float xDip, float yDip, int* outRow = nullptr) const {
+        if (outRow)
+            *outRow = -1;
+        if (searchPaletteClearRect.right > searchPaletteClearRect.left &&
+            contains(searchPaletteClearRect, xDip, yDip))
+            return kSearchPaletteHitClear;
+        if (contains(searchPaletteEscRect, xDip, yDip))
+            return kSearchPaletteHitClose;
+        if (searching() && !searchResults.empty() &&
+            contains(searchPaletteListRect, xDip, yDip)) {
+            const float listOffset =
+                yDip - searchPaletteListRect.top + searchPaletteScroll - kSearchPaletteListPadY;
+            if (listOffset >= 0.0f) {
+                const int rowIndex = static_cast<int>(listOffset / kSearchPaletteRowH);
+                const float withinRow = listOffset - rowIndex * kSearchPaletteRowH;
+                if (rowIndex >= 0 && rowIndex < static_cast<int>(searchResults.size()) &&
+                    withinRow >= 2.0f && withinRow <= kSearchPaletteRowH - 2.0f &&
+                    xDip >= 8.0f && xDip <= searchPaletteListRect.right - 8.0f) {
+                    if (outRow)
+                        *outRow = rowIndex;
+                    return kSearchPaletteHitRow;
+                }
+            }
+        }
+        return kSearchPaletteHitNone;
+    }
+
+    void paintSearchPalette(fluent::FluentDialogSurface::Painter& painter,
+                            float widthDip, float heightDip) {
+        const auto& paletteColors = fluent::palette();
+        if (auto* backgroundBrush = painter.brush(paletteColors.menuFill)) {
+            painter.target()->FillRectangle(D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
+                                            backgroundBrush);
+        }
+        painter.strokeRoundRect(
+            paletteColors.menuStroke,
+            D2D1::RectF(0.5f, 0.5f, widthDip - 0.5f, heightDip - 0.5f),
+            1.0f, fluent::metrics::cardRadius);
+
+        if (auto* searchBrush = painter.brush(paletteColors.accent)) {
+            settings_icon::draw(painter.target(), settings_icon::Kind::Search,
+                                D2D1::RectF(18.0f, 17.0f, 36.0f, 35.0f), searchBrush, 1.4f);
+        }
+
+        if (searchPaletteClearRect.right > searchPaletteClearRect.left) {
+            const bool clearHovered = searchPaletteHoverKind == kSearchPaletteHitClear;
+            const bool clearPressed = searchPalettePressedKind == kSearchPaletteHitClear;
+            if (clearPressed || clearHovered) {
+                painter.fillRoundRect(
+                    clearPressed ? paletteColors.listSelected : paletteColors.listHover,
+                    searchPaletteClearRect, 5.0f);
+            }
+            const float centerX =
+                (searchPaletteClearRect.left + searchPaletteClearRect.right) * 0.5f;
+            const float centerY =
+                (searchPaletteClearRect.top + searchPaletteClearRect.bottom) * 0.5f;
+            if (auto* crossBrush = painter.brush(
+                    clearHovered ? paletteColors.text : paletteColors.textSecondary)) {
+                painter.target()->DrawLine(
+                    D2D1::Point2F(centerX - 4.0f, centerY - 4.0f),
+                    D2D1::Point2F(centerX + 4.0f, centerY + 4.0f), crossBrush, 1.35f);
+                painter.target()->DrawLine(
+                    D2D1::Point2F(centerX + 4.0f, centerY - 4.0f),
+                    D2D1::Point2F(centerX - 4.0f, centerY + 4.0f), crossBrush, 1.35f);
+            }
+        }
+
+        const bool escHovered = searchPaletteHoverKind == kSearchPaletteHitClose;
+        const bool escPressed = searchPalettePressedKind == kSearchPaletteHitClose;
+        painter.fillRoundRect(
+            escPressed ? paletteColors.listSelected
+                       : (escHovered ? paletteColors.controlHover : paletteColors.listHover),
+            searchPaletteEscRect, 4.0f);
+        painter.strokeRoundRect(paletteColors.cardStroke, searchPaletteEscRect, 1.0f, 4.0f);
+        painter.drawText(L"Esc", painter.textFormat(11.0f, 500, true, true),
+                         searchPaletteEscRect,
+                         escHovered ? paletteColors.text : paletteColors.textSecondary);
+
+        if (auto* separatorBrush = painter.brush(paletteColors.separator)) {
+            painter.target()->DrawLine(
+                D2D1::Point2F(0.0f, kSearchPaletteHeaderH - 0.5f),
+                D2D1::Point2F(widthDip, kSearchPaletteHeaderH - 0.5f), separatorBrush, 1.0f);
+        }
+
+        if (!searching()) {
+            painter.drawText(
+                L"输入关键词搜索设置名称、选项或说明，支持空格分词筛选",
+                painter.textFormat(13.0f, 400, false, true),
+                D2D1::RectF(20.0f, kSearchPaletteHeaderH, widthDip - 20.0f, heightDip),
+                paletteColors.textSecondary);
+            return;
+        }
+
+        if (searchResults.empty()) {
+            painter.drawText(
+                L"未找到匹配的设置，请尝试其他关键词",
+                painter.textFormat(13.5f, 400, false, true),
+                D2D1::RectF(20.0f, kSearchPaletteHeaderH, widthDip - 20.0f, heightDip),
+                paletteColors.textSecondary);
+            return;
+        }
+
+        painter.target()->PushAxisAlignedClip(searchPaletteListRect,
+                                              D2D1_ANTIALIAS_MODE_ALIASED);
+        const bool hasScrollbar = searchPaletteMaxScroll > 0.5f;
+        const float itemRight = widthDip - (hasScrollbar ? 14.0f : 8.0f);
+        for (int index = 0; index < static_cast<int>(searchResults.size()); ++index) {
+            const float rowTop = searchPaletteListRect.top + kSearchPaletteListPadY +
+                                 index * kSearchPaletteRowH - searchPaletteScroll;
+            if (rowTop + kSearchPaletteRowH < searchPaletteListRect.top ||
+                rowTop > searchPaletteListRect.bottom)
+                continue;
+            const auto& result = searchResults[index];
+            const auto* row = findRow(result.id);
+            if (!row)
+                continue;
+
+            const D2D1_RECT_F itemRect =
+                D2D1::RectF(8.0f, rowTop + 2.0f, itemRight, rowTop + kSearchPaletteRowH - 2.0f);
+            const bool selected = index == selectedSearchResult;
+            const bool hovered =
+                searchPaletteHoverKind == kSearchPaletteHitRow && searchPaletteHoverRow == index;
+            if (selected) {
+                painter.fillRoundRect(paletteColors.listSelected, itemRect, 6.0f);
+                const float midY = (itemRect.top + itemRect.bottom) * 0.5f;
+                painter.fillRoundRect(
+                    paletteColors.accent,
+                    D2D1::RectF(itemRect.left + 4.0f, midY - 8.0f,
+                                itemRect.left + 7.0f, midY + 8.0f),
+                    1.5f);
+            } else if (hovered) {
+                painter.fillRoundRect(paletteColors.listHover, itemRect, 6.0f);
+            }
+
+            const float iconCenterY = (itemRect.top + itemRect.bottom) * 0.5f;
+            const D2D1_RECT_F iconBadge =
+                D2D1::RectF(itemRect.left + 14.0f, iconCenterY - 15.0f,
+                            itemRect.left + 44.0f, iconCenterY + 15.0f);
+            const D2D1_COLOR_F badgeFill =
+                selected ? D2D1::ColorF(paletteColors.accent.r, paletteColors.accent.g,
+                                        paletteColors.accent.b, 0.12f)
+                         : paletteColors.listHover;
+            painter.fillRoundRect(badgeFill, iconBadge, 6.0f);
+            if (auto* iconBrush = painter.brush(
+                    selected ? paletteColors.accent : paletteColors.textSecondary)) {
+                settings_icon::draw(
+                    painter.target(), iconForRow(result.id),
+                    D2D1::RectF(iconBadge.left + 7.0f, iconBadge.top + 7.0f,
+                                iconBadge.right - 7.0f, iconBadge.bottom - 7.0f),
+                    iconBrush, 1.25f);
+            }
+
+            const float textRight = selected ? itemRect.right - 56.0f : itemRect.right - 14.0f;
+            painter.drawTrimmedText(
+                row->text, painter.textFormat(13.5f, selected ? 600 : 500, false, true),
+                D2D1::RectF(itemRect.left + 54.0f, itemRect.top + 6.0f, textRight,
+                            itemRect.top + 28.0f),
+                paletteColors.text);
+            painter.drawTrimmedText(
+                result.path, painter.textFormat(12.0f, 400, false, true),
+                D2D1::RectF(itemRect.left + 54.0f, itemRect.top + 27.0f, textRight,
+                            itemRect.bottom - 5.0f),
+                paletteColors.textSecondary);
+            if (selected) {
+                painter.drawText(
+                    L"跳转 ↵", painter.textFormat(11.5f, 500, true, true),
+                    D2D1::RectF(itemRect.right - 54.0f, itemRect.top, itemRect.right - 10.0f,
+                                itemRect.bottom),
+                    paletteColors.accent);
+            }
+        }
+
+        if (hasScrollbar) {
+            const float trackTop = searchPaletteListRect.top + 6.0f;
+            const float trackBottom = searchPaletteListRect.bottom - 6.0f;
+            const float trackHeight = std::max(12.0f, trackBottom - trackTop);
+            const float viewportHeight =
+                std::max(1.0f, searchPaletteListRect.bottom - searchPaletteListRect.top);
+            const float totalHeight = viewportHeight + searchPaletteMaxScroll;
+            const float thumbHeight =
+                std::max(20.0f, trackHeight * (viewportHeight / totalHeight));
+            const float scrollRatio =
+                std::clamp(searchPaletteScroll / searchPaletteMaxScroll, 0.0f, 1.0f);
+            const float thumbTop = trackTop + (trackHeight - thumbHeight) * scrollRatio;
+            painter.fillRoundRect(
+                paletteColors.controlStroke,
+                D2D1::RectF(widthDip - 8.0f, thumbTop, widthDip - 4.0f, thumbTop + thumbHeight),
+                2.0f);
+        }
+        painter.target()->PopAxisAlignedClip();
+
+        const float footerTop = heightDip - kSearchPaletteFooterH;
+        if (auto* separatorBrush = painter.brush(paletteColors.separator)) {
+            painter.target()->DrawLine(
+                D2D1::Point2F(0.0f, footerTop + 0.5f),
+                D2D1::Point2F(widthDip, footerTop + 0.5f), separatorBrush, 1.0f);
+        }
+        auto* footerFormat = painter.textFormat(11.5f, 400, false, true);
+        painter.drawText(L"↑↓ 选择    Enter 跳转    Esc 关闭", footerFormat,
+                         D2D1::RectF(16.0f, footerTop, widthDip - 100.0f, heightDip),
+                         paletteColors.textSecondary);
+        const std::wstring countLabel =
+            L"共 " + std::to_wstring(searchResults.size()) + L" 项";
+        const float countWidth = painter.measureTextWidth(countLabel, footerFormat);
+        painter.drawText(
+            countLabel, footerFormat,
+            D2D1::RectF(std::max(16.0f, widthDip - 16.0f - countWidth - 2.0f), footerTop,
+                        widthDip - 14.0f, heightDip),
+            paletteColors.textSecondary);
+    }
+
+    static LRESULT CALLBACK searchPaletteWndProc(HWND window, UINT message, WPARAM wp,
+                                                 LPARAM lp) {
+        Impl* self = nullptr;
+        if (message == WM_NCCREATE) {
+            self = static_cast<Impl*>(
+                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+            self->searchPaletteHwnd = window;
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        } else {
+            self = reinterpret_cast<Impl*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        }
+        if (!self)
+            return DefWindowProcW(window, message, wp, lp);
+
+        switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paintStruct{};
+            HDC dc = BeginPaint(window, &paintStruct);
+            self->searchPaletteSurface.paint(
+                dc, false,
+                [self](fluent::FluentDialogSurface::Painter& painter, float widthDip,
+                       float heightDip) {
+                    self->paintSearchPalette(painter, widthDip, heightDip);
+                });
+            EndPaint(window, &paintStruct);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            TRACKMOUSEEVENT trackEvent{sizeof(trackEvent), TME_LEAVE, window, 0};
+            TrackMouseEvent(&trackEvent);
+            const POINT currentPt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            const bool pointerMoved =
+                currentPt.x != self->searchPaletteLastMovePt.x ||
+                currentPt.y != self->searchPaletteLastMovePt.y;
+            self->searchPaletteLastMovePt = currentPt;
+            const float scale = self->searchPaletteSurface.dipScale();
+            int hitRow = -1;
+            const int hitKind = self->searchPaletteHitTest(
+                static_cast<float>(currentPt.x) / scale,
+                static_cast<float>(currentPt.y) / scale, &hitRow);
+            bool changed = hitKind != self->searchPaletteHoverKind ||
+                           hitRow != self->searchPaletteHoverRow;
+            self->searchPaletteHoverKind = hitKind;
+            self->searchPaletteHoverRow = hitRow;
+            if (pointerMoved && hitKind == kSearchPaletteHitRow && hitRow >= 0 &&
+                hitRow != self->selectedSearchResult) {
+                self->selectedSearchResult = hitRow;
+                changed = true;
+            }
+            if (changed)
+                self->searchPaletteSurface.invalidate();
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (self->searchPaletteHoverKind != kSearchPaletteHitNone ||
+                self->searchPaletteHoverRow != -1) {
+                self->searchPaletteHoverKind = kSearchPaletteHitNone;
+                self->searchPaletteHoverRow = -1;
+                self->searchPaletteSurface.invalidate();
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            const float scale = self->searchPaletteSurface.dipScale();
+            int hitRow = -1;
+            const int hitKind = self->searchPaletteHitTest(
+                GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale, &hitRow);
+            self->searchPalettePressedKind = hitKind;
+            self->searchPalettePressedRow = hitRow;
+            if (hitKind != kSearchPaletteHitNone)
+                SetCapture(window);
+            self->settingsSearch.focus();
+            self->searchPaletteSurface.invalidate();
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            const float scale = self->searchPaletteSurface.dipScale();
+            int hitRow = -1;
+            const int hitKind = self->searchPaletteHitTest(
+                GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale, &hitRow);
+            const int pressedKind = self->searchPalettePressedKind;
+            const int pressedRow = self->searchPalettePressedRow;
+            self->searchPalettePressedKind = kSearchPaletteHitNone;
+            self->searchPalettePressedRow = -1;
+            if (GetCapture() == window)
+                ReleaseCapture();
+            if (pressedKind == kSearchPaletteHitClear &&
+                hitKind == kSearchPaletteHitClear) {
+                self->settingsSearch.setText(L"");
+                self->refreshSearch();
+                self->settingsSearch.focus();
+                return 0;
+            }
+            if (pressedKind == kSearchPaletteHitClose &&
+                hitKind == kSearchPaletteHitClose) {
+                self->closeSearchPalette(true);
+                return 0;
+            }
+            if (pressedKind == kSearchPaletteHitRow &&
+                hitKind == kSearchPaletteHitRow && pressedRow == hitRow && hitRow >= 0) {
+                self->openSearchResult(hitRow);
+                return 0;
+            }
+            self->searchPaletteSurface.invalidate();
+            return 0;
+        }
+        case WM_CAPTURECHANGED:
+            self->searchPalettePressedKind = kSearchPaletteHitNone;
+            self->searchPalettePressedRow = -1;
+            self->searchPaletteSurface.invalidate();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            if (self->searchPaletteMaxScroll > 0.0f) {
+                const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wp);
+                self->searchPaletteScroll = std::clamp(
+                    self->searchPaletteScroll -
+                        static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA) * 48.0f,
+                    0.0f, self->searchPaletteMaxScroll);
+                self->searchPaletteSurface.invalidate();
+            }
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) {
+                self->closeSearchPalette(true);
+                return 0;
+            }
+            if (wp == VK_RETURN && self->searching() && self->selectedSearchResult >= 0) {
+                self->openSearchResult(self->selectedSearchResult);
+                return 0;
+            }
+            if ((wp == VK_UP || wp == VK_DOWN) && self->searching()) {
+                self->selectSearchResult(wp == VK_DOWN ? 1 : -1);
+                return 0;
+            }
+            break;
+        case WM_COMMAND:
+            if (LOWORD(wp) == kIdSettingsSearch && HIWORD(wp) == EN_CHANGE) {
+                if (!self->closingSearchPalette)
+                    self->refreshSearch();
+                return 0;
+            }
+            break;
+        case WM_DPICHANGED:
+            self->layoutSearchPalette();
+            self->searchPaletteSurface.invalidate();
+            return 0;
+        case WM_ACTIVATE:
+            if (LOWORD(wp) == WA_INACTIVE && self->searchPaletteOpen &&
+                !self->closingSearchPalette) {
+                if (self->hwnd && IsWindow(self->hwnd)) {
+                    POINT cursor{};
+                    if (GetCursorPos(&cursor) && ScreenToClient(self->hwnd, &cursor)) {
+                        const float ownerScale = self->surface.dipScale();
+                        const float cursorX = static_cast<float>(cursor.x) / ownerScale;
+                        const float cursorY = static_cast<float>(cursor.y) / ownerScale;
+                        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 &&
+                            contains(self->searchTriggerRect, cursorX, cursorY)) {
+                            self->suppressNextSearchTriggerPress = true;
+                        }
+                    }
+                }
+                self->closeSearchPalette(false);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            self->closeSearchPalette(true);
+            return 0;
+        case WM_DESTROY:
+            self->searchPaletteOpen = false;
+            self->searchPaletteSurface.discard();
+            self->searchPaletteHwnd = nullptr;
+            return 0;
+        }
+        return DefWindowProcW(window, message, wp, lp);
+    }
+
+    bool ensureSearchPaletteWindow() {
+        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd))
+            return true;
+        WNDCLASSEXW paletteClass{};
+        paletteClass.cbSize = sizeof(paletteClass);
+        paletteClass.style = CS_HREDRAW | CS_VREDRAW;
+        paletteClass.lpfnWndProc = &Impl::searchPaletteWndProc;
+        paletteClass.hInstance = inst;
+        paletteClass.lpszClassName = L"QQMusicLyricSettingsSearchPalette";
+        paletteClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&paletteClass);
+
+        searchPaletteHwnd = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"QQMusicLyricSettingsSearchPalette", L"",
+            WS_POPUP, 0, 0, 1, 1, hwnd, nullptr, inst, this);
+        if (!searchPaletteHwnd)
             return false;
-        settingsSearch.setLeadingIcon(settings_icon::Kind::Search);
+        SetLayeredWindowAttributes(searchPaletteHwnd, 0, 255, LWA_ALPHA);
+        styleSearchPaletteWindow();
+        searchPaletteSurface.initialize(searchPaletteHwnd, false, true);
+        if (!settingsSearch.create(searchPaletteHwnd, kIdSettingsSearch,
+                                   L"搜索设置项、选项或说明…", false, 14.5f)) {
+            DestroyWindow(searchPaletteHwnd);
+            searchPaletteHwnd = nullptr;
+            return false;
+        }
+        settingsSearch.setChromelessStyle(true);
         SendMessageW(settingsSearch.editHwnd(), EM_SETLIMITTEXT, 120, 0);
         SetWindowSubclass(settingsSearch.editHwnd(), &Impl::searchEditProc, 2,
                           reinterpret_cast<DWORD_PTR>(this));
         return true;
+    }
+
+    void openSearchPalette() {
+        if (!hwnd || !IsWindow(hwnd))
+            return;
+        stopSearchLocateHighlight();
+        if (sliderEditOpen)
+            commitSliderEditor();
+        if (searchPaletteOpen && searchPaletteHwnd && IsWindowVisible(searchPaletteHwnd)) {
+            SetActiveWindow(searchPaletteHwnd);
+            settingsSearch.focus();
+            SendMessageW(settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
+            return;
+        }
+        if (!ensureSearchPaletteWindow())
+            return;
+        ensureSearchScrimWindow();
+
+        const bool wasClosing =
+            !searchPaletteOpen && searchPaletteAnimating && searchPaletteProgress > 0.01f;
+        if (hwnd)
+            KillTimer(hwnd, kSearchPaletteAnimTimer);
+        searchPaletteAnimating = false;
+        setWindowClickThrough(searchPaletteHwnd, false);
+        setWindowClickThrough(searchScrimHwnd, false);
+
+        closingSearchPalette = true;
+        settingsSearch.setText(L"");
+        closingSearchPalette = false;
+        searchQuery.clear();
+        searchResults.clear();
+        selectedSearchResult = -1;
+        searchPaletteScroll = 0.0f;
+        searchPaletteMaxScroll = 0.0f;
+        searchPaletteHoverKind = kSearchPaletteHitNone;
+        searchPaletteHoverRow = -1;
+        searchPalettePressedKind = kSearchPaletteHitNone;
+        searchPalettePressedRow = -1;
+        searchPaletteLastMovePt = {-1, -1};
+
+        BOOL clientAnimations = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
+        const float startProgress =
+            clientAnimations ? (wasClosing ? searchPaletteProgress : 0.0f) : 1.0f;
+        searchPaletteProgress = startProgress;
+        searchPaletteAnimFrom = startProgress;
+        searchPaletteAnimTarget = 1.0f;
+        searchPaletteOpen = true;
+
+        layoutSearchPalette();
+        SetLayeredWindowAttributes(searchPaletteHwnd, 0, searchPaletteAlphaByte(), LWA_ALPHA);
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
+            ShowWindow(searchScrimHwnd, SW_SHOWNOACTIVATE);
+        ShowWindow(searchPaletteHwnd, SW_SHOW);
+        SetWindowPos(searchPaletteHwnd, HWND_TOP, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
+            SetWindowPos(searchScrimHwnd, searchPaletteHwnd, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        searchPaletteSurface.invalidate();
+        UpdateWindow(searchPaletteHwnd);
+        SetActiveWindow(searchPaletteHwnd);
+        settingsSearch.focus();
+        if (clientAnimations && startProgress < 0.999f) {
+            searchPaletteAnimating = true;
+            searchPaletteAnimStartMs = GetTickCount64();
+            searchPaletteAnimDurationMs =
+                std::max(40.0f, kSearchPaletteOpenDurationMs * (1.0f - startProgress));
+            SetTimer(hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
+        }
+        surface.invalidate();
+    }
+
+    void closeSearchPalette(bool restoreOwnerFocus, bool immediate = false) {
+        if (immediate) {
+            if (!searchPaletteOpen && !searchPaletteAnimating)
+                return;
+            searchPaletteOpen = false;
+            searchPaletteHoverKind = kSearchPaletteHitNone;
+            searchPaletteHoverRow = -1;
+            searchPalettePressedKind = kSearchPaletteHitNone;
+            searchPalettePressedRow = -1;
+            if (searchPaletteHwnd && GetCapture() == searchPaletteHwnd)
+                ReleaseCapture();
+            finalizeSearchPaletteClosed();
+            if (restoreOwnerFocus && hwnd && IsWindow(hwnd)) {
+                const bool keepFocusVisible = focusVisible;
+                SetActiveWindow(hwnd);
+                SetFocus(hwnd);
+                focusVisible = keepFocusVisible;
+            }
+            if (hwnd && IsWindow(hwnd))
+                surface.invalidate();
+            return;
+        }
+        if (!searchPaletteOpen || closingSearchPalette)
+            return;
+        closingSearchPalette = true;
+        searchPaletteOpen = false;
+        searchPaletteHoverKind = kSearchPaletteHitNone;
+        searchPaletteHoverRow = -1;
+        searchPalettePressedKind = kSearchPaletteHitNone;
+        searchPalettePressedRow = -1;
+        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+            if (GetCapture() == searchPaletteHwnd)
+                ReleaseCapture();
+        }
+        setWindowClickThrough(searchPaletteHwnd, true);
+        setWindowClickThrough(searchScrimHwnd, true);
+        BOOL clientAnimations = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
+        closingSearchPalette = false;
+        if (restoreOwnerFocus && hwnd && IsWindow(hwnd)) {
+            const bool keepFocusVisible = focusVisible;
+            SetActiveWindow(hwnd);
+            SetFocus(hwnd);
+            focusVisible = keepFocusVisible;
+        }
+        if (!clientAnimations || searchPaletteProgress <= 0.02f || !hwnd) {
+            finalizeSearchPaletteClosed();
+        } else {
+            searchPaletteAnimating = true;
+            searchPaletteAnimFrom = searchPaletteProgress;
+            searchPaletteAnimTarget = 0.0f;
+            searchPaletteAnimStartMs = GetTickCount64();
+            searchPaletteAnimDurationMs =
+                std::max(36.0f, kSearchPaletteCloseDurationMs * searchPaletteProgress);
+            SetTimer(hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
+        }
+        if (hwnd && IsWindow(hwnd))
+            surface.invalidate();
     }
 
     void createSliderEditor() {
@@ -1898,10 +2937,8 @@ struct SettingsDialog::Impl {
         const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
-        if (settingsSearch.hwnd())
-            settingsSearch.move(static_cast<int>(12.0f * s), static_cast<int>(12.0f * s),
-                                static_cast<int>(kNavW * s), static_cast<int>(32.0f * s));
-        navRect = D2D1::RectF(12.0f, 56.0f, 12.0f + kNavW, std::max(56.0f, h - 12.0f));
+        searchTriggerRect = D2D1::RectF(16.0f, 14.0f, 12.0f + kNavW - 4.0f, 48.0f);
+        navRect = D2D1::RectF(12.0f, 58.0f, 12.0f + kNavW, std::max(58.0f, h - 12.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * kNavItemH,
                                           navRect.right, navRect.top + (i + 1) * kNavItemH);
@@ -1947,8 +2984,6 @@ struct SettingsDialog::Impl {
         if (!rows[activePage].empty())
             contentEnd -= rows[activePage].back().gapAfter;
         contentHeight = std::max(0.0f, contentEnd - contentTop);
-        if (searching())
-            contentHeight = std::max(72.0f, static_cast<float>(searchResults.size()) * kSearchResultPitch);
         const float viewportHeight =
             std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
         contentMaxScroll = std::max(0.0f, contentHeight - viewportHeight);
@@ -2215,6 +3250,8 @@ struct SettingsDialog::Impl {
             y += rowH + row.gapAfter;
         }
         layoutSliderEditor();
+        if (searchPaletteOpen || searchPaletteAnimating)
+            layoutSearchPalette();
     }
 
     void stopNavIndicator() {
@@ -2258,9 +3295,7 @@ struct SettingsDialog::Impl {
     }
 
     void showPage(int page) {
-        if (searching())
-            settingsSearch.setText(L"");
-        searchLocatedId = 0;
+        stopSearchLocateHighlight();
         if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
         stopContentScroll();
@@ -2293,6 +3328,53 @@ struct SettingsDialog::Impl {
     void drawNav(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
         // 导航融入窗口底色，右侧设置卡片承担主要的表面层级。
+        const bool triggerHovered = hoverId == kIdSettingsSearch;
+        const bool triggerPressed = pressedId == kIdSettingsSearch;
+        const bool triggerActive = triggerPressed || searchPaletteOpen;
+        const D2D1_COLOR_F triggerFill =
+            triggerActive
+                ? p.listSelected
+                : (triggerHovered
+                       ? p.listHover
+                       : D2D1::ColorF(p.listHover.r, p.listHover.g, p.listHover.b,
+                                      p.listHover.a * 0.85f));
+        painter.fillRoundRect(triggerFill, searchTriggerRect, 6.0f);
+        if (focusedId == kIdSettingsSearch && focusVisible) {
+            painter.strokeRoundRect(p.accent, searchTriggerRect, 1.5f, 6.0f);
+        } else {
+            painter.strokeRoundRect(
+                triggerHovered || searchPaletteOpen ? p.controlStroke : p.cardStroke,
+                searchTriggerRect, 1.0f, 6.0f);
+        }
+        const float triggerCenterY =
+            (searchTriggerRect.top + searchTriggerRect.bottom) * 0.5f;
+        const D2D1_RECT_F searchIconRect = D2D1::RectF(
+            navRect.left + kNavIconLeft, triggerCenterY - kNavIconSize * 0.5f,
+            navRect.left + kNavIconLeft + kNavIconSize, triggerCenterY + kNavIconSize * 0.5f);
+        if (auto* triggerIconBrush = painter.brush(
+                triggerHovered || searchPaletteOpen ? p.accent : p.textSecondary)) {
+            settings_icon::draw(painter.target(), settings_icon::Kind::Search, searchIconRect,
+                                triggerIconBrush, 1.3f);
+        }
+        const D2D1_RECT_F shortcutBadgeRect = D2D1::RectF(
+            searchTriggerRect.right - 48.0f, triggerCenterY - 9.5f,
+            searchTriggerRect.right - 7.0f, triggerCenterY + 9.5f);
+        painter.fillRoundRect(p.listHover, shortcutBadgeRect, 4.0f);
+        painter.strokeRoundRect(p.cardStroke, shortcutBadgeRect, 1.0f, 4.0f);
+        painter.drawText(L"Ctrl+F", painter.textFormat(10.5f, 500, true, true),
+                         shortcutBadgeRect, p.textSecondary);
+        painter.drawText(
+            L"搜索设置", painter.textFormat(13.5f, 400, false, true),
+            D2D1::RectF(navRect.left + kNavIconLeft + kNavIconSize + kNavIconTextGap,
+                        searchTriggerRect.top, shortcutBadgeRect.left - 6.0f,
+                        searchTriggerRect.bottom),
+            triggerHovered || searchPaletteOpen ? p.text : p.textSecondary);
+        if (auto* navSeparatorBrush = painter.brush(p.separator)) {
+            painter.target()->DrawLine(
+                D2D1::Point2F(navRect.left + 12.0f, 53.0f),
+                D2D1::Point2F(navRect.right - 12.0f, 53.0f), navSeparatorBrush, 1.0f);
+        }
+
         if (focusedId == kIdNav && focusVisible) {
             painter.strokeRoundRect(
                 p.accent,
@@ -3859,7 +4941,7 @@ struct SettingsDialog::Impl {
             drawScrollBar(painter);
             return;
         }
-        if (!navOnly && !contentOnly && !contentScrollAnimating && !searching())
+        if (!navOnly && !contentOnly && !contentScrollAnimating)
             updateHintHeights(painter);
         const auto& p = fluent::palette();
         if (!contentOnly)
@@ -3867,15 +4949,13 @@ struct SettingsDialog::Impl {
         if (navOnly)
             return;
         if (!contentOnly) {
-            if (const auto icon = searching() ? settings_icon::Kind::Search : iconForPage(activePage);
+            if (const auto icon = iconForPage(activePage);
                 icon != settings_icon::Kind::None) {
                 if (auto* iconBrush = painter.brush(p.accent))
                     settings_icon::draw(painter.target(), icon, pageTitleIconRects[activePage],
                                         iconBrush, 1.35f);
             }
-            const auto title = searching() ? L"搜索设置（" + std::to_wstring(searchResults.size()) + L"）"
-                                          : pageTitles[activePage];
-            painter.drawText(title, painter.textFormat(20.0f, 600),
+            painter.drawText(pageTitles[activePage], painter.textFormat(20.0f, 600),
                              pageTitleRects[activePage], p.text);
         }
 
@@ -3885,42 +4965,32 @@ struct SettingsDialog::Impl {
 
     void paintContent(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
-        if (searching()) {
-            if (searchResults.empty())
-                painter.drawText(L"未找到匹配的设置，请尝试其他关键词。",
-                    painter.textFormat(14.0f),
-                    D2D1::RectF(contentViewportRect.left + 16.0f, contentViewportRect.top,
-                                contentViewportRect.right - 16.0f, contentViewportRect.top + 64.0f),
-                    p.textSecondary);
-            for (int index = 0; index < static_cast<int>(searchResults.size()); ++index) {
-                const auto& result = searchResults[index];
-                const auto* row = findRow(result.id);
-                if (!row)
-                    continue;
-                const float top = contentViewportRect.top + index * kSearchResultPitch - contentPaintScroll;
-                const auto rect = D2D1::RectF(contentViewportRect.left, top,
-                                              contentViewportRect.right, top + kSearchResultPitch - 8.0f);
-                const bool selected = index == selectedSearchResult;
-                const bool hovered = hoverId == kIdSearchResult && hoverOption == index;
-                painter.fillRoundRect(hovered ? p.controlHover : p.cardFill, rect,
-                                      fluent::metrics::cardRadius);
-                painter.strokeRoundRect(selected ? p.accent : p.cardStroke, rect, 1.0f,
-                                        fluent::metrics::cardRadius);
-                if (auto* brush = painter.brush(p.accent))
-                    settings_icon::draw(painter.target(), iconForRow(result.id),
-                        D2D1::RectF(rect.left + 16.0f, top + 16.0f, rect.left + 32.0f, top + 32.0f),
-                        brush, 1.2f);
-                painter.drawTrimmedText(row->text, painter.textFormat(14.0f, 500),
-                    D2D1::RectF(rect.left + 44.0f, top + 10.0f, rect.right - 16.0f, top + 36.0f), p.text);
-                painter.drawTrimmedText(result.path, painter.textFormat(12.0f),
-                    D2D1::RectF(rect.left + 44.0f, top + 36.0f, rect.right - 16.0f, top + 62.0f),
-                    p.textSecondary);
-            }
-            return;
-        }
         drawSettingGroups(painter);
-        if (const auto* located = findRow(searchLocatedId); located && searchLocatedId != 0)
-            painter.strokeRoundRect(p.accent, located->cardRect, 1.5f, fluent::metrics::cardRadius);
+        const float locatedAlpha = searchLocatedAlpha();
+        if (const auto* located = findRow(searchLocatedId);
+            located && searchLocatedId != 0 && locatedAlpha > 0.004f) {
+            const bool dark = fluent::isDarkMode();
+            const D2D1_RECT_F highlightRect = D2D1::RectF(
+                located->cardRect.left + 4.0f, located->cardRect.top + 3.0f,
+                located->cardRect.right - 4.0f, located->cardRect.bottom - 3.0f);
+            painter.fillRoundRect(
+                D2D1::ColorF(p.accent.r, p.accent.g, p.accent.b,
+                             (dark ? 0.14f : 0.085f) * locatedAlpha),
+                highlightRect, 6.0f);
+            painter.strokeRoundRect(
+                D2D1::ColorF(p.accent.r, p.accent.g, p.accent.b,
+                             (dark ? 0.28f : 0.18f) * locatedAlpha),
+                highlightRect, 1.0f, 6.0f);
+            const float indicatorCenterY =
+                located->iconRect.bottom > located->iconRect.top
+                    ? (located->iconRect.top + located->iconRect.bottom) * 0.5f
+                    : (located->cardRect.top + located->cardRect.bottom) * 0.5f;
+            painter.fillRoundRect(
+                D2D1::ColorF(p.accent.r, p.accent.g, p.accent.b, locatedAlpha),
+                D2D1::RectF(located->cardRect.left + 7.5f, indicatorCenterY - 9.0f,
+                            located->cardRect.left + 10.5f, indicatorCenterY + 9.0f),
+                1.5f);
+        }
         for (auto& row : rows[activePage]) {
             if (row.kind == ControlKind::Header) {
                 painter.drawText(row.text, painter.textFormat(13.0f, 600), row.labelRect,
@@ -3929,7 +4999,16 @@ struct SettingsDialog::Impl {
             }
             const auto icon = iconForRow(row.id);
             if (icon != settings_icon::Kind::None) {
-                if (auto* iconBrush = painter.brush(row.enabled ? p.textSecondary : p.disabled))
+                D2D1_COLOR_F iconColor = row.enabled ? p.textSecondary : p.disabled;
+                if (row.enabled && row.id == searchLocatedId && locatedAlpha > 0.004f) {
+                    const float inverseAlpha = 1.0f - locatedAlpha;
+                    iconColor = D2D1::ColorF(
+                        iconColor.r * inverseAlpha + p.accent.r * locatedAlpha,
+                        iconColor.g * inverseAlpha + p.accent.g * locatedAlpha,
+                        iconColor.b * inverseAlpha + p.accent.b * locatedAlpha,
+                        iconColor.a * inverseAlpha + p.accent.a * locatedAlpha);
+                }
+                if (auto* iconBrush = painter.brush(iconColor))
                     settings_icon::draw(painter.target(), icon, row.iconRect, iconBrush);
             }
             painter.drawText(row.text, painter.textFormat(14.0f, 400), row.labelRect,
@@ -4005,6 +5084,8 @@ struct SettingsDialog::Impl {
     int hitTest(float x, float y, int* option = nullptr) const {
         if (option)
             *option = -1;
+        if (contains(searchTriggerRect, x, y))
+            return kIdSettingsSearch;
         for (int i = 0; i < kSettingsPageCount; ++i) {
             if (contains(navItemRects[i], x, y)) {
                 if (option)
@@ -4016,17 +5097,6 @@ struct SettingsDialog::Impl {
             return kIdContentScrollBar;
         if (!contains(contentViewportRect, x, y))
             return 0;
-        if (searching()) {
-            const float offset = y - contentViewportRect.top + contentPaintScroll;
-            const int index = static_cast<int>(offset / kSearchResultPitch);
-            if (index >= 0 && index < static_cast<int>(searchResults.size()) &&
-                offset - index * kSearchResultPitch < kSearchResultPitch - 8.0f) {
-                if (option)
-                    *option = index;
-                return kIdSearchResult;
-            }
-            return 0;
-        }
         for (const auto& row : rows[activePage]) {
             if (!row.enabled)
                 continue;
@@ -4084,7 +5154,7 @@ struct SettingsDialog::Impl {
     }
 
     std::vector<int> focusOrder() const {
-        std::vector<int> order{kIdNav};
+        std::vector<int> order{kIdSettingsSearch, kIdNav};
         for (const auto& row : rows[activePage]) {
             if (row.enabled && row.id == kIdIdleApps) {
                 order.push_back(kIdIdleAppNames);
@@ -4797,6 +5867,19 @@ struct SettingsDialog::Impl {
                 UpdateWindow(hwnd);
                 return 0;
             }
+            if (wp == kSearchLocateTimer) {
+                if (searchLocatedAlpha() <= 0.004f) {
+                    stopSearchLocateHighlight();
+                    renderContentLayer();
+                    return 0;
+                }
+                renderContentLayer();
+                return 0;
+            }
+            if (wp == kSearchPaletteAnimTimer) {
+                advanceSearchPaletteAnimation();
+                return 0;
+            }
             if (wp == kNavIndicatorTimer) {
                 const float scale = surface.dipScale();
                 const RECT dirty{
@@ -4814,17 +5897,26 @@ struct SettingsDialog::Impl {
             searchResults.clear();
             selectedSearchResult = -1;
             searchLocatedId = 0;
+            searchLocatedStartMs = 0;
+            searchLocateFading = false;
+            searchLocateInitialCursorPt = {LONG_MIN, LONG_MIN};
             backdrop = fluent::styleDialogWindow(hwnd, false);
             surface.initialize(hwnd, backdrop, true);
             if (!createContentWindow())
                 return -1;
             createControls();
             createSliderEditor();
-            if (!createSearchEditor())
-                return -1;
             layout();
             return 0;
+        case WM_MOVE:
+            if (searchPaletteOpen || searchPaletteAnimating)
+                layoutSearchPalette();
+            return 0;
         case WM_SIZE:
+            if (wp == SIZE_MINIMIZED) {
+                closeSearchPalette(false, true);
+                return 0;
+            }
             stopContentScroll();
             layout();
             surface.invalidate();
@@ -4854,7 +5946,15 @@ struct SettingsDialog::Impl {
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
             sliderValueEdit.refreshTheme();
-            settingsSearch.refreshTheme();
+            searchScrimLastWidth = 0;
+            searchScrimLastHeight = 0;
+            if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+                styleSearchPaletteWindow();
+                settingsSearch.refreshTheme();
+                if (searchPaletteOpen)
+                    layoutSearchPalette();
+                searchPaletteSurface.invalidate();
+            }
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -4934,6 +6034,15 @@ struct SettingsDialog::Impl {
             }
             int option = -1;
             const int id = hitTest(GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, &option);
+            if (searchLocatedId != 0 && !searchLocateFading) {
+                const POINT currentCursorPt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                if (currentCursorPt.x != searchLocateInitialCursorPt.x ||
+                    currentCursorPt.y != searchLocateInitialCursorPt.y) {
+                    searchLocateInitialCursorPt = {LONG_MIN, LONG_MIN};
+                    if (pointerOverLocatedRow(pointerX, pointerY))
+                        beginSearchLocateFade();
+                }
+            }
             if (id != hoverId || option != hoverOption) {
                 hoverId = id;
                 hoverOption = option;
@@ -4959,6 +6068,8 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_LBUTTONDOWN: {
+            const bool suppressSearchTrigger = suppressNextSearchTriggerPress;
+            suppressNextSearchTriggerPress = false;
             advanceContentScroll();
             stopContentScroll();
             SetFocus(hwnd);
@@ -4968,8 +6079,16 @@ struct SettingsDialog::Impl {
             int option = -1;
             const float pointerX = GET_X_LPARAM(lp) / s;
             const float pointerY = GET_Y_LPARAM(lp) / s;
+            if (pointerOverLocatedRow(pointerX, pointerY))
+                beginSearchLocateFade();
             pressedId = hitTest(pointerX, pointerY, &option);
             pressedOption = option;
+            if (pressedId == kIdSettingsSearch && suppressSearchTrigger) {
+                pressedId = 0;
+                pressedOption = -1;
+                surface.invalidate();
+                return 0;
+            }
             if (pressedId == kIdIdleApps && isIdleAppDragOption(pressedOption)) {
                 const int index = pressedOption - kIdleAppDragOptionBase;
                 if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size()) {
@@ -5036,9 +6155,8 @@ struct SettingsDialog::Impl {
             }
             if (pressed == kIdNav && hit == kIdNav && option >= 0)
                 showPage(option);
-            else if (pressed == kIdSearchResult && hit == kIdSearchResult &&
-                     pressedOptionValue == option)
-                openSearchResult(option);
+            else if (pressed == kIdSettingsSearch && hit == kIdSettingsSearch)
+                openSearchPalette();
             else if (pressed != 0 && pressed == hit) {
                 Row* row = findRow(pressed);
                 if (row && row->enabled) {
@@ -5085,26 +6203,10 @@ struct SettingsDialog::Impl {
             return DLGC_WANTALLKEYS | DLGC_WANTTAB;
         case WM_KEYDOWN:
             if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                settingsSearch.focus();
-                SendMessageW(settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
-                return 0;
-            }
-            if (searching()) {
-                if (wp == VK_ESCAPE)
-                    settingsSearch.setText(L"");
-                else if (wp == VK_RETURN)
-                    openSearchResult(selectedSearchResult);
-                else if (wp == VK_UP || wp == VK_DOWN)
-                    selectSearchResult(wp == VK_DOWN ? 1 : -1);
-                else if (wp == VK_TAB)
-                    settingsSearch.focus();
+                openSearchPalette();
                 return 0;
             }
             if (wp == VK_TAB) {
-                if ((GetKeyState(VK_SHIFT) & 0x8000) && focusedId == kIdNav) {
-                    settingsSearch.focus();
-                    return 0;
-                }
                 focusStep((GetKeyState(VK_SHIFT) & 0x8000) ? -1 : 1);
                 return 0;
             }
@@ -5113,7 +6215,11 @@ struct SettingsDialog::Impl {
                 return 0;
             }
             if (wp == VK_UP || wp == VK_DOWN) {
-                if (focusedId == kIdNav) {
+                if (focusedId == kIdSettingsSearch && wp == VK_DOWN) {
+                    focusedId = kIdNav;
+                    focusVisible = true;
+                    surface.invalidate();
+                } else if (focusedId == kIdNav) {
                     int next = activePage + (wp == VK_DOWN ? 1 : -1);
                     if (next < 0)
                         next = kSettingsPageCount - 1;
@@ -5206,7 +6312,9 @@ struct SettingsDialog::Impl {
                 return 0;
             }
             if (wp == VK_SPACE || wp == VK_RETURN) {
-                if (focusedId == kIdIdleAppNames) {
+                if (focusedId == kIdSettingsSearch) {
+                    openSearchPalette();
+                } else if (focusedId == kIdIdleAppNames) {
                     onCommand(kIdIdleAppNames);
                 } else if (focusedId != kIdNav) {
                     Row* row = findRow(focusedId);
@@ -5229,11 +6337,6 @@ struct SettingsDialog::Impl {
                 colorPicker.reset();
             return 0;
         case WM_COMMAND:
-            if (LOWORD(wp) == kIdSettingsSearch) {
-                if (HIWORD(wp) == EN_CHANGE)
-                    refreshSearch();
-                return 0;
-            }
             if (LOWORD(wp) == kIdSliderValueEdit) {
                 if (HIWORD(wp) == EN_KILLFOCUS)
                     commitSliderEditor();
@@ -5248,6 +6351,20 @@ struct SettingsDialog::Impl {
         case WM_DESTROY:
             stopContentScroll();
             stopNavIndicator();
+            stopSearchLocateHighlight();
+            KillTimer(hwnd, kSearchPaletteAnimTimer);
+            searchPaletteAnimating = false;
+            if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+                DestroyWindow(searchPaletteHwnd);
+                searchPaletteHwnd = nullptr;
+            }
+            if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
+                DestroyWindow(searchScrimHwnd);
+                searchScrimHwnd = nullptr;
+            }
+            searchScrimRenderer.releaseAll();
+            searchPaletteOpen = false;
+            searchPaletteSurface.discard();
             contentRenderer.releaseAll();
             contentLayerReady = false;
             contentWindow = nullptr;
@@ -5262,6 +6379,16 @@ struct SettingsDialog::Impl {
     }
 
     void destroy() {
+        closeSearchPalette(false, true);
+        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
+            DestroyWindow(searchPaletteHwnd);
+            searchPaletteHwnd = nullptr;
+        }
+        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
+            DestroyWindow(searchScrimHwnd);
+            searchScrimHwnd = nullptr;
+        }
+        searchScrimRenderer.releaseAll();
         if (sliderEditOpen)
             cancelSliderEditor();
         if (colorPicker) {

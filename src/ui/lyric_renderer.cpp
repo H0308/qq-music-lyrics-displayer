@@ -247,12 +247,12 @@ bool LyricRenderer::bindDC(int width, int height) {
     return true;
 }
 
-bool LyricRenderer::present(HWND hwnd) {
+bool LyricRenderer::present(HWND hwnd, BYTE alpha) {
     if (!hwnd || !memdc_)
         return false;
     POINT ptSrc{0, 0};
     SIZE sz{bmpW_, bmpH_};
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
     return !!UpdateLayeredWindow(hwnd, nullptr, nullptr, &sz, memdc_, &ptSrc, 0, &blend,
                                  ULW_ALPHA);
 }
