@@ -121,6 +121,7 @@ target_link_libraries(QQMusicLyric PRIVATE
     d2d1
     d3d11
     dxgi
+    dxguid
     dcomp
     dwrite
     gdiplus

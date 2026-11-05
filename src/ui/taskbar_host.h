@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/spectrum_effects.h"
+
 #include "lyric_window.h"
 
 #include <array>
@@ -32,6 +34,8 @@ enum class SpectrumStyle {
     Default,
     Bars,
     DreamyWave,
+    Segmented,
+    BottomBand,
 };
 
 // 任务栏歌词背景：无 / 封面模糊 / 纯色（跟随任务栏深浅色）；
@@ -208,6 +212,7 @@ public:
     void setSpectrumColor(COLORREF color, bool customized, bool followAlbum);
     void setSpectrumAlbumColor(COLORREF color, bool available);
     void setSpectrumGradient(bool on);
+    void setSpectrumEffects(uint32_t effects);
     void setSpectrumBackground(bool on);
     void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);

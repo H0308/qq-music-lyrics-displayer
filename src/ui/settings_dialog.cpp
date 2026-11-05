@@ -76,6 +76,7 @@ constexpr int kIdSpectrumStyle = 419;
 constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdSpectrumBackground = 428;
 constexpr int kIdSpectrumGradient = 429;
+constexpr int kIdSpectrumEffectFirst = 486;
 constexpr int kIdSpectrumColorMode = 450;
 constexpr int kIdSpectrumColor = 452;
 constexpr int kIdProgressBackground = 438;
@@ -171,10 +172,11 @@ constexpr float kModeGridNoteGap = 12.0f;
 constexpr float kModeGridMinH = 196.0f;
 constexpr float kSpectrumStyleCardH = 96.0f;
 constexpr float kSpectrumStyleCardGap = 8.0f;
-constexpr float kSpectrumStyleRowH = 148.0f;
+constexpr float kSpectrumStyleRowH = 252.0f;
 constexpr float kSpectrumBackgroundArtworkMaxW = 144.0f;
 constexpr float kSpectrumBackgroundArtworkMinW = 96.0f;
 constexpr float kSpectrumBackgroundArtworkH = 34.0f;
+constexpr float kSpectrumEffectArtworkH = 44.0f;
 constexpr float kSpectrumBackgroundArtworkGap = 12.0f;
 constexpr float kCoverEffectCardH = 72.0f;
 constexpr float kCoverEffectCardGap = 8.0f;
@@ -399,6 +401,10 @@ settings_icon::Kind iconForRow(int id) {
     case kIdSpectrum:
     case kIdSpectrumStyle:
         return settings_icon::Kind::Spectrum;
+    case kIdSpectrumEffectFirst:
+    case kIdSpectrumEffectFirst + 1:
+    case kIdSpectrumEffectFirst + 2:
+    case kIdSpectrumEffectFirst + 3:
     case kIdSpectrumGradient:
         return settings_icon::Kind::Gradient;
     case kIdSpectrumBackground:
@@ -1641,18 +1647,28 @@ struct SettingsDialog::Impl {
             L"只在上面选择“自定义颜色”时生效。",
             colorText(state.spectrumColor).c_str(), kRowTallH);
         spectrumColor.enabled = state.spectrumOn && state.spectrumCustomColor && spectrumEnabled;
-        addHeader(kSpectrumPage, L"样式与效果");
-        addRadio(kSpectrumPage, kIdSpectrumStyle, L"频谱样式", nullptr,
-                 {L"默认", L"柱状图", L"梦幻波浪"}, vertical ? 0 : state.spectrumStyle,
+        addHeader(kSpectrumPage, L"频谱样式");
+        addRadio(kSpectrumPage, kIdSpectrumStyle, L"选择样式", nullptr,
+                 {L"默认", L"柱状图", L"梦幻波浪", L"分段电平", L"底缘频谱带"},
+                 vertical ? 0 : state.spectrumStyle,
                  state.spectrumOn && spectrumEnabled,
                  kSpectrumStyleRowH);
+        addHeader(kSpectrumPage, L"频谱特效");
+        const wchar_t* effectNames[kSpectrumEffectCount] = {
+            L"柔光辉晕", L"衰减残影", L"峰值散粒", L"流动光泽"};
+        for (int i = 0; i < kSpectrumEffectCount; ++i) {
+            Row& effect = addToggle(kSpectrumPage, kIdSpectrumEffectFirst + i,
+                effectNames[i], (state.spectrumEffects & spectrumEffectBit(kSpectrumEffects[i])) != 0);
+            effect.enabled = state.spectrumOn && spectrumEnabled;
+        }
         Row& spectrumGradient =
             addToggle(kSpectrumPage, kIdSpectrumGradient, L"频谱渐变色",
                       spectrumEnabled ? state.spectrumGradient : false);
         spectrumGradient.enabled = state.spectrumOn && spectrumEnabled;
         Row& spectrumBackground =
-            addToggle(kSpectrumPage, kIdSpectrumBackground, L"背景波浪",
-                      spectrumEnabled ? state.spectrumBackground : false);
+            addRow(kSpectrumPage, kIdSpectrumBackground, ControlKind::Toggle, L"背景波浪",
+                   L"仅在选择“梦幻波浪”样式时可开启。", 40.0f, kRowTallH);
+        spectrumBackground.checked = spectrumEnabled ? state.spectrumBackground : false;
         spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 &&
                                      spectrumEnabled;
         addSlider(kSpectrumPage, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
@@ -2855,6 +2871,10 @@ struct SettingsDialog::Impl {
                                  kHintTextSize);
     }
 
+    static bool isSpectrumEffectRow(int id) {
+        return id >= kIdSpectrumEffectFirst && id < kIdSpectrumEffectFirst + kSpectrumEffectCount;
+    }
+
     static bool isSegmentedChoice(const Row& row) {
         return row.kind == ControlKind::Radio && row.id != kIdCoverEffect &&
                row.id != kIdSpectrumStyle && row.id != kIdHoverControlStyle &&
@@ -3196,11 +3216,13 @@ struct SettingsDialog::Impl {
 
                 const float gridTop = titleTop + row.titleHeight + kModeGridTopGap;
                 row.controlRect = D2D1::RectF(
-                    innerX, gridTop, innerRight, gridTop + kSpectrumStyleCardH);
+                    innerX, gridTop, innerRight,
+                    gridTop + kSpectrumStyleCardH * 2.0f + kSpectrumStyleCardGap);
                 y += rowH + row.gapAfter;
                 continue;
             }
-            if (row.id == kIdSpectrumBackground) {
+            if (row.id == kIdSpectrumBackground || row.id == kIdSpectrumGradient ||
+                isSpectrumEffectRow(row.id)) {
                 const float controlX = innerRight - row.controlW;
                 const float controlH = 24.0f;
                 const float availableW = std::max(0.0f, controlX - innerX);
@@ -3211,13 +3233,21 @@ struct SettingsDialog::Impl {
                 const float artworkLeft = std::max(innerX, artworkRight - artworkW);
                 const float labelRight = std::max(labelX + 20.0f,
                                                   artworkLeft - kSpectrumBackgroundArtworkGap);
-                const float titleTop = y + (rowH - row.titleHeight) * 0.5f;
+                const float titleTop = row.showHint ? y + kTitleTopPadding
+                                                    : y + (rowH - row.titleHeight) * 0.5f;
                 placeIcon(titleTop);
                 row.labelRect = D2D1::RectF(labelX, titleTop, labelRight,
                                             titleTop + row.titleHeight);
-                const float artworkTop = y + (rowH - kSpectrumBackgroundArtworkH) * 0.5f;
+                if (row.showHint) {
+                    row.hintRect = D2D1::RectF(labelX,
+                        titleTop + row.titleHeight + kTitleHintGap, labelRight,
+                        y + rowH - kHintBottomPadding);
+                }
+                const float artworkH = isSpectrumEffectRow(row.id) || row.id == kIdSpectrumGradient
+                                           ? kSpectrumEffectArtworkH : kSpectrumBackgroundArtworkH;
+                const float artworkTop = y + (rowH - artworkH) * 0.5f;
                 row.artworkRect = D2D1::RectF(artworkLeft, artworkTop, artworkRight,
-                                              artworkTop + kSpectrumBackgroundArtworkH);
+                                              artworkTop + artworkH);
                 const float controlY = y + (rowH - controlH) * 0.5f;
                 row.controlRect = D2D1::RectF(controlX, controlY,
                                               controlX + row.controlW, controlY + controlH);
@@ -3669,6 +3699,23 @@ struct SettingsDialog::Impl {
         if (width <= 0.0f || height <= 0.0f)
             return;
 
+        if (style == 4) {
+            drawLine(withOpacity(p.text, 0.65f),
+                     D2D1::Point2F(left + 5.0f, top + height * 0.3f),
+                     D2D1::Point2F(right - 5.0f, top + height * 0.3f), 1.3f);
+            drawLine(withOpacity(p.textSecondary, 0.45f),
+                     D2D1::Point2F(left + 5.0f, top + height * 0.56f),
+                     D2D1::Point2F(left + width * 0.65f, top + height * 0.56f), 1.0f);
+            for (int i = 0; i < 24; ++i) {
+                const float x = left + i * width / 24;
+                const float barH = 1.0f + height * 0.18f *
+                    (0.5f + 0.5f * std::sin(i * 0.73f));
+                painter.fillRoundRect(tone(withOpacity(p.accent, 0.8f)),
+                    D2D1::RectF(x, bottom - barH, x + width / 40, bottom), 0.4f);
+            }
+            return;
+        }
+
         if (style == 2) {
             // 梦幻波浪：三层半透明波面向同一底线收束，避免画成几条装饰线。
             if (!painter.target())
@@ -3753,6 +3800,25 @@ struct SettingsDialog::Impl {
         if (barW <= 0.0f)
             return;
 
+        if (style == 3) {
+            constexpr int cells = 7;
+            const float step = height / (cells + 1);
+            for (int i = 0; i < kBars; ++i) {
+                const int lit = static_cast<int>(std::ceil(kLevels[i] * cells));
+                const float x = left + i * (barW + gap);
+                for (int cell = 0; cell < cells; ++cell) {
+                    const float y = bottom - cell * step;
+                    painter.fillRoundRect(tone(withOpacity(p.accent,
+                        cell < lit ? 0.85f : 0.10f)),
+                        D2D1::RectF(x, y - step * 0.6f, x + barW, y), 0.2f);
+                }
+                const float peakY = bottom - std::min(cells - 1, lit) * step;
+                drawLine(p.accent, D2D1::Point2F(x, peakY),
+                         D2D1::Point2F(x + barW, peakY), 1.0f);
+            }
+            return;
+        }
+
         if (style == 1) {
             // 柱状图：柱底统一贴近底线，电平只向上增长。
             const float baseY = bottom - 2.0f;
@@ -3778,6 +3844,121 @@ struct SettingsDialog::Impl {
                                              centerY + barH * 0.5f),
                 barW * 0.5f);
         }
+    }
+
+    void drawSpectrumEffectArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                   const D2D1_RECT_F& bounds, SpectrumEffect effect, bool enabled,
+                                   bool gradient = false) {
+        auto* rt = painter.target();
+        if (!rt || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+            return;
+        const auto& p = fluent::palette();
+        const auto tone = [enabled](D2D1_COLOR_F color, float opacity = 1.0f) {
+            color.a *= opacity * (enabled ? 1.0f : 0.42f);
+            return color;
+        };
+        const auto panel = D2D1::RectF(bounds.left + 1.0f, bounds.top + 1.0f,
+                                      bounds.right - 1.0f, bounds.bottom - 1.0f);
+        painter.fillRoundRect(tone(p.controlFill), panel, 7.0f);
+        painter.strokeRoundRect(tone(p.cardStroke), panel, 1.0f, 7.0f);
+        rt->PushAxisAlignedClip(panel, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const float left = panel.left + 8.0f;
+        const float right = panel.right - 8.0f;
+        const float baseY = panel.bottom - 6.0f;
+        const float height = panel.bottom - panel.top;
+        constexpr int count = 12;
+        constexpr float levels[count] = {
+            0.26f, 0.42f, 0.60f, 0.82f, 0.44f, 0.70f,
+            0.52f, 0.90f, 0.66f, 0.86f, 0.48f, 0.30f};
+        const float unit = std::max(0.0f, right - left) / (count * 5.0f + (count - 1) * 3.0f);
+        const float barW = unit * 5.0f;
+        const auto light = D2D1::ColorF(p.accent.r + (1.0f - p.accent.r) * 0.72f,
+                                       p.accent.g + (1.0f - p.accent.g) * 0.72f,
+                                       p.accent.b + (1.0f - p.accent.b) * 0.72f, p.accent.a);
+        ID2D1LinearGradientBrush* sheen = nullptr;
+        ID2D1LinearGradientBrush* barGradient = nullptr;
+        if (gradient) {
+            const auto dark = D2D1::ColorF(p.accent.r * kSpectrumBarGradientDarkFactor,
+                p.accent.g * kSpectrumBarGradientDarkFactor,
+                p.accent.b * kSpectrumBarGradientDarkFactor, p.accent.a);
+            const auto bright = D2D1::ColorF(
+                p.accent.r + (1.0f - p.accent.r) * kSpectrumBarGradientLightMix,
+                p.accent.g + (1.0f - p.accent.g) * kSpectrumBarGradientLightMix,
+                p.accent.b + (1.0f - p.accent.b) * kSpectrumBarGradientLightMix, p.accent.a);
+            const D2D1_GRADIENT_STOP stops[] = {
+                {0.0f, tone(dark)}, {1.0f, tone(bright)}};
+            ID2D1GradientStopCollection* collection = nullptr;
+            if (SUCCEEDED(rt->CreateGradientStopCollection(stops, _countof(stops), &collection))) {
+                rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                    D2D1::Point2F(0, baseY), D2D1::Point2F(0, panel.top)), collection,
+                    &barGradient);
+                collection->Release();
+            }
+        }
+        if (!gradient && effect == SpectrumEffect::Sheen) {
+            const D2D1_GRADIENT_STOP stops[] = {
+                {0.0f, tone(light, 0.0f)}, {0.38f, tone(light, 0.0f)},
+                {0.48f, tone(light, 0.85f)}, {0.58f, tone(light, 0.0f)},
+                {1.0f, tone(light, 0.0f)}};
+            ID2D1GradientStopCollection* collection = nullptr;
+            if (SUCCEEDED(rt->CreateGradientStopCollection(stops, 5, &collection))) {
+                rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                    D2D1::Point2F(left, panel.top), D2D1::Point2F(right, panel.bottom)),
+                    collection, &sheen);
+                collection->Release();
+            }
+        }
+        for (int i = 0; i < count; ++i) {
+            const float x = left + i * unit * 8.0f;
+            const float barH = 3.0f + levels[i] * height * 0.48f;
+            const auto bar = D2D1::RectF(x, baseY - barH, x + barW, baseY);
+            if (!gradient && effect == SpectrumEffect::Glow) {
+                for (int layer = 4; layer >= 1; --layer) {
+                    const float spread = layer * 0.85f;
+                    painter.fillRoundRect(tone(p.accent, 0.035f + (4 - layer) * 0.015f),
+                        D2D1::RectF(bar.left - spread, bar.top - spread,
+                                     bar.right + spread, bar.bottom + spread),
+                        barW * 0.5f + spread);
+                }
+            } else if (effect == SpectrumEffect::Trail) {
+                // 两个较早的峰形从高处向当前柱顶收束，表现回落后的残留轮廓。
+                const float previous = levels[(i + 3) % count];
+                for (int layer = 2; layer >= 1; --layer) {
+                    const float extra = (0.3f + previous * 0.7f) * layer * height * 0.10f;
+                    painter.fillRoundRect(tone(p.accent, layer == 2 ? 0.12f : 0.24f),
+                        D2D1::RectF(bar.left, bar.top - extra, bar.right, bar.bottom),
+                        barW * 0.5f);
+                }
+            }
+            if (barGradient) {
+                const float cx = x + barW * 0.5f;
+                barGradient->SetStartPoint(D2D1::Point2F(cx, bar.bottom));
+                barGradient->SetEndPoint(D2D1::Point2F(cx, bar.top));
+                rt->FillRoundedRectangle(D2D1::RoundedRect(bar, barW * 0.5f, barW * 0.5f),
+                                         barGradient);
+            } else {
+                painter.fillRoundRect(tone(p.accent, 0.84f), bar, barW * 0.5f);
+            }
+            if (effect == SpectrumEffect::Sparks && i % 3 == 1) {
+                const float cx = x + barW * 0.5f;
+                if (auto* brush = painter.brush(tone(p.accent, 0.24f)))
+                    rt->DrawLine(D2D1::Point2F(cx, bar.top - 1.0f),
+                                 D2D1::Point2F(cx - 1.7f, bar.top - 4.0f), brush, 0.7f);
+                if (auto* brush = painter.brush(tone(p.accent, 0.9f)))
+                    rt->FillEllipse(D2D1::Ellipse(
+                        D2D1::Point2F(cx - 2.2f, bar.top - 5.2f), 1.0f, 1.0f), brush);
+                if (auto* brush = painter.brush(tone(p.accent, 0.42f)))
+                    rt->FillEllipse(D2D1::Ellipse(
+                        D2D1::Point2F(cx + 2.0f, bar.top - 8.0f), 0.7f, 0.7f), brush);
+            } else if (sheen) {
+                rt->FillRoundedRectangle(D2D1::RoundedRect(bar, barW * 0.5f, barW * 0.5f), sheen);
+            }
+        }
+        if (sheen)
+            sheen->Release();
+        if (barGradient)
+            barGradient->Release();
+        rt->PopAxisAlignedClip();
     }
 
     void drawSpectrumBackgroundArtwork(fluent::FluentDialogSurface::Painter& painter,
@@ -3933,16 +4114,19 @@ struct SettingsDialog::Impl {
 
         const float gridW = row.controlRect.right - row.controlRect.left;
         row.optionRects.clear();
-        const size_t count = std::min<size_t>(row.options.size(), 3);
+        const size_t count = row.options.size();
         if (count == 0)
             return;
-        const float cardW = (gridW - kSpectrumStyleCardGap * static_cast<float>(count - 1)) /
-                            static_cast<float>(count);
+        const size_t columns = std::min<size_t>(count, 3);
+        const float cardW = (gridW - kSpectrumStyleCardGap * static_cast<float>(columns - 1)) /
+                            static_cast<float>(columns);
         for (size_t i = 0; i < count; ++i) {
-            const float left = row.controlRect.left + static_cast<float>(i) *
+            const float left = row.controlRect.left + static_cast<float>(i % columns) *
                                (cardW + kSpectrumStyleCardGap);
-            const D2D1_RECT_F card = D2D1::RectF(left, row.controlRect.top, left + cardW,
-                                                 row.controlRect.bottom);
+            const float top = row.controlRect.top + static_cast<float>(i / columns) *
+                              (kSpectrumStyleCardH + kSpectrumStyleCardGap);
+            const D2D1_RECT_F card = D2D1::RectF(left, top, left + cardW,
+                                             top + kSpectrumStyleCardH);
             row.optionRects.push_back(card);
 
             const bool selected = static_cast<int>(i) == row.selected;
@@ -5100,6 +5284,12 @@ struct SettingsDialog::Impl {
             }
             if (row.id == kIdSpectrumBackground)
                 drawSpectrumBackgroundArtwork(painter, row.artworkRect, row.enabled);
+            else if (row.id == kIdSpectrumGradient)
+                drawSpectrumEffectArtwork(painter, row.artworkRect, SpectrumEffect::Glow,
+                                           row.enabled, true);
+            else if (isSpectrumEffectRow(row.id))
+                drawSpectrumEffectArtwork(painter, row.artworkRect,
+                    kSpectrumEffects[row.id - kIdSpectrumEffectFirst], row.enabled);
             if (row.kind == ControlKind::Toggle)
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
@@ -5211,7 +5401,8 @@ struct SettingsDialog::Impl {
                 continue;
             }
             bool inControl = contains(row.controlRect, x, y);
-            if (row.id == kIdSpectrumBackground)
+            if (row.id == kIdSpectrumBackground || row.id == kIdSpectrumGradient ||
+                isSpectrumEffectRow(row.id))
                 inControl = inControl || contains(row.artworkRect, x, y);
             if (row.id == kIdIdleQuoteBackground && !row.optionRects.empty())
                 inControl = inControl || contains(row.optionRects.front(), x, y);
@@ -5502,6 +5693,10 @@ struct SettingsDialog::Impl {
             break;
         case kIdSpectrum:
             row->checked = !row->checked;
+            for (int i = 0; i < kSpectrumEffectCount; ++i) {
+                if (auto* effect = findRow(kIdSpectrumEffectFirst + i))
+                    effect->enabled = row->checked;
+            }
             if (auto* colorMode = findRow(kIdSpectrumColorMode))
                 colorMode->enabled = row->checked;
             if (auto* color = findRow(kIdSpectrumColor))
@@ -5546,6 +5741,14 @@ struct SettingsDialog::Impl {
             if (actions.onSpectrumStyle)
                 actions.onSpectrumStyle(row->selected);
             updateProgressBackgroundRowsEnabled();
+            break;
+        case kIdSpectrumEffectFirst:
+        case kIdSpectrumEffectFirst + 1:
+        case kIdSpectrumEffectFirst + 2:
+        case kIdSpectrumEffectFirst + 3:
+            row->checked = !row->checked;
+            if (actions.onSpectrumEffect)
+                actions.onSpectrumEffect(row->id - kIdSpectrumEffectFirst, row->checked);
             break;
         case kIdSpectrumGradient:
             row->checked = !row->checked;
@@ -5849,12 +6052,18 @@ struct SettingsDialog::Impl {
             row->enabled = s.spectrumOn && s.spectrumCustomColor && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumStyle)) {
-            row->selected = vertical ? 0 : std::clamp(s.spectrumStyle, 0, 2);
+            row->selected = vertical ? 0 : std::clamp(s.spectrumStyle, 0, 4);
             row->enabled = s.spectrumOn && !minimal && !vertical;
         }
         if (auto* row = findRow(kIdSpectrumGradient)) {
             row->checked = minimal || vertical ? false : s.spectrumGradient;
             row->enabled = s.spectrumOn && !minimal && !vertical;
+        }
+        for (int i = 0; i < kSpectrumEffectCount; ++i) {
+            if (auto* row = findRow(kIdSpectrumEffectFirst + i)) {
+                row->checked = (s.spectrumEffects & spectrumEffectBit(kSpectrumEffects[i])) != 0;
+                row->enabled = s.spectrumOn && !minimal && !vertical;
+            }
         }
         if (auto* row = findRow(kIdSpectrumBackground)) {
             row->checked = minimal || vertical ? false : s.spectrumBackground;

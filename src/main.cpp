@@ -317,6 +317,8 @@ const wchar_t* fontStyleLabel(LyricFontStyle style) {
 }
 
 SpectrumStyle spectrumStyleFromConfig(const std::string& value) {
+    if (value == "segmented") return SpectrumStyle::Segmented;
+    if (value == "bottom-band") return SpectrumStyle::BottomBand;
     if (value == "bars" || value == "rounded-bars") {
         return SpectrumStyle::Bars;
     }
@@ -334,6 +336,8 @@ const char* spectrumStyleConfigName(SpectrumStyle style) {
     switch (style) {
     case SpectrumStyle::Bars: return "bars";
     case SpectrumStyle::DreamyWave: return "dreamy-wave";
+    case SpectrumStyle::Segmented: return "segmented";
+    case SpectrumStyle::BottomBand: return "bottom-band";
     case SpectrumStyle::Default:
     default: return "default";
     }
@@ -343,6 +347,8 @@ int spectrumStyleIndex(SpectrumStyle style) {
     switch (style) {
     case SpectrumStyle::Bars: return 1;
     case SpectrumStyle::DreamyWave: return 2;
+    case SpectrumStyle::Segmented: return 3;
+    case SpectrumStyle::BottomBand: return 4;
     case SpectrumStyle::Default:
     default: return 0;
     }
@@ -859,6 +865,7 @@ struct App {
     bool spectrumCustomColor_ = false;
     bool spectrumFollowAlbum_ = false;
     bool spectrumGradient_ = false;
+    uint32_t spectrumEffects_ = 0;
     bool spectrumBackground_ = false;
     int spectrumOpacity_ = 40;
     // 播放进度背景：与背景波浪互斥，不透明度默认 25% 保证文字可读
@@ -1236,13 +1243,10 @@ struct App {
     void applySpectrumStyle(int style) {
         spectrumStyle_ = taskbarVertical_
                              ? SpectrumStyle::Default
-                             : style == 1 ? SpectrumStyle::Bars
-                                          : style == 2 ? SpectrumStyle::DreamyWave
-                                                        : SpectrumStyle::Default;
+                             : static_cast<SpectrumStyle>(std::clamp(style, 0, 4));
         forEachHost([&](TaskbarHost* host) { host->setSpectrumStyle(spectrumStyle_); });
-        logSettingInt(L"spectrum-style", spectrumStyle_ == SpectrumStyle::Bars
-                                            ? 1
-                                            : spectrumStyle_ == SpectrumStyle::DreamyWave ? 2 : 0);
+        tryRestoreSpectrumAfterNoSpace();
+        logSettingInt(L"spectrum-style", spectrumStyleIndex(spectrumStyle_));
         saveSettings();
     }
 
@@ -1273,6 +1277,19 @@ struct App {
         spectrumGradient_ = taskbarVertical_ ? false : on;
         forEachHost([&](TaskbarHost* host) { host->setSpectrumGradient(spectrumGradient_); });
         logSettingBool(L"spectrum-gradient", spectrumGradient_);
+        saveSettings();
+    }
+
+    void applySpectrumEffect(int effect, bool on) {
+        if (effect < 0 || effect >= kSpectrumEffectCount)
+            return;
+        const uint32_t bit = spectrumEffectBit(kSpectrumEffects[effect]);
+        if (on)
+            spectrumEffects_ |= bit;
+        else
+            spectrumEffects_ &= ~bit;
+        forEachHost([&](TaskbarHost* host) { host->setSpectrumEffects(spectrumEffects_); });
+        logSettingInt(L"spectrum-effects", static_cast<int>(spectrumEffects_));
         saveSettings();
     }
 
@@ -1608,6 +1625,7 @@ struct App {
             host->setSpectrumColor(spectrumColor_, spectrumCustomColor_, spectrumFollowAlbum_);
             host->setSpectrumAlbumColor(albumColor_, hasAlbumColor_);
             host->setSpectrumGradient(spectrumGradient_);
+            host->setSpectrumEffects(spectrumEffects_);
             host->setSpectrumBackground(minimal || vertical ? false : spectrumBackground_);
             host->setSpectrumOpacity(spectrumOpacity_);
             host->setProgressBackground(minimal ? false : progressBackground_);
@@ -4116,6 +4134,7 @@ void App::loadSettings() {
         if (spectrumCustomColor_)
             spectrumFollowAlbum_ = false;
         spectrumGradient_ = j.value("spectrumGradient", false);
+        spectrumEffects_ = j.value("spectrumEffects", 0u) & kSpectrumEffectsMask;
         spectrumBackground_ = j.value("spectrumBackground",
                                        spectrumStyleValue == "background-wave");
         spectrumOpacity_ = std::clamp(j.value("spectrumOpacity", 40), 0, 100);
@@ -4373,6 +4392,7 @@ void App::saveSettings() {
         j["spectrumCustomColor"] = spectrumCustomColor_;
         j["spectrumFollowAlbum"] = spectrumFollowAlbum_;
         j["spectrumGradient"] = spectrumGradient_;
+        j["spectrumEffects"] = spectrumEffects_;
         j["spectrumBackground"] = spectrumBackground_;
         j["spectrumOpacity"] = spectrumOpacity_;
         j["progressBackground"] = progressBackground_;
@@ -5590,6 +5610,7 @@ SettingsState App::currentSettingsState() const {
     st.spectrumCustomColor = vertical ? false : spectrumCustomColor_;
     st.spectrumFollowAlbum = vertical ? false : spectrumFollowAlbum_;
     st.spectrumGradient = vertical ? false : spectrumGradient_;
+    st.spectrumEffects = spectrumEffects_;
     st.spectrumBackground = vertical ? false : spectrumBackground_;
     st.spectrumOpacity = spectrumOpacity_;
     st.progressBackground = progressBackground_;
@@ -5696,6 +5717,7 @@ SettingsActions App::buildSettingsActions() {
     act.onSpectrumColorMode = [this](int mode) { applySpectrumColorMode(mode); };
     act.onSpectrumColor = [this](COLORREF color) { applySpectrumColor(color); };
     act.onSpectrumGradient = [this](bool on) { applySpectrumGradient(on); };
+    act.onSpectrumEffect = [this](int effect, bool on) { applySpectrumEffect(effect, on); };
     act.onSpectrumBackground = [this](bool on) { applySpectrumBackground(on); };
     act.onSpectrumOpacity = [this](int percent) { applySpectrumOpacity(percent); };
     act.onProgressBackground = [this](bool on) { applyProgressBackground(on); };

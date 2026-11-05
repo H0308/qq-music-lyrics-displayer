@@ -137,8 +137,6 @@ constexpr float kDockResourceRightPadding = 3.0f;
 constexpr float kDockPetSeatW = 42.0f;
 constexpr float kPetLaneMinWidthDip = 44.0f;
 constexpr UINT kResourceSnapshotPollMs = 250;
-constexpr float kSpectrumBarGradientDarkFactor = 0.78f;
-constexpr float kSpectrumBarGradientLightMix = 0.22f;
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylArmParkedAngle = -18.0f;
 constexpr ULONGLONG kVinylArmDurationMs = 240;
@@ -1041,6 +1039,7 @@ struct TaskbarHost::Impl {
     COLORREF spectrumAlbumColor_ = RGB(49, 194, 124);
     bool spectrumAlbumColorAvailable_ = false;
     bool spectrumGradient_ = false;
+    uint32_t spectrumEffects_ = 0;
     bool spectrumBackground_ = false;
     int spectrumOpacityPct_ = 40;
     // 播放进度背景：与背景波浪互斥，颜色取专辑主色（无封面时回退系统强调色）
@@ -1072,6 +1071,27 @@ struct TaskbarHost::Impl {
     ID2D1Bitmap* coverBlurInput_ = nullptr; // 模糊链当前绑定的封面（不持有引用，仅用于比较）
     bool spectrumVisible_ = false;
     std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
+    std::array<float, TaskbarHost::kSpectrumBands> spectrumPeaks_{};
+    std::array<ULONGLONG, TaskbarHost::kSpectrumBands> spectrumPeakHoldUntil_{};
+    ULONGLONG spectrumVisualTickMs_ = 0;
+    ID2D1DeviceContext* spectrumFxContext_ = nullptr;
+    ID2D1Bitmap1* spectrumFxFrame_ = nullptr;
+    std::array<ID2D1Bitmap1*, 4> spectrumFxHistory_{};
+    std::array<ULONGLONG, 4> spectrumFxHistoryMs_{};
+    size_t spectrumFxHistoryNext_ = 0;
+    ULONGLONG spectrumFxCaptureMs_ = 0;
+    ID2D1Effect* spectrumGlowFx_ = nullptr;
+    ID2D1LinearGradientBrush* spectrumSheenBrush_ = nullptr;
+    struct SpectrumSpark {
+        ULONGLONG bornMs = 0;
+        float level = 0.0f;
+        int band = 0;
+        float drift = 0.0f;
+    };
+    std::array<SpectrumSpark, 24> spectrumSparks_{};
+    std::array<float, TaskbarHost::kSpectrumBands> spectrumPreviousLevels_{};
+    std::array<ULONGLONG, TaskbarHost::kSpectrumBands> spectrumLastSparkMs_{};
+    size_t spectrumSparkNext_ = 0;
     ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
     ID2D1EllipseGeometry* vinylCoverClip_ = nullptr;
     ID2D1Layer* coverLayer_ = nullptr;
@@ -2477,7 +2497,7 @@ struct TaskbarHost::Impl {
         const D2D1_COLOR_F spectrumBase = rgb(spectrumBaseColor, 0.60f);
         rt->CreateSolidColorBrush(spectrumBase, &brushSpectrum_);
 
-        // 柱状频谱开启渐变时，沿每根柱子的高度固定分成三段：下深、中间基色、上浅。
+        // 每根柱子由底部深色连续过渡到顶部浅色，不插入分层色带。
         const D2D1_COLOR_F spectrumDark = D2D1::ColorF(
             spectrumBase.r * kSpectrumBarGradientDarkFactor,
             spectrumBase.g * kSpectrumBarGradientDarkFactor,
@@ -2488,12 +2508,8 @@ struct TaskbarHost::Impl {
             spectrumBase.b + (1.0f - spectrumBase.b) * kSpectrumBarGradientLightMix,
             spectrumBase.a);
         const D2D1_GRADIENT_STOP barGradientStops[] = {
-            {0.000f, spectrumDark},
-            {0.333f, spectrumDark},
-            {0.334f, spectrumBase},
-            {0.666f, spectrumBase},
-            {0.667f, spectrumLight},
-            {1.000f, spectrumLight},
+            {0.0f, spectrumDark},
+            {1.0f, spectrumLight},
         };
         ID2D1GradientStopCollection* barGradientStopCollection = nullptr;
         if (SUCCEEDED(rt->CreateGradientStopCollection(
@@ -2717,6 +2733,148 @@ struct TaskbarHost::Impl {
         return spectrumBackground_ && spectrumStyle_ == SpectrumStyle::DreamyWave;
     }
 
+    bool integratedSpectrum() const {
+        return spectrumStyle_ == SpectrumStyle::BottomBand;
+    }
+
+    void resetSpectrumVisuals() {
+        spectrumPeaks_.fill(0.0f);
+        spectrumPeakHoldUntil_.fill(0);
+        spectrumVisualTickMs_ = 0;
+        resetSpectrumEffectHistory();
+    }
+
+    bool spectrumEffectEnabled(SpectrumEffect effect) const {
+        return (spectrumEffects_ & spectrumEffectBit(effect)) != 0;
+    }
+
+    void resetSpectrumEffectHistory() {
+        spectrumFxHistoryMs_.fill(0);
+        spectrumFxHistoryNext_ = 0;
+        spectrumFxCaptureMs_ = 0;
+        spectrumSparks_.fill({});
+        spectrumPreviousLevels_.fill(0.0f);
+        spectrumLastSparkMs_.fill(0);
+        spectrumSparkNext_ = 0;
+    }
+
+    void releaseSpectrumEffectResources() {
+        auto release = [](auto*& resource) {
+            if (resource) {
+                resource->Release();
+                resource = nullptr;
+            }
+        };
+        if (spectrumFxContext_)
+            spectrumFxContext_->SetTarget(nullptr);
+        release(spectrumGlowFx_);
+        release(spectrumSheenBrush_);
+        release(spectrumFxFrame_);
+        for (auto*& bitmap : spectrumFxHistory_)
+            release(bitmap);
+        release(spectrumFxContext_);
+        resetSpectrumEffectHistory();
+    }
+
+    void setSpectrumEffects(uint32_t effects) {
+        effects &= kSpectrumEffectsMask;
+        if (spectrumEffects_ == effects)
+            return;
+        spectrumEffects_ = effects;
+        releaseSpectrumEffectResources();
+        requestFrameAndFlush();
+    }
+
+    bool spectrumEffectsAnimating() const {
+        if (!spectrumVisible_ || !clientAnimations_ || scene_ == DisplayScene::Idle ||
+            isMinimalMode() || isStoppedMode())
+            return false;
+        const ULONGLONG now = frameNowMs_;
+        for (const auto& spark : spectrumSparks_)
+            if (spark.bornMs != 0 && now - spark.bornMs < 420)
+                return true;
+        for (ULONGLONG captured : spectrumFxHistoryMs_)
+            if (captured != 0 && now - captured < 220)
+                return true;
+        if (spectrumEffectEnabled(SpectrumEffect::Sheen) && media.playing) {
+            for (float level : spectrumBands_)
+                if (level > 0.01f)
+                    return true;
+        }
+        return false;
+    }
+
+    void updateSpectrumEffects(ULONGLONG now) {
+        if (!spectrumVisible_ || !clientAnimations_ || scene_ == DisplayScene::Idle ||
+            isMinimalMode() || isStoppedMode()) {
+            resetSpectrumEffectHistory();
+            return;
+        }
+        bool expired = false;
+        for (auto& spark : spectrumSparks_) {
+            if (spark.bornMs != 0 && now - spark.bornMs >= 420) {
+                spark.bornMs = 0;
+                expired = true;
+            }
+        }
+        for (auto& captured : spectrumFxHistoryMs_) {
+            if (captured != 0 && now - captured >= 220) {
+                captured = 0;
+                expired = true;
+            }
+        }
+        for (int band = 0; band < TaskbarHost::kSpectrumBands; ++band) {
+            const float level = spectrumLevel(band);
+            if (spectrumEffectEnabled(SpectrumEffect::Sparks) && media.playing &&
+                level > 0.35f && level - spectrumPreviousLevels_[band] > 0.12f &&
+                now - spectrumLastSparkMs_[band] >= 90) {
+                spectrumLastSparkMs_[band] = now;
+                for (int i = 0; i < 2; ++i) {
+                    spectrumSparks_[spectrumSparkNext_] = {
+                        now, level, band, i == 0 ? -1.0f : 1.0f};
+                    spectrumSparkNext_ = (spectrumSparkNext_ + 1) % spectrumSparks_.size();
+                }
+            }
+            spectrumPreviousLevels_[band] = level;
+        }
+        if (expired || spectrumEffectsAnimating())
+            requestFrame();
+    }
+
+    bool spectrumVisualsAnimating() const {
+        if (!spectrumVisible_ || spectrumStyle_ != SpectrumStyle::Segmented)
+            return false;
+        for (int i = 0; i < TaskbarHost::kSpectrumBands; ++i) {
+            if (spectrumPeaks_[i] > 0.01f)
+                return true;
+        }
+        return false;
+    }
+
+    void updateSpectrumVisuals(ULONGLONG now) {
+        if (!spectrumVisible_ || spectrumStyle_ != SpectrumStyle::Segmented)
+            return;
+        const float dt = spectrumVisualTickMs_ == 0 ? 0.0f
+            : static_cast<float>(now - spectrumVisualTickMs_) / 1000.0f;
+        spectrumVisualTickMs_ = now;
+        bool changed = false;
+        for (int i = 0; i < TaskbarHost::kSpectrumBands; ++i) {
+            const float level = spectrumLevel(i);
+            const float previous = spectrumPeaks_[i];
+            if (!clientAnimations_ || level >= previous) {
+                spectrumPeaks_[i] = level;
+                spectrumPeakHoldUntil_[i] = now + 180;
+            } else if (now > spectrumPeakHoldUntil_[i]) {
+                const float decaySeconds = std::min(dt,
+                    static_cast<float>(now - spectrumPeakHoldUntil_[i]) / 1000.0f);
+                spectrumPeaks_[i] = std::max(level, previous - decaySeconds * 0.9f);
+            }
+            changed = changed || spectrumPeaks_[i] != previous;
+        }
+        if (changed)
+            requestFrame();
+    }
+
     bool backgroundWaveAnimating() const {
         // 波浪的相位独立于播放状态和音频电平，暂停后仍需要连续刷新。
         return clientAnimations_ && spectrumVisible_ && backgroundWaveEnabled() &&
@@ -2726,9 +2884,9 @@ struct TaskbarHost::Impl {
     void setSpectrumStyle(SpectrumStyle style) {
         if (spectrumStyle_ == style)
             return;
-        const bool wasBackground = backgroundWaveEnabled();
         spectrumStyle_ = style;
-        if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
+        resetSpectrumVisuals();
+        if (spectrumVisible_)
             adjustPosition();
         requestFrameAndFlush();
     }
@@ -2740,6 +2898,7 @@ struct TaskbarHost::Impl {
         spectrumColor_ = color;
         spectrumCustomColor_ = customized;
         spectrumFollowAlbum_ = followAlbum && !customized;
+        resetSpectrumEffectHistory();
         createLyricBrushes();
         requestFrameAndFlush();
     }
@@ -2749,8 +2908,10 @@ struct TaskbarHost::Impl {
             return;
         spectrumAlbumColor_ = color;
         spectrumAlbumColorAvailable_ = available;
-        if (spectrumFollowAlbum_ && !spectrumCustomColor_)
+        if (spectrumFollowAlbum_ && !spectrumCustomColor_) {
+            resetSpectrumEffectHistory();
             createLyricBrushes();
+        }
         requestFrameAndFlush();
     }
 
@@ -2758,6 +2919,7 @@ struct TaskbarHost::Impl {
         if (spectrumGradient_ == on)
             return;
         spectrumGradient_ = on;
+        resetSpectrumEffectHistory();
         requestFrameAndFlush();
     }
 
@@ -2766,6 +2928,7 @@ struct TaskbarHost::Impl {
             return;
         const bool wasBackground = backgroundWaveEnabled();
         spectrumBackground_ = on;
+        resetSpectrumEffectHistory();
         if (spectrumVisible_ && wasBackground != backgroundWaveEnabled())
             adjustPosition();
         requestFrameAndFlush();
@@ -2776,6 +2939,7 @@ struct TaskbarHost::Impl {
         if (spectrumOpacityPct_ == next)
             return;
         spectrumOpacityPct_ = next;
+        resetSpectrumEffectHistory();
         if (backgroundWaveEnabled())
             requestFrameAndFlush();
     }
@@ -3021,6 +3185,7 @@ struct TaskbarHost::Impl {
             return;
         }
         spectrumVisible_ = on;
+        resetSpectrumVisuals();
         if (!on)
             spectrumBands_.fill(0.0f);
         // 先改窗口宽度再渲染：若在 render 内经 Layout 失效改大小，
@@ -3148,12 +3313,16 @@ struct TaskbarHost::Impl {
             return;
 
         const bool trackChanged = frame.trackKey != trackKey_;
+        if (trackChanged)
+            resetSpectrumVisuals();
         const bool lyricsChanged = !sameLyrics(lines, frame.lyrics);
         const bool lineChanged = frame.currentLine != currentLine;
         const bool statusChanged = frame.statusText != statusText;
         const bool statusOneShotChanged = frame.statusTextOneShot != statusTextOneShot_;
         const DisplayScene previousScene = scene_;
         const bool sceneChanged = frame.scene != scene_;
+        if (sceneChanged)
+            resetSpectrumEffectHistory();
         const bool sceneWidthChanged = sceneWidthPolicyDiffers(scene_, frame.scene);
         const bool idleChanged = frame.idle.sentence != idle.sentence ||
                                  frame.idle.source != idle.source ||
@@ -3434,7 +3603,8 @@ struct TaskbarHost::Impl {
     }
 
     float spectrumContentWForScene(DisplayScene scene, float hostW) const {
-        if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled())
+        if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled() ||
+            integratedSpectrum())
             return 0.0f;
         return horizontalImmersiveMode() ? immersiveSpectrumZoneW(hostW) : spectrumClusterW();
     }
@@ -3457,7 +3627,8 @@ struct TaskbarHost::Impl {
                 extra += dockResourceZoneW(hostW) + kDockResourceZoneGap;
             return extra;
         }
-        if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled())
+        if (scene == DisplayScene::Idle || !spectrumVisible_ || backgroundWaveEnabled() ||
+            integratedSpectrum())
             return embeddedResourceExtra();
         return spectrumContentWForScene(scene, hostW) + kTextPadding + embeddedResourceExtra();
     }
@@ -3615,6 +3786,277 @@ struct TaskbarHost::Impl {
             fillSpectrumBar(rt, bar);
             x += kSpectrumBarW + kSpectrumGap;
         }
+    }
+
+    void drawSegmentedSpectrum(float x, float h, int visualCount) {
+        auto* rt = drawTarget();
+        if (!rt || !brushSpectrum_)
+            return;
+        const D2D1_COLOR_F original = brushSpectrum_->GetColor();
+        const float baseY = h - kSpectrumBottomPadding;
+        constexpr float cellH = 2.0f;
+        constexpr float step = 3.5f;
+        const int cells = std::max(1, static_cast<int>(h * 0.78f / step));
+        for (int i = 0; i < visualCount; ++i) {
+            const float level = spectrumVisualLevel(i, visualCount);
+            const int lit = static_cast<int>(std::ceil(level * cells));
+            const float position = visualCount <= 1 ? 0.0f
+                : static_cast<float>(i) / (visualCount - 1) * (TaskbarHost::kSpectrumBands - 1);
+            const int band = std::min(TaskbarHost::kSpectrumBands - 2,
+                                      static_cast<int>(position));
+            const float peak = spectrumPeaks_[band] +
+                (spectrumPeaks_[band + 1] - spectrumPeaks_[band]) * (position - band);
+            for (int cell = 0; cell < cells; ++cell) {
+                brushSpectrum_->SetColor(original);
+                brushSpectrum_->SetColor(spectrumColorForLevel(
+                    static_cast<float>(cell + 1) / cells, cell < lit ? 0.88f : 0.09f));
+                const float y = baseY - cell * step;
+                rt->FillRectangle(D2D1::RectF(x, y - cellH, x + kSpectrumBarW, y),
+                                  brushSpectrum_);
+            }
+            if (peak > 0.01f) {
+                brushSpectrum_->SetColor(original);
+                brushSpectrum_->SetColor(spectrumColorForLevel(peak));
+                const int peakCell = std::clamp(static_cast<int>(std::ceil(peak * cells)) - 1,
+                                                0, cells - 1);
+                const float y = baseY - peakCell * step;
+                rt->FillRectangle(D2D1::RectF(x, y - 1.0f, x + kSpectrumBarW, y),
+                                  brushSpectrum_);
+            }
+            x += kSpectrumBarW + kSpectrumGap;
+        }
+        brushSpectrum_->SetColor(original);
+    }
+
+    bool ensureSpectrumEffectResources(float width, float height) {
+        auto* rt = drawTarget();
+        if (!rt)
+            return false;
+        float dpiX = 96.0f;
+        float dpiY = 96.0f;
+        rt->GetDpi(&dpiX, &dpiY);
+        const auto size = D2D1::SizeU(
+            std::max(1u, static_cast<UINT>(std::ceil(width * dpiX / 96.0f))),
+            std::max(1u, static_cast<UINT>(std::ceil(height * dpiY / 96.0f))));
+        if (spectrumFxFrame_) {
+            const auto previous = spectrumFxFrame_->GetPixelSize();
+            float previousDpiX = 0.0f;
+            float previousDpiY = 0.0f;
+            spectrumFxFrame_->GetDpi(&previousDpiX, &previousDpiY);
+            if (previous.width == size.width && previous.height == size.height &&
+                previousDpiX == dpiX && previousDpiY == dpiY)
+                return true;
+            releaseSpectrumEffectResources();
+        }
+        ID2D1Device* device = nullptr;
+        rt->GetDevice(&device);
+        if (!device)
+            return false;
+        HRESULT hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                                                  &spectrumFxContext_);
+        device->Release();
+        if (FAILED(hr))
+            return false;
+        spectrumFxContext_->SetDpi(dpiX, dpiY);
+        const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            dpiX, dpiY);
+        hr = spectrumFxContext_->CreateBitmap(size, nullptr, 0, &properties, &spectrumFxFrame_);
+        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Trail)) {
+            for (auto*& bitmap : spectrumFxHistory_) {
+                hr = spectrumFxContext_->CreateBitmap(size, nullptr, 0, &properties, &bitmap);
+                if (FAILED(hr))
+                    break;
+            }
+        }
+        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Glow))
+            hr = rt->CreateEffect(CLSID_D2D1GaussianBlur, &spectrumGlowFx_);
+        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Sheen)) {
+            const D2D1_GRADIENT_STOP stops[] = {
+                {0.0f, D2D1::ColorF(1, 1, 1, 0)},
+                {0.5f, D2D1::ColorF(1, 1, 1, 0.5f)},
+                {1.0f, D2D1::ColorF(1, 1, 1, 0)}};
+            ID2D1GradientStopCollection* collection = nullptr;
+            hr = rt->CreateGradientStopCollection(stops, 3, &collection);
+            if (SUCCEEDED(hr)) {
+                hr = rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                    D2D1::Point2F(0, 0), D2D1::Point2F(1, 0)), collection,
+                    &spectrumSheenBrush_);
+                collection->Release();
+            }
+        }
+        if (FAILED(hr)) {
+            runtime_log::writef(L"[spectrum] effect-resource-failed hr=0x%08X", hr);
+            releaseSpectrumEffectResources();
+            return false;
+        }
+        return true;
+    }
+
+    float spectrumSparkOriginY(const SpectrumSpark& spark, float h) const {
+        const float level = spark.level;
+        switch (spectrumStyle_) {
+        case SpectrumStyle::Default:
+            return h * 0.5f - (4.0f + level * (h * 0.74f - 4.0f)) * 0.5f;
+        case SpectrumStyle::Segmented: {
+            const int cells = std::max(1, static_cast<int>(h * 0.78f / 3.5f));
+            return h - kSpectrumBottomPadding -
+                std::max(0.0f, std::ceil(level * cells) - 1.0f) * 3.5f - 2.0f;
+        }
+        case SpectrumStyle::BottomBand:
+            return h - 1.1f - level * std::min(5.0f, h * 0.12f);
+        case SpectrumStyle::DreamyWave: {
+            const float t = static_cast<float>(spark.band) / (TaskbarHost::kSpectrumBands - 1);
+            const float phase = static_cast<float>(spark.bornMs % 60000ULL) / 1000.0f;
+            const float tide = std::clamp(0.5f + 0.5f *
+                std::sin(6.2831853f * t * 1.24f + phase * 0.46f - 0.55f) +
+                0.08f * std::sin(6.2831853f * t * 0.60f + phase * 0.24f + 0.7f),
+                0.0f, 1.0f);
+            const float profile = std::clamp(0.06f + level * 0.62f + tide * 0.34f, 0.0f, 1.0f);
+            return h - kSpectrumBottomPadding -
+                (2.0f + profile * (std::max(3.0f, h * 0.76f) - 2.0f));
+        }
+        case SpectrumStyle::Bars:
+        default:
+            return h - kSpectrumBottomPadding - (3.0f + level * (h * 0.82f - 3.0f));
+        }
+    }
+
+    template <typename DrawShape>
+    void drawSpectrumWithEffects(float x, float h, float width, DrawShape drawShape) {
+        auto* rt = drawTarget();
+        if (!rt || width <= 0.0f || h <= 0.0f)
+            return;
+        if (spectrumEffects_ == 0 || isMinimalMode() || isStoppedMode()) {
+            drawShape();
+            return;
+        }
+        if (!ensureSpectrumEffectResources(width, h)) {
+            drawShape();
+            return;
+        }
+        // 独立上下文不改动外层歌词和转场的 target、变换与裁剪栈。
+        spectrumFxContext_->SetTarget(spectrumFxFrame_);
+        spectrumFxContext_->SetTransform(D2D1::Matrix3x2F::Translation(-x, 0.0f));
+        spectrumFxContext_->BeginDraw();
+        spectrumFxContext_->Clear(D2D1::ColorF(0, 0, 0, 0));
+        auto* previousTarget = drawTargetOverride_;
+        drawTargetOverride_ = spectrumFxContext_;
+        drawShape();
+        drawTargetOverride_ = previousTarget;
+        const HRESULT hr = spectrumFxContext_->EndDraw();
+        spectrumFxContext_->SetTarget(nullptr);
+        if (FAILED(hr)) {
+            releaseSpectrumEffectResources();
+            requestFrame();
+            return;
+        }
+        const auto destination = D2D1::RectF(x, 0.0f, x + width, h);
+        const auto source = D2D1::RectF(0.0f, 0.0f, width, h);
+        const auto offset = D2D1::Point2F(x, 0.0f);
+        const ULONGLONG now = frameNowMs_ != 0 ? frameNowMs_ : monotonicNowMs();
+        const bool audioActive = std::any_of(spectrumBands_.begin(), spectrumBands_.end(),
+                                            [](float level) { return level > 0.01f; });
+        rt->PushAxisAlignedClip(destination, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (clientAnimations_ && spectrumEffectEnabled(SpectrumEffect::Trail)) {
+            for (size_t n = 0; n < spectrumFxHistory_.size(); ++n) {
+                const size_t i = (spectrumFxHistoryNext_ + n) % spectrumFxHistory_.size();
+                const ULONGLONG captured = spectrumFxHistoryMs_[i];
+                if (captured == 0 || now - captured >= 220)
+                    continue;
+                const float age = static_cast<float>(now - captured) / 220.0f;
+                rt->DrawBitmap(spectrumFxHistory_[i], &destination, (1.0f - age) * 0.18f,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
+            }
+        }
+        if (spectrumGlowFx_) {
+            float energy = 0.0f;
+            for (float level : spectrumBands_)
+                energy = std::max(energy, level);
+            spectrumGlowFx_->SetInput(0, spectrumFxFrame_);
+            spectrumGlowFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
+                                      1.6f + energy * 1.6f);
+            rt->DrawImage(spectrumGlowFx_, offset, source);
+        }
+        rt->DrawBitmap(spectrumFxFrame_, &destination, 1.0f,
+                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
+        if (spectrumSheenBrush_ && clientAnimations_ && media.playing && audioActive) {
+            const float phase = static_cast<float>(now % 2600ULL) / 2600.0f;
+            const float bandW = std::clamp(width * 0.18f, 12.0f, 60.0f);
+            const float center = x - bandW + phase * (width + 2.0f * bandW);
+            spectrumSheenBrush_->SetStartPoint(D2D1::Point2F(center - bandW * 0.5f, 0));
+            spectrumSheenBrush_->SetEndPoint(D2D1::Point2F(center + bandW * 0.5f, 0));
+            const auto antialias = rt->GetAntialiasMode();
+            rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
+            rt->FillOpacityMask(spectrumFxFrame_, spectrumSheenBrush_, &destination, &source);
+            rt->SetAntialiasMode(antialias);
+        }
+        if (clientAnimations_ && spectrumEffectEnabled(SpectrumEffect::Sparks) && brushSpectrum_) {
+            const auto original = brushSpectrum_->GetColor();
+            const float opacity = backgroundWaveEnabled() ? spectrumOpacityPct_ / 100.0f : 1.0f;
+            for (const auto& spark : spectrumSparks_) {
+                if (spark.bornMs == 0 || now - spark.bornMs >= 420)
+                    continue;
+                const float age = static_cast<float>(now - spark.bornMs) / 420.0f;
+                const float t = static_cast<float>(spark.band) / (TaskbarHost::kSpectrumBands - 1);
+                float originX = t * width;
+                if (spectrumStyle_ == SpectrumStyle::BottomBand) {
+                    const int count = std::max(1, static_cast<int>(width / 4.0f));
+                    const float pitch = width / count;
+                    originX = std::round(t * (count - 1)) * pitch + pitch * 0.3f;
+                } else if (spectrumStyle_ != SpectrumStyle::DreamyWave) {
+                    const int count = std::max(1, static_cast<int>(std::round(
+                        (width + kSpectrumGap) / (kSpectrumBarW + kSpectrumGap))));
+                    originX = kSpectrumBarW * 0.5f + std::round(t * (count - 1)) *
+                              (kSpectrumBarW + kSpectrumGap);
+                }
+                const float px = x + originX + spark.drift * age * 5.0f;
+                const float py = spectrumSparkOriginY(spark, h) - age * 8.0f + age * age * 3.0f;
+                brushSpectrum_->SetColor(original);
+                brushSpectrum_->SetColor(spectrumColorForLevel(spark.level,
+                    (1.0f - age) * 0.85f * opacity));
+                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(px, py),
+                    0.9f - age * 0.45f, 0.9f - age * 0.45f), brushSpectrum_);
+            }
+            brushSpectrum_->SetColor(original);
+        }
+        rt->PopAxisAlignedClip();
+        // 每 45ms 采一张，最多四张；静音后停止写入，让残影自然衰减。
+        if (clientAnimations_ && media.playing &&
+            spectrumEffectEnabled(SpectrumEffect::Trail) && audioActive &&
+            (spectrumFxCaptureMs_ == 0 || now - spectrumFxCaptureMs_ >= 45)) {
+            auto* bitmap = spectrumFxHistory_[spectrumFxHistoryNext_];
+            if (SUCCEEDED(bitmap->CopyFromBitmap(nullptr, spectrumFxFrame_, nullptr))) {
+                spectrumFxHistoryMs_[spectrumFxHistoryNext_] = now;
+                spectrumFxHistoryNext_ = (spectrumFxHistoryNext_ + 1) % spectrumFxHistory_.size();
+                spectrumFxCaptureMs_ = now;
+            }
+        }
+    }
+
+    void drawBottomSpectrum(float x, float h, float width) {
+        drawSpectrumWithEffects(x, h, width, [&] { drawBottomSpectrumShape(x, h, width); });
+    }
+
+    void drawBottomSpectrumShape(float x, float h, float width) {
+        auto* rt = drawTarget();
+        if (!rt || !brushSpectrum_ || width <= 0.0f)
+            return;
+        const D2D1_COLOR_F original = brushSpectrum_->GetColor();
+        const int count = std::max(1, static_cast<int>(width / 4.0f));
+        const float pitch = width / count;
+        const float maxH = std::min(5.0f, h * 0.12f);
+        const float baseY = h - 0.5f;
+        for (int i = 0; i < count; ++i) {
+            const float level = spectrumVisualLevel(i, count);
+            const float t = (i + 0.5f) / count;
+            const float edge = std::min(1.0f, std::min(t, 1.0f - t) * 16.0f);
+            brushSpectrum_->SetColor(original);
+            brushSpectrum_->SetColor(spectrumColorForLevel(level, edge * 0.78f));
+            rt->FillRectangle(D2D1::RectF(x + i * pitch, baseY - 0.6f - level * maxH,
+                                         x + i * pitch + pitch * 0.6f, baseY), brushSpectrum_);
+        }
+        brushSpectrum_->SetColor(original);
     }
 
     // 填充波浪：以 baseY 为底边，width 可覆盖独立频谱区或歌曲内容背景区。
@@ -3791,16 +4233,24 @@ struct TaskbarHost::Impl {
     }
 
     void drawBackgroundWaveSpectrum(float x, float h, float width) {
-        drawWaveSpectrum(x, h, width,
-                         static_cast<float>(spectrumOpacityPct_) / 100.0f);
+        drawSpectrumWithEffects(x, h, width, [&] {
+            drawWaveSpectrum(x, h, width, static_cast<float>(spectrumOpacityPct_) / 100.0f);
+        });
     }
 
     // 默认保留原有的中线对称频谱效果；柱状图样式从窗口下边缘向上增长。
     // 沉浸模式中，柱状频谱在右侧宽频谱区内居中，梦幻波浪则铺满整个区域。
     void drawSpectrum(float x, float h, float width) {
+        drawSpectrumWithEffects(x, h, width, [&] { drawSpectrumShape(x, h, width); });
+    }
+
+    void drawSpectrumShape(float x, float h, float width) {
         if (width <= 0.0f)
             return;
         switch (spectrumStyle_) {
+        case SpectrumStyle::BottomBand:
+            break; // 与歌曲内容整合的样式不在右侧重复绘制。
+        case SpectrumStyle::Segmented:
         case SpectrumStyle::Bars:
         {
             const int visualCount = horizontalImmersiveMode()
@@ -3808,7 +4258,10 @@ struct TaskbarHost::Impl {
                                         : TaskbarHost::kSpectrumBands;
             const float clusterW = spectrumVisualClusterW(visualCount);
             const float clusterX = x + std::max(0.0f, (width - clusterW) * 0.5f);
-            drawBarSpectrum(clusterX, h, visualCount);
+            if (spectrumStyle_ == SpectrumStyle::Segmented)
+                drawSegmentedSpectrum(clusterX, h, visualCount);
+            else
+                drawBarSpectrum(clusterX, h, visualCount);
             break;
         }
         case SpectrumStyle::DreamyWave:
@@ -4074,7 +4527,7 @@ struct TaskbarHost::Impl {
         const float spectrumW = std::max(0.0f, spectrumRight - zoneX);
         if (showSpectrum && spectrumW > 0.0f) {
             if (spectrumStyle_ == SpectrumStyle::DreamyWave) {
-                drawDreamyWaveSpectrum(zoneX, h, spectrumW);
+                drawSpectrum(zoneX, h, spectrumW);
             } else {
                 // 先按原始频谱区确定柱数；Dock 贴右对齐，普通沉浸模式仍按原逻辑居中。
                 const int availableCount = std::max(
@@ -4090,10 +4543,14 @@ struct TaskbarHost::Impl {
                                            ? std::max(zoneX, spectrumRight - clusterW)
                                            : std::max(zoneX, std::min(naturalX,
                                                                        spectrumRight - clusterW));
-                if (spectrumStyle_ == SpectrumStyle::Bars)
-                    drawBarSpectrum(clusterX, h, visualCount);
-                else
-                    drawDefaultSpectrum(clusterX, h, visualCount);
+                drawSpectrumWithEffects(clusterX, h, clusterW, [&] {
+                    if (spectrumStyle_ == SpectrumStyle::Segmented)
+                        drawSegmentedSpectrum(clusterX, h, visualCount);
+                    else if (spectrumStyle_ == SpectrumStyle::Bars)
+                        drawBarSpectrum(clusterX, h, visualCount);
+                    else
+                        drawDefaultSpectrum(clusterX, h, visualCount);
+                });
             }
         }
         if (dock)
@@ -4763,6 +5220,7 @@ struct TaskbarHost::Impl {
     }
 
     void releaseDeviceResources() {
+        releaseSpectrumEffectResources();
         cancelSceneWindowResize();
         auto r = [](auto*& p) {
             if (p) {
@@ -8894,7 +9352,10 @@ struct TaskbarHost::Impl {
         const bool backgroundSpectrum =
             !idleScene && spectrumVisible_ && backgroundWaveEnabled();
         // 独立频谱占用歌词区右端；背景波浪不改变窗口宽度和歌词布局。
-        bool showSpectrum = !idleScene && spectrumVisible_ && !showControls && !backgroundSpectrum;
+        bool showSpectrum = !idleScene && spectrumVisible_ && !showControls &&
+                            !backgroundSpectrum && !integratedSpectrum();
+        const bool bottomSpectrum = !idleScene && spectrumVisible_ && !showControls &&
+                                    spectrumStyle_ == SpectrumStyle::BottomBand;
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
         // 模糊效果链涉及资源创建（CreateEffect），与画刷一样放在 BeginDraw 之前
@@ -8935,6 +9396,8 @@ struct TaskbarHost::Impl {
             const float waveW = std::max(1.0f, waveRight - waveX);
             drawBackgroundWaveSpectrum(waveX, h, waveW);
         }
+        if (bottomSpectrum)
+            drawBottomSpectrum(lyricAreaX, h, lyricAreaW);
 
         // 沉浸模式的操作组、频谱和时钟都属于固定遮罩层内容，必须在歌曲内容
         // 过渡变换之前绘制；切歌时只让封面、歌曲信息和歌词内容移动。
@@ -9164,6 +9627,8 @@ struct TaskbarHost::Impl {
                     const float waveW = std::max(1.0f, waveRight - waveX);
                     drawBackgroundWaveSpectrum(waveX, h, waveW);
                 }
+                if (bottomSpectrum)
+                    drawBottomSpectrum(lyricAreaX, h, lyricAreaW);
                 if (isExpandedView()) {
                     drawImmersiveControls();
                     if (!idleScene)
@@ -9529,6 +9994,8 @@ struct TaskbarHost::Impl {
             return true;
         if (taskbarDynamicBackgroundAnimating() || backgroundWaveAnimating())
             return true;
+        if (spectrumVisualsAnimating() || spectrumEffectsAnimating())
+            return true;
         if (media.playing && scrollAnimating_ && !songLayerActive)
             return true;
         if (media.playing && clientAnimations_ && karaokeLine() && !songLayerActive)
@@ -9690,6 +10157,8 @@ struct TaskbarHost::Impl {
         if (media.playing && progressBackgroundActive())
             return true;
         // 频谱柱等静音衰减到阈值以下才算静止
+        if (spectrumVisualsAnimating() || spectrumEffectsAnimating())
+            return true;
         if (spectrumVisible_) {
             for (float v : spectrumBands_)
                 if (v > 0.01f)
@@ -9732,6 +10201,8 @@ struct TaskbarHost::Impl {
             timerMs_ = wantMs;
         }
         frameNowMs_ = monotonicNowMs();
+        updateSpectrumVisuals(frameNowMs_);
+        updateSpectrumEffects(frameNowMs_);
         dockPet_.tick(frameNowMs_);
         updateVinylRotation();
         if (refreshResourceSnapshot())
@@ -10477,6 +10948,10 @@ void TaskbarHost::setSpectrumAlbumColor(COLORREF color, bool available) {
 
 void TaskbarHost::setSpectrumGradient(bool on) {
     impl_->setSpectrumGradient(on);
+}
+
+void TaskbarHost::setSpectrumEffects(uint32_t effects) {
+    impl_->setSpectrumEffects(effects);
 }
 
 void TaskbarHost::setSpectrumBackground(bool on) {
