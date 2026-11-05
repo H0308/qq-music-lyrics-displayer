@@ -1191,8 +1191,12 @@ struct TaskbarHost::Impl {
         renderState_.setSongTransitionPending(pending);
     }
 
+    bool usesSongContentTransition() const {
+        return isExpandedView() || (!isVerticalTaskbar() && embeddedResourceVisible());
+    }
+
     bool immersiveSongContentLayerActive() const {
-        return isExpandedView() && songContentTransition_ &&
+        return songContentTransition_ &&
                songContentTransition_->compositorLayer;
     }
 
@@ -3575,7 +3579,7 @@ struct TaskbarHost::Impl {
     }
 
     void drawDefaultSpectrum(float x, float h, int visualCount) {
-        auto* rt = renderer.renderTarget();
+        auto* rt = drawTarget();
         if (!rt || !brushSpectrum_)
             return;
         const int n = std::max(1, visualCount);
@@ -3595,7 +3599,7 @@ struct TaskbarHost::Impl {
 
     // 新增样式：普通柱状图，柱底贴近歌词窗口下边缘，电平只向上增长。
     void drawBarSpectrum(float x, float h, int visualCount) {
-        auto* rt = renderer.renderTarget();
+        auto* rt = drawTarget();
         if (!rt || !brushSpectrum_)
             return;
         const int n = std::max(1, visualCount);
@@ -3615,7 +3619,7 @@ struct TaskbarHost::Impl {
 
     // 填充波浪：以 baseY 为底边，width 可覆盖独立频谱区或歌曲内容背景区。
     void drawWaveSpectrum(float x, float h, float width, float opacityScale) {
-        auto* rt = renderer.renderTarget();
+        auto* rt = drawTarget();
         if (!rt || !brushSpectrum_)
             return;
 
@@ -6986,7 +6990,7 @@ struct TaskbarHost::Impl {
     }
 
     void beginImmersiveSongContentTransition() {
-        if (!isExpandedView() || isMinimalMode() ||
+        if (!usesSongContentTransition() || isMinimalMode() ||
             !isSongTransitionPending() || songContentTransition_)
             return;
         songContentTransition_ = SongContentTransition{monotonicNowMs()};
@@ -7015,7 +7019,7 @@ struct TaskbarHost::Impl {
     // D2D 回退路径：沉浸模式的遮罩、控件和频谱保持静止，只把封面、歌曲信息
     // 和歌词作为一组内容在 D2D 坐标系内滑入。
     bool applyImmersiveSongContentTransform(ID2D1DeviceContext* rt) {
-        if (!rt || !isExpandedView() || !songContentTransition_ ||
+        if (!rt || !usesSongContentTransition() || !songContentTransition_ ||
             songContentTransition_->compositorLayer)
             return false;
 
@@ -8617,14 +8621,12 @@ struct TaskbarHost::Impl {
         }
         if (SUCCEEDED(hr)) {
             const bool startSongTransition = isSongTransitionPending();
-            const bool immersiveLayerActive =
-                isExpandedView() && songContentTransition_ &&
-                songContentTransition_->compositorLayer;
+            const bool immersiveLayerActive = immersiveSongContentLayerActive();
             if (startSongTransition) {
                 // 展开视图的根视觉只承载沉浸模式显隐过渡，切歌不能把它复位。
                 if (!isExpandedView())
                     renderer.resetRoot();
-                if (!isMinimalMode() && !isExpandedView()) {
+                if (!isMinimalMode() && !usesSongContentTransition()) {
                     const float travel = kSongTransitionTravelDip * scale();
                     const bool vertical = isVerticalTaskbar();
                     const float fromX = vertical ? 0.0f : travel;
@@ -8904,7 +8906,7 @@ struct TaskbarHost::Impl {
         bool compositorSongContent =
             songContentTransition_ && songContentTransition_->compositorLayer;
         bool compositorSongContentPending = false;
-        if (isExpandedView() && songContentTransition_ &&
+        if (usesSongContentTransition() && songContentTransition_ &&
             !songContentTransition_->compositorLayer) {
             // 歌词行转场也使用 lyricLayers_。整首歌切换时先交给歌曲内容层，
             // 保证封面、歌曲信息和歌词成为同一张快照，避免两套合成层互相抢占。
@@ -8948,6 +8950,11 @@ struct TaskbarHost::Impl {
                                    h, resourceWidth);
         }
 
+        const bool clipSongContent = embeddedResourceVisible();
+        const float songContentRight = w - embeddedResourceExtra();
+        if (clipSongContent)
+            rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, songContentRight, h),
+                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         bool contentTransitionActive = false;
         if (!compositorSongContent) {
             contentTransitionActive = applyImmersiveSongContentTransform(rt);
@@ -9117,6 +9124,8 @@ struct TaskbarHost::Impl {
 
         if (contentTransitionActive)
             rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        if (clipSongContent)
+            rt->PopAxisAlignedClip();
         // Idle 内容先绘制每日一言，再把宠物放到内容层上方，保证两者同时可见。
         if (isExpandedView() && idleScene)
             drawDockPet(w, h, leftW);
@@ -9133,7 +9142,8 @@ struct TaskbarHost::Impl {
             if (layerReady) {
                 const float travelPx = kSongTransitionTravelDip * scale();
                 layerReady = renderer.animateLyricLayerX(
-                    0, travelPx, 0.0f, 0.0f, 1.0f, 1.0f, kSongTransitionMs / 1000.0f);
+                    0, travelPx, 0.0f, 0.0f, 1.0f, 1.0f, kSongTransitionMs / 1000.0f,
+                    clipSongContent ? songContentRight * scale() : 0.0f);
             }
             if (layerReady && songContentTransition_) {
                 songContentTransition_->compositorLayer = true;
@@ -9166,6 +9176,9 @@ struct TaskbarHost::Impl {
                     drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding,
                                            h, resourceWidth);
                 }
+                if (clipSongContent)
+                    rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, songContentRight, h),
+                                            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 contentTransitionActive = applyImmersiveSongContentTransform(rt);
                 // 失败回退时仍需绘制歌曲内容；这里复用与快照相同的绘制入口，
                 // 避免回退路径和正常路径再次产生视觉差异。
@@ -9174,6 +9187,8 @@ struct TaskbarHost::Impl {
                                           lyricEffectsEnabled, showControls, showSpectrum);
                 if (contentTransitionActive)
                     rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                if (clipSongContent)
+                    rt->PopAxisAlignedClip();
                 if (isExpandedView() && idleScene)
                     drawDockPet(w, h, leftW);
                 frameHr = rt->EndDraw();

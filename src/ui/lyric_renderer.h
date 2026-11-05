@@ -109,7 +109,8 @@ public:
     // 页面横向滑动转场（媒体卡片 ⇄ 空闲面板）：内容已画入层，只让合成器
     // 按刷新率做 X 位移和透明度过渡；层定位在 (0, baseY)。
     bool animateLyricLayerX(int index, float fromX, float toX, float baseY,
-                            float fromOpacity, float toOpacity, float durationSec);
+                            float fromOpacity, float toOpacity, float durationSec,
+                            float fixedClipRight = 0.0f);
     // 页面横向滑动转场的固定背景层。背景与内容层一起提交，避免转场期间
     // 重绘/提交根交换链。创建/复用时透明度为 0，由调用方在动画提交阶段
     // 调 showLyricTransitionBackdrop() 转可见。

@@ -927,7 +927,7 @@ void DCompRenderer::clearLyricTransitionLayers() {
 
 bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float baseY,
                                        float fromOpacity, float toOpacity,
-                                       float durationSec) {
+                                       float durationSec, float fixedClipRight) {
     if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
         !lyricLayers_[index].opacity || durationSec <= 0.0f)
         return false;
@@ -935,6 +935,7 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
     const double duration = static_cast<double>(durationSec);
     IDCompositionAnimation* offsetAnim = nullptr;
     IDCompositionAnimation* opacityAnim = nullptr;
+    IDCompositionAnimation* clipRightAnim = nullptr;
     HRESULT hr = dcomp_->CreateAnimation(&offsetAnim);
     if (SUCCEEDED(hr))
         hr = dcomp_->CreateAnimation(&opacityAnim);
@@ -955,10 +956,23 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
     if (SUCCEEDED(hr))
         hr = lyricLayers_[index].opacity->SetOpacity(opacityAnim);
 
+    if (SUCCEEDED(hr) && fixedClipRight > 0.0f) {
+        hr = dcomp_->CreateAnimation(&clipRightAnim);
+        if (SUCCEEDED(hr))
+            hr = addSmoothStep(clipRightAnim, 0.0, duration,
+                               fixedClipRight - fromX, fixedClipRight - toX) ? S_OK : E_FAIL;
+        if (SUCCEEDED(hr))
+            hr = clipRightAnim->End(duration, fixedClipRight - toX);
+        if (SUCCEEDED(hr))
+            hr = lyricLayers_[index].clip->SetRight(clipRightAnim);
+    }
+
     if (offsetAnim)
         offsetAnim->Release();
     if (opacityAnim)
         opacityAnim->Release();
+    if (clipRightAnim)
+        clipRightAnim->Release();
     return SUCCEEDED(hr);
 }
 
