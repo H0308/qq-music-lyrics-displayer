@@ -865,17 +865,52 @@ struct ManualSearchDialog::Impl {
         if (!layout)
             return;
 
-        const D2D1_POINT_2F origin = D2D1::Point2F(rect.left, rect.top);
-        painter.drawTextLayout(layout, origin, p.textSecondary);
+        const float pixelScale = surface.dipScale();
+        const D2D1_POINT_2F origin = D2D1::Point2F(
+            std::round(rect.left * pixelScale) / pixelScale,
+            std::round(rect.top * pixelScale) / pixelScale);
+        std::vector<D2D1_RECT_F> playedClips;
+        std::vector<D2D1_RECT_F> unplayedClips{
+            D2D1::RectF(rect.left, rect.top, rect.right, rect.bottom)};
         for (const auto& clip : karaokeHighlightClips(layout, line)) {
-            painter.target()->PushAxisAlignedClip(
-                D2D1::RectF(rect.left + clip.left, rect.top + clip.top,
-                            std::min(rect.right, rect.left + clip.right),
-                            std::min(rect.bottom, rect.top + clip.bottom)),
-                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            painter.drawTextLayout(layout, origin, fluent::toD2D(RGB(49, 194, 124)));
-            painter.target()->PopAxisAlignedClip();
+            const D2D1_RECT_F played = D2D1::RectF(
+                std::max(rect.left, origin.x + clip.left),
+                std::max(rect.top, origin.y + clip.top),
+                std::min(rect.right, origin.x + clip.right),
+                std::min(rect.bottom, origin.y + clip.bottom));
+            if (played.right <= played.left || played.bottom <= played.top)
+                continue;
+            playedClips.push_back(played);
+            std::vector<D2D1_RECT_F> remaining;
+            for (const auto& area : unplayedClips) {
+                const D2D1_RECT_F overlap = D2D1::RectF(
+                    std::max(area.left, played.left), std::max(area.top, played.top),
+                    std::min(area.right, played.right), std::min(area.bottom, played.bottom));
+                if (overlap.right <= overlap.left || overlap.bottom <= overlap.top) {
+                    remaining.push_back(area);
+                    continue;
+                }
+                if (area.top < overlap.top)
+                    remaining.push_back(D2D1::RectF(area.left, area.top, area.right, overlap.top));
+                if (overlap.bottom < area.bottom)
+                    remaining.push_back(D2D1::RectF(area.left, overlap.bottom, area.right, area.bottom));
+                if (area.left < overlap.left)
+                    remaining.push_back(D2D1::RectF(area.left, overlap.top, overlap.left, overlap.bottom));
+                if (overlap.right < area.right)
+                    remaining.push_back(D2D1::RectF(overlap.right, overlap.top, area.right, overlap.bottom));
+            }
+            unplayedClips = std::move(remaining);
         }
+        auto drawClippedText = [&](const D2D1_RECT_F& clip, D2D1_COLOR_F color) {
+            painter.target()->PushAxisAlignedClip(
+                clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            painter.drawTextLayout(layout, origin, color);
+            painter.target()->PopAxisAlignedClip();
+        };
+        for (const auto& clip : unplayedClips)
+            drawClippedText(clip, p.textSecondary);
+        for (const auto& clip : playedClips)
+            drawClippedText(clip, fluent::toD2D(RGB(49, 194, 124)));
     }
 
     void drawPreviewLyricLine(fluent::FluentDialogSurface::Painter& painter,
