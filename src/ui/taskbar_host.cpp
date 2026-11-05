@@ -128,12 +128,11 @@ constexpr float kImmersiveClockZoneRatio = 0.045f;
 constexpr float kImmersiveClockZoneMinW = 80.0f;
 constexpr float kImmersiveClockZoneMaxW = 96.0f;
 constexpr float kImmersiveSpectrumClockGap = 10.0f;
-constexpr float kDockResourceZoneRatio = 0.12f;
-constexpr float kDockResourceZoneMinW = 172.0f;
-constexpr float kDockResourceZoneMaxW = 180.0f;
 constexpr float kDockResourceZoneGap = 10.0f;
-constexpr float kDockResourceTextMinGap = 2.0f;
-constexpr float kDockResourceMetricColumnW = 72.0f;
+constexpr float kDefaultResourceLeftColumnW = 76.0f;
+constexpr float kDefaultResourceRightColumnW = 100.0f;
+constexpr float kResourceFontSize = 13.5f;
+constexpr float kResourceCellSafetyPadding = 1.0f;
 constexpr float kDockResourceRightPadding = 3.0f;
 constexpr float kDockPetSeatW = 42.0f;
 constexpr float kPetLaneMinWidthDip = 44.0f;
@@ -883,6 +882,8 @@ struct TaskbarHost::Impl {
         std::wstring right;
     };
     size_t dockResourcePage_ = 0;
+    float resourceLeftColumnW_ = kDefaultResourceLeftColumnW;
+    float resourceRightColumnW_ = kDefaultResourceRightColumnW;
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -907,6 +908,7 @@ struct TaskbarHost::Impl {
     IDWriteTextFormat* fmtDragPreview_ = nullptr;
     IDWriteTextFormat* fmtClockTime_ = nullptr;
     IDWriteTextFormat* fmtClockDate_ = nullptr;
+    IDWriteTextFormat* fmtResource_ = nullptr;
     IDWriteTextLayout* titleLayout_ = nullptr;
     IDWriteTextLayout* artistLayout_ = nullptr;
     IDWriteTextLayout* lyricLayout_ = nullptr;
@@ -1221,10 +1223,14 @@ struct TaskbarHost::Impl {
         return embeddedResourceVisible() && scene_ == DisplayScene::Idle && statusText.empty();
     }
 
+    float resourceZoneWidth() const {
+        return resourceLeftColumnW_ + kDockResourceZoneGap + resourceRightColumnW_;
+    }
+
     float embeddedResourceExtra() const {
         if (embeddedResourceOnly())
-            return kDockResourceZoneMinW + kDockResourceRightPadding;
-        return embeddedResourceVisible() ? kDockResourceZoneMinW + kDockResourceZoneGap : 0.0f;
+            return resourceZoneWidth() + kDockResourceRightPadding;
+        return embeddedResourceVisible() ? resourceZoneWidth() + kDockResourceZoneGap : 0.0f;
     }
 
     int expandedControlCount() const {
@@ -1674,6 +1680,7 @@ struct TaskbarHost::Impl {
             runtime_log::writef(L"[taskbar] media popup creation failed");
         if (!volumePopup_.create(inst))
             runtime_log::writef(L"[taskbar] volume popup creation failed");
+        updateResourceColumnWidths();
         adjustPosition();
         startProbe(); // 避让探测（阻塞型跨进程调用）全程在工作线程执行
         if (resourceMonitoringEnabled() && !isStoppedMode())
@@ -2962,6 +2969,7 @@ struct TaskbarHost::Impl {
         const bool embeddedChanged =
             dockResourceVisibility_.embeddedEnabled != visibility.embeddedEnabled;
         dockResourceVisibility_ = visibility;
+        updateResourceColumnWidths();
         if (embeddedChanged && viewMode_ == TaskbarViewMode::Embedded && hwnd) {
             if (visibility.embeddedEnabled && !isStoppedMode())
                 startResourceMonitoring();
@@ -3336,8 +3344,8 @@ struct TaskbarHost::Impl {
     float dockResourceZoneW(float hostW) const {
         if (!isAppBarView() || hostW <= 0.0f)
             return 0.0f;
-        return std::clamp(hostW * kDockResourceZoneRatio,
-                          kDockResourceZoneMinW, kDockResourceZoneMaxW);
+        return std::min(resourceZoneWidth(),
+                        std::max(1.0f, hostW - kDockResourceRightPadding));
     }
 
     bool hitDockResourceArea(float clientX, float clientY) const {
@@ -3352,8 +3360,11 @@ struct TaskbarHost::Impl {
         logicalClientPixelSize(pxW, pxH);
         const float width = dip(pxW);
         const float height = dip(pxH);
-        const float resourceW = embeddedResourceVisible() ? kDockResourceZoneMinW
-                                                         : dockResourceZoneW(width);
+        const float resourceW =
+            embeddedResourceVisible()
+                ? std::min(resourceZoneWidth(),
+                           std::max(1.0f, width - kDockResourceRightPadding))
+                : dockResourceZoneW(width);
         const float resourceX = width - resourceW - kDockResourceRightPadding;
         return x >= resourceX && x <= width - kDockResourceRightPadding && y >= 0.0f &&
                y <= height;
@@ -3819,19 +3830,22 @@ struct TaskbarHost::Impl {
     }
 
     static std::wstring formatNetworkRate(uint64_t bytesPerSecond) {
-        static constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s"};
+        static constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s", L"TB/s"};
         double value = static_cast<double>(bytesPerSecond);
         size_t unit = 0;
-        while (value >= 1024.0 && unit + 1 < std::size(units)) {
+        while (std::round(value) >= 1000.0 && unit + 1 < std::size(units)) {
             value /= 1024.0;
             ++unit;
         }
+        if (unit + 1 == std::size(units))
+            value = std::min(value, 999.0);
 
+        const double roundedTenths = std::round(value * 10.0) / 10.0;
         wchar_t text[32]{};
-        if (unit == 0 || value >= 100.0)
-            swprintf_s(text, L"%.0f%ls", value, units[unit]);
+        if (unit == 0 || roundedTenths >= 100.0)
+            swprintf_s(text, L"%.0f%ls", std::round(value), units[unit]);
         else
-            swprintf_s(text, L"%.1f%ls", value, units[unit]);
+            swprintf_s(text, L"%.1f%ls", roundedTenths, units[unit]);
         return text;
     }
 
@@ -3912,11 +3926,10 @@ struct TaskbarHost::Impl {
 
     void drawDockResourceStatus(float x, float h, float width) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !fmtClockTime_ || !brushText_)
+        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !brushText_ ||
+            !ensureResourceFormat())
             return;
 
-        IDWriteTextFormat* resourceFormat = fmtClockTime_;
-        resourceFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         const std::wstring baseCells[] = {L"CPU: " + resourceCpuText_,
                                           L"内存: " + resourceMemoryText_,
                                           L"下行: " + resourceDownloadText_,
@@ -3940,39 +3953,32 @@ struct TaskbarHost::Impl {
         const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
         const float rowH = blockH * 0.5f;
-        const float leftColumnW = std::min(kDockResourceMetricColumnW,
+        const float leftColumnW = std::min(resourceLeftColumnW_,
                                            std::max(1.0f, width - kDockResourceZoneGap));
         const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
         const float rightColumnW =
             std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
-        const float leftCellW = leftColumnW +
-                                std::max(0.0f, kDockResourceZoneGap -
-                                                  kDockResourceTextMinGap);
+        const D2D1_DRAW_TEXT_OPTIONS drawOptions =
+            width + 1.0f >= resourceZoneWidth() ? D2D1_DRAW_TEXT_OPTIONS_NONE
+                                                : D2D1_DRAW_TEXT_OPTIONS_CLIP;
 
-        IDWriteFactory* dwrite = renderer.dwrite();
         auto drawResourceCell = [&](const std::wstring& text, float left, float rowTop,
                                     float cellW) {
-            if (!dwrite || cellW <= 0.0f)
+            if (text.empty() || cellW <= 0.0f)
                 return;
-            IDWriteTextLayout* layout = nullptr;
-            const D2D1_RECT_F rect = D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH);
-            if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
-                                                resourceFormat, cellW, rowH, &layout)) ||
-                !layout)
-                return;
-            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
-            layout->SetTrimming(&trimming, nullptr);
-            rt->DrawTextLayout(D2D1::Point2F(rect.left, rect.top), layout, brushText_,
-                               D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            layout->Release();
+            rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmtResource_,
+                          D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH), brushText_,
+                          drawOptions, DWRITE_MEASURING_MODE_NATURAL);
         };
         for (size_t row = 0; row < visibleRows.size(); ++row) {
             const auto& current = visibleRows[row];
             const float rowTop = top + row * rowH;
-            drawResourceCell(current.left, x, rowTop, leftCellW);
-            if (!current.right.empty())
+            if (current.right.empty()) {
+                drawResourceCell(current.left, x, rowTop, width);
+            } else {
+                drawResourceCell(current.left, x, rowTop, leftColumnW);
                 drawResourceCell(current.right, rightColumnX, rowTop, rightColumnW);
+            }
         }
     }
 
@@ -4555,7 +4561,136 @@ struct TaskbarHost::Impl {
         make(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
     }
 
+    static float measureResourceTextWidth(IDWriteFactory* dwrite, IDWriteTextFormat* format,
+                                          const std::wstring& text) {
+        if (!dwrite || !format || text.empty())
+            return 0.0f;
+        IDWriteTextLayout* layout = nullptr;
+        if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+                                            format, 0.0f, 0.0f, &layout)) ||
+            !layout)
+            return 0.0f;
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        float measuredWidth = 0.0f;
+        DWRITE_TEXT_METRICS metrics{};
+        if (SUCCEEDED(layout->GetMetrics(&metrics)))
+            measuredWidth = std::max(measuredWidth, metrics.widthIncludingTrailingWhitespace);
+        DWRITE_OVERHANG_METRICS overhangs{};
+        if (SUCCEEDED(layout->GetOverhangMetrics(&overhangs)))
+            measuredWidth = std::max(measuredWidth, overhangs.right);
+        layout->Release();
+        return measuredWidth;
+    }
+
+    bool ensureResourceFormat() {
+        if (fmtResource_)
+            return true;
+        IDWriteFactory* dwrite = renderer.dwrite();
+        if (!dwrite) {
+            renderer.initialize();
+            dwrite = renderer.dwrite();
+        }
+        if (!dwrite)
+            return false;
+        const DWRITE_FONT_WEIGHT effectiveWeight =
+            isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_SEMI_BOLD;
+        dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
+                                 dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL,
+                                 kResourceFontSize, L"zh-cn", &fmtResource_);
+        if (!fmtResource_)
+            return false;
+        fmtResource_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        fmtResource_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        fmtResource_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        fluent::applyUiFontFallback(fmtResource_);
+        return true;
+    }
+
+    bool updateResourceColumnWidths() {
+        if (!ensureResourceFormat())
+            return false;
+        IDWriteFactory* dwrite = renderer.dwrite();
+        if (!dwrite)
+            return false;
+
+        wchar_t widestDigit = L'8';
+        float widestDigitWidth = -1.0f;
+        for (wchar_t digit = L'0'; digit <= L'9'; ++digit) {
+            const float digitWidth =
+                measureResourceTextWidth(dwrite, fmtResource_, std::wstring(1, digit));
+            if (digitWidth > widestDigitWidth) {
+                widestDigitWidth = digitWidth;
+                widestDigit = digit;
+            }
+        }
+
+        const std::wstring singleDigit(1, widestDigit);
+        const std::wstring twoDigits = singleDigit + singleDigit;
+        const std::wstring threeDigits = twoDigits + singleDigit;
+        const std::wstring decimalDigits = twoDigits + L"." + singleDigit;
+
+        float leftMaxWidth = 0.0f;
+        auto measureLeft = [&](const std::wstring& sample) {
+            leftMaxWidth = std::max(leftMaxWidth,
+                                    measureResourceTextWidth(dwrite, fmtResource_, sample));
+        };
+        measureLeft(L"CPU: 100%");
+        measureLeft(L"CPU: " + twoDigits + L"%");
+        measureLeft(L"内存: 100%");
+        measureLeft(L"内存: " + twoDigits + L"%");
+        if (dockResourceVisibility_.gpuUsage) {
+            measureLeft(L"GPU: 100%");
+            measureLeft(L"GPU: " + twoDigits + L"%");
+        }
+
+        float rightMaxWidth = 0.0f;
+        auto measureRight = [&](const std::wstring& sample) {
+            rightMaxWidth = std::max(rightMaxWidth,
+                                     measureResourceTextWidth(dwrite, fmtResource_, sample));
+        };
+        static constexpr const wchar_t* ratePrefixes[] = {L"下行: ", L"上行: "};
+        static constexpr const wchar_t* rateUnits[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s", L"TB/s"};
+        for (const wchar_t* prefixLabel : ratePrefixes) {
+            for (const wchar_t* unitLabel : rateUnits) {
+                measureRight(std::wstring(prefixLabel) + decimalDigits + unitLabel);
+                measureRight(std::wstring(prefixLabel) + threeDigits + unitLabel);
+            }
+        }
+        float singleRowMaxWidth = 0.0f;
+        if (dockResourceVisibility_.cpuFrequency) {
+            const std::wstring freqSample = L"频率: " + decimalDigits + L"GHz";
+            if (dockResourceVisibility_.gpuUsage)
+                measureRight(freqSample);
+            else
+                singleRowMaxWidth = measureResourceTextWidth(dwrite, fmtResource_, freqSample);
+        }
+
+        const float nextLeftWidth =
+            std::max(1.0f, std::ceil(leftMaxWidth) + kResourceCellSafetyPadding);
+        float nextRightWidth =
+            std::max(1.0f, std::ceil(rightMaxWidth) + kResourceCellSafetyPadding);
+        const float minTotalWidth = std::ceil(singleRowMaxWidth) + kResourceCellSafetyPadding;
+        if (nextLeftWidth + kDockResourceZoneGap + nextRightWidth < minTotalWidth)
+            nextRightWidth = minTotalWidth - nextLeftWidth - kDockResourceZoneGap;
+
+        const bool changed = nextLeftWidth != resourceLeftColumnW_ ||
+                             nextRightWidth != resourceRightColumnW_;
+        resourceLeftColumnW_ = nextLeftWidth;
+        resourceRightColumnW_ = nextRightWidth;
+        return changed;
+    }
+
+    void recreateResourceFormat() {
+        if (fmtResource_) {
+            fmtResource_->Release();
+            fmtResource_ = nullptr;
+        }
+        if (updateResourceColumnWidths())
+            requestInvalidation(RenderInvalidation::Layout);
+    }
+
     void recreateFormats() {
+        recreateResourceFormat();
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite)
             return;
@@ -4607,6 +4742,8 @@ struct TaskbarHost::Impl {
         fontStyle_ = style;
         recreateFormats();
         requestInvalidation(RenderInvalidation::Layout);
+        if (hwnd && (isAppBarView() || embeddedResourceVisible()))
+            adjustPosition();
         requestFrameAndFlush();
     }
 
@@ -4626,6 +4763,7 @@ struct TaskbarHost::Impl {
         r(fmtDragPreview_);
         r(fmtClockTime_);
         r(fmtClockDate_);
+        r(fmtResource_);
         r(titleLayout_);
         r(artistLayout_);
         r(lyricLayout_);
@@ -8793,8 +8931,10 @@ struct TaskbarHost::Impl {
                 drawDockPet(w, h, leftW);
             drawImmersiveRightSide(w, h, showSpectrum);
         } else if (embeddedResourceVisible()) {
-            drawDockResourceStatus(w - kDockResourceZoneMinW - kDockResourceRightPadding,
-                                   h, kDockResourceZoneMinW);
+            const float resourceWidth =
+                std::min(resourceZoneWidth(), std::max(1.0f, w - kDockResourceRightPadding));
+            drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding,
+                                   h, resourceWidth);
         }
 
         bool contentTransitionActive = false;
@@ -9009,8 +9149,11 @@ struct TaskbarHost::Impl {
                         drawDockPet(w, h, leftW);
                     drawImmersiveRightSide(w, h, showSpectrum);
                 } else if (embeddedResourceVisible()) {
-                    drawDockResourceStatus(w - kDockResourceZoneMinW - kDockResourceRightPadding,
-                                           h, kDockResourceZoneMinW);
+                    const float resourceWidth =
+                        std::min(resourceZoneWidth(),
+                                 std::max(1.0f, w - kDockResourceRightPadding));
+                    drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding,
+                                           h, resourceWidth);
                 }
                 contentTransitionActive = applyImmersiveSongContentTransform(rt);
                 // 失败回退时仍需绘制歌曲内容；这里复用与快照相同的绘制入口，
