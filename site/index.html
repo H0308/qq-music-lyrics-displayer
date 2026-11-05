@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QQ 音乐 / 网易云任务栏歌词 — 把歌词嵌入 Windows 任务栏</title>
-  <meta name="description" content="把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏：滚动歌词、逐字高亮、播放控制、音频频谱、每日一言。C++ 原生实现，无 Electron。">
+  <meta name="description" content="把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏：逐字高亮与歌词特效、播放控制、音频频谱、资源监视、每日一言，支持字号建议与小任务栏自动适配。C++ 原生实现，无 Electron。">
   <meta property="og:title" content="QQ 音乐 / 网易云任务栏歌词">
-  <meta property="og:description" content="把歌词嵌入 Windows 任务栏——滚动歌词、逐字高亮、播放控制、音频频谱。C++ 原生实现，无 Electron。">
+  <meta property="og:description" content="把歌词嵌入 Windows 任务栏：逐字跟唱、流星粒子拖尾、音频频谱、资源监视与小任务栏自动适配。C++ 原生实现，无 Electron。">
   <meta property="og:type" content="website">
   <meta property="og:image" content="assets/img/social-preview.png">
   <link rel="icon" type="image/png" href="assets/img/logo.png">
@@ -116,8 +116,9 @@
 
         <div class="feature-row reverse reveal">
           <div class="feature-text">
-            <h2>翻译、罗马音与双行歌词</h2>
+            <h2>逐字跟唱与辅助歌词</h2>
             <p>支持多格式歌词：逐字歌词平滑填充，LRC 整行高亮；外文歌曲可显示翻译或罗马音，辅助歌词可一键切换；没有辅助歌词时可开启双行模式，同时预览当前行与下一行。</p>
+            <p>星尘跟唱让五角星沿逐字进度跳动、缓慢旋转，并留下向后散开的流星粒子；跟唱流光、笔触下划线和字间涟漪可独立开关、组合使用。星尘仅用于单行逐字歌词，与翻译、罗马音互斥。<a href="docs.html#settings-lyric-effects">查看歌词特效说明 →</a></p>
           </div>
           <figure class="shot" data-shot="feature-bilingual.png">
             <img src="assets/img/feature-bilingual.png" alt="辅助歌词：罗马音、翻译与双行歌词效果" width="2172" height="724">
@@ -183,7 +184,7 @@
           </div>
           <div class="explore-item reveal">
             <h3>外观自由定制</h3>
-            <p>字体、字号、颜色、光晕与描边均可调整，深浅色模式分开配置。</p>
+            <p>字体、字号、颜色、光晕与描边均可调整，深浅色模式可分别配置。字号列表用绿色标出单个推荐值、黄色标出建议最大值、红色提示影响显示效果的字号。</p>
           </div>
           <div class="explore-item reveal">
             <h3>智能避让布局<sup class="feature-footnote"><a href="#windows10-note" aria-label="查看 Windows 10 兼容性提示">1</a></sup></h3>
@@ -218,8 +219,16 @@
             <p>通过 Windows AppBar 占用屏幕顶部或底部工作区，独立显示歌词、频谱与控制区域。</p>
           </div>
           <div class="explore-item reveal">
-            <h3>Dock 资源状态<sup class="feature-footnote"><a href="#windows10-note" aria-label="查看 Windows 10 兼容性提示">1</a></sup></h3>
-            <p>显示 CPU、内存和网络下行 / 上行状态，资源采样与界面绘制分开运行。</p>
+            <h3>任务栏资源监视<sup class="feature-footnote"><a href="#windows10-note" aria-label="查看 Windows 10 兼容性提示">1</a></sup></h3>
+            <p>Dock 自带资源区，横向内嵌模式也可开启。显示 CPU、内存及可选的网络、GPU、CPU 频率指标，滚轮翻页查看。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>小任务栏自动适配</h3>
+            <p>任务栏变矮时，临时停用双行、星尘和辅助歌词，自动调整文字与频谱；资源监视改为单行、每页两个指标。恢复正常大小后自动还原偏好。</p>
+          </div>
+          <div class="explore-item reveal">
+            <h3>伴听宠物</h3>
+            <p>Dock 与沉浸模式中，空闲时漫游、播放时伴听、暂停时休息；内嵌模式的媒体卡片中也有原地陪伴的小宠物。</p>
           </div>
         </div>
         <p class="explore-more reveal">新功能持续开发中，敬请期待</p>
