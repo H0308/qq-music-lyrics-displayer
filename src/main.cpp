@@ -6241,10 +6241,7 @@ int main() {
         if (app.tickTickApiTokenDialog && app.tickTickApiTokenDialog->isOpen() &&
             IsDialogMessageW(app.tickTickApiTokenDialog->hwnd(), &msg))
             continue;
-        if (app.settingsDialog && app.settingsDialog->isOpen() &&
-            IsDialogMessageW(app.settingsDialog->hwnd(), &msg))
-            continue;
-        // 手动搜索和选择字体使用窗口级自绘输入框，字符输入必须经过
+        // 设置、手动搜索和选择字体使用窗口级自绘输入框，字符输入必须经过
         // TranslateMessage 生成 WM_CHAR，再由各自窗口处理；不能交给
         // IsDialogMessageW 抢先消费键盘消息。
         if (app.fontColorDialog && app.fontColorDialog->isOpen() &&

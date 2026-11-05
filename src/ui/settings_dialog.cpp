@@ -22,6 +22,7 @@
 #include <climits>
 #include <cwctype>
 #include <cwchar>
+#include <cstring>
 #include <string>
 #include <utility>
 #include <vector>
@@ -136,7 +137,6 @@ constexpr int kIdDockResourceDownload = 482;
 constexpr int kIdDockResourceUpload = 483;
 constexpr int kIdDockResourceGpuUsage = 473;
 constexpr int kIdDockResourceCpuFrequency = 477;
-constexpr int kIdSliderValueEdit = 478;
 constexpr int kIdImmersiveBackgroundAdjustment = 479;
 constexpr int kIdDockBackgroundAdjustment = 480;
 constexpr int kIdContentScrollBar = 401;
@@ -192,7 +192,7 @@ constexpr float kHoverControlStyleRowH = 292.0f;
 constexpr float kSliderValueW = 62.0f;
 constexpr float kSliderValueGap = 10.0f;
 constexpr float kSliderSuffixW = 16.0f;
-constexpr UINT_PTR kSliderEditSubclassId = 1;
+constexpr UINT_PTR kSliderCaretTimer = 5;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
@@ -534,7 +534,6 @@ struct SettingsDialog::Impl {
     int activePage = 0;
 
     fluent::FluentDialogSurface surface;
-    fluent::FluentEdit sliderValueEdit;
     fluent::FluentEdit settingsSearch;
     struct SearchResult {
         int page;
@@ -583,6 +582,16 @@ struct SettingsDialog::Impl {
     int sliderEditRowId = 0;
     bool sliderEditOpen = false;
     bool sliderEditCommitting = false;
+    std::wstring sliderEditText;
+    size_t sliderEditCaret = 0;
+    size_t sliderEditAnchor = 0;
+    std::array<float, 4> sliderCaretStops{};
+    bool sliderCaretVisible = true;
+    bool sliderEditSelecting = false;
+    std::wstring sliderUndoText;
+    size_t sliderUndoCaret = 0;
+    size_t sliderUndoAnchor = 0;
+    bool sliderCanUndo = false;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
         L"显示", L"展示模式", L"性能", L"悬浮卡片", L"媒体控件", L"频谱", L"歌词",
@@ -675,32 +684,6 @@ struct SettingsDialog::Impl {
         return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
     }
 
-    static LRESULT CALLBACK sliderEditProc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
-                                           UINT_PTR subclassId, DWORD_PTR refData) {
-        auto* self = reinterpret_cast<Impl*>(refData);
-        if (msg == WM_NCDESTROY) {
-            RemoveWindowSubclass(h, &Impl::sliderEditProc, subclassId);
-            return DefSubclassProc(h, msg, wp, lp);
-        }
-        if (self && msg == WM_KEYDOWN) {
-            if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                self->openSearchPalette();
-                return 0;
-            }
-            if (wp == VK_RETURN) {
-                self->commitSliderEditor();
-                SetFocus(self->hwnd);
-                return 0;
-            }
-            if (wp == VK_ESCAPE) {
-                self->cancelSliderEditor();
-                SetFocus(self->hwnd);
-                return 0;
-            }
-        }
-        return DefSubclassProc(h, msg, wp, lp);
-    }
-
     static bool isIdleAppDragOption(int option) {
         return option >= kIdleAppDragOptionBase;
     }
@@ -770,21 +753,28 @@ struct SettingsDialog::Impl {
                            rect.right - 4.0f - kSliderSuffixW, rect.bottom - 1.0f);
     }
 
+    void resetSliderCaret() {
+        sliderCaretVisible = true;
+        KillTimer(hwnd, kSliderCaretTimer);
+        const UINT blink = GetCaretBlinkTime();
+        if (blink != INFINITE && blink > 0)
+            SetTimer(hwnd, kSliderCaretTimer, blink, nullptr);
+        surface.invalidate();
+    }
+
     void hideSliderEditor() {
         sliderEditOpen = false;
         sliderEditRowId = 0;
-        if (sliderValueEdit.hwnd())
-            ShowWindow(sliderValueEdit.hwnd(), SW_HIDE);
-        if (hwnd)
-            surface.invalidate();
+        sliderEditSelecting = false;
+        KillTimer(hwnd, kSliderCaretTimer);
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
+        surface.invalidate();
     }
 
     void cancelSliderEditor() {
-        if (!sliderEditOpen)
-            return;
-        if (const Row* row = findRow(sliderEditRowId))
-            sliderValueEdit.setText(std::to_wstring(row->value));
-        hideSliderEditor();
+        if (sliderEditOpen)
+            hideSliderEditor();
     }
 
     void commitSliderEditor() {
@@ -794,15 +784,10 @@ struct SettingsDialog::Impl {
         Row* row = findRow(sliderEditRowId);
         if (row && row->enabled) {
             int value = row->value;
-            if (parseBoundedInteger(sliderValueEdit.text(), row->minValue, row->maxValue,
-                                    value)) {
-                if (value != row->value) {
-                    row->value = value;
-                    onCommand(row->id);
-                }
-            } else {
-                // 空值或非数字不进入设置，恢复编辑前的有效值。
-                sliderValueEdit.setText(std::to_wstring(row->value));
+            if (parseBoundedInteger(sliderEditText, row->minValue, row->maxValue, value) &&
+                value != row->value) {
+                row->value = value;
+                onCommand(row->id);
             }
         }
         hideSliderEditor();
@@ -812,36 +797,146 @@ struct SettingsDialog::Impl {
     void layoutSliderEditor() {
         if (!sliderEditOpen)
             return;
-        Row* row = findRow(sliderEditRowId);
+        const Row* row = findRow(sliderEditRowId);
         if (!row || row->kind != ControlKind::Slider || !row->enabled ||
             row->cardRect.right <= row->cardRect.left ||
             row->cardRect.bottom <= contentViewportRect.top ||
-            row->cardRect.top >= contentViewportRect.bottom) {
+            row->cardRect.top >= contentViewportRect.bottom)
             hideSliderEditor();
-            return;
-        }
-
-        const D2D1_RECT_F valueRect = sliderNumberRect(*row);
-        const float s = surface.dipScale();
-        const int x = static_cast<int>(std::lround(valueRect.left * s));
-        const int y = static_cast<int>(std::lround(valueRect.top * s));
-        const int w = static_cast<int>(std::lround((valueRect.right - valueRect.left) * s));
-        const int h = static_cast<int>(std::lround((valueRect.bottom - valueRect.top) * s));
-        sliderValueEdit.move(x, y, std::max(1, w), std::max(1, h));
     }
 
     void openSliderEditor(Row& row) {
-        if (!row.enabled || !sliderValueEdit.editHwnd())
+        if (!row.enabled)
             return;
         if (sliderEditOpen && sliderEditRowId != row.id)
             commitSliderEditor();
+        stopContentScroll();
         sliderEditRowId = row.id;
         sliderEditOpen = true;
-        sliderValueEdit.setText(std::to_wstring(row.value));
-        layoutSliderEditor();
-        sliderValueEdit.focus();
-        SendMessageW(sliderValueEdit.editHwnd(), EM_SETSEL, 0, -1);
-        surface.invalidate();
+        sliderEditText = std::to_wstring(row.value);
+        sliderEditCaret = sliderEditText.size();
+        sliderEditAnchor = 0;
+        sliderCanUndo = false;
+        focusedId = row.id;
+        SetFocus(hwnd);
+        resetSliderCaret();
+    }
+
+    void replaceSliderSelection(const std::wstring& inserted) {
+        if (inserted.find_first_not_of(L"0123456789") != std::wstring::npos)
+            return;
+        const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
+        const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
+        if (sliderEditText.size() - (last - first) + inserted.size() > 3)
+            return;
+        sliderUndoText = sliderEditText;
+        sliderUndoCaret = sliderEditCaret;
+        sliderUndoAnchor = sliderEditAnchor;
+        sliderCanUndo = true;
+        sliderEditText.replace(first, last - first, inserted);
+        sliderEditCaret = sliderEditAnchor = first + inserted.size();
+        resetSliderCaret();
+    }
+
+    bool copySliderSelection() {
+        const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
+        const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
+        if (first == last || !OpenClipboard(hwnd))
+            return false;
+        const std::wstring text = sliderEditText.substr(first, last - first);
+        const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+        bool copied = false;
+        if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+            if (void* data = GlobalLock(memory)) {
+                std::memcpy(data, text.c_str(), bytes);
+                GlobalUnlock(memory);
+                EmptyClipboard();
+                copied = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
+            }
+            if (!copied)
+                GlobalFree(memory);
+        }
+        CloseClipboard();
+        return copied;
+    }
+
+    bool handleSliderEditKey(WPARAM key) {
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (key == VK_TAB || (ctrl && key == 'F')) {
+            commitSliderEditor();
+            return false;
+        }
+        if (key == VK_RETURN) {
+            commitSliderEditor();
+            return true;
+        }
+        if (key == VK_ESCAPE) {
+            cancelSliderEditor();
+            return true;
+        }
+        if (ctrl && key == 'A') {
+            sliderEditAnchor = 0;
+            sliderEditCaret = sliderEditText.size();
+        } else if ((ctrl && (key == 'C' || key == 'X' || key == VK_INSERT)) ||
+                   (shift && key == VK_DELETE)) {
+            if (copySliderSelection() && (key == 'X' || key == VK_DELETE))
+                replaceSliderSelection(L"");
+        } else if ((ctrl && key == 'V') || (shift && key == VK_INSERT)) {
+            std::wstring text;
+            if (OpenClipboard(hwnd)) {
+                if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+                    if (const auto* value = static_cast<const wchar_t*>(GlobalLock(data))) {
+                        text = value;
+                        GlobalUnlock(data);
+                    }
+                }
+                CloseClipboard();
+            }
+            if (!text.empty())
+                replaceSliderSelection(text);
+        } else if (ctrl && (key == 'Z' || key == 'Y')) {
+            if (sliderCanUndo) {
+                std::swap(sliderEditText, sliderUndoText);
+                std::swap(sliderEditCaret, sliderUndoCaret);
+                std::swap(sliderEditAnchor, sliderUndoAnchor);
+            }
+        } else if (key == VK_LEFT || key == VK_RIGHT || key == VK_HOME || key == VK_END) {
+            if (key == VK_HOME)
+                sliderEditCaret = 0;
+            else if (key == VK_END)
+                sliderEditCaret = sliderEditText.size();
+            else if (!shift && sliderEditCaret != sliderEditAnchor)
+                sliderEditCaret = key == VK_LEFT ? std::min(sliderEditCaret, sliderEditAnchor)
+                                                : std::max(sliderEditCaret, sliderEditAnchor);
+            else if (key == VK_LEFT && sliderEditCaret > 0)
+                --sliderEditCaret;
+            else if (key == VK_RIGHT && sliderEditCaret < sliderEditText.size())
+                ++sliderEditCaret;
+            if (!shift)
+                sliderEditAnchor = sliderEditCaret;
+        } else if (key == VK_BACK || key == VK_DELETE) {
+            if (sliderEditCaret == sliderEditAnchor) {
+                if (key == VK_BACK && sliderEditAnchor > 0)
+                    --sliderEditAnchor;
+                else if (key == VK_DELETE && sliderEditAnchor < sliderEditText.size())
+                    ++sliderEditAnchor;
+            }
+            replaceSliderSelection(L"");
+        }
+        resetSliderCaret();
+        return true;
+    }
+
+    void placeSliderCaret(float pointerX, bool extend) {
+        size_t nearest = 0;
+        for (size_t i = 1; i <= sliderEditText.size(); ++i)
+            if (std::fabs(pointerX - sliderCaretStops[i]) < std::fabs(pointerX - sliderCaretStops[nearest]))
+                nearest = i;
+        sliderEditCaret = nearest;
+        if (!extend)
+            sliderEditAnchor = nearest;
+        resetSliderCaret();
     }
 
     static bool isOptionEnabled(const Row& row, size_t option) {
@@ -2852,20 +2947,6 @@ struct SettingsDialog::Impl {
             surface.invalidate();
     }
 
-    void createSliderEditor() {
-        if (!sliderValueEdit.create(hwnd, kIdSliderValueEdit, nullptr, false, 12.0f))
-            return;
-        sliderValueEdit.setEmbeddedNumberStyle();
-        if (HWND edit = sliderValueEdit.editHwnd()) {
-            LONG_PTR style = GetWindowLongPtrW(edit, GWL_STYLE);
-            SetWindowLongPtrW(edit, GWL_STYLE, style | ES_NUMBER);
-            SendMessageW(edit, EM_SETLIMITTEXT, 3, 0);
-            SetWindowSubclass(edit, &Impl::sliderEditProc, kSliderEditSubclassId,
-                              reinterpret_cast<DWORD_PTR>(this));
-        }
-        ShowWindow(sliderValueEdit.hwnd(), SW_HIDE);
-    }
-
     float measureTextHeight(fluent::FluentDialogSurface::Painter& painter,
                             const std::wstring& text, float width, float textSize) const {
         if (text.empty() || width <= 0.0f)
@@ -3675,11 +3756,31 @@ struct SettingsDialog::Impl {
         const auto numberRect = sliderNumberRect(row);
         painter.fillRoundRect(row.enabled ? p.controlFill : p.listHover, valueRect);
         painter.strokeRoundRect(editing ? p.accent : p.controlStroke, valueRect);
-        if (!editing) {
-            painter.drawText(std::to_wstring(row.value),
-                             painter.textFormat(12.0f, 600, true, true), numberRect,
-                             row.enabled ? p.text : p.disabled);
+        auto* numberFormat = painter.textFormat(12.0f, 600, true, true);
+        const std::wstring number = editing ? sliderEditText : std::to_wstring(row.value);
+        painter.target()->PushAxisAlignedClip(numberRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (editing && numberFormat) {
+            const float textWidth = painter.measureTextWidth(number, numberFormat);
+            const float textLeft = (numberRect.left + numberRect.right - textWidth) * 0.5f;
+            for (size_t i = 0; i <= number.size(); ++i)
+                sliderCaretStops[i] = std::clamp(textLeft +
+                    painter.measureTextWidth(number.substr(0, i), numberFormat),
+                    numberRect.left + 1.0f, numberRect.right - 1.0f);
+            const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
+            const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
+            if (first != last)
+                painter.fillRoundRect(p.listSelected,
+                    D2D1::RectF(sliderCaretStops[first], numberRect.top + 4.0f,
+                                sliderCaretStops[last], numberRect.bottom - 4.0f), 1.0f);
         }
+        painter.drawText(number, numberFormat, numberRect, row.enabled ? p.text : p.disabled);
+        if (editing && sliderCaretVisible && sliderEditCaret == sliderEditAnchor) {
+            if (auto* brush = painter.brush(p.accent))
+                painter.target()->FillRectangle(
+                    D2D1::RectF(sliderCaretStops[sliderEditCaret], numberRect.top + 5.0f,
+                                sliderCaretStops[sliderEditCaret] + 1.0f, numberRect.bottom - 5.0f), brush);
+        }
+        painter.target()->PopAxisAlignedClip();
         painter.drawText(row.valueSuffix, painter.textFormat(12.0f, 600, true, true),
                          D2D1::RectF(numberRect.right, numberRect.top,
                                      valueRect.right - 4.0f, numberRect.bottom),
@@ -6337,6 +6438,13 @@ struct SettingsDialog::Impl {
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
         case WM_TIMER:
+            if (wp == kSliderCaretTimer) {
+                if (sliderEditOpen) {
+                    sliderCaretVisible = !sliderCaretVisible;
+                    surface.invalidate();
+                }
+                return 0;
+            }
             if (wp == kContentScrollTimer) {
                 advanceContentScroll();
                 UpdateWindow(hwnd);
@@ -6380,7 +6488,6 @@ struct SettingsDialog::Impl {
             if (!createContentWindow())
                 return -1;
             createControls();
-            createSliderEditor();
             layout();
             return 0;
         case WM_MOVE:
@@ -6420,7 +6527,6 @@ struct SettingsDialog::Impl {
             stopNavIndicator();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
-            sliderValueEdit.refreshTheme();
             searchScrimLastWidth = 0;
             searchScrimLastHeight = 0;
             if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
@@ -6461,6 +6567,10 @@ struct SettingsDialog::Impl {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
             TrackMouseEvent(&tme);
             const float s = surface.dipScale();
+            if (sliderEditOpen && sliderEditSelecting && GetCapture() == hwnd) {
+                placeSliderCaret(GET_X_LPARAM(lp) / s, true);
+                return 0;
+            }
             if (scrollDragging) {
                 scrollFromPointer(GET_Y_LPARAM(lp) / s);
                 if (hoverId != kIdContentScrollBar || hoverOption != -1) {
@@ -6572,12 +6682,25 @@ struct SettingsDialog::Impl {
                     idleAppDragStartY = pointerY;
                 }
             }
-            if (pressedId != 0) {
-                Row* row = findRow(pressedId);
-                if (row && row->kind == ControlKind::Slider && row->enabled &&
-                    !contains(sliderValueRect(*row), pointerX, pointerY))
-                    updateSliderFromPointer(*row, pointerX);
+            Row* pressedRow = findRow(pressedId);
+            const bool numberHit = pressedRow && pressedRow->kind == ControlKind::Slider &&
+                pressedRow->enabled && contains(sliderValueRect(*pressedRow), pointerX, pointerY);
+            if (sliderEditOpen && (!numberHit || pressedId != sliderEditRowId))
+                commitSliderEditor();
+            if (numberHit) {
+                if (sliderEditOpen) {
+                    placeSliderCaret(pointerX, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+                    sliderEditSelecting = true;
+                    SetCapture(hwnd);
+                } else {
+                    openSliderEditor(*pressedRow);
+                }
+                pressedId = 0;
+                pressedOption = -1;
+                return 0;
             }
+            if (pressedRow && pressedRow->kind == ControlKind::Slider && pressedRow->enabled)
+                updateSliderFromPointer(*pressedRow, pointerX);
             if (pressedId != 0 && pressedId != kIdContentScrollBar)
                 focusedId = pressedId == kIdIdleApps && option == kIdleAppNamesOption
                                  ? kIdIdleAppNames
@@ -6596,6 +6719,12 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_LBUTTONUP: {
+            if (sliderEditSelecting) {
+                sliderEditSelecting = false;
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
+                return 0;
+            }
             const float s = surface.dipScale();
             if (idleAppDragging) {
                 const int fromIndex = idleAppDragIndex;
@@ -6658,6 +6787,7 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_CAPTURECHANGED:
+            sliderEditSelecting = false;
             pressedId = 0;
             pressedOption = -1;
             scrollDragging = false;
@@ -6678,7 +6808,13 @@ struct SettingsDialog::Impl {
         }
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB;
+        case WM_CHAR:
+            if (sliderEditOpen && wp >= L'0' && wp <= L'9')
+                replaceSliderSelection(std::wstring(1, static_cast<wchar_t>(wp)));
+            return 0;
         case WM_KEYDOWN:
+            if (sliderEditOpen && handleSliderEditKey(wp))
+                return 0;
             if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 openSearchPalette();
                 return 0;
@@ -6808,6 +6944,7 @@ struct SettingsDialog::Impl {
             surface.invalidate();
             return 0;
         case WM_KILLFOCUS:
+            commitSliderEditor();
             focusVisible = false;
             surface.invalidate();
             return 0;
@@ -6816,11 +6953,6 @@ struct SettingsDialog::Impl {
                 colorPicker.reset();
             return 0;
         case WM_COMMAND:
-            if (LOWORD(wp) == kIdSliderValueEdit) {
-                if (HIWORD(wp) == EN_KILLFOCUS)
-                    commitSliderEditor();
-                return 0;
-            }
             if (HIWORD(wp) == BN_CLICKED || HIWORD(wp) == LBN_SELCHANGE)
                 onCommand(LOWORD(wp));
             return 0;
@@ -6828,6 +6960,7 @@ struct SettingsDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            KillTimer(hwnd, kSliderCaretTimer);
             stopContentScroll();
             stopNavIndicator();
             stopSearchLocateHighlight();
