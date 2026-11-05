@@ -4613,8 +4613,7 @@ struct TaskbarHost::Impl {
         }
         if (!dwrite)
             return false;
-        const DWRITE_FONT_WEIGHT effectiveWeight =
-            isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_SEMI_BOLD;
+        const DWRITE_FONT_WEIGHT effectiveWeight = dwriteWeightOf(fontStyle_);
         dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
                                  dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL,
                                  kResourceFontSize, L"zh-cn", &fmtResource_);
