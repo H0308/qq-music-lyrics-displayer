@@ -1024,20 +1024,16 @@ struct ManualSearchDialog::Impl {
         candidateScroll = std::clamp(candidateScroll, 0.0f, candidateMaxScroll());
 
         painter.fillRoundRect(p.cardFill, candidateListRect, fluent::metrics::cardRadius);
-        painter.strokeRoundRect(p.cardStroke, candidateListRect, 1.0f,
+        const bool focused = focusedId == kIdCandidateList && focusVisible;
+        painter.strokeRoundRect(focused ? p.accent : p.cardStroke, candidateListRect, 1.0f,
                                 fluent::metrics::cardRadius);
-        if (focusedId == kIdCandidateList && focusVisible) {
-            painter.strokeRoundRect(
-                p.accent,
-                D2D1::RectF(candidateListRect.left + 1.5f, candidateListRect.top + 1.5f,
-                            candidateListRect.right - 1.5f, candidateListRect.bottom - 1.5f),
-                1.5f, fluent::metrics::cardRadius - 1.0f);
-        }
 
+        // 合成滚动层是矩形，留出圆角和边框空间，避免覆盖卡片边缘。
         candidateScrollView.layout(
-            D2D1::RectF(candidateListRect.left + 2.0f, candidateListRect.top + 2.0f,
-                        candidateListRect.right - kScrollBarHitWidth, candidateListRect.bottom - 2.0f),
-            std::max(0.0f, candidateContentHeight() - 4.0f), surface.dpi());
+            D2D1::RectF(candidateListRect.left + fluent::metrics::cardRadius,
+                        candidateListRect.top + 4.0f,
+                        candidateListRect.right - kScrollBarHitWidth, candidateListRect.bottom - 4.0f),
+            std::max(0.0f, candidateContentHeight() - 8.0f), surface.dpi());
         if (!candidateScrollView.animating())
             candidateScrollView.setOffset(candidateScroll);
         candidateScroll = candidateScrollView.offset();
@@ -1057,31 +1053,31 @@ struct ManualSearchDialog::Impl {
                     if (selected)
                         painter.fillRoundRect(
                             p.listSelected,
-                            D2D1::RectF(candidateListRect.left + 4.0f, y + 2.0f,
-                                        candidateListRect.right - 4.0f, y + rowH - 2.0f));
+                            D2D1::RectF(paintBounds.left + 2.0f, y + 2.0f,
+                                        paintBounds.right - 2.0f, y + rowH - 2.0f));
                     else if (hovered)
                         painter.fillRoundRect(
                             p.listHover,
-                            D2D1::RectF(candidateListRect.left + 4.0f, y + 2.0f,
-                                        candidateListRect.right - 4.0f, y + rowH - 2.0f));
+                            D2D1::RectF(paintBounds.left + 2.0f, y + 2.0f,
+                                        paintBounds.right - 2.0f, y + rowH - 2.0f));
                     if (selected)
                         painter.fillRoundRect(
                             p.accent,
-                            D2D1::RectF(candidateListRect.left + 7.0f,
+                            D2D1::RectF(paintBounds.left + 4.0f,
                                         y + rowH * 0.5f - 8.0f,
-                                        candidateListRect.left + 10.0f,
+                                        paintBounds.left + 7.0f,
                                         y + rowH * 0.5f + 8.0f),
                             1.5f);
                     painter.drawTrimmedText(
                         item.text, painter.textFormat(13.0f, 400, false, true),
-                        D2D1::RectF(candidateListRect.left + 16.0f, y,
-                                    candidateListRect.right - 12.0f, y + rowH),
+                        D2D1::RectF(paintBounds.left + 16.0f, y,
+                                    paintBounds.right - 8.0f, y + rowH),
                         p.text);
                 } else {
                     painter.drawText(
                         item.text, painter.textFormat(12.0f, 600, false, true),
-                        D2D1::RectF(candidateListRect.left + 16.0f, y,
-                                    candidateListRect.right - 12.0f, y + rowH),
+                        D2D1::RectF(paintBounds.left + 16.0f, y,
+                                    paintBounds.right - 8.0f, y + rowH),
                         p.textSecondary);
                 }
             }
