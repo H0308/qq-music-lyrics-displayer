@@ -4140,13 +4140,13 @@ struct SettingsDialog::Impl {
         drawLine(p.separator, D2D1::Point2F(screen.left + 12.0f, centerY),
                  D2D1::Point2F(screen.right - 12.0f, centerY), 1.0f);
 
-        const float toastW = std::min(62.0f, screen.right - screen.left - 18.0f);
-        const float toastH = 16.0f;
+        const float toastW = std::min(72.0f, screen.right - screen.left - 18.0f);
+        const float toastH = 20.0f;
         const float toastLeft = (screen.left + screen.right - toastW) * 0.5f;
         const float toastTop = top ? screen.top + 7.0f : screen.bottom - toastH - 7.0f;
         const D2D1_RECT_F toast =
             D2D1::RectF(toastLeft, toastTop, toastLeft + toastW, toastTop + toastH);
-        const float toastRadius = toastH * 0.5f;
+        const float toastRadius = 4.5f;
         painter.fillRoundRect(tone(p.listSelected), toast, toastRadius);
         painter.strokeRoundRect(tone(p.accent), toast, 1.0f, toastRadius);
 
@@ -4154,18 +4154,13 @@ struct SettingsDialog::Impl {
         const D2D1_RECT_F cover = D2D1::RectF(
             toast.left + 3.0f, toast.top + 3.0f, toast.left + 3.0f + coverSize,
             toast.bottom - 3.0f);
-        const D2D1_POINT_2F coverCenter =
-            D2D1::Point2F((cover.left + cover.right) * 0.5f,
-                          (cover.top + cover.bottom) * 0.5f);
-        if (auto* brush = painter.brush(tone(p.accent)))
-            painter.target()->FillEllipse(
-                D2D1::Ellipse(coverCenter, coverSize * 0.5f, coverSize * 0.5f), brush);
+        painter.fillRoundRect(tone(p.accent), cover, 2.5f);
         drawLine(p.textOnAccent, D2D1::Point2F(cover.left + 2.0f, cover.top + 4.0f),
                  D2D1::Point2F(cover.right - 2.0f, cover.top + 4.0f), 0.8f);
-        drawLine(p.text, D2D1::Point2F(cover.right + 4.0f, toast.top + 5.0f),
-                 D2D1::Point2F(toast.right - 5.0f, toast.top + 5.0f), 1.2f);
-        drawLine(p.textSecondary, D2D1::Point2F(cover.right + 4.0f, toast.top + 11.0f),
-                 D2D1::Point2F(toast.right - 17.0f, toast.top + 11.0f), 1.0f);
+        drawLine(p.text, D2D1::Point2F(cover.right + 4.0f, toast.top + 7.0f),
+                 D2D1::Point2F(toast.right - 5.0f, toast.top + 7.0f), 1.2f);
+        drawLine(p.textSecondary, D2D1::Point2F(cover.right + 4.0f, toast.top + 13.0f),
+                 D2D1::Point2F(toast.right - 17.0f, toast.top + 13.0f), 1.0f);
     }
 
     void drawSongToastPositionRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {

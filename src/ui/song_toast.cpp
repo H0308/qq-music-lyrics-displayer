@@ -25,31 +25,35 @@ constexpr UINT_PTR kEnterTimer = 1;
 constexpr UINT_PTR kAutoHideTimer = 2;
 constexpr UINT_PTR kCloseTimer = 3;
 constexpr UINT_PTR kScrollTimer = 4;
+constexpr UINT_PTR kContentTimer = 5;
+constexpr UINT kContentAnimationMs = 160;
 constexpr UINT kEnterAnimationMs = 240;
 constexpr UINT kCloseAnimationMs = 180;
 // 超长文字滚动：与媒体卡片一致约 30fps 重绘，位移由计时器步进
 constexpr UINT kScrollTimerMs = 32;
 constexpr float kScrollSpeedDip = 24.0f;
 
-constexpr float kToastHeightDip = 48.0f;
-constexpr float kToastWidthDip = 168.0f;
-constexpr float kCoverSizeDip = 32.0f;
-// 上下左右内边距一致，封面圆与浮窗胶囊左角同心，弧度衔接自然
-constexpr float kCoverLeftDip = 8.0f;
-constexpr float kCoverTopDip = 8.0f;
-constexpr float kTextLeftDip = 50.0f;
-constexpr float kTextRightPaddingDip = 16.0f;
+constexpr float kToastHeightDip = 56.0f;
+constexpr float kToastMinWidthDip = 220.0f;
+constexpr float kToastMaxWidthDip = 280.0f;
+constexpr float kToastRadiusDip = 12.0f;
+constexpr float kShadowPaddingDip = 8.0f;
+constexpr float kCoverSizeDip = 36.0f;
+constexpr float kCoverRadiusDip = 8.0f;
+constexpr float kCoverLeftDip = 10.0f;
+constexpr float kCoverTopDip = 10.0f;
+constexpr float kTextLeftDip = 58.0f;
+constexpr float kTextRightPaddingDip = 12.0f;
 constexpr float kTextEdgeFadeDip = 8.0f;
 constexpr float kTextGapDip = 2.0f;
 // 封面右下角的来源应用角标：跨出封面边缘 2px，固定显示不提供开关
-constexpr float kBadgeSizeDip = 14.0f;
+constexpr float kBadgeSizeDip = 12.0f;
 constexpr float kBadgeOverhangDip = 2.0f;
 // 滚动文本首尾相接时两份文字之间的间隔
 constexpr float kTextScrollPaddingDip = 24.0f;
 constexpr float kBottomMarginDip = 20.0f;
 constexpr float kEnterTravelDip = 12.0f;
 constexpr float kExitTravelDip = 6.0f;
-// 胶囊外形：圆角恒为高度一半
 constexpr float kTitleFontSize = 13.0f;
 constexpr float kArtistFontSize = 11.5f;
 
@@ -133,6 +137,9 @@ struct SongToast::Impl {
     int cardScreenY = 0;
     int cardWidthPx = 0;
     int cardHeightPx = 0;
+    float toastWidthDip = kToastMinWidthDip;
+    ULONGLONG contentStartMs = 0;
+    ULONGLONG scrollReadyMs = 0;
 
     DCompRenderer renderer;
     uint64_t deviceGeneration = 0;
@@ -141,6 +148,9 @@ struct SongToast::Impl {
     ID2D1SolidColorBrush* brushText = nullptr;
     ID2D1SolidColorBrush* brushSecondary = nullptr;
     ID2D1SolidColorBrush* brushControl = nullptr;
+    ID2D1SolidColorBrush* brushTint = nullptr;
+    ID2D1SolidColorBrush* brushShadow = nullptr;
+    ID2D1Layer* contentLayer = nullptr;
     ID2D1LinearGradientBrush* brushTextEdgeFade = nullptr;
     ID2D1Layer* textEdgeFadeLayer = nullptr;
 
@@ -157,7 +167,7 @@ struct SongToast::Impl {
     ULONGLONG scrollTickMs = 0;
     ID2D1Bitmap* coverBmp = nullptr;
     ID2D1Bitmap* sourceIconBmp = nullptr;
-    ID2D1EllipseGeometry* coverClip = nullptr;
+    ID2D1RoundedRectangleGeometry* coverClip = nullptr;
     ID2D1Layer* coverLayer = nullptr;
     ID2D1Bitmap* backdropBmp = nullptr;
     ID2D1Effect* backdropBlur = nullptr;
@@ -188,6 +198,8 @@ struct SongToast::Impl {
         KillTimer(hwnd, kAutoHideTimer);
         KillTimer(hwnd, kCloseTimer);
         KillTimer(hwnd, kScrollTimer);
+        KillTimer(hwnd, kContentTimer);
+        contentStartMs = 0;
         scrollTimerRunning = false;
         entering = false;
         closing = false;
@@ -205,7 +217,7 @@ struct SongToast::Impl {
     }
 
     float textAreaWidth() const {
-        return std::max(1.0f, kToastWidthDip - kTextLeftDip - kTextRightPaddingDip);
+        return std::max(1.0f, toastWidthDip - kTextLeftDip - kTextRightPaddingDip);
     }
 
     void updateScrollTimer() {
@@ -233,6 +245,10 @@ struct SongToast::Impl {
 
     void advanceTextScroll() {
         const ULONGLONG now = GetTickCount64();
+        if (now < scrollReadyMs) {
+            scrollTickMs = now;
+            return;
+        }
         if (scrollTickMs == 0) {
             scrollTickMs = now;
             return;
@@ -291,6 +307,9 @@ struct SongToast::Impl {
         releaseCom(brushText);
         releaseCom(brushSecondary);
         releaseCom(brushControl);
+        releaseCom(brushTint);
+        releaseCom(brushShadow);
+        releaseCom(contentLayer);
         releaseCom(brushTextEdgeFade);
         releaseCom(textEdgeFadeLayer);
         releaseCom(titleLayout);
@@ -350,16 +369,19 @@ struct SongToast::Impl {
             FAILED(rt->CreateSolidColorBrush(p.cardStroke, &brushStroke)) ||
             FAILED(rt->CreateSolidColorBrush(p.text, &brushText)) ||
             FAILED(rt->CreateSolidColorBrush(p.textSecondary, &brushSecondary)) ||
-            FAILED(rt->CreateSolidColorBrush(p.controlFill, &brushControl))) {
+            FAILED(rt->CreateSolidColorBrush(p.controlFill, &brushControl)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black, 0.0f), &brushTint)) ||
+            FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(D2D1::ColorF::Black, 0.0f), &brushShadow)) ||
+            FAILED(rt->CreateLayer(&contentLayer))) {
             releaseDrawingResources();
             return false;
         }
 
         auto* factory = renderer.d2d();
         if (!factory ||
-            FAILED(factory->CreateEllipseGeometry(
-                D2D1::Ellipse(D2D1::Point2F(kCoverSizeDip * 0.5f, kCoverSizeDip * 0.5f),
-                              kCoverSizeDip * 0.5f, kCoverSizeDip * 0.5f),
+            FAILED(factory->CreateRoundedRectangleGeometry(
+                D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, kCoverSizeDip, kCoverSizeDip),
+                                  kCoverRadiusDip, kCoverRadiusDip),
                 &coverClip)) ||
             FAILED(rt->CreateLayer(&coverLayer))) {
             releaseDrawingResources();
@@ -369,7 +391,7 @@ struct SongToast::Impl {
         // 歌曲信息滚动时，左右各 8 DIP 逐渐淡出；使用图层透明度遮罩，
         // 不会把动态背景覆盖成固定颜色。短文本不滚动时不启用该遮罩。
         const float textAreaWidth =
-            std::max(1.0f, kToastWidthDip - kTextLeftDip - kTextRightPaddingDip);
+            std::max(1.0f, toastWidthDip - kTextLeftDip - kTextRightPaddingDip);
         const float fadeStop = std::min(0.5f, kTextEdgeFadeDip / textAreaWidth);
         const D2D1_GRADIENT_STOP fadeStops[] = {
             {0.0f, D2D1::ColorF(D2D1::ColorF::White, 0.0f)},
@@ -383,7 +405,7 @@ struct SongToast::Impl {
             fadeCollection) {
             const auto gradient = D2D1::LinearGradientBrushProperties(
                 D2D1::Point2F(kTextLeftDip, 0.0f),
-                D2D1::Point2F(kToastWidthDip - kTextRightPaddingDip, 0.0f));
+                D2D1::Point2F(toastWidthDip - kTextRightPaddingDip, 0.0f));
             if (FAILED(rt->CreateLinearGradientBrush(gradient, fadeCollection,
                                                      &brushTextEdgeFade)) ||
                 FAILED(rt->CreateLayer(&textEdgeFadeLayer))) {
@@ -528,6 +550,7 @@ struct SongToast::Impl {
         titleScrollOffset = 0.0f;
         artistScrollOffset = 0.0f;
         scrollTickMs = 0;
+        scrollReadyMs = GetTickCount64() + 650;
 
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite || !fmtTitle || !fmtArtist)
@@ -558,13 +581,22 @@ struct SongToast::Impl {
         if (!hwnd)
             return false;
         buildTextLayouts();
+        if (!visible) {
+            const float nextWidth = std::clamp(
+                kTextLeftDip + std::max(titleWidth, artistWidth) + kTextRightPaddingDip,
+                kToastMinWidthDip, kToastMaxWidthDip);
+            if (nextWidth != toastWidthDip) {
+                toastWidthDip = nextWidth;
+                themeDirty = true;
+            }
+        }
         dpi = GetDpiForWindow(hwnd);
         if (dpi == 0)
             dpi = GetDpiForSystem();
         const float s = scale();
-        const int widthPx = static_cast<int>(std::lround(kToastWidthDip * s));
-        const int heightPx = static_cast<int>(std::lround(kToastHeightDip * s));
-        const int margin = static_cast<int>(std::lround(kBottomMarginDip * s));
+        const int widthPx = static_cast<int>(std::lround((toastWidthDip + kShadowPaddingDip * 2.0f) * s));
+        const int heightPx = static_cast<int>(std::lround((kToastHeightDip + kShadowPaddingDip * 2.0f) * s));
+        const int margin = static_cast<int>(std::lround((kBottomMarginDip - kShadowPaddingDip) * s));
 
         HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
         MONITORINFO info{};
@@ -696,7 +728,7 @@ struct SongToast::Impl {
         if (!rt || !layout || !brush)
             return;
         const float areaWidth = std::max(0.0f, rect.right - rect.left);
-        const float y = rect.top;
+        const float y = std::round(rect.top * scale()) / scale();
         const bool scrolling = textWidth > areaWidth;
         const float loopWidth = textWidth + kTextScrollPaddingDip * 2.0f;
         const float bases[2] = {rect.left - offset, rect.left - offset + loopWidth};
@@ -712,7 +744,7 @@ struct SongToast::Impl {
         }
         rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
         for (int i = 0; i < count; ++i) {
-            const float x = scrolling ? bases[i] : rect.left;
+            const float x = std::round((scrolling ? bases[i] : rect.left) * scale()) / scale();
             rt->DrawTextLayout(D2D1::Point2F(x, y), layout, brush);
         }
         rt->PopAxisAlignedClip();
@@ -754,11 +786,10 @@ struct SongToast::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return false;
-        const float w = kToastWidthDip;
+        const float w = toastWidthDip;
         const float h = kToastHeightDip;
-        const float radius = h * 0.5f;
+        const float radius = kToastRadiusDip;
 
-        // 胶囊裁剪几何随宽度变化，按帧创建并在 EndDraw 后释放。
         ID2D1RoundedRectangleGeometry* capsule = nullptr;
         ID2D1Layer* capsuleLayer = nullptr;
         if (auto* factory = renderer.d2d()) {
@@ -771,6 +802,14 @@ struct SongToast::Impl {
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        rt->SetTransform(D2D1::Matrix3x2F::Translation(kShadowPaddingDip, kShadowPaddingDip));
+        for (int ring = 3; ring >= 1; --ring) {
+            const float spread = static_cast<float>(ring) * 1.5f;
+            brushShadow->SetColor(D2D1::ColorF(D2D1::ColorF::Black, 0.025f));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(
+                D2D1::RectF(-spread, 2.0f - spread, w + spread, h + 2.0f + spread),
+                radius + spread, radius + spread), brushShadow);
+        }
 
         const bool clipped = capsule && capsuleLayer;
         if (clipped) {
@@ -780,27 +819,45 @@ struct SongToast::Impl {
         }
         if (backdropBlur) {
             const D2D1_POINT_2F offset = D2D1::Point2F(0.0f, 0.0f);
-            rt->DrawImage(backdropBlur, &offset, nullptr, D2D1_INTERPOLATION_MODE_LINEAR,
+            const D2D1_RECT_F source = D2D1::RectF(kShadowPaddingDip, kShadowPaddingDip,
+                                                   kShadowPaddingDip + w, kShadowPaddingDip + h);
+            rt->DrawImage(backdropBlur, &offset, &source, D2D1_INTERPOLATION_MODE_LINEAR,
                           D2D1_COMPOSITE_MODE_SOURCE_OVER);
         } else if (backdropBmp) {
+            const D2D1_RECT_F source = D2D1::RectF(kShadowPaddingDip, kShadowPaddingDip,
+                                                   kShadowPaddingDip + w, kShadowPaddingDip + h);
             rt->DrawBitmap(backdropBmp, D2D1::RectF(0.0f, 0.0f, w, h), 1.0f,
-                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
         }
         if (clipped)
             rt->PopLayer();
 
         const auto card = D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, h), radius, radius);
         rt->FillRoundedRectangle(card, brushBackground);
-        rt->DrawRoundedRectangle(card, brushStroke, 1.0f);
+        if (media.hasDominantColor) {
+            brushTint->SetColor(fluent::toD2D(media.dominantColor, 0.08f));
+            rt->FillRoundedRectangle(card, brushTint);
+        }
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), radius, radius), brushStroke, 1.0f);
+
+        const bool animateContent = contentStartMs != 0;
+        if (animateContent) {
+            const float progress = std::clamp(
+                static_cast<float>(GetTickCount64() - contentStartMs) / kContentAnimationMs,
+                0.0f, 1.0f);
+            const float opacity = progress * progress * (3.0f - 2.0f * progress);
+            rt->PushLayer(D2D1::LayerParameters1(
+                D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                D2D1::Matrix3x2F::Identity(), opacity), contentLayer);
+        }
 
         // 封面
         const D2D1_RECT_F coverRect =
             D2D1::RectF(kCoverLeftDip, kCoverTopDip, kCoverLeftDip + kCoverSizeDip,
                         kCoverTopDip + kCoverSizeDip);
-        rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F((coverRect.left + coverRect.right) * 0.5f,
-                                                    (coverRect.top + coverRect.bottom) * 0.5f),
-                                      kCoverSizeDip * 0.5f, kCoverSizeDip * 0.5f),
-                        brushControl);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(coverRect, kCoverRadiusDip, kCoverRadiusDip),
+                                  brushControl);
         if (coverBmp && coverClip && coverLayer) {
             rt->PushLayer(D2D1::LayerParameters1(
                               D2D1::InfiniteRect(), coverClip,
@@ -849,6 +906,9 @@ struct SongToast::Impl {
                               artistScrollOffset, brushSecondary);
         }
 
+        if (animateContent)
+            rt->PopLayer();
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
         releaseCom(capsule);
         releaseCom(capsuleLayer);
@@ -868,6 +928,20 @@ struct SongToast::Impl {
     void showSong() {
         if (!hwnd || !enabled || media.title.empty())
             return;
+        if (visible && !closing) {
+            KillTimer(hwnd, kAutoHideTimer);
+            textDirty = true;
+            coverDirty = true;
+            sourceIconDirty = true;
+            if (clientAnimations && !entering) {
+                contentStartMs = GetTickCount64();
+                SetTimer(hwnd, kContentTimer, USER_TIMER_MINIMUM, nullptr);
+            }
+            render();
+            SetTimer(hwnd, kAutoHideTimer,
+                     static_cast<UINT>(std::clamp(durationSec, 1, 10)) * 1000, nullptr);
+            return;
+        }
         killTimers();
         if (visible)
             hideImmediate();
@@ -875,7 +949,7 @@ struct SongToast::Impl {
         coverDirty = true;
         sourceIconDirty = true;
         backdropDirty = true;
-        entering = true;
+        entering = clientAnimations;
         closing = false;
         if (!layoutAndPosition() || !render()) {
             entering = false;
@@ -886,14 +960,17 @@ struct SongToast::Impl {
         // 中上时从上方滑入，与中下方向相反。
         renderer.resetRoot();
         const float travel = (placementTop ? -kEnterTravelDip : kEnterTravelDip) * scale();
-        if (!renderer.animateRoot(0.0f, 0.0f, travel, 0.0f, 0.0f, 1.0f,
+        if (clientAnimations && !renderer.animateRoot(0.0f, 0.0f, travel, 0.0f, 0.0f, 1.0f,
                                   static_cast<float>(kEnterAnimationMs) / 1000.0f)) {
             renderer.resetRoot();
         }
         renderer.commit();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         visible = true;
-        SetTimer(hwnd, kEnterTimer, kEnterAnimationMs, nullptr);
+        if (entering)
+            SetTimer(hwnd, kEnterTimer, kEnterAnimationMs, nullptr);
+        else
+            updateScrollTimer();
         SetTimer(hwnd, kAutoHideTimer,
                  static_cast<UINT>(std::clamp(durationSec, 1, 10)) * 1000, nullptr);
     }
@@ -901,6 +978,12 @@ struct SongToast::Impl {
     void hideAnimated() {
         if (!visible || closing || !hwnd)
             return;
+        if (!clientAnimations) {
+            hideImmediate();
+            return;
+        }
+        KillTimer(hwnd, kContentTimer);
+        contentStartMs = 0;
         KillTimer(hwnd, kEnterTimer);
         KillTimer(hwnd, kAutoHideTimer);
         KillTimer(hwnd, kScrollTimer);
@@ -958,7 +1041,14 @@ struct SongToast::Impl {
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_TIMER:
-            if (wp == kEnterTimer) {
+            if (wp == kContentTimer) {
+                if (GetTickCount64() - contentStartMs >= kContentAnimationMs || !clientAnimations) {
+                    KillTimer(hwnd, kContentTimer);
+                    contentStartMs = 0;
+                }
+                if (visible && !closing)
+                    render();
+            } else if (wp == kEnterTimer) {
                 KillTimer(hwnd, kEnterTimer);
                 entering = false;
                 updateScrollTimer();
@@ -1048,13 +1138,17 @@ bool SongToast::create(HINSTANCE inst) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&wc);
 
-    // WS_EX_TRANSPARENT + WM_NCHITTEST=HTTRANSPARENT：双重保证鼠标事件完全穿透
-    const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT |
+    const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT |
                           WS_EX_NOREDIRECTIONBITMAP;
     impl_->hwnd = CreateWindowExW(exStyle, kWndClassName, L"QQMusicLyricSongToast", WS_POPUP,
                                   0, 0, 1, 1, nullptr, nullptr, inst, impl_.get());
     if (!impl_->hwnd)
         return false;
+    if (!SetLayeredWindowAttributes(impl_->hwnd, 0, 255, LWA_ALPHA)) {
+        runtime_log::writef(L"[song-toast] layered window initialization failed: %lu", GetLastError());
+        DestroyWindow(impl_->hwnd);
+        return false;
+    }
     impl_->dpi = GetDpiForWindow(impl_->hwnd);
     if (impl_->dpi == 0)
         impl_->dpi = GetDpiForSystem();
