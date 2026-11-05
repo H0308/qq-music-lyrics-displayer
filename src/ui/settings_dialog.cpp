@@ -4445,7 +4445,7 @@ struct SettingsDialog::Impl {
                 if (auto* brush = painter.brush(tone(color))) {
                     D2D1_MATRIX_3X2_F previous{};
                     rt->GetTransform(&previous);
-                    rt->SetTransform(D2D1::Matrix3x2F::Rotation(leaves[i].angle, center));
+                    rt->SetTransform(D2D1::Matrix3x2F::Rotation(leaves[i].angle, center) * previous);
                     rt->FillEllipse(D2D1::Ellipse(center, leaves[i].size,
                                                    leaves[i].size * 0.44f),
                                     brush);
