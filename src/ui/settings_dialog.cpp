@@ -1,5 +1,6 @@
 #include "settings_dialog.h"
 
+#include "app_info.h"
 #include "ui/app_icon.h"
 #include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
@@ -37,6 +38,11 @@ constexpr int kSongToastPage = 7;
 constexpr int kIdlePage = kSettingsPageCount - 1;
 constexpr int kIdNav = 400;
 constexpr int kIdSettingsSearch = 4900;
+constexpr int kIdOpenDocs = 4901;
+constexpr int kIdOpenFeedback = 4902;
+constexpr int kIdOpenAbout = 4903;
+constexpr int kFooterItemCount = 3;
+constexpr float kFooterItemH = 32.0f;
 constexpr float kSearchPaletteHeaderH = 52.0f;
 constexpr float kSearchPaletteFooterH = 32.0f;
 constexpr float kSearchPaletteRowH = 56.0f;
@@ -243,7 +249,7 @@ std::wstring colorText(COLORREF color) {
 }
 
 constexpr const wchar_t* kFontSettingNotice =
-    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息、沉浸模式时间/日期和 Dock 资源占用";
+    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息、沉浸模式时间/日期和 Dock、内嵌模式资源监视";
 
 const wchar_t* idleQuoteSourceHint(int source) {
     if (source == 1)
@@ -568,6 +574,8 @@ struct SettingsDialog::Impl {
     std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
+    std::array<D2D1_RECT_F, kFooterItemCount> footerItemRects{};
+    D2D1_RECT_F versionRect{};
     bool navIndicatorAnimating = false;
     ULONGLONG navIndicatorStartMs = 0;
     float navIndicatorFrom = 0.0f;
@@ -2969,6 +2977,14 @@ struct SettingsDialog::Impl {
         }
 
         const float contentLeft = 12.0f + kNavW + 16.0f;
+        const float footerTop = h - 24.0f - kFooterItemCount * kFooterItemH - 20.0f;
+        for (int index = 0; index < kFooterItemCount; ++index) {
+            footerItemRects[index] = D2D1::RectF(
+                navRect.left + 4.0f, footerTop + index * kFooterItemH,
+                navRect.right - 4.0f, footerTop + (index + 1) * kFooterItemH);
+        }
+        versionRect = D2D1::RectF(navRect.left + kNavIconLeft, h - 36.0f,
+                                  navRect.right - 12.0f, h - 16.0f);
         const float availableContentW = std::max(20.0f, w - contentLeft - 24.0f);
         const float contentW = std::min(availableContentW, kContentMaxWidthDip);
         // 内容达到最大宽度后，在导航栏右侧的可用区域内居中。
@@ -3445,6 +3461,31 @@ struct SettingsDialog::Impl {
             D2D1::RectF(navRect.left + 7.0f, centerY - halfHeight,
                         navRect.left + 10.0f, centerY + halfHeight),
             1.5f);
+        const wchar_t* footerLabels[] = {L"文档中心", L"问题反馈", L"关于与更新"};
+        const settings_icon::Kind footerIcons[] = {
+            settings_icon::Kind::Lyrics, settings_icon::Kind::Toast, settings_icon::Kind::Info};
+        for (int index = 0; index < kFooterItemCount; ++index) {
+            const int id = kIdOpenDocs + index;
+            const auto& rect = footerItemRects[index];
+            if (pressedId == id && hoverId == id)
+                painter.fillRoundRect(p.controlPressed, rect, 6.0f);
+            else if (hoverId == id)
+                painter.fillRoundRect(p.listHover, rect, 6.0f);
+            if (focusedId == id && focusVisible)
+                painter.strokeRoundRect(p.accent, rect, 1.5f, 6.0f);
+            const float iconTop = (rect.top + rect.bottom - kNavIconSize) * 0.5f;
+            if (auto* brush = painter.brush(p.textSecondary))
+                settings_icon::draw(painter.target(), footerIcons[index],
+                    D2D1::RectF(navRect.left + kNavIconLeft, iconTop,
+                                navRect.left + kNavIconLeft + kNavIconSize,
+                                iconTop + kNavIconSize), brush);
+            painter.drawText(footerLabels[index], painter.textFormat(12.5f, 400, false, true),
+                D2D1::RectF(navRect.left + kNavIconLeft + kNavIconSize + kNavIconTextGap,
+                            rect.top, rect.right - 8.0f, rect.bottom), p.textSecondary);
+        }
+        painter.drawText(std::wstring(L"版本 ") + app_info::kVersion,
+                         painter.textFormat(11.0f, 400, false, true), versionRect,
+                         p.textSecondary);
     }
 
     void drawButton(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
@@ -5108,6 +5149,10 @@ struct SettingsDialog::Impl {
             *option = -1;
         if (contains(searchTriggerRect, x, y))
             return kIdSettingsSearch;
+        for (int index = 0; index < kFooterItemCount; ++index) {
+            if (contains(footerItemRects[index], x, y))
+                return kIdOpenDocs + index;
+        }
         for (int i = 0; i < kSettingsPageCount; ++i) {
             if (contains(navItemRects[i], x, y)) {
                 if (option)
@@ -5176,7 +5221,8 @@ struct SettingsDialog::Impl {
     }
 
     std::vector<int> focusOrder() const {
-        std::vector<int> order{kIdSettingsSearch, kIdNav};
+        std::vector<int> order{kIdSettingsSearch, kIdNav, kIdOpenDocs, kIdOpenFeedback,
+                               kIdOpenAbout};
         for (const auto& row : rows[activePage]) {
             if (row.enabled && row.id == kIdIdleApps) {
                 order.push_back(kIdIdleAppNames);
@@ -5225,6 +5271,14 @@ struct SettingsDialog::Impl {
     }
 
     void onCommand(int id, int option = -1) {
+        if (id >= kIdOpenDocs && id <= kIdOpenAbout) {
+            const auto& action = id == kIdOpenDocs ? actions.onOpenDocs
+                               : id == kIdOpenFeedback ? actions.onOpenFeedback
+                                                      : actions.onOpenAbout;
+            if (action)
+                action();
+            return;
+        }
         if (id == kIdNav)
             return;
         if (id == kIdIdleAppNames) {
@@ -6199,6 +6253,8 @@ struct SettingsDialog::Impl {
                 showPage(option);
             else if (pressed == kIdSettingsSearch && hit == kIdSettingsSearch)
                 openSearchPalette();
+            else if (pressed >= kIdOpenDocs && pressed <= kIdOpenAbout && pressed == hit)
+                onCommand(pressed);
             else if (pressed != 0 && pressed == hit) {
                 Row* row = findRow(pressed);
                 if (row && row->enabled) {
@@ -6356,6 +6412,8 @@ struct SettingsDialog::Impl {
             if (wp == VK_SPACE || wp == VK_RETURN) {
                 if (focusedId == kIdSettingsSearch) {
                     openSearchPalette();
+                } else if (focusedId >= kIdOpenDocs && focusedId <= kIdOpenAbout) {
+                    onCommand(focusedId);
                 } else if (focusedId == kIdIdleAppNames) {
                     onCommand(kIdIdleAppNames);
                 } else if (focusedId != kIdNav) {

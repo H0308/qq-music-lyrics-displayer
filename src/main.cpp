@@ -5589,6 +5589,15 @@ SettingsState App::currentSettingsState() const {
 
 SettingsActions App::buildSettingsActions() {
     SettingsActions act;
+    act.onOpenDocs = [] {
+        ShellExecuteW(nullptr, L"open", L"https://www.taskbar-lyrics.top/docs.html",
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    };
+    act.onOpenFeedback = [] {
+        ShellExecuteW(nullptr, L"open", L"https://www.taskbar-lyrics.top/feedback.html",
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    };
+    act.onOpenAbout = [this] { showAbout(); };
     act.onIdleEntryEnabled = [this](bool on) { applyIdleEntryEnabled(on); };
     act.onIdleTextMode = [this](int mode) { applyIdleTextMode(mode); };
     act.onIdleQuoteSource = [this](int source) { applyIdleQuoteSource(source); };

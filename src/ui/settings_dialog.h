@@ -88,6 +88,9 @@ struct SettingsState {
 
 // 设置变更回调：用户操作即时生效（与右键菜单语义一致）
 struct SettingsActions {
+    std::function<void()> onOpenDocs;
+    std::function<void()> onOpenFeedback;
+    std::function<void()> onOpenAbout;
     std::function<void(bool)> onIdleEntryEnabled;
     std::function<void(int)> onIdleTextMode; // 0 每日一言 1 欢迎语 2 不显示
     std::function<void(int)> onIdleQuoteSource;
