@@ -93,6 +93,8 @@ constexpr int kIdSongToast = 440;
 constexpr int kIdSongToastDuration = 441;
 constexpr int kIdSongToastSkipFullscreen = 442;
 constexpr int kIdSongToastPosition = 443;
+constexpr int kIdSongToastMonitor = 484;
+constexpr int kIdSongToastPreview = 485;
 constexpr int kIdPickFont = 420;
 constexpr int kIdFontColor = 421;
 constexpr int kIdFollowAlbum = 422;
@@ -404,7 +406,10 @@ settings_icon::Kind iconForRow(int id) {
     case kIdSpectrumOpacity:
         return settings_icon::Kind::Opacity;
     case kIdSongToast:
+    case kIdSongToastPreview:
         return settings_icon::Kind::Toast;
+    case kIdSongToastMonitor:
+        return settings_icon::Kind::Display;
     case kIdSongToastDuration:
         return settings_icon::Kind::Duration;
     case kIdSongToastSkipFullscreen:
@@ -1581,7 +1586,7 @@ struct SettingsDialog::Impl {
         addHeader(kSongToastPage, L"显示与时长");
         Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
                                 L"切歌时弹出歌曲信息",
-                                L"在主屏幕中下方短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
+                                L"在所选显示器短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
                                 L"始终不响应鼠标操作",
                                 40.0f, kRowTallH);
         songToast.checked = minimal ? false : state.songToastEnabled;
@@ -1597,10 +1602,22 @@ struct SettingsDialog::Impl {
                       state.songToastSkipFullscreen);
         songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
         addHeader(kSongToastPage, L"弹出位置");
+        addRadio(kSongToastPage, kIdSongToastMonitor, L"显示器选择",
+                 L"在每次弹窗出现时确定显示器，不随鼠标移动。",
+                 {L"主显示器", L"当前鼠标所在显示器"},
+                 state.songToastFollowMouseMonitor ? 1 : 0,
+                 !minimal && state.songToastEnabled, kRowTallH);
         addRadio(kSongToastPage, kIdSongToastPosition, L"切歌弹窗位置", nullptr,
                  {L"中上", L"中下"},
                  state.songToastPosition, !minimal && state.songToastEnabled,
                  kSongToastPositionRowH);
+        addHeader(kSongToastPage, L"效果预览");
+        Row& songToastPreview = addButton(
+            kSongToastPage, kIdSongToastPreview, L"预览切歌弹窗",
+            L"使用当前歌曲，按所选显示器、位置和停留时间展示；需要开启弹窗且当前有歌曲。",
+            L"预览弹窗", kRowTallH);
+        songToastPreview.enabled = !minimal && state.songToastEnabled &&
+                                   state.songToastPreviewAvailable;
         addHeader(kPerformancePage, L"渲染与资源占用");
         addModeGrid(kPerformancePage, kIdRenderMode, L"性能模式",
                     L"模式仅本次运行有效，重启软件后恢复正常模式",
@@ -5609,6 +5626,11 @@ struct SettingsDialog::Impl {
             break;
         case kIdSongToast:
             row->checked = !row->checked;
+            state.songToastEnabled = row->checked;
+            if (auto* monitor = findRow(kIdSongToastMonitor))
+                monitor->enabled = row->checked;
+            if (auto* preview = findRow(kIdSongToastPreview))
+                preview->enabled = row->checked && state.songToastPreviewAvailable;
             if (auto* duration = findRow(kIdSongToastDuration))
                 duration->enabled = row->checked;
             if (auto* skipFullscreen = findRow(kIdSongToastSkipFullscreen))
@@ -5630,6 +5652,15 @@ struct SettingsDialog::Impl {
         case kIdSongToastPosition:
             if (actions.onSongToastPosition)
                 actions.onSongToastPosition(row->selected);
+            break;
+        case kIdSongToastMonitor:
+            state.songToastFollowMouseMonitor = row->selected == 1;
+            if (actions.onSongToastFollowMouseMonitor)
+                actions.onSongToastFollowMouseMonitor(state.songToastFollowMouseMonitor);
+            break;
+        case kIdSongToastPreview:
+            if (actions.onPreviewSongToast)
+                actions.onPreviewSongToast();
             break;
         case kIdTaskbarTheme:
             if (actions.onTaskbarTheme)
@@ -5881,6 +5912,12 @@ struct SettingsDialog::Impl {
             row->selected = std::clamp(s.songToastPosition, 0, 1);
             row->enabled = !minimal && s.songToastEnabled;
         }
+        if (auto* row = findRow(kIdSongToastMonitor)) {
+            row->selected = s.songToastFollowMouseMonitor ? 1 : 0;
+            row->enabled = !minimal && s.songToastEnabled;
+        }
+        if (auto* row = findRow(kIdSongToastPreview))
+            row->enabled = !minimal && s.songToastEnabled && s.songToastPreviewAvailable;
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);
         if (auto* row = findRow(kIdWindowTheme))

@@ -6,7 +6,7 @@
 
 #include <windows.h>
 
-// 切歌时在主屏幕中下方短暂弹出的圆角歌曲卡片。
+// 切歌时在所选显示器短暂弹出的圆角歌曲卡片。
 // 独立置顶窗口：圆角封面 + 两行标题与艺术家，磨砂半透明背景，
 // 始终依据背后内容的明暗自动切换文字颜色；窗口固定鼠标穿透、不可交互。
 class SongToast {
@@ -23,8 +23,9 @@ public:
     void setEnabled(bool enabled);
     // 自动收起前的停留秒数（1~10）
     void setDurationSec(int seconds);
-    // true 显示在主屏幕中上方（与中下对称，出入场动画方向相反），false 中下方
+    // true 显示在目标显示器中上方（与中下对称，出入场动画方向相反），false 中下方
     void setPlacementTop(bool top);
+    void setFollowMouseMonitor(bool follow);
     // 切歌触发：更新内容并从下方滑入，停留设定时长后自动收起
     void showSong(const OverlayMediaInfo& info);
     // 可见期间异步补齐媒体字段（封面等）；空标题视为无播放，立即收起

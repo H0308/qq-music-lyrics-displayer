@@ -120,6 +120,9 @@ struct SongToast::Impl {
     bool enabled = false;
     int durationSec = 4;
     bool placementTop = false; // true 中上，false 中下
+    bool followMouseMonitor = false;
+    HMONITOR targetMonitor = nullptr;
+    bool positioning = false;
     bool visible = false;
     bool entering = false;
     bool closing = false;
@@ -576,10 +579,29 @@ struct SongToast::Impl {
         build(media.artist, fmtArtist, &artistLayout, artistWidth, artistHeight);
     }
 
-    // 固定宽度定位到主屏幕工作区中下方（不覆盖任务栏），超长文字截断。
+    HMONITOR selectedMonitor() const {
+        POINT point{};
+        if (followMouseMonitor) {
+            if (!GetCursorPos(&point))
+                return nullptr;
+            return MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        }
+        return MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY);
+    }
+
     bool layoutAndPosition() {
         if (!hwnd)
             return false;
+        if (!targetMonitor)
+            targetMonitor = selectedMonitor();
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!targetMonitor || !GetMonitorInfoW(targetMonitor, &info))
+            return false;
+        dpi = GetDpiForWindow(hwnd);
+        if (dpi == 0)
+            return false;
+        const UINT layoutDpi = dpi;
         buildTextLayouts();
         if (!visible) {
             const float nextWidth = std::clamp(
@@ -590,19 +612,11 @@ struct SongToast::Impl {
                 themeDirty = true;
             }
         }
-        dpi = GetDpiForWindow(hwnd);
-        if (dpi == 0)
-            dpi = GetDpiForSystem();
         const float s = scale();
         const int widthPx = static_cast<int>(std::lround((toastWidthDip + kShadowPaddingDip * 2.0f) * s));
         const int heightPx = static_cast<int>(std::lround((kToastHeightDip + kShadowPaddingDip * 2.0f) * s));
         const int margin = static_cast<int>(std::lround((kBottomMarginDip - kShadowPaddingDip) * s));
 
-        HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
-        MONITORINFO info{};
-        info.cbSize = sizeof(info);
-        if (!GetMonitorInfoW(monitor, &info))
-            return false;
         const RECT work = info.rcWork;
         const int workWidth = static_cast<int>(work.right - work.left);
         const int x = static_cast<int>(work.left) + (workWidth - widthPx) / 2;
@@ -613,9 +627,13 @@ struct SongToast::Impl {
         cardScreenY = y;
         cardWidthPx = widthPx;
         cardHeightPx = heightPx;
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, widthPx, heightPx,
-                     SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-        return true;
+        positioning = true;
+        const bool positioned = SetWindowPos(hwnd, HWND_TOPMOST, x, y, widthPx, heightPx,
+                                              SWP_NOACTIVATE | SWP_NOOWNERZORDER) != FALSE;
+        positioning = false;
+        if (positioned && GetDpiForWindow(hwnd) != layoutDpi)
+            return layoutAndPosition();
+        return positioned;
     }
 
     void decodeCover() {
@@ -928,6 +946,16 @@ struct SongToast::Impl {
     void showSong() {
         if (!hwnd || !enabled || media.title.empty())
             return;
+        const HMONITOR nextMonitor = selectedMonitor();
+        if (!nextMonitor)
+            return;
+        const bool monitorChanged = targetMonitor != nextMonitor;
+        targetMonitor = nextMonitor;
+        if (monitorChanged) {
+            backdropDirty = true;
+            if (visible && !layoutAndPosition())
+                return;
+        }
         if (visible && !closing) {
             KillTimer(hwnd, kAutoHideTimer);
             textDirty = true;
@@ -1067,8 +1095,10 @@ struct SongToast::Impl {
             }
             return 0;
         case WM_DPICHANGED:
-            dpi = GetDpiForWindow(hwnd);
+            dpi = LOWORD(wp);
             releaseDrawingResources();
+            if (positioning)
+                return 0;
             if (visible) {
                 backdropDirty = true;
                 layoutAndPosition();
@@ -1076,6 +1106,7 @@ struct SongToast::Impl {
             }
             return 0;
         case WM_DISPLAYCHANGE:
+            targetMonitor = selectedMonitor();
             if (visible) {
                 backdropDirty = true;
                 layoutAndPosition();
@@ -1185,6 +1216,18 @@ void SongToast::setPlacementTop(bool top) {
 void SongToast::showSong(const OverlayMediaInfo& info) {
     impl_->media = info;
     impl_->showSong();
+}
+
+void SongToast::setFollowMouseMonitor(bool follow) {
+    if (impl_->followMouseMonitor == follow)
+        return;
+    impl_->followMouseMonitor = follow;
+    impl_->targetMonitor = impl_->selectedMonitor();
+    if (impl_->visible) {
+        impl_->backdropDirty = true;
+        if (impl_->layoutAndPosition())
+            impl_->render();
+    }
 }
 
 void SongToast::setMedia(const OverlayMediaInfo& info) {

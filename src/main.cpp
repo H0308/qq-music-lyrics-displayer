@@ -841,6 +841,7 @@ struct App {
     int songToastDurationSec_ = 4;
     bool songToastSkipFullscreen_ = true; // 前台有全屏应用时不弹出
     bool songToastTop_ = false;           // true 中上，false 中下（默认）
+    bool songToastFollowMouseMonitor_ = false;
     // 任务栏默认跟随 Windows 系统模式；普通窗口/悬浮窗默认跟随 Windows 应用模式。
     fluent::ThemeMode taskbarThemeMode_ = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode_ = fluent::ThemeMode::FollowApp;
@@ -1823,6 +1824,14 @@ struct App {
         saveSettings();
     }
 
+    void applySongToastFollowMouseMonitor(bool follow) {
+        songToastFollowMouseMonitor_ = follow;
+        if (songToast_)
+            songToast_->setFollowMouseMonitor(follow);
+        logSettingBool(L"song-toast-follow-mouse-monitor", follow);
+        saveSettings();
+    }
+
     void applySongToastPosition(int position) {
         songToastTop_ = position == 0;
         if (songToast_)
@@ -1879,6 +1888,7 @@ struct App {
             toast->setEnabled(true);
             toast->setDurationSec(songToastDurationSec_);
             toast->setPlacementTop(songToastTop_);
+            toast->setFollowMouseMonitor(songToastFollowMouseMonitor_);
             songToast_ = std::move(toast);
         }
         songToast_->showSong(currentFrame_.media);
@@ -3397,7 +3407,7 @@ struct App {
         }
         tryExtractAlbumColor();
         updateRuntimeLogState(snap);
-        if (mediaSessionChanged)
+        if (mediaSessionChanged || trackChanged)
             refreshSettingsDialog(true);
     }
 
@@ -4079,6 +4089,7 @@ void App::loadSettings() {
         songToastDurationSec_ = std::clamp(j.value("songToastDuration", 4), 1, 10);
         songToastSkipFullscreen_ = j.value("songToastSkipFullscreen", true);
         songToastTop_ = j.value("songToastPosition", std::string("bottom")) == "top";
+        songToastFollowMouseMonitor_ = j.value("songToastFollowMouseMonitor", false);
         taskbarThemeMode_ = themeModeFromConfig(
             j.value("taskbarTheme", std::string("system")),
             fluent::ThemeMode::FollowSystem);
@@ -4353,6 +4364,7 @@ void App::saveSettings() {
         j["songToastDuration"] = songToastDurationSec_;
         j["songToastSkipFullscreen"] = songToastSkipFullscreen_;
         j["songToastPosition"] = songToastTop_ ? "top" : "bottom";
+        j["songToastFollowMouseMonitor"] = songToastFollowMouseMonitor_;
         j["taskbarTheme"] = themeModeConfigName(taskbarThemeMode_);
         j["windowTheme"] = themeModeConfigName(windowThemeMode_);
         j["spectrum"] = spectrumOn_;
@@ -5597,6 +5609,8 @@ SettingsState App::currentSettingsState() const {
     st.songToastDurationSec = songToastDurationSec_;
     st.songToastSkipFullscreen = songToastSkipFullscreen_;
     st.songToastPosition = songToastTop_ ? 0 : 1;
+    st.songToastFollowMouseMonitor = songToastFollowMouseMonitor_;
+    st.songToastPreviewAvailable = st.mediaSessionAlive && !currentFrame_.media.title.empty();
     st.taskbarThemeMode = taskbarThemeMode_;
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
@@ -5707,6 +5721,10 @@ SettingsActions App::buildSettingsActions() {
     act.onSongToastDuration = [this](int seconds) { applySongToastDuration(seconds); };
     act.onSongToastSkipFullscreen = [this](bool on) { applySongToastSkipFullscreen(on); };
     act.onSongToastPosition = [this](int position) { applySongToastPosition(position); };
+    act.onSongToastFollowMouseMonitor = [this](bool follow) {
+        applySongToastFollowMouseMonitor(follow);
+    };
+    act.onPreviewSongToast = [this] { notifySongToast(); };
     act.onTaskbarTheme = [this](fluent::ThemeMode mode) { applyTaskbarTheme(mode); };
     act.onWindowTheme = [this](fluent::ThemeMode mode) { applyWindowTheme(mode); };
     act.onPickFont = [this] { pickFont(); };

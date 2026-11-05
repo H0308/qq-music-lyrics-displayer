@@ -71,6 +71,8 @@ struct SettingsState {
     int songToastDurationSec = 4;     // 切歌弹窗停留秒数（1~10）
     bool songToastSkipFullscreen = true; // 前台有全屏应用时不弹出
     int songToastPosition = 1;      // 0 中上 1 中下
+    bool songToastFollowMouseMonitor = false;
+    bool songToastPreviewAvailable = false;
     fluent::ThemeMode taskbarThemeMode = fluent::ThemeMode::FollowSystem;
     fluent::ThemeMode windowThemeMode = fluent::ThemeMode::FollowApp;
     bool verticalTaskbar = false; // 侧边任务栏：禁用不适合窄栏的设置项
@@ -149,6 +151,8 @@ struct SettingsActions {
     std::function<void(int)> onSongToastDuration;
     std::function<void(bool)> onSongToastSkipFullscreen;
     std::function<void(int)> onSongToastPosition;
+    std::function<void(bool)> onSongToastFollowMouseMonitor;
+    std::function<void()> onPreviewSongToast;
     std::function<void(fluent::ThemeMode)> onTaskbarTheme;
     std::function<void(fluent::ThemeMode)> onWindowTheme;
     std::function<void()> onPickFont;
