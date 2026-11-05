@@ -141,6 +141,7 @@ constexpr UINT kCmdTaskbarModeImmersive = 136;
 constexpr UINT kCmdTaskbarModeAppBar = 137;
 constexpr UINT kCmdAppBarTop = 138;
 constexpr UINT kCmdAppBarBottom = 139;
+constexpr UINT kCmdRestart = 140;
 constexpr int kCmdTaskbarMonitorAll = 150;
 constexpr int kCmdTaskbarMonitorBase = 151;
 constexpr int kDockQuickAppCommandBase = 21000;
@@ -191,6 +192,7 @@ const wchar_t* trayCommandName(int command) {
     case kCmdPickFont: return L"pick-font";
     case kCmdFontColorEffect: return L"font-color-effect";
     case kCmdManualSearch: return L"manual-search";
+    case kCmdRestart: return L"restart";
     case kCmdExit: return L"exit";
     default: return L"unknown";
     }
@@ -2957,6 +2959,36 @@ struct App {
         return taskbarEnabledBeforeStopped_;
     }
 
+    void restartApplication() {
+        if (shutdownRequested_)
+            return;
+        std::wstring executable(32768, L'\0');
+        const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
+                                               static_cast<DWORD>(executable.size()));
+        if (length == 0 || length >= executable.size()) {
+            message_dialog::showModal(GetModuleHandleW(nullptr), trayHwnd, L"重启应用",
+                                      L"无法获取应用路径，重启失败。", L"确定");
+            return;
+        }
+        executable.resize(length);
+        std::wstring commandLine = L"\"" + executable + L"\" --restart-parent " +
+                                   std::to_wstring(GetCurrentProcessId());
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(executable.c_str(), commandLine.data(), nullptr, nullptr,
+                            FALSE, 0, nullptr, nullptr, &startup, &process)) {
+            runtime_log::writef(L"[lifecycle] restart failed error=%lu", GetLastError());
+            message_dialog::showModal(GetModuleHandleW(nullptr), trayHwnd, L"重启应用",
+                                      L"无法启动应用，重启失败。", L"确定");
+            return;
+        }
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        runtimeLogger_.write(L"[lifecycle] restart requested");
+        requestQuit();
+    }
+
     void requestQuit() {
         if (shutdownRequested_)
             return;
@@ -5135,7 +5167,9 @@ std::vector<fluent::FluentMenuItem> App::buildMenuItems(bool fullTrayMenu) {
     if (fullTrayMenu) {
         addItem(kCmdAutoStart, L"开机自启动", settings_icon::Kind::Trigger, autoStartEnabled());
         addSeparator();
-        addItem(kCmdAbout, L"关于", settings_icon::Kind::Info);
+        addItem(kCmdAbout, L"检查更新…", settings_icon::Kind::Download);
+        items.back().rightText = app_info::kVersion;
+        addItem(kCmdRestart, L"重启应用", settings_icon::Kind::Restart);
         addItem(kCmdExit, L"退出", settings_icon::Kind::Exit);
     }
     return items;
@@ -5336,6 +5370,9 @@ void App::onMenuCommand(int cmd, const wchar_t* source) {
         break;
     case kCmdExit:
         requestQuit();
+        break;
+    case kCmdRestart:
+        restartApplication();
         break;
     }
 }
@@ -5912,8 +5949,25 @@ int main() {
     int verifyArgc = 0;
     LPWSTR* verifyArgv = CommandLineToArgvW(GetCommandLineW(), &verifyArgc);
     bool verifyRelease = false;
+    DWORD restartParent = 0;
     if (verifyArgv) {
         for (int i = 1; i < verifyArgc; ++i) {
+            if (wcscmp(verifyArgv[i], L"--restart-parent") == 0 && i + 1 < verifyArgc) {
+                const std::wstring parentArgument = verifyArgv[++i];
+                try {
+                    size_t parsed = 0;
+                    const unsigned long parentId = std::stoul(parentArgument, &parsed);
+                    if (parsed != parentArgument.size() || parentId == 0 ||
+                        parentId == GetCurrentProcessId()) {
+                        LocalFree(verifyArgv);
+                        return 1;
+                    }
+                    restartParent = parentId;
+                } catch (const std::exception&) {
+                    LocalFree(verifyArgv);
+                    return 1;
+                }
+            }
             if (wcscmp(verifyArgv[i], L"--verify-release") == 0) {
                 verifyRelease = true;
                 break;
@@ -5927,6 +5981,18 @@ int main() {
 #else
         return 1;
 #endif
+    }
+
+    if (restartParent != 0) {
+        HANDLE parentProcess = OpenProcess(SYNCHRONIZE, FALSE, restartParent);
+        if (parentProcess) {
+            const DWORD result = WaitForSingleObject(parentProcess, INFINITE);
+            CloseHandle(parentProcess);
+            if (result != WAIT_OBJECT_0)
+                return 1;
+        } else if (GetLastError() != ERROR_INVALID_PARAMETER) {
+            return 1;
+        }
     }
 
     // 单实例限制：命名互斥体（Local\ 会话级）。进程退出（含崩溃）时内核自动销毁，

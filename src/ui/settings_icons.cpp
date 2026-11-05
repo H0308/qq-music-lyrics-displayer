@@ -279,6 +279,37 @@ void draw(ID2D1RenderTarget* target, Kind kind, const D2D1_RECT_F& bounds, ID2D1
         c.line(15.5f, 4.5f, 15.5f, 8.0f);
         c.line(14.0f, 8.0f, 17.0f, 11.0f);
         break;
+    case Kind::Download:
+        c.line(10.0f, 2.5f, 10.0f, 12.0f);
+        c.line(6.0f, 8.0f, 10.0f, 12.0f);
+        c.line(10.0f, 12.0f, 14.0f, 8.0f);
+        c.line(3.0f, 11.5f, 3.0f, 17.0f);
+        c.line(3.0f, 17.0f, 17.0f, 17.0f);
+        c.line(17.0f, 17.0f, 17.0f, 11.5f);
+        break;
+    case Kind::Restart: {
+        ID2D1Factory* factory = nullptr;
+        target->GetFactory(&factory);
+        ID2D1PathGeometry* geometry = nullptr;
+        if (SUCCEEDED(factory->CreatePathGeometry(&geometry))) {
+            ID2D1GeometrySink* sink = nullptr;
+            if (SUCCEEDED(geometry->Open(&sink))) {
+                sink->BeginFigure(c.point(4.5f, 13.5f), D2D1_FIGURE_BEGIN_HOLLOW);
+                sink->AddArc(D2D1::ArcSegment(
+                    c.point(4.5f, 6.5f), D2D1::SizeF(6.5f * c.scale, 6.5f * c.scale),
+                    0.0f, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                sink->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(sink->Close()))
+                    target->DrawGeometry(geometry, brush, c.stroke);
+                sink->Release();
+            }
+            geometry->Release();
+        }
+        factory->Release();
+        c.line(4.5f, 2.5f, 4.5f, 6.5f);
+        c.line(4.5f, 6.5f, 8.5f, 6.5f);
+        break;
+    }
     case Kind::Refresh:
         c.ellipse(4.0f, 4.0f, 16.0f, 16.0f);
         c.line(14.0f, 4.0f, 17.0f, 4.0f);

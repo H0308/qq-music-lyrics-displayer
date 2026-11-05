@@ -25,6 +25,7 @@ struct FluentMenuItem {
     bool enabled = true;
     bool separator = false;
     std::vector<FluentMenuItem> submenu;
+    std::wstring rightText;
 };
 
 class FluentMenu {

@@ -26,6 +26,7 @@ constexpr float kGutter = kIconLeft + kIconSize + kIconTextGap;
 constexpr float kCheckRightPad = 28.0f;
 constexpr float kSubmenuCheckRightPad = 48.0f;
 constexpr float kRightPad = 36.0f;
+constexpr float kRightTextGap = 24.0f;
 constexpr float kMinWidth = 208.0f;
 constexpr float kSubmenuGap = 6.0f;
 constexpr UINT kTimerSubmenu = 1;
@@ -154,7 +155,9 @@ struct MenuWnd {
                 if (it.separator)
                     continue;
                 IDWriteTextLayout* layout = nullptr;
-                if (SUCCEEDED(dw->CreateTextLayout(it.text.c_str(), static_cast<UINT32>(it.text.size()),
+                const std::wstring measuredText = it.rightText.empty()
+                    ? it.text : it.text + it.rightText;
+                if (SUCCEEDED(dw->CreateTextLayout(measuredText.c_str(), static_cast<UINT32>(measuredText.size()),
                                                    f, 1000.0f, 100.0f, &layout)) &&
                     layout) {
                     DWRITE_TEXT_METRICS m{};
@@ -162,7 +165,8 @@ struct MenuWnd {
                     const float stateSpace = it.checked
                         ? (it.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
                         : kRightPad;
-                    maxText = std::max(maxText, m.width + stateSpace);
+                    maxText = std::max(maxText, m.width + stateSpace +
+                        (it.rightText.empty() ? 0.0f : kRightTextGap));
                     layout->Release();
                 }
             }
@@ -272,8 +276,24 @@ struct MenuWnd {
             const float stateSpace = it.checked
                 ? (it.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
                 : kRightPad;
+            float labelRight = wDip - stateSpace;
+            if (!it.rightText.empty()) {
+                IDWriteTextLayout* detailLayout = nullptr;
+                if (SUCCEEDED(renderer.dwrite()->CreateTextLayout(
+                        it.rightText.c_str(), static_cast<UINT32>(it.rightText.size()), fmt,
+                        wDip - kGutter - stateSpace, kItemH, &detailLayout)) && detailLayout) {
+                    DWRITE_TEXT_METRICS detailMetrics{};
+                    detailLayout->GetMetrics(&detailMetrics);
+                    const float detailLeft = labelRight - detailMetrics.width;
+                    brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
+                    rt->DrawTextLayout(D2D1::Point2F(detailLeft, y), detailLayout, brush);
+                    labelRight = detailLeft - kRightTextGap;
+                    detailLayout->Release();
+                }
+            }
+            brush->SetColor(it.enabled ? p.text : p.disabled);
             rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,
-                          D2D1::RectF(kGutter, y, wDip - stateSpace, y + kItemH), brush);
+                          D2D1::RectF(kGutter, y, labelRight, y + kItemH), brush);
             if (!it.submenu.empty()) {
                 // 子菜单箭头
                 brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
