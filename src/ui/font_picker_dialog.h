@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 // Win11 风格字体选择对话框（替代系统 ChooseFont）：
 // 字体族筛选/列表（各行以该字体渲染预览）、字号、样式、示例预览。
@@ -29,6 +30,8 @@ public:
     HWND hwnd() const;
 
     void setApplyCallback(ApplyCallback cb);
+    using SizeContextCallback = std::function<std::vector<LyricFontSizeContext>()>;
+    void setSizeContextCallback(SizeContextCallback cb);
 
 private:
     struct Impl;

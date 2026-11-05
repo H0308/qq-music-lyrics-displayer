@@ -5282,6 +5282,30 @@ struct TaskbarHost::Impl {
         setFont(fontFamily_, fontSize_ + delta, fontStyle_);
     }
 
+    LyricFontSizeContext fontSizeContext() const {
+        LyricFontSizeContext context;
+        context.minSize = kMinFont;
+        context.maxSize = kMaxFont;
+        RECT client{};
+        if (!hwnd || !GetClientRect(hwnd, &client))
+            return context;
+        const bool vertical = isVerticalTaskbar();
+        const float crossAxis = static_cast<float>(vertical ? client.right - client.left
+                                                            : client.bottom - client.top) / scale();
+        const float effectPad = lyricGlow_ ? 4.8f : lyricOutline_ ? 2.4f : 0.0f;
+        context.availableDip = std::max(0.0f, crossAxis - 4.0f - effectPad);
+        context.mainScale = kLyricMainFontScale;
+        if (!vertical && doubleLineLyricsEnabled_) {
+            context.extraScale = kLyricPreviewFontScale;
+            context.gapDip = kLyricPreviewGap;
+        } else if (!vertical && (translationEnabled_ || romanizationEnabled_)) {
+            context.extraScale = 0.78f;
+            context.gapDip = 1.0f;
+        }
+        context.star = lyricStarEnabled(lyricEffectLayoutLine_);
+        return context;
+    }
+
     void setFont(const std::wstring& family, float size, LyricFontStyle style) {
         fontFamily_ = family;
         fontSize_ = std::clamp(size, kMinFont, kMaxFont);
@@ -11390,6 +11414,10 @@ const std::wstring& TaskbarHost::statusText() const {
 
 void TaskbarHost::changeFont(float delta) {
     impl_->changeFont(delta);
+}
+
+LyricFontSizeContext TaskbarHost::fontSizeContext() const {
+    return impl_->fontSizeContext();
 }
 
 void TaskbarHost::setFont(const std::wstring& family, float size, LyricFontStyle style) {

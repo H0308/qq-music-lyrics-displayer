@@ -5456,6 +5456,15 @@ void App::pickFont() {
         fontPickerDialog.reset();
         return;
     }
+    fontPickerDialog->setSizeContextCallback([this]() {
+        std::vector<LyricFontSizeContext> contexts;
+        forEachHost([&](TaskbarHost* host) {
+            auto context = host->fontSizeContext();
+            if (context.availableDip > 0.0f)
+                contexts.push_back(context);
+        });
+        return contexts;
+    });
     fontPickerDialog->setApplyCallback(
         [this](const std::wstring& family, float size, LyricFontStyle style) {
             fontFamily_ = family;

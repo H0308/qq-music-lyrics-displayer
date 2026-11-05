@@ -39,7 +39,7 @@ constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
 
-constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 14, 16, 18, 20,
+constexpr int kSizePresets[] = {8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20,
                                 22, 24, 26, 28, 32, 36, 40, 48};
 
 const std::array<const wchar_t*, 4>& styleNames() {
@@ -113,6 +113,11 @@ struct FontPickerDialog::Impl {
     D2D1_RECT_F familyListRect{};
     D2D1_RECT_F sizeEditRect{};
     D2D1_RECT_F sizeListRect{};
+    int recommendedSize = 0;
+    int suggestedMaxSize = -1;
+    float supportedMinSize = 9.0f;
+    float supportedMaxSize = 18.0f;
+    bool sizeAdviceChanged = false;
     D2D1_RECT_F previewRect{};
     D2D1_RECT_F okRect{};
     D2D1_RECT_F cancelRect{};
@@ -135,6 +140,7 @@ struct FontPickerDialog::Impl {
     bool focusVisible = false;
 
     ApplyCallback onApply;
+    SizeContextCallback sizeContext;
 
     ~Impl() {
         for (auto& [_, format] : familyFormats) {
@@ -746,7 +752,37 @@ struct FontPickerDialog::Impl {
             const bool selected = i == (family ? familySelected : sizeSelected);
             const bool hovered = hoverId == (family ? kIdFamilyList : kIdSizeList) &&
                                  hoverRow == i;
-            if (selected)
+            const wchar_t* sizeLabel = nullptr;
+            D2D1_COLOR_F ratingFill{};
+            D2D1_COLOR_F ratingText = p.textSecondary;
+            if (!family) {
+                const int size = kSizePresets[i];
+                const bool dark = fluent::isDarkMode();
+                if (size < supportedMinSize || size > supportedMaxSize ||
+                    (suggestedMaxSize >= 0 && size > suggestedMaxSize)) {
+                    sizeLabel = L"影响显示效果";
+                    ratingFill = D2D1::ColorF(0.90f, 0.28f, 0.32f, 0.14f);
+                    ratingText = dark ? D2D1::ColorF(1.0f, 0.64f, 0.66f)
+                                      : D2D1::ColorF(0.66f, 0.14f, 0.18f);
+                } else if (size == suggestedMaxSize) {
+                    sizeLabel = L"建议最大值";
+                    ratingFill = D2D1::ColorF(0.97f, 0.74f, 0.15f, 0.20f);
+                    ratingText = dark ? D2D1::ColorF(1.0f, 0.83f, 0.42f)
+                                      : D2D1::ColorF(0.53f, 0.36f, 0.03f);
+                } else if (size == recommendedSize) {
+                    sizeLabel = L"推荐";
+                    ratingFill = D2D1::ColorF(0.23f, 0.70f, 0.38f, 0.15f);
+                    ratingText = dark ? D2D1::ColorF(0.57f, 0.88f, 0.65f)
+                                      : D2D1::ColorF(0.12f, 0.43f, 0.22f);
+                }
+            }
+            if (sizeLabel) {
+                if (selected || hovered)
+                    ratingFill.a += selected ? 0.08f : 0.04f;
+                painter.fillRoundRect(ratingFill,
+                    D2D1::RectF(rect.left + 4.0f, y + 2.0f, rect.right - 4.0f,
+                                y + kListRowHeight - 2.0f));
+            } else if (selected)
                 painter.fillRoundRect(
                     p.listSelected,
                     D2D1::RectF(rect.left + 4.0f, y + 2.0f, rect.right - 4.0f,
@@ -772,15 +808,24 @@ struct FontPickerDialog::Impl {
                                                         y + kListRowHeight),
                                             p.text);
             } else {
+                float numberRight = rect.right - 18.0f;
+                if (sizeLabel) {
+                    auto* labelFormat = painter.textFormat(11.0f, 400, false, true);
+                    const float labelWidth = painter.measureTextWidth(sizeLabel, labelFormat);
+                    numberRight -= labelWidth + 8.0f;
+                    painter.drawText(sizeLabel, labelFormat,
+                        D2D1::RectF(rect.right - 18.0f - labelWidth, y,
+                                    rect.right - 18.0f, y + kListRowHeight), ratingText);
+                }
                 painter.drawText(std::to_wstring(kSizePresets[i]),
                                  painter.textFormat(13.0f, 400, false, true),
-                                 D2D1::RectF(rect.left + 16.0f, y, rect.right - 12.0f,
+                                 D2D1::RectF(rect.left + 16.0f, y, numberRight,
                                              y + kListRowHeight),
                                  p.text);
             }
         }
 
-        }, !scrollOnlyPaint);
+        }, !scrollOnlyPaint || (!family && sizeAdviceChanged));
         const float contentHeight = listContentHeight(family);
         if (contentHeight > height && height > 0.0f) {
             const auto bar = scrollBarGeometry(height, contentHeight);
@@ -793,7 +838,51 @@ struct FontPickerDialog::Impl {
         }
     }
 
+    void updateSizeAdvice(fluent::FluentDialogSurface::Painter& painter, IDWriteTextFormat* format) {
+        const auto contexts = sizeContext ? sizeContext() : std::vector<LyricFontSizeContext>{};
+        if (contexts.empty() || !format || !painter.dwrite())
+            return;
+        IDWriteTextLayout* sample = nullptr;
+        if (FAILED(painter.dwrite()->CreateTextLayout(
+                L"永Ag", 3, format, 4096.0f, 4096.0f, &sample)))
+            return;
+        DWRITE_TEXT_METRICS metrics{};
+        const bool measured = SUCCEEDED(sample->GetMetrics(&metrics));
+        sample->Release();
+        if (!measured || metrics.height <= 0.0f || currentSize() <= 0.0f)
+            return;
+        const float lineRatio = metrics.height / currentSize();
+        for (const auto& context : contexts) {
+            supportedMinSize = std::max(supportedMinSize, context.minSize);
+            supportedMaxSize = std::min(supportedMaxSize, context.maxSize);
+        }
+        suggestedMaxSize = 0;
+        for (int size = static_cast<int>(std::ceil(supportedMinSize));
+             size <= static_cast<int>(std::floor(supportedMaxSize)); ++size) {
+            bool fits = true;
+            for (const auto& context : contexts) {
+                float needed = lineRatio * size * (context.mainScale + context.extraScale)
+                               + context.gapDip;
+                if (context.star) {
+                    const float headroom = 2.0f * std::clamp(size * 0.40f, 5.5f, 8.5f)
+                                           + 1.25f + 3.0f;
+                    needed += std::max(headroom, 2.0f * (headroom - 8.0f));
+                }
+                fits = fits && needed <= context.availableDip;
+            }
+            if (fits)
+                suggestedMaxSize = size;
+        }
+        if (suggestedMaxSize > 0)
+            recommendedSize = std::max(static_cast<int>(std::ceil(supportedMinSize)),
+                static_cast<int>(std::floor(suggestedMaxSize * 0.85f)));
+    }
+
     void drawPreview(fluent::FluentDialogSurface::Painter& painter) {
+        recommendedSize = 0;
+        suggestedMaxSize = -1;
+        supportedMinSize = 9.0f;
+        supportedMaxSize = 18.0f;
         const auto& p = fluent::palette();
         painter.fillRoundRect(p.cardFill, previewRect, fluent::metrics::cardRadius);
         painter.strokeRoundRect(p.cardStroke, previewRect, 1.0f, fluent::metrics::cardRadius);
@@ -808,6 +897,7 @@ struct FontPickerDialog::Impl {
                 DWRITE_FONT_STRETCH_NORMAL, currentSize(), L"zh-cn", &format)) &&
             format) {
             fluent::applyUiFontFallback(format);
+            updateSizeAdvice(painter, format);
             format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             painter.drawText(L"AaBb 永字八法 0123", format,
@@ -852,10 +942,16 @@ struct FontPickerDialog::Impl {
         painter.drawText(L"样式", painter.textFormat(13.0f, 400, false, true), styleLabelRect,
                          p.textSecondary);
         drawStyleGroup(painter);
+        const int previousRecommended = recommendedSize;
+        const int previousMaximum = suggestedMaxSize;
+        const float previousMin = supportedMinSize;
+        const float previousMax = supportedMaxSize;
+        drawPreview(painter);
+        sizeAdviceChanged = previousRecommended != recommendedSize || previousMaximum != suggestedMaxSize ||
+                            previousMin != supportedMinSize || previousMax != supportedMaxSize;
         drawList(painter, true);
         drawTextField(painter, sizeEditRect, sizeEdit, kIdSizeEdit);
         drawList(painter, false);
-        drawPreview(painter);
         drawButton(painter, okRect, L"确定", true, kIdOk);
         drawButton(painter, cancelRect, L"取消", false, kIdCancel);
     }
@@ -1438,4 +1534,10 @@ HWND FontPickerDialog::hwnd() const {
 
 void FontPickerDialog::setApplyCallback(ApplyCallback cb) {
     impl_->onApply = std::move(cb);
+}
+
+void FontPickerDialog::setSizeContextCallback(SizeContextCallback cb) {
+    impl_->sizeContext = std::move(cb);
+    if (impl_->hwnd)
+        InvalidateRect(impl_->hwnd, nullptr, FALSE);
 }

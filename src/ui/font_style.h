@@ -11,6 +11,17 @@ enum class LyricFontStyle {
     BoldItalic,
 };
 
+// 字号建议使用任务栏的实际逻辑尺寸，与字体窗口的显示器缩放无关。
+struct LyricFontSizeContext {
+    float availableDip = 0.0f;
+    float mainScale = 1.0f;
+    float extraScale = 0.0f;
+    float gapDip = 0.0f;
+    float minSize = 9.0f;
+    float maxSize = 18.0f;
+    bool star = false;
+};
+
 inline constexpr bool isBoldFontStyle(LyricFontStyle style) {
     return style == LyricFontStyle::Bold || style == LyricFontStyle::BoldItalic;
 }
