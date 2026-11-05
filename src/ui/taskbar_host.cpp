@@ -262,6 +262,9 @@ BOOL CALLBACK collectDisplayMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parame
     info.cbSize = sizeof(info);
     if (!GetMonitorInfoW(monitor, &info))
         return TRUE;
+    if (info.rcMonitor.right <= info.rcMonitor.left ||
+        info.rcMonitor.bottom <= info.rcMonitor.top)
+        return TRUE;
 
     TaskbarDisplayInfo display;
     display.monitor = monitor;
@@ -270,13 +273,30 @@ BOOL CALLBACK collectDisplayMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parame
     display.monitorRect = info.rcMonitor;
     display.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
 
-    DISPLAY_DEVICEW device{};
-    device.cb = sizeof(device);
-    if (!EnumDisplayDevicesW(info.szDevice, 0, &device, 0) ||
-        (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP) == 0)
-        return TRUE;
-    if (device.DeviceString[0] != L'\0')
-        display.displayName = device.DeviceString;
+    std::wstring activeMonitorLabel;
+    std::wstring fallbackMonitorLabel;
+    for (DWORD monitorIndex = 0;; ++monitorIndex) {
+        DISPLAY_DEVICEW device{};
+        device.cb = sizeof(device);
+        if (!EnumDisplayDevicesW(info.szDevice, monitorIndex, &device, 0))
+            break;
+        if (device.DeviceString[0] == L'\0')
+            continue;
+        if (fallbackMonitorLabel.empty())
+            fallbackMonitorLabel = device.DeviceString;
+        if ((device.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
+            continue;
+        if (activeMonitorLabel.empty()) {
+            activeMonitorLabel = device.DeviceString;
+        } else if (activeMonitorLabel.find(device.DeviceString) == std::wstring::npos) {
+            activeMonitorLabel += L" / ";
+            activeMonitorLabel += device.DeviceString;
+        }
+    }
+    if (!activeMonitorLabel.empty())
+        display.displayName = std::move(activeMonitorLabel);
+    else if (!fallbackMonitorLabel.empty())
+        display.displayName = std::move(fallbackMonitorLabel);
 
     enumeration->displays->push_back(std::move(display));
     return TRUE;
@@ -1372,6 +1392,8 @@ struct TaskbarHost::Impl {
             display = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
                 return item.primary;
             });
+        if (display == displays.end() && !displays.empty())
+            display = displays.begin();
         if (display == displays.end())
             return false;
 
@@ -9771,6 +9793,7 @@ struct TaskbarHost::Impl {
                                 static_cast<unsigned long>(LOWORD(lp)),
                                 static_cast<unsigned long>(HIWORD(lp)),
                                 static_cast<unsigned long>(wp));
+            findTaskbar();
             updateDisplayRefresh();
             if (isAppBarView() && appBarRegistered_)
                 updateAppBarPosition();

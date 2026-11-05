@@ -91,7 +91,10 @@ constexpr UINT_PTR kTimerIdleQuote = 5;
 constexpr UINT_PTR kTimerTickTickStartupRetry = 6;
 constexpr UINT_PTR kTimerTaskbarAutoRestore = 7;
 constexpr UINT_PTR kTimerBackgroundSettingsSave = 8;
+constexpr UINT_PTR kTimerTaskbarDisplayRebuildRetry = 9;
 constexpr UINT kTaskbarAutoRestoreMs = 1000;
+constexpr UINT kTaskbarDisplayRebuildRetryMs = 500;
+constexpr int kTaskbarDisplayRebuildMaxRetries = 6;
 constexpr UINT kSongToastCoverWaitMs = 350;
 constexpr UINT kLyricDebounceMs = 300;
 constexpr UINT kBackgroundSettingsSaveDebounceMs = 300;
@@ -674,6 +677,9 @@ struct App {
     bool taskbarAllowOverlap_ = false;
     bool taskbarNoSpaceClosePending_ = false;
     bool taskbarRebuildPending_ = false;
+    bool taskbarPendingDisplayRebuild_ = false;
+    bool taskbarRebuildAllowOverlap_ = false;
+    int taskbarDisplayRebuildRetries_ = 0;
     // 任务栏空间不足时自动隐藏；宿主本身继续保留并后台探测空间变化。
     bool taskbarAutoClosedForNoSpace_ = false;
     bool taskbarSpectrumSuppressedForNoSpace_ = false;
@@ -903,11 +909,13 @@ struct App {
 
     std::vector<TaskbarDisplayInfo> desiredTaskbarDisplays(const SmtcSnapshot& snap) const {
         auto displays = enumerateTaskbarDisplays();
-        const auto primary = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
+        if (displays.empty())
+            return {};
+        auto primary = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
             return item.primary;
         });
         if (primary == displays.end())
-            return {};
+            primary = displays.begin();
 
         if (taskbarViewMode_ == TaskbarViewMode::Embedded ||
             (taskbarViewMode_ == TaskbarViewMode::Immersive && !snap.sessionAlive))
@@ -1331,25 +1339,52 @@ struct App {
             runtime_log::writef(L"[display] failed to wake main loop for taskbar rebuild");
     }
 
+    void cancelTaskbarDisplayRebuildRetry() {
+        taskbarPendingDisplayRebuild_ = false;
+        taskbarRebuildAllowOverlap_ = false;
+        taskbarDisplayRebuildRetries_ = 0;
+        if (trayHwnd)
+            KillTimer(trayHwnd, kTimerTaskbarDisplayRebuildRetry);
+    }
+
+    void scheduleTaskbarDisplayRebuildRetry(bool allowOverlap) {
+        if (shutdownRequested_ || isRenderMode(RenderMode::Stopped))
+            return;
+        taskbarPendingDisplayRebuild_ = true;
+        taskbarRebuildAllowOverlap_ = allowOverlap;
+        if (taskbarDisplayRebuildRetries_ >= kTaskbarDisplayRebuildMaxRetries)
+            return;
+        ++taskbarDisplayRebuildRetries_;
+        if (trayHwnd)
+            SetTimer(trayHwnd, kTimerTaskbarDisplayRebuildRetry,
+                     kTaskbarDisplayRebuildRetryMs, nullptr);
+    }
+
     // 仅由最外层主消息循环调用；重建期间的新显示通知留到下一轮处理。
     void rebuildTaskbarIfPending() {
         if (!taskbarRebuildPending_)
             return;
         taskbarRebuildPending_ = false;
-        if (shutdownRequested_ || !taskbarHost)
+        if (shutdownRequested_ || (!taskbarHost && !taskbarPendingDisplayRebuild_))
             return;
 
-        const bool allowOverlap = taskbarAllowOverlap_;
+        const bool allowOverlap =
+            taskbarHost ? taskbarAllowOverlap_ : taskbarRebuildAllowOverlap_;
         runtime_log::writef(L"[display] taskbar rebuild started");
         destroyTaskbar();
         if (shutdownRequested_)
             return;
-        createTaskbar(GetModuleHandleW(nullptr), allowOverlap);
+        const TaskbarCreateResult result =
+            createTaskbar(GetModuleHandleW(nullptr), allowOverlap);
+        if (result == TaskbarCreateResult::Failed)
+            scheduleTaskbarDisplayRebuildRetry(allowOverlap);
+        else
+            cancelTaskbarDisplayRebuildRetry();
         refreshSettingsDialog(true);
     }
 
     void syncTaskbarView(const SmtcSnapshot& snap) {
-        if (!taskbarHost)
+        if (!taskbarHost && !taskbarPendingDisplayRebuild_)
             return;
 
         const auto displays = desiredTaskbarDisplays(snap);
@@ -1357,7 +1392,7 @@ struct App {
         desiredIds.reserve(displays.size());
         for (const auto& display : displays)
             desiredIds.push_back(display.deviceName);
-        if (desiredIds != activeTaskbarDisplayIds_) {
+        if (!taskbarHost || desiredIds != activeTaskbarDisplayIds_) {
             requestTaskbarRebuild();
             return;
         }
@@ -1376,7 +1411,7 @@ struct App {
     void applyTaskbarViewMode(int mode) {
         mode = std::clamp(mode, 0, 2);
         taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
-        if (taskbarHost) {
+        if (taskbarHost || taskbarPendingDisplayRebuild_) {
             forEachHost([&](TaskbarHost* host) {
                 host->setImmersiveBackgroundAdjustment(immersiveBackgroundAdjustment_);
                 host->setDockBackgroundAdjustment(dockBackgroundAdjustment_);
@@ -1384,9 +1419,11 @@ struct App {
                 host->setDockBackgroundBlur(dockBackgroundBlur_);
             });
             syncTaskbarView(monitor.snapshot());
-            syncTaskbarOrientation();
-            applyEffectiveTaskbarSettings();
-            publishPresentationFrame(monitor.snapshot(), false, true);
+            if (taskbarHost) {
+                syncTaskbarOrientation();
+                applyEffectiveTaskbarSettings();
+                publishPresentationFrame(monitor.snapshot(), false, true);
+            }
         }
         logSettingInt(L"taskbar-view-mode", mode);
         saveSettings();
@@ -1642,8 +1679,10 @@ struct App {
             !isRenderMode(RenderMode::Stopped) && nextMode == static_cast<int>(RenderMode::Stopped);
         const bool leavingStopped =
             isRenderMode(RenderMode::Stopped) && nextMode != static_cast<int>(RenderMode::Stopped);
-        if (enteringStopped)
+        if (enteringStopped) {
             taskbarEnabledBeforeStopped_ = taskbarEnabledForUserAction();
+            cancelTaskbarDisplayRebuildRetry();
+        }
 
         renderMode_ = nextMode;
         if (taskbarHost) {
@@ -2747,6 +2786,7 @@ struct App {
             taskbarAutoClosedForNoSpace_ = false;
             taskbarSpectrumSuppressedForNoSpace_ = false;
             cancelTaskbarAutoRestore();
+            cancelTaskbarDisplayRebuildRetry();
             forEachHost([](TaskbarHost* host) { host->setAllowOverlap(true); });
             const TaskbarPlacementStatus status = taskbarHost->refreshPlacement();
             if (status == TaskbarPlacementStatus::Unavailable) {
@@ -2842,6 +2882,7 @@ struct App {
             }
             cancelTaskbarAutoRestore();
             runtime_log::writef(L"[taskbar] auto-hide reason=no-space");
+            cancelTaskbarDisplayRebuildRetry();
             updateTrayIcon();
             return TaskbarCreateResult::NoSpace;
         }
@@ -2852,6 +2893,7 @@ struct App {
         }
         taskbarAutoClosedForNoSpace_ = false;
         cancelTaskbarAutoRestore();
+        cancelTaskbarDisplayRebuildRetry();
         // 宿主会在首次避让探测完成后自行解除显示抑制；强制开启仍重新提交当前帧，
         // 确保“开启”选项立即生效而不必等待下一次媒体事件。
         if (allowOverlap) {
@@ -2882,8 +2924,10 @@ struct App {
     }
 
     bool taskbarEnabledForUserAction() {
-        if (!taskbarHost || isRenderMode(RenderMode::Stopped))
+        if (isRenderMode(RenderMode::Stopped))
             return false;
+        if (!taskbarHost)
+            return taskbarPendingDisplayRebuild_;
         const TaskbarPlacementStatus status = taskbarHost->placementStatus();
         if (status == TaskbarPlacementStatus::NoSpace ||
             status == TaskbarPlacementStatus::Unavailable)
@@ -2911,6 +2955,7 @@ struct App {
         // 仅投递 WM_QUIT 会把这部分清理推迟到 main() 返回后的析构阶段，
         // 任务栏歌词窗口或探测线程可能在此期间继续存活。
         cancelTaskbarAutoRestore();
+        cancelTaskbarDisplayRebuildRetry();
         destroyTaskbar();
         closeUpdatePrompt();
         destroyTray();
@@ -2924,6 +2969,7 @@ struct App {
             taskbarAutoClosedForNoSpace_ = false;
             taskbarManualOpenPending_ = false;
             cancelTaskbarAutoRestore();
+            cancelTaskbarDisplayRebuildRetry();
             destroyTaskbar();
         } else {
             const bool noSpaceAlreadyKnown =
@@ -2945,6 +2991,7 @@ struct App {
             // 后台探测线程，不走销毁/重建路径。
             if (taskbarHost)
                 destroyTaskbar();
+            cancelTaskbarDisplayRebuildRetry();
             if (isRenderMode(RenderMode::Stopped)) {
                 message_dialog::showModal(
                     GetModuleHandleW(nullptr), trayHwnd, L"任务栏歌词提示",
@@ -5768,6 +5815,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->tryRestoreTaskbarAfterNoSpace();
         return 0;
     }
+    if (msg == WM_TIMER && wp == kTimerTaskbarDisplayRebuildRetry) {
+        KillTimer(h, kTimerTaskbarDisplayRebuildRetry);
+        app->requestTaskbarRebuild();
+        return 0;
+    }
     if (msg == kMsgDialogClosed) {
         app->onDialogClosed(static_cast<DialogKind>(wp));
         return 0;
@@ -5777,6 +5829,7 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     if (msg == WM_DISPLAYCHANGE) {
+        app->taskbarDisplayRebuildRetries_ = 0;
         app->requestTaskbarRebuild();
         return 0;
     }
@@ -5794,6 +5847,11 @@ LRESULT CALLBACK App::trayWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         app->updateTrayIcon();
         if (app->taskbarHost)
             app->forEachHost([](TaskbarHost* host) { host->onTaskbarCreated(); });
+        else if (app->taskbarPendingDisplayRebuild_ &&
+                 !app->isRenderMode(RenderMode::Stopped)) {
+            app->taskbarDisplayRebuildRetries_ = 0;
+            app->requestTaskbarRebuild();
+        }
         else if (app->taskbarAutoClosedForNoSpace_ &&
                  !app->isRenderMode(RenderMode::Stopped)) {
             app->armTaskbarAutoRestore();
