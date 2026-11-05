@@ -51,6 +51,8 @@ protected:
     float clearAlpha_ = 0.0f;
 
 private:
+    static LRESULT CALLBACK dpiChangedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                          UINT_PTR subclassId, DWORD_PTR refData);
     LyricRenderer renderer_;
     ID2D1SolidColorBrush* brush_ = nullptr;
     IDWriteTextFormat* fmt_ = nullptr;

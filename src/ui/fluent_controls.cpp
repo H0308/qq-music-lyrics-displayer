@@ -85,7 +85,26 @@ bool LayeredChild::createLayered(HWND parent, const wchar_t* className, WNDPROC 
     hwnd_ = CreateWindowExW(layered ? WS_EX_LAYERED : 0, className, L"", style, 0, 0, 10, 10,
                             parent, reinterpret_cast<HMENU>(static_cast<UINT_PTR>(id)),
                             GetModuleHandleW(nullptr), this);
+    if (hwnd_)
+        SetWindowSubclass(hwnd_, &LayeredChild::dpiChangedProc, 1,
+                          reinterpret_cast<DWORD_PTR>(this));
     return hwnd_ != nullptr;
+}
+
+LRESULT CALLBACK LayeredChild::dpiChangedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                              UINT_PTR subclassId, DWORD_PTR refData) {
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, &LayeredChild::dpiChangedProc, subclassId);
+        return DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    const LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+    if (msg == WM_DPICHANGED_AFTERPARENT) {
+        // 父窗口移动子控件时，子控件可能尚未切换 DPI；通知完成后再提交正确缩放的帧。
+        auto* self = reinterpret_cast<LayeredChild*>(refData);
+        if (self && IsWindowVisible(hwnd))
+            self->renderNow();
+    }
+    return result;
 }
 
 void LayeredChild::move(int x, int y, int w, int h) {
@@ -594,6 +613,14 @@ LRESULT FluentEdit::handle(UINT msg, WPARAM wp, LPARAM lp) {
     case WM_SIZE:
         layoutEdit();
         InvalidateRect(hwnd_, nullptr, FALSE);
+        return 0;
+    case WM_DPICHANGED_AFTERPARENT:
+        editFontDpi_ = 0;
+        surface_.invalidate();
+        if (IsWindowVisible(hwnd_)) {
+            layoutEdit();
+            repaintEdit();
+        }
         return 0;
     case WM_SETFOCUS:
         SetFocus(hEdit_);

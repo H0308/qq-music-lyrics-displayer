@@ -359,13 +359,16 @@ FluentDialogSurface::~FluentDialogSurface() {
     hwnd_ = nullptr;
 }
 
+UINT FluentDialogSurface::dpi() const {
+    const UINT current = hwnd_ ? GetDpiForWindow(hwnd_) : 0;
+    return current ? current : 96;
+}
+
 bool FluentDialogSurface::initialize(HWND hwnd, bool backdrop, bool cacheText) {
     textCache_.clear();
     cacheText_ = cacheText;
     hwnd_ = hwnd;
-    dpi_ = hwnd_ ? GetDpiForWindow(hwnd_) : 96;
-    if (dpi_ == 0)
-        dpi_ = 96;
+    dpi_ = dpi();
     (void)backdrop;
     hasPainted_ = false;
     return hwnd_ != nullptr;
@@ -393,9 +396,7 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
         return false;
 
     const UINT previousDpi = dpi_;
-    dpi_ = GetDpiForWindow(hwnd_);
-    if (dpi_ == 0)
-        dpi_ = 96;
+    dpi_ = dpi();
     if (dpi_ != previousDpi || width != textCacheWidth_ || height != textCacheHeight_) {
         textCache_.clear();
         textCacheWidth_ = width;

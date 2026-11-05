@@ -126,12 +126,13 @@ public:
     void discard();
 
     HWND hwnd() const { return hwnd_; }
-    UINT dpi() const { return dpi_; }
-    float dipScale() const { return fluent::dipScale(dpi_); }
+    // 布局发生在 WM_PAINT 之前，必须查询窗口当前 DPI，不能沿用上一帧。
+    UINT dpi() const;
+    float dipScale() const { return fluent::dipScale(dpi()); }
 
 private:
     HWND hwnd_ = nullptr;
-    UINT dpi_ = 96;
+    UINT dpi_ = 96; // 已绘制帧的 DPI，用于判断绘制缓存是否需要失效。
     bool hasPainted_ = false;
     bool cacheText_ = false;
     TextCache textCache_;

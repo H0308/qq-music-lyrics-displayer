@@ -6514,6 +6514,7 @@ struct SettingsDialog::Impl {
             return TRUE;
         case WM_DPICHANGED: {
             stopContentScroll();
+            stopNavIndicator();
             fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
                                          kDialogExStyle, kMinClientWidthDip,
                                          kMinClientHeightDip);
