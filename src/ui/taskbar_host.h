@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui/spectrum_effects.h"
+#include "ui/lyric_effects.h"
 
 #include "lyric_window.h"
 
@@ -213,6 +214,7 @@ public:
     void setSpectrumAlbumColor(COLORREF color, bool available);
     void setSpectrumGradient(bool on);
     void setSpectrumEffects(uint32_t effects);
+    void setLyricEffects(uint32_t effects);
     void setSpectrumBackground(bool on);
     void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);

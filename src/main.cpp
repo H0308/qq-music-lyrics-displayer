@@ -750,6 +750,7 @@ struct App {
     bool secondaryLyricEnabled_ = true;
     bool preferRomanization_ = false;
     bool doubleLineLyricsEnabled_ = false;
+    uint32_t lyricEffects_ = 0;
     LyricAlignment lyricAlignment_ = LyricAlignment::Left;
     LyricAlignment idleQuoteAlignment_ = LyricAlignment::Left;
     IdleQuoteBackground idleQuoteBackground_ = IdleQuoteBackground::None;
@@ -1180,6 +1181,12 @@ struct App {
     }
 
     void applySecondaryLyricMode() {
+        const uint32_t starBit = lyricEffectBit(LyricEffect::Stardust);
+        if (secondaryLyricEnabled_ && (lyricEffects_ & starBit) != 0) {
+            lyricEffects_ &= ~starBit;
+            forEachHost([&](TaskbarHost* host) { host->setLyricEffects(lyricEffects_); });
+            logSettingInt(L"lyric-effects", static_cast<int>(lyricEffects_));
+        }
         const bool showTranslation = !taskbarVertical_ && secondaryLyricEnabled_ &&
                                      !preferRomanization_;
         const bool showRomanization = !taskbarVertical_ && secondaryLyricEnabled_ &&
@@ -1290,6 +1297,25 @@ struct App {
             spectrumEffects_ &= ~bit;
         forEachHost([&](TaskbarHost* host) { host->setSpectrumEffects(spectrumEffects_); });
         logSettingInt(L"spectrum-effects", static_cast<int>(spectrumEffects_));
+        saveSettings();
+    }
+
+    void applyLyricEffect(int effect, bool on) {
+        if (effect < 0 || effect >= kLyricEffectCount)
+            return;
+        if (on && effect == static_cast<int>(LyricEffect::Stardust) && secondaryLyricEnabled_) {
+            secondaryLyricEnabled_ = false;
+            applySecondaryLyricMode();
+            logSettingBool(L"secondary-lyrics", false);
+        }
+        const uint32_t bit = 1u << effect;
+        if (on)
+            lyricEffects_ |= bit;
+        else
+            lyricEffects_ &= ~bit;
+        forEachHost([&](TaskbarHost* host) { host->setLyricEffects(lyricEffects_); });
+        logSettingInt(L"lyric-effects", static_cast<int>(lyricEffects_));
+        refreshSettingsDialog(true);
         saveSettings();
     }
 
@@ -1605,6 +1631,7 @@ struct App {
                 vertical ? false : (secondaryLyricEnabled_ && !preferRomanization_),
                 vertical ? false : (secondaryLyricEnabled_ && preferRomanization_));
             host->setDoubleLineLyrics(vertical ? false : doubleLineLyricsEnabled_);
+            host->setLyricEffects(lyricEffects_);
             host->setLyricAlignment(vertical ? LyricAlignment::Left : lyricAlignment_);
             host->setIdleQuoteAlignment(vertical ? LyricAlignment::Left : idleQuoteAlignment_);
             host->setSongInfoVisible(vertical ? false : songInfoVisible_);
@@ -4157,6 +4184,9 @@ void App::loadSettings() {
             preferRomanization_ = oldRomanization && !oldTranslation;
         }
         doubleLineLyricsEnabled_ = j.value("doubleLineLyrics", false);
+        lyricEffects_ = j.value("lyricEffects", 0u) & kLyricEffectsMask;
+        if ((lyricEffects_ & lyricEffectBit(LyricEffect::Stardust)) != 0)
+            secondaryLyricEnabled_ = false;
         const std::string lyricAlignment = j.value("lyricAlignment", std::string("left"));
         if (lyricAlignment == "center")
             lyricAlignment_ = LyricAlignment::Center;
@@ -4405,6 +4435,7 @@ void App::saveSettings() {
         j["secondaryLyricEnabled"] = secondaryLyricEnabled_;
         j["secondaryLyricType"] = preferRomanization_ ? "romanization" : "translation";
         j["doubleLineLyrics"] = doubleLineLyricsEnabled_;
+        j["lyricEffects"] = lyricEffects_;
         j["lyricAlignment"] = lyricAlignment_ == LyricAlignment::Center
                                    ? "center"
                                : lyricAlignment_ == LyricAlignment::Right ? "right" : "left";
@@ -5636,6 +5667,7 @@ SettingsState App::currentSettingsState() const {
     st.windowThemeMode = windowThemeMode_;
     st.followAlbum = lyricFollowAlbum_;
     st.doubleLineLyrics = vertical ? false : doubleLineLyricsEnabled_;
+    st.lyricEffects = lyricEffects_;
     st.lyricAlignment = vertical
                             ? 0
                             : lyricAlignment_ == LyricAlignment::Center
@@ -5753,6 +5785,7 @@ SettingsActions App::buildSettingsActions() {
     act.onFontColorEffect = [this] { showFontColorDialog(); };
     act.onFollowAlbum = [this](bool on) { applyFollowAlbum(on); };
     act.onDoubleLineLyrics = [this](bool on) { applyDoubleLineLyrics(on); };
+    act.onLyricEffect = [this](int effect, bool on) { applyLyricEffect(effect, on); };
     act.onLyricAlignment = [this](int a) { applyLyricAlignment(a); };
     act.onIdleQuoteAlignment = [this](int a) { applyIdleQuoteAlignment(a); };
     act.onSecondaryEnabled = [this](bool on) { applySecondaryEnabled(on); };

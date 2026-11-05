@@ -3,6 +3,7 @@
 #include "idle/idle_types.h"
 #include "ui/fluent_theme.h"
 #include "ui/spectrum_effects.h"
+#include "ui/lyric_effects.h"
 
 #include <windows.h>
 
@@ -80,6 +81,7 @@ struct SettingsState {
     bool verticalTaskbar = false; // 侧边任务栏：禁用不适合窄栏的设置项
     bool followAlbum = false;
     bool doubleLineLyrics = false;
+    uint32_t lyricEffects = 0;
     int lyricAlignment = 0; // 0 左对齐 1 居中 2 右对齐
     bool secondaryEnabled = true;
     bool preferRomanization = false;
@@ -162,6 +164,7 @@ struct SettingsActions {
     std::function<void()> onFontColorEffect;
     std::function<void(bool)> onFollowAlbum;
     std::function<void(bool)> onDoubleLineLyrics;
+    std::function<void(int, bool)> onLyricEffect;
     std::function<void(int)> onLyricAlignment;
     std::function<void(bool)> onSecondaryEnabled;
     std::function<void(bool)> onPreferRomanization; // true = 罗马音

@@ -8,6 +8,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
 #include "ui/media_control_icons.h"
+#include "ui/lyric_star.h"
 #include "ui/settings_icons.h"
 
 #include <commctrl.h>
@@ -77,6 +78,7 @@ constexpr int kIdSpectrumOpacity = 423;
 constexpr int kIdSpectrumBackground = 428;
 constexpr int kIdSpectrumGradient = 429;
 constexpr int kIdSpectrumEffectFirst = 486;
+constexpr int kIdLyricEffectFirst = 500;
 constexpr int kIdSpectrumColorMode = 450;
 constexpr int kIdSpectrumColor = 452;
 constexpr int kIdProgressBackground = 438;
@@ -411,6 +413,11 @@ settings_icon::Kind iconForRow(int id) {
         return settings_icon::Kind::Wave;
     case kIdSpectrumOpacity:
         return settings_icon::Kind::Opacity;
+    case kIdLyricEffectFirst:
+    case kIdLyricEffectFirst + 1:
+    case kIdLyricEffectFirst + 2:
+    case kIdLyricEffectFirst + 3:
+        return settings_icon::Kind::Lyrics;
     case kIdSongToast:
     case kIdSongToastPreview:
         return settings_icon::Kind::Toast;
@@ -465,6 +472,7 @@ settings_icon::Kind iconForRow(int id) {
 } // namespace
 
 struct SettingsDialog::Impl {
+    LyricStarShape lyricStarArtwork_;
     enum class ControlKind {
         Toggle,
         Radio,
@@ -1687,6 +1695,16 @@ struct SettingsDialog::Impl {
         addHeader(kLyricsPage, L"颜色与效果");
         addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
         addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
+        addHeader(kLyricsPage, L"歌词特效");
+        const wchar_t* lyricEffectNames[kLyricEffectCount] = {
+            L"星尘跟唱", L"跟唱流光", L"笔触下划线", L"字间涟漪"};
+        for (int i = 0; i < kLyricEffectCount; ++i) {
+            Row& effect = addRow(kLyricsPage, kIdLyricEffectFirst + i, ControlKind::Toggle,
+                lyricEffectNames[i], i == 0 ? L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。"
+                    : L"需要逐字歌词，仅作用于当前演唱行。", 40.0f, kRowTallH);
+            effect.checked = (state.lyricEffects & (1u << i)) != 0;
+            effect.enabled = !minimalModeActive() && (i != 0 || vertical || !state.doubleLineLyrics);
+        }
         addHeader(kLyricsPage, L"翻译与罗马音");
         addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
                   vertical ? false : state.secondaryEnabled).enabled = !vertical;
@@ -2875,6 +2893,10 @@ struct SettingsDialog::Impl {
         return id >= kIdSpectrumEffectFirst && id < kIdSpectrumEffectFirst + kSpectrumEffectCount;
     }
 
+    static bool isLyricEffectRow(int id) {
+        return id >= kIdLyricEffectFirst && id < kIdLyricEffectFirst + kLyricEffectCount;
+    }
+
     static bool isSegmentedChoice(const Row& row) {
         return row.kind == ControlKind::Radio && row.id != kIdCoverEffect &&
                row.id != kIdSpectrumStyle && row.id != kIdHoverControlStyle &&
@@ -3222,7 +3244,7 @@ struct SettingsDialog::Impl {
                 continue;
             }
             if (row.id == kIdSpectrumBackground || row.id == kIdSpectrumGradient ||
-                isSpectrumEffectRow(row.id)) {
+                isSpectrumEffectRow(row.id) || isLyricEffectRow(row.id)) {
                 const float controlX = innerRight - row.controlW;
                 const float controlH = 24.0f;
                 const float availableW = std::max(0.0f, controlX - innerX);
@@ -3243,7 +3265,8 @@ struct SettingsDialog::Impl {
                         titleTop + row.titleHeight + kTitleHintGap, labelRight,
                         y + rowH - kHintBottomPadding);
                 }
-                const float artworkH = isSpectrumEffectRow(row.id) || row.id == kIdSpectrumGradient
+                const float artworkH = isSpectrumEffectRow(row.id) || isLyricEffectRow(row.id) ||
+                                               row.id == kIdSpectrumGradient
                                            ? kSpectrumEffectArtworkH : kSpectrumBackgroundArtworkH;
                 const float artworkTop = y + (rowH - artworkH) * 0.5f;
                 row.artworkRect = D2D1::RectF(artworkLeft, artworkTop, artworkRight,
@@ -3958,6 +3981,76 @@ struct SettingsDialog::Impl {
             sheen->Release();
         if (barGradient)
             barGradient->Release();
+        rt->PopAxisAlignedClip();
+    }
+
+    void drawLyricEffectArtwork(fluent::FluentDialogSurface::Painter& painter,
+                                const D2D1_RECT_F& bounds, LyricEffect effect, bool enabled) {
+        auto* rt = painter.target();
+        if (!rt || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
+            return;
+        const auto& p = fluent::palette();
+        auto tone = [&](D2D1_COLOR_F color, float alpha) {
+            color.a *= alpha * (enabled ? 1.0f : 0.42f);
+            return color;
+        };
+        const auto panel = D2D1::RectF(bounds.left + 1, bounds.top + 1,
+                                      bounds.right - 1, bounds.bottom - 1);
+        painter.fillRoundRect(tone(p.controlFill, 1), panel, 7);
+        painter.strokeRoundRect(tone(p.cardStroke, 1), panel, 1, 7);
+        rt->PushAxisAlignedClip(panel, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        const float cx = (panel.left + panel.right) * 0.5f;
+        const float cy = (panel.top + panel.bottom) * 0.5f;
+        const float textShift = effect == LyricEffect::Stardust ? 7.0f : 0.0f;
+        const auto textRect = D2D1::RectF(panel.left + 8, panel.top + 6 + textShift,
+                                         panel.right - 8, panel.bottom - 6 + textShift);
+        auto* format = painter.textFormat(14.0f, 500, true, true);
+        if (!format) {
+            rt->PopAxisAlignedClip();
+            return;
+        }
+        if (effect == LyricEffect::Ripple) {
+            if (auto* brush = painter.brush(tone(p.accent, 0.65f))) {
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 8, 8), brush, 1.35f);
+                rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 12, 12), brush, 1.0f);
+            }
+        }
+        painter.drawText(L"听见音乐", format, textRect,
+            tone(p.accent, 0.82f));
+        if (effect == LyricEffect::FollowLight) {
+            rt->PushAxisAlignedClip(D2D1::RectF(cx - 8, panel.top, cx + 8, panel.bottom),
+                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            painter.drawText(L"听见音乐", format, textRect,
+                tone(D2D1::ColorF(p.accent.r * 0.30f, p.accent.g * 0.30f,
+                                  p.accent.b * 0.30f, p.accent.a), 0.85f));
+            rt->PopAxisAlignedClip();
+            rt->PushAxisAlignedClip(D2D1::RectF(cx - 3, panel.top, cx + 3, panel.bottom),
+                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            const auto light = D2D1::ColorF(p.accent.r + (1 - p.accent.r) * 0.7f,
+                p.accent.g + (1 - p.accent.g) * 0.7f,
+                p.accent.b + (1 - p.accent.b) * 0.7f, p.accent.a);
+            painter.drawText(L"听见音乐", format, textRect, tone(light, 1));
+            rt->PopAxisAlignedClip();
+        } else if (effect == LyricEffect::Underline) {
+            for (int i = 0; i < 10; ++i) {
+                if (auto* brush = painter.brush(tone(p.accent, 0.15f + i * 0.08f)))
+                    rt->DrawLine(D2D1::Point2F(cx - 27 + i * 4, cy + 10),
+                                 D2D1::Point2F(cx - 23 + i * 4, cy + 10), brush, 1);
+            }
+        } else if (effect == LyricEffect::Stardust) {
+            for (int i = 15; i >= 1; --i) {
+                const float age = i / 16.0f;
+                const float fade = 1.0f - age;
+                const float r = 0.55f + fade * (1.0f + (i % 3) * 0.2f);
+                const float scatter = std::sin(i * 2.4f) * age * 5.5f - age;
+                if (auto* brush = painter.brush(tone(p.accent, fade * fade * 0.85f)))
+                    rt->FillEllipse(D2D1::Ellipse(
+                        D2D1::Point2F(cx - 7 - 5.0f - age * 30.0f, cy - 7.5f + scatter),
+                        r, r), brush);
+            }
+            lyricStarArtwork_.draw(rt, D2D1::Point2F(cx - 7, cy - 7.5f), 7.2f, 0.35f,
+                                   painter.brush(tone(p.accent, 1.0f)));
+        }
         rt->PopAxisAlignedClip();
     }
 
@@ -5290,6 +5383,9 @@ struct SettingsDialog::Impl {
             else if (isSpectrumEffectRow(row.id))
                 drawSpectrumEffectArtwork(painter, row.artworkRect,
                     kSpectrumEffects[row.id - kIdSpectrumEffectFirst], row.enabled);
+            else if (isLyricEffectRow(row.id))
+                drawLyricEffectArtwork(painter, row.artworkRect,
+                    static_cast<LyricEffect>(row.id - kIdLyricEffectFirst), row.enabled);
             if (row.kind == ControlKind::Toggle)
                 drawToggle(painter, row);
             else if (row.kind == ControlKind::Radio)
@@ -5402,7 +5498,7 @@ struct SettingsDialog::Impl {
             }
             bool inControl = contains(row.controlRect, x, y);
             if (row.id == kIdSpectrumBackground || row.id == kIdSpectrumGradient ||
-                isSpectrumEffectRow(row.id))
+                isSpectrumEffectRow(row.id) || isLyricEffectRow(row.id))
                 inControl = inControl || contains(row.artworkRect, x, y);
             if (row.id == kIdIdleQuoteBackground && !row.optionRects.empty())
                 inControl = inControl || contains(row.optionRects.front(), x, y);
@@ -5890,8 +5986,18 @@ struct SettingsDialog::Impl {
             if (actions.onFollowAlbum)
                 actions.onFollowAlbum(row->checked);
             break;
+        case kIdLyricEffectFirst:
+        case kIdLyricEffectFirst + 1:
+        case kIdLyricEffectFirst + 2:
+        case kIdLyricEffectFirst + 3:
+            row->checked = !row->checked;
+            if (actions.onLyricEffect)
+                actions.onLyricEffect(row->id - kIdLyricEffectFirst, row->checked);
+            break;
         case kIdDoubleLine:
             row->checked = !row->checked;
+            if (auto* stardust = findRow(kIdLyricEffectFirst))
+                stardust->enabled = !row->checked && !minimalModeActive();
             if (actions.onDoubleLineLyrics)
                 actions.onDoubleLineLyrics(row->checked);
             break;
@@ -6145,6 +6251,12 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdDoubleLine)) {
             row->checked = vertical ? false : s.doubleLineLyrics;
             row->enabled = !vertical;
+        }
+        for (int i = 0; i < kLyricEffectCount; ++i) {
+            if (auto* row = findRow(kIdLyricEffectFirst + i)) {
+                row->checked = (s.lyricEffects & (1u << i)) != 0;
+                row->enabled = !minimal && (i != 0 || vertical || !s.doubleLineLyrics);
+            }
         }
         if (auto* row = findRow(kIdAlignment)) {
             row->selected = vertical ? 0 : s.lyricAlignment;
