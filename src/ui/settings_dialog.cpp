@@ -9,11 +9,13 @@
 #include "ui/fluent_theme.h"
 #include "ui/media_control_icons.h"
 #include "ui/settings/artwork.h"
-#include "ui/settings/search_model.h"
 #include "ui/settings/ids.h"
 #include "ui/settings/row.h"
-#include "ui/settings/lyric_section.h"
-#include "ui/settings/spectrum_section.h"
+#include "ui/settings/sections.h"
+#include "ui/settings/section_labels.h"
+#include "ui/settings/section_metrics.h"
+#include "ui/settings/search_palette.h"
+#include "ui/settings/slider_editor.h"
 #include "ui/settings_icons.h"
 
 #include <commctrl.h>
@@ -38,28 +40,12 @@ namespace {
 
 constexpr int kFooterItemCount = 3;
 constexpr float kFooterItemH = 32.0f;
-constexpr float kSearchPaletteHeaderH = 52.0f;
-constexpr float kSearchPaletteFooterH = 32.0f;
-constexpr float kSearchPaletteRowH = 56.0f;
-constexpr float kSearchPaletteListPadY = 6.0f;
-constexpr int kSearchPaletteMaxVisibleRows = 6;
-constexpr float kSearchPaletteEmptyPromptH = 54.0f;
-constexpr float kSearchPaletteNoResultH = 70.0f;
-constexpr int kSearchPaletteHitNone = 0;
-constexpr int kSearchPaletteHitClear = 1;
-constexpr int kSearchPaletteHitClose = 2;
-constexpr int kSearchPaletteHitRow = 3;
 constexpr UINT_PTR kNavIndicatorTimer = 1;
 constexpr UINT kNavIndicatorDurationMs = 180;
 constexpr UINT kNavIndicatorFrameMs = USER_TIMER_MINIMUM;
 constexpr UINT_PTR kContentScrollTimer = 2;
 constexpr UINT_PTR kSearchLocateTimer = 3;
-constexpr UINT_PTR kSearchPaletteAnimTimer = 4;
 constexpr ULONGLONG kSearchLocateFadeMs = 800;
-constexpr float kSearchPaletteOpenDurationMs = 165.0f;
-constexpr float kSearchPaletteCloseDurationMs = 120.0f;
-constexpr float kSearchPaletteOpenSlideDip = -10.0f;
-constexpr float kSearchPaletteCloseSlideDip = -8.0f;
 constexpr float kContentScrollFrequency = 28.0f;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
 
@@ -84,7 +70,6 @@ constexpr float kModeGridGap = 8.0f;
 constexpr float kModeGridCardH = 56.0f;
 constexpr float kModeGridTopGap = 10.0f;
 constexpr float kModeGridNoteGap = 12.0f;
-constexpr float kModeGridMinH = 196.0f;
 constexpr float kSpectrumStyleCardH = 96.0f;
 constexpr float kSpectrumStyleCardGap = 8.0f;
 constexpr float kSpectrumBackgroundArtworkMaxW = 144.0f;
@@ -94,17 +79,13 @@ constexpr float kSpectrumEffectArtworkH = 44.0f;
 constexpr float kSpectrumBackgroundArtworkGap = 12.0f;
 constexpr float kCoverEffectCardH = 72.0f;
 constexpr float kCoverEffectCardGap = 8.0f;
-constexpr float kCoverEffectRowH = 124.0f;
 constexpr float kSongToastPositionCardW = 156.0f;
 constexpr float kSongToastPositionCardH = 92.0f;
 constexpr float kSongToastPositionCardGap = 8.0f;
-constexpr float kSongToastPositionRowH = 144.0f;
 constexpr float kHoverControlStyleCardH = 156.0f;
-constexpr float kHoverControlStyleRowH = 292.0f;
 constexpr float kSliderValueW = 62.0f;
 constexpr float kSliderValueGap = 10.0f;
 constexpr float kSliderSuffixW = 16.0f;
-constexpr UINT_PTR kSliderCaretTimer = 5;
 constexpr float kScrollBarWidth = 3.0f;
 constexpr float kScrollBarHitWidth = 12.0f;
 constexpr float kScrollBarInset = 8.0f;
@@ -115,9 +96,7 @@ constexpr float kRowIconTextGap = 10.0f;
 constexpr float kRowIconSlotW = kRowIconSize + kRowIconTextGap;
 constexpr float kPageTitleIconSize = 20.0f;
 constexpr float kPageTitleIconTextGap = 10.0f;
-constexpr float kIdleAppItemH = 52.0f;
 constexpr float kIdleAppsListTop = 76.0f;
-constexpr float kIdleAppsBaseH = 128.0f;
 constexpr float kIdleAppActionW = 58.0f;
 constexpr float kIdleAppActionGap = 8.0f;
 constexpr float kIdleAppInfoRightInset = 144.0f;
@@ -127,97 +106,9 @@ constexpr float kIdleAppNamesToggleGap = 8.0f;
 constexpr float kIdleAppDragThreshold = 5.0f;
 constexpr float kIdleQuoteBackgroundCardH = 112.0f;
 constexpr float kIdleQuoteBackgroundCardGap = 8.0f;
-constexpr float kIdleQuoteBackgroundRowH = 324.0f;
 
 constexpr DWORD kDialogStyle = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_THICKFRAME;
 constexpr DWORD kDialogExStyle = WS_EX_DLGMODALFRAME | WS_EX_WINDOWEDGE;
-
-fluent::ThemeMode themeModeFromIndex(int index) {
-    switch (index) {
-    case 1:
-        return fluent::ThemeMode::FollowApp;
-    case 2:
-        return fluent::ThemeMode::Light;
-    case 3:
-        return fluent::ThemeMode::Dark;
-    case 0:
-    default:
-        return fluent::ThemeMode::FollowSystem;
-    }
-}
-
-int themeModeIndex(fluent::ThemeMode mode) {
-    switch (mode) {
-    case fluent::ThemeMode::FollowApp:
-        return 1;
-    case fluent::ThemeMode::Light:
-        return 2;
-    case fluent::ThemeMode::Dark:
-        return 3;
-    case fluent::ThemeMode::FollowSystem:
-    default:
-        return 0;
-    }
-}
-
-
-constexpr const wchar_t* kFontSettingNotice =
-    L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息、沉浸模式时间/日期和 Dock、内嵌模式资源监视";
-
-const wchar_t* idleQuoteSourceHint(int source) {
-    if (source == 1)
-        return L"今日诗词会根据客户端网络 IP、时间等信息进行推荐，并在本地保存接口 Token。";
-    if (source == 2)
-        return L"通过一言的网易云分类获取每日一句";
-    return L"默认使用一言获取每日一言。";
-}
-
-const wchar_t* taskbarViewModeHint(bool mediaSessionAlive, bool verticalTaskbar) {
-    if (!mediaSessionAlive)
-        return L"当前没有音乐播放，沉浸模式暂不可用；开始播放后即可选择。Dock 模式仍可使用。";
-    if (verticalTaskbar)
-        return L"侧边任务栏不支持沉浸模式；Dock 模式以独立顶栏或底栏占用桌面工作区。";
-    return L"沉浸模式覆盖 Windows 任务栏；Dock 模式以独立顶栏或底栏占用桌面工作区。";
-}
-
-const wchar_t* backgroundAdjustmentHint(bool supported, int mode) {
-    if (!supported)
-        return L"背景模糊层初始化失败，请查看运行日志中的 dock-backdrop 信息。";
-    return mode == 1
-               ? L"0% 完全透明，100% 显示随 Windows 应用主题变化的纯底色；中间值为底色半透明。"
-               : L"0% 完全透明，100% 完全模糊；中间值混合清晰桌面与模糊背景。";
-}
-
-const wchar_t* backgroundAdjustmentLabel(bool immersive, int mode) {
-    if (immersive)
-        return mode == 1 ? L"沉浸模式背景不透明度" : L"沉浸模式背景模糊程度";
-    return mode == 1 ? L"背景不透明度" : L"背景模糊程度";
-}
-
-bool parseBoundedInteger(const std::wstring& text, int minValue, int maxValue, int& value) {
-    size_t begin = 0;
-    size_t end = text.size();
-    while (begin < end && std::iswspace(text[begin]))
-        ++begin;
-    while (end > begin && std::iswspace(text[end - 1]))
-        --end;
-    if (begin == end)
-        return false;
-
-    int parsed = 0;
-    for (size_t i = begin; i < end; ++i) {
-        const wchar_t ch = text[i];
-        if (ch < L'0' || ch > L'9')
-            return false;
-        const int digit = static_cast<int>(ch - L'0');
-        if (parsed > (INT_MAX - digit) / 10)
-            parsed = INT_MAX;
-        else
-            parsed = parsed * 10 + digit;
-    }
-    value = std::clamp(parsed, minValue, maxValue);
-    return true;
-}
 
 settings_icon::Kind iconForPage(int page) {
     switch (page) {
@@ -244,137 +135,6 @@ settings_icon::Kind iconForPage(int page) {
     }
 }
 
-settings_icon::Kind iconForRow(int id) {
-    switch (id) {
-    case kIdTaskbarTheme:
-    case kIdWindowTheme:
-        return settings_icon::Kind::Theme;
-    case kIdPickFont:
-        return settings_icon::Kind::Font;
-    case kIdSongInfo:
-        return settings_icon::Kind::SongInfo;
-    case kIdAlbumCover:
-        return settings_icon::Kind::AlbumCover;
-    case kIdPlatformIcon:
-        return settings_icon::Kind::Platform;
-    case kIdCoverEffect:
-        return settings_icon::Kind::Vinyl;
-    case kIdProgressBackground:
-        return settings_icon::Kind::Progress;
-    case kIdProgressBackgroundOpacity:
-    case kIdCoverBackgroundOpacity:
-        return settings_icon::Kind::Opacity;
-    case kIdTaskbarBackground:
-        return settings_icon::Kind::Background;
-    case kIdIdleQuoteBackground:
-        return settings_icon::Kind::DynamicBackground;
-    case kIdIdleQuoteBackgroundScope:
-        return settings_icon::Kind::Scope;
-    case kIdRenderMode:
-        return settings_icon::Kind::RenderMode;
-    case kIdTaskbarContextMenu:
-    case kIdTaskbarViewMode:
-    case kIdTaskbarMonitor:
-        return settings_icon::Kind::Display;
-    case kIdAppBarEdge:
-        return settings_icon::Kind::Position;
-    case kIdImmersiveBackgroundBlur:
-    case kIdDockBackgroundBlur:
-    case kIdImmersiveBackgroundAdjustment:
-    case kIdDockBackgroundAdjustment:
-        return settings_icon::Kind::Background;
-    case kIdEmbeddedResourceMonitor:
-    case kIdDockResourceGpuUsage:
-    case kIdDockResourceDownload:
-    case kIdDockResourceUpload:
-    case kIdDockResourceCpuFrequency:
-        return settings_icon::Kind::Performance;
-    case kIdHoverControls:
-        return settings_icon::Kind::Hover;
-    case kIdHoverControlStyle:
-        return settings_icon::Kind::Control;
-    case kIdFloatingCardTrigger:
-        return settings_icon::Kind::Trigger;
-    case kIdFloatingCardBackground:
-        return settings_icon::Kind::Background;
-    case kIdFloatingCardBackgroundColor:
-    case kIdSpectrumColorMode:
-    case kIdSpectrumColor:
-    case kIdFontColor:
-        return settings_icon::Kind::Color;
-    case kIdFloatingCardFollowAlbum:
-    case kIdFollowAlbum:
-        return settings_icon::Kind::Follow;
-    case kIdFloatingCardAutoTextContrast:
-        return settings_icon::Kind::Contrast;
-    case kIdSpectrum:
-    case kIdSpectrumStyle:
-        return settings_icon::Kind::Spectrum;
-    case kIdSpectrumEffectFirst:
-    case kIdSpectrumEffectFirst + 1:
-    case kIdSpectrumEffectFirst + 2:
-    case kIdSpectrumEffectFirst + 3:
-    case kIdSpectrumGradient:
-        return settings_icon::Kind::Gradient;
-    case kIdSpectrumBackground:
-        return settings_icon::Kind::Wave;
-    case kIdSpectrumOpacity:
-        return settings_icon::Kind::Opacity;
-    case kIdLyricEffectFirst:
-    case kIdLyricEffectFirst + 1:
-    case kIdLyricEffectFirst + 2:
-    case kIdLyricEffectFirst + 3:
-        return settings_icon::Kind::Lyrics;
-    case kIdSongToast:
-    case kIdSongToastPreview:
-        return settings_icon::Kind::Toast;
-    case kIdSongToastMonitor:
-        return settings_icon::Kind::Display;
-    case kIdSongToastDuration:
-        return settings_icon::Kind::Duration;
-    case kIdSongToastSkipFullscreen:
-        return settings_icon::Kind::Fullscreen;
-    case kIdSongToastPosition:
-        return settings_icon::Kind::Position;
-    case kIdIdleEntry:
-        return settings_icon::Kind::Idle;
-    case kIdIdleQuote:
-    case kIdIdleCustomWelcome:
-        return settings_icon::Kind::Quote;
-    case kIdIdleQuoteSource:
-        return settings_icon::Kind::Language;
-    case kIdIdleQuoteRefreshInterval:
-        return settings_icon::Kind::Refresh;
-    case kIdIdleApps:
-        return settings_icon::Kind::Apps;
-    case kIdTickTickApiToken:
-        return settings_icon::Kind::Api;
-    case kIdTickTickConnect:
-        return settings_icon::Kind::Connect;
-    case kIdTickTickRefresh:
-        return settings_icon::Kind::Sync;
-    case kIdTickTickDisconnect:
-        return settings_icon::Kind::Disconnect;
-    case kIdTickTickEnabled:
-        return settings_icon::Kind::Apps;
-    case kIdDoubleLine:
-    case kIdSecondaryOn:
-        return settings_icon::Kind::DoubleLine;
-    case kIdAlignment:
-    case kIdIdleQuoteAlignment:
-        return settings_icon::Kind::Alignment;
-    case kIdSecondaryType:
-        return settings_icon::Kind::Language;
-    case kIdQqLocalLyricsEnabled:
-        return settings_icon::Kind::LocalLyrics;
-    case kIdQqLocalLyricsPath:
-        return settings_icon::Kind::Folder;
-    case kIdQqLocalLyricsPersistOrder:
-        return settings_icon::Kind::Persist;
-    default:
-        return settings_icon::Kind::None;
-    }
-}
 
 } // namespace
 
@@ -390,64 +150,54 @@ struct SettingsDialog::Impl {
     DCompRenderer contentRenderer;
     bool contentLayerReady = false;
     bool backdrop = false;
-    SettingsState state;
-    SettingsActions actions;
+    SettingsSections sections_;
+    Row* findRow(int id) { return sections_.findRow(id); }
+    bool minimalModeActive() const { return sections_.minimalModeActive(); }
+    void updateFloatingCardRowsEnabled() { sections_.updateFloatingCardRowsEnabled(); }
+    bool backgroundWaveActive() const { return sections_.backgroundWaveActive(); }
+    bool spectrumBackgroundAvailable() const { return sections_.spectrumBackgroundAvailable(); }
+    void updateProgressBackgroundRowsEnabled() { sections_.updateProgressBackgroundRowsEnabled(); }
+    void updateBackgroundAdjustmentPresentation() {
+        sections_.updateBackgroundAdjustmentPresentation();
+    }
+    void updateImmersiveRowsEnabled() { sections_.updateImmersiveRowsEnabled(); }
+    void updateIdleAppsRowHeight() { sections_.updateIdleAppsRowHeight(); }
+    void updateTickTickRows() { sections_.updateTickTickRows(); }
+    void updateIdleQuoteSourceRow() { sections_.updateIdleQuoteSourceRow(); }
+    int idleTextMode() const { return sections_.idleTextMode(); }
+    bool embeddedResourceOnlyAvailable() const { return sections_.embeddedResourceOnlyAvailable(); }
+    void updateIdleRowsEnabled() { sections_.updateIdleRowsEnabled(); }
+    void updateCompactLyricRows() { sections_.updateCompactLyricRows(); }
+    const Row* findRow(int id) const { return sections_.findRow(id); }
+    void createControls() { sections_.create(); }
+    void onCommand(int id, int option = -1) {
+        const auto* row = sections_.findRow(id);
+        if ((id == kIdSpectrumColor || id == kIdFloatingCardBackgroundColor) && row &&
+            row->enabled) {
+            openColorPicker(id);
+            return;
+        }
+        sections_.onCommand(id, option);
+        if (hwnd)
+            surface.invalidate();
+    }
+    void updateState(const SettingsState& s) {
+        if (slider_.state().open)
+            commitSliderEditor();
+        resetIdleAppDrag();
+        sections_.update(s);
+        layout();
+        surface.invalidate();
+    }
+
     int activePage = 0;
 
     fluent::FluentDialogSurface surface;
-    fluent::FluentEdit settingsSearch;
 
-    SettingsSearchModel searchModel_;
-    int selectedSearchResult = -1;
     int searchLocatedId = 0;
     ULONGLONG searchLocatedStartMs = 0;
     bool searchLocateFading = false;
     POINT searchLocateInitialCursorPt{LONG_MIN, LONG_MIN};
-    D2D1_RECT_F searchTriggerRect{};
-    HWND searchScrimHwnd = nullptr;
-    LyricRenderer searchScrimRenderer;
-    int searchScrimLastWidth = 0;
-    int searchScrimLastHeight = 0;
-    UINT searchScrimLastDpi = 0;
-    bool searchScrimLastDark = false;
-    bool searchScrimLastZoomed = false;
-    HWND searchPaletteHwnd = nullptr;
-    fluent::FluentDialogSurface searchPaletteSurface;
-    bool searchPaletteOpen = false;
-    bool closingSearchPalette = false;
-    bool suppressNextSearchTriggerPress = false;
-    bool searchPaletteAnimating = false;
-    ULONGLONG searchPaletteAnimStartMs = 0;
-    float searchPaletteAnimDurationMs = kSearchPaletteOpenDurationMs;
-    float searchPaletteAnimFrom = 0.0f;
-    float searchPaletteAnimTarget = 0.0f;
-    float searchPaletteProgress = 0.0f;
-    int searchPaletteBaseX = 0;
-    int searchPaletteBaseY = 0;
-    float searchPaletteScale = 1.0f;
-    float searchPaletteScroll = 0.0f;
-    float searchPaletteMaxScroll = 0.0f;
-    int searchPaletteHoverKind = kSearchPaletteHitNone;
-    int searchPaletteHoverRow = -1;
-    int searchPalettePressedKind = kSearchPaletteHitNone;
-    int searchPalettePressedRow = -1;
-    POINT searchPaletteLastMovePt{-1, -1};
-    D2D1_RECT_F searchPaletteClearRect{};
-    D2D1_RECT_F searchPaletteEscRect{};
-    D2D1_RECT_F searchPaletteListRect{};
-    int sliderEditRowId = 0;
-    bool sliderEditOpen = false;
-    bool sliderEditCommitting = false;
-    std::wstring sliderEditText;
-    size_t sliderEditCaret = 0;
-    size_t sliderEditAnchor = 0;
-    std::array<float, 4> sliderCaretStops{};
-    bool sliderCaretVisible = true;
-    bool sliderEditSelecting = false;
-    std::wstring sliderUndoText;
-    size_t sliderUndoCaret = 0;
-    size_t sliderUndoAnchor = 0;
-    bool sliderCanUndo = false;
     std::unique_ptr<ColorPickerDialog> colorPicker;
     std::array<std::wstring, kSettingsPageCount> navItems{
         L"显示", L"展示模式", L"性能", L"悬浮卡片", L"媒体控件", L"频谱", L"歌词",
@@ -455,7 +205,6 @@ struct SettingsDialog::Impl {
     std::array<std::wstring, kSettingsPageCount> pageTitles{
         L"显示", L"展示模式", L"性能", L"悬浮卡片", L"媒体控件", L"频谱", L"歌词",
         L"切歌弹窗", L"每日一言与更多"};
-    std::vector<Row> rows[kSettingsPageCount];
     D2D1_RECT_F navRect{};
     std::array<D2D1_RECT_F, kSettingsPageCount> navItemRects{};
     std::array<D2D1_RECT_F, kFooterItemCount> footerItemRects{};
@@ -493,6 +242,51 @@ struct SettingsDialog::Impl {
     int pressedOption = -1;
     int focusedId = kIdNav;
     bool focusVisible = false;
+
+    SliderEditor slider_{{hwnd, focusedId, contentViewportRect,
+                          [this](int id) { return findRow(id); }, [this](int id) { onCommand(id); },
+                          [this] { stopContentScroll(); }, [this] { surface.invalidate(); }}};
+
+    void resetSliderCaret() { slider_.resetCaret(); }
+    void hideSliderEditor() { slider_.hide(); }
+    void cancelSliderEditor() { slider_.cancel(); }
+    void commitSliderEditor() { slider_.commit(); }
+    void layoutSliderEditor() { slider_.layout(); }
+    void openSliderEditor(Row& row) { slider_.open(row); }
+    void replaceSliderSelection(const std::wstring& inserted) {
+        slider_.replaceSelection(inserted);
+    }
+    bool handleSliderEditKey(WPARAM key) { return slider_.handleKey(key); }
+    void placeSliderCaret(float pointerX, bool extend) { slider_.placeCaret(pointerX, extend); }
+
+    SettingsSearchPalette search_{{hwnd, inst, surface, sections_, pageTitles, focusVisible},
+                                  [this] {
+                                      stopSearchLocateHighlight();
+                                      if (slider_.state().open)
+                                          commitSliderEditor();
+                                  },
+                                  [this](const SettingsSearchResult& result) {
+                                      showPage(result.page);
+                                      surface.invalidate();
+                                      UpdateWindow(hwnd);
+                                      if (auto* row = findRow(result.id)) {
+                                          setContentScroll(contentScroll + row->cardRect.top -
+                                                           contentViewportRect.top - 12.0f);
+                                          startSearchLocateHighlight(result.id);
+                                          focusedId = row->enabled ? result.id : kIdNav;
+                                      }
+                                      SetFocus(hwnd);
+                                      focusVisible = false;
+                                      surface.invalidate();
+                                  }};
+    bool searching() const { return search_.searching(); }
+    void refreshSearch() { search_.refreshSearch(); }
+    void openSearchPalette() { search_.openSearchPalette(); }
+    void closeSearchPalette(bool focus, bool immediate = false) {
+        search_.closeSearchPalette(focus, immediate);
+    }
+    void layoutSearchPalette() { search_.layoutSearchPalette(); }
+    void advanceSearchPaletteAnimation() { search_.advanceSearchPaletteAnimation(); }
 
     static LRESULT CALLBACK contentWndProc(HWND window, UINT message, WPARAM wp, LPARAM lp) {
         if (message == WM_NCHITTEST)
@@ -541,7 +335,7 @@ struct SettingsDialog::Impl {
     }
 
     static bool isIdleAppDragOption(int option) {
-        return option >= kIdleAppDragOptionBase;
+        return SettingsSections::isIdleAppDragOption(option);
     }
 
     void resetIdleAppDrag() {
@@ -554,7 +348,7 @@ struct SettingsDialog::Impl {
 
     bool updateIdleAppDropTarget(float x, float y) {
         const Row* row = findRow(kIdIdleApps);
-        const size_t count = state.idleApps.size();
+        const size_t count = sections_.state.idleApps.size();
         if (!row || !row->enabled || count == 0) {
             idleAppDropIndex = -1;
             return false;
@@ -577,25 +371,7 @@ struct SettingsDialog::Impl {
         return true;
     }
 
-    Row* findRow(int id) {
-        for (auto& page : rows) {
-            for (auto& row : page) {
-                if (row.id == id)
-                    return &row;
-            }
-        }
-        return nullptr;
-    }
 
-    const Row* findRow(int id) const {
-        for (const auto& page : rows) {
-            for (const auto& row : page) {
-                if (row.id == id)
-                    return &row;
-            }
-        }
-        return nullptr;
-    }
 
     static D2D1_RECT_F sliderValueRect(const Row& row) {
         const float trackRight = row.controlRect.right - kSliderValueW;
@@ -609,470 +385,41 @@ struct SettingsDialog::Impl {
                            rect.right - 4.0f - kSliderSuffixW, rect.bottom - 1.0f);
     }
 
-    void resetSliderCaret() {
-        sliderCaretVisible = true;
-        KillTimer(hwnd, kSliderCaretTimer);
-        const UINT blink = GetCaretBlinkTime();
-        if (blink != INFINITE && blink > 0)
-            SetTimer(hwnd, kSliderCaretTimer, blink, nullptr);
-        surface.invalidate();
-    }
 
-    void hideSliderEditor() {
-        sliderEditOpen = false;
-        sliderEditRowId = 0;
-        sliderEditSelecting = false;
-        KillTimer(hwnd, kSliderCaretTimer);
-        if (GetCapture() == hwnd)
-            ReleaseCapture();
-        surface.invalidate();
-    }
 
-    void cancelSliderEditor() {
-        if (sliderEditOpen)
-            hideSliderEditor();
-    }
 
-    void commitSliderEditor() {
-        if (!sliderEditOpen || sliderEditCommitting)
-            return;
-        sliderEditCommitting = true;
-        Row* row = findRow(sliderEditRowId);
-        if (row && row->enabled) {
-            int value = row->value;
-            if (parseBoundedInteger(sliderEditText, row->minValue, row->maxValue, value) &&
-                value != row->value) {
-                row->value = value;
-                onCommand(row->id);
-            }
-        }
-        hideSliderEditor();
-        sliderEditCommitting = false;
-    }
 
-    void layoutSliderEditor() {
-        if (!sliderEditOpen)
-            return;
-        const Row* row = findRow(sliderEditRowId);
-        if (!row || row->kind != ControlKind::Slider || !row->enabled ||
-            row->cardRect.right <= row->cardRect.left ||
-            row->cardRect.bottom <= contentViewportRect.top ||
-            row->cardRect.top >= contentViewportRect.bottom)
-            hideSliderEditor();
-    }
 
-    void openSliderEditor(Row& row) {
-        if (!row.enabled)
-            return;
-        if (sliderEditOpen && sliderEditRowId != row.id)
-            commitSliderEditor();
-        stopContentScroll();
-        sliderEditRowId = row.id;
-        sliderEditOpen = true;
-        sliderEditText = std::to_wstring(row.value);
-        sliderEditCaret = sliderEditText.size();
-        sliderEditAnchor = 0;
-        sliderCanUndo = false;
-        focusedId = row.id;
-        SetFocus(hwnd);
-        resetSliderCaret();
-    }
 
-    void replaceSliderSelection(const std::wstring& inserted) {
-        if (inserted.find_first_not_of(L"0123456789") != std::wstring::npos)
-            return;
-        const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
-        const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
-        if (sliderEditText.size() - (last - first) + inserted.size() > 3)
-            return;
-        sliderUndoText = sliderEditText;
-        sliderUndoCaret = sliderEditCaret;
-        sliderUndoAnchor = sliderEditAnchor;
-        sliderCanUndo = true;
-        sliderEditText.replace(first, last - first, inserted);
-        sliderEditCaret = sliderEditAnchor = first + inserted.size();
-        resetSliderCaret();
-    }
 
-    bool copySliderSelection() {
-        const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
-        const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
-        if (first == last || !OpenClipboard(hwnd))
-            return false;
-        const std::wstring text = sliderEditText.substr(first, last - first);
-        const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-        bool copied = false;
-        if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
-            if (void* data = GlobalLock(memory)) {
-                std::memcpy(data, text.c_str(), bytes);
-                GlobalUnlock(memory);
-                EmptyClipboard();
-                copied = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
-            }
-            if (!copied)
-                GlobalFree(memory);
-        }
-        CloseClipboard();
-        return copied;
-    }
 
-    bool handleSliderEditKey(WPARAM key) {
-        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        if (key == VK_TAB || (ctrl && key == 'F')) {
-            commitSliderEditor();
-            return false;
-        }
-        if (key == VK_RETURN) {
-            commitSliderEditor();
-            return true;
-        }
-        if (key == VK_ESCAPE) {
-            cancelSliderEditor();
-            return true;
-        }
-        if (ctrl && key == 'A') {
-            sliderEditAnchor = 0;
-            sliderEditCaret = sliderEditText.size();
-        } else if ((ctrl && (key == 'C' || key == 'X' || key == VK_INSERT)) ||
-                   (shift && key == VK_DELETE)) {
-            if (copySliderSelection() && (key == 'X' || key == VK_DELETE))
-                replaceSliderSelection(L"");
-        } else if ((ctrl && key == 'V') || (shift && key == VK_INSERT)) {
-            std::wstring text;
-            if (OpenClipboard(hwnd)) {
-                if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
-                    if (const auto* value = static_cast<const wchar_t*>(GlobalLock(data))) {
-                        text = value;
-                        GlobalUnlock(data);
-                    }
-                }
-                CloseClipboard();
-            }
-            if (!text.empty())
-                replaceSliderSelection(text);
-        } else if (ctrl && (key == 'Z' || key == 'Y')) {
-            if (sliderCanUndo) {
-                std::swap(sliderEditText, sliderUndoText);
-                std::swap(sliderEditCaret, sliderUndoCaret);
-                std::swap(sliderEditAnchor, sliderUndoAnchor);
-            }
-        } else if (key == VK_LEFT || key == VK_RIGHT || key == VK_HOME || key == VK_END) {
-            if (key == VK_HOME)
-                sliderEditCaret = 0;
-            else if (key == VK_END)
-                sliderEditCaret = sliderEditText.size();
-            else if (!shift && sliderEditCaret != sliderEditAnchor)
-                sliderEditCaret = key == VK_LEFT ? std::min(sliderEditCaret, sliderEditAnchor)
-                                                : std::max(sliderEditCaret, sliderEditAnchor);
-            else if (key == VK_LEFT && sliderEditCaret > 0)
-                --sliderEditCaret;
-            else if (key == VK_RIGHT && sliderEditCaret < sliderEditText.size())
-                ++sliderEditCaret;
-            if (!shift)
-                sliderEditAnchor = sliderEditCaret;
-        } else if (key == VK_BACK || key == VK_DELETE) {
-            if (sliderEditCaret == sliderEditAnchor) {
-                if (key == VK_BACK && sliderEditAnchor > 0)
-                    --sliderEditAnchor;
-                else if (key == VK_DELETE && sliderEditAnchor < sliderEditText.size())
-                    ++sliderEditAnchor;
-            }
-            replaceSliderSelection(L"");
-        }
-        resetSliderCaret();
-        return true;
-    }
 
-    void placeSliderCaret(float pointerX, bool extend) {
-        size_t nearest = 0;
-        for (size_t i = 1; i <= sliderEditText.size(); ++i)
-            if (std::fabs(pointerX - sliderCaretStops[i]) < std::fabs(pointerX - sliderCaretStops[nearest]))
-                nearest = i;
-        sliderEditCaret = nearest;
-        if (!extend)
-            sliderEditAnchor = nearest;
-        resetSliderCaret();
-    }
 
     static bool isOptionEnabled(const Row& row, size_t option) {
         return option >= row.optionEnabled.size() || row.optionEnabled[option];
     }
 
-    bool minimalModeActive() const {
-        if (state.renderMode == kRenderModeMinimal)
-            return true;
-        const auto* mode = findRow(kIdRenderMode);
-        return mode && mode->selected == kRenderModeMinimal;
-    }
 
-    Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
-                float controlW, float height) {
-        return RowBuilder(rows[page]).addRow(id, kind, text, hint, controlW, height);
-    }
 
-    Row& addToggle(int page, int id, const wchar_t* text, bool checked) {
-        return RowBuilder(rows[page]).addToggle(id, text, checked);
-    }
 
-    void updateFloatingCardRowsEnabled() {
-        const auto* idleEntry = findRow(kIdIdleEntry);
-        const auto* controls = findRow(kIdHoverControls);
-        const auto* style = findRow(kIdHoverControlStyle);
-        const auto* background = findRow(kIdFloatingCardBackground);
-        const bool mediaCardEnabled = controls && controls->checked && style &&
-                                      style->selected == 1;
-        const bool cardEnabled = !minimalModeActive() &&
-                                 ((idleEntry && idleEntry->checked) || mediaCardEnabled);
-        const bool frosted = cardEnabled && background && background->selected == 1;
-        if (auto* row = findRow(kIdFloatingCardTrigger))
-            row->enabled = cardEnabled;
-        if (auto* row = findRow(kIdFloatingCardBackground))
-            row->enabled = cardEnabled;
-        if (auto* row = findRow(kIdFloatingCardBackgroundColor))
-            row->enabled = frosted;
-        if (auto* row = findRow(kIdFloatingCardFollowAlbum))
-            row->enabled = frosted;
-        if (auto* row = findRow(kIdFloatingCardAutoTextContrast))
-            row->enabled = frosted;
-    }
 
     // 播放进度背景与背景波浪共用同一层背景，二者互斥：
     // 背景波浪生效（频谱开 + 梦幻波浪 + 背景开关开）时进度背景不可用
-    bool backgroundWaveActive() const {
-        const auto* spectrum = findRow(kIdSpectrum);
-        const auto* style = findRow(kIdSpectrumStyle);
-        const auto* background = findRow(kIdSpectrumBackground);
-        return spectrum && spectrum->checked && style && style->selected == 2 && background &&
-               background->checked;
-    }
 
     // 背景波浪行的可用态：频谱开 + 梦幻波浪样式
-    bool spectrumBackgroundAvailable() const {
-        const auto* spectrum = findRow(kIdSpectrum);
-        const auto* style = findRow(kIdSpectrumStyle);
-        return spectrum && spectrum->checked && style && style->selected == 2;
-    }
 
-    void updateProgressBackgroundRowsEnabled() {
-        const bool available = !minimalModeActive() && !backgroundWaveActive();
-        if (auto* row = findRow(kIdProgressBackground))
-            row->enabled = available;
-        if (auto* row = findRow(kIdProgressBackgroundOpacity))
-            row->enabled = available && findRow(kIdProgressBackground) &&
-                           findRow(kIdProgressBackground)->checked;
-    }
 
-    void updateBackgroundAdjustmentPresentation() {
-        auto update = [this](int modeId, int sliderId, bool immersive) {
-            const auto* modeRow = findRow(modeId);
-            const int selected = modeRow ? std::clamp(modeRow->selected, 0, 1) : 0;
-            if (auto* slider = findRow(sliderId)) {
-                slider->text = backgroundAdjustmentLabel(immersive, selected);
-                slider->hint = backgroundAdjustmentHint(
-                    state.backgroundBlurSupported, selected);
-                slider->showHint = true;
-                slider->minHeight = kRowTallH;
-                slider->height = slider->minHeight;
-            }
-        };
-        update(kIdImmersiveBackgroundAdjustment, kIdImmersiveBackgroundBlur, true);
-        update(kIdDockBackgroundAdjustment, kIdDockBackgroundBlur, false);
-    }
 
-    void updateImmersiveRowsEnabled() {
-        auto* mode = findRow(kIdTaskbarViewMode);
-        const int selectedMode = mode ? std::clamp(mode->selected, 0, 2) : 0;
-        const bool immersiveEnabled = state.mediaSessionAlive && !state.verticalTaskbar;
-        const bool appBarEnabled = selectedMode == 2;
-        const bool expandedEnabled = appBarEnabled ||
-                                     (selectedMode == 1 && immersiveEnabled);
-        if (mode) {
-            mode->enabled = true;
-            mode->optionEnabled.assign(mode->options.size(), true);
-            if (mode->optionEnabled.size() > 1)
-                mode->optionEnabled[1] = immersiveEnabled;
-        }
-        if (auto* row = findRow(kIdAppBarEdge))
-            row->enabled = appBarEnabled;
-        if (auto* row = findRow(kIdTaskbarMonitor))
-            row->enabled = selectedMode != 0;
-        if (auto* row = findRow(kIdImmersiveBackgroundAdjustment)) {
-            row->selected = std::clamp(state.immersiveBackgroundAdjustment, 0, 1);
-            row->enabled = selectedMode == 1 && immersiveEnabled &&
-                           state.backgroundBlurSupported;
-        }
-        if (auto* row = findRow(kIdDockBackgroundAdjustment)) {
-            row->selected = std::clamp(state.dockBackgroundAdjustment, 0, 1);
-            row->enabled = appBarEnabled && state.backgroundBlurSupported;
-        }
-        if (auto* row = findRow(kIdImmersiveBackgroundBlur)) {
-            row->enabled = selectedMode == 1 && immersiveEnabled &&
-                           state.backgroundBlurSupported;
-            row->hint = backgroundAdjustmentHint(
-                state.backgroundBlurSupported, state.immersiveBackgroundAdjustment);
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-        }
-        if (auto* row = findRow(kIdDockBackgroundBlur)) {
-            row->enabled = appBarEnabled && state.backgroundBlurSupported;
-            row->hint = backgroundAdjustmentHint(
-                state.backgroundBlurSupported, state.dockBackgroundAdjustment);
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-        }
-        updateBackgroundAdjustmentPresentation();
-        const bool embeddedResources = selectedMode == 0 && !state.verticalTaskbar;
-        if (auto* row = findRow(kIdEmbeddedResourceMonitor))
-            row->enabled = embeddedResources;
-        const bool resourceExtrasEnabled = appBarEnabled ||
-                                           (embeddedResources && state.embeddedResourceMonitor);
-        if (auto* row = findRow(kIdDockResourceDownload))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceUpload))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceGpuUsage))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceCpuFrequency))
-            row->enabled = resourceExtrasEnabled;
-        auto* controls = findRow(kIdHoverControls);
-        if (controls)
-            controls->enabled = !expandedEnabled;
-        if (auto* row = findRow(kIdHoverControlStyle))
-            row->enabled = !expandedEnabled && controls && controls->checked &&
-                           !minimalModeActive();
-        if (auto* row = findRow(kIdAlignment))
-            row->enabled = !expandedEnabled && !state.verticalTaskbar;
-    }
 
-    Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
-                  std::vector<std::wstring> options, int selected, bool enabled, float height) {
-        return RowBuilder(rows[page])
-            .addRadio(id, text, hint, std::move(options), selected, enabled, height);
-    }
 
-    Row& addModeGrid(int page, int id, const wchar_t* text, const wchar_t* hint,
-                     std::vector<std::wstring> options,
-                     std::vector<std::wstring> optionHints, int selected, bool enabled,
-                     float height) {
-        Row& row = addRow(page, id, ControlKind::ModeGrid, text, hint, 0.0f, height);
-        row.options = std::move(options);
-        row.optionHints = std::move(optionHints);
-        row.selected = selected;
-        row.enabled = enabled;
-        return row;
-    }
 
-    Row& addSlider(int page, int id, const wchar_t* text, int value, bool enabled,
-                   const wchar_t* hint = nullptr, float height = kRowH) {
-        return RowBuilder(rows[page]).addSlider(id, text, value, enabled, hint, height);
-    }
 
-    Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
-                   const wchar_t* controlText, float height = kRowH) {
-        return RowBuilder(rows[page]).addButton(id, text, hint, controlText, height);
-    }
 
-    void updateIdleAppsRowHeight() {
-        if (auto* row = findRow(kIdIdleApps)) {
-            const size_t count = std::max<size_t>(1, state.idleApps.size());
-            row->minHeight = kIdleAppsBaseH + static_cast<float>(count) * kIdleAppItemH;
-            row->height = row->minHeight;
-        }
-    }
 
-    void updateTickTickRows() {
-        const bool hasToken = state.tickTickApiTokenConfigured;
-        const bool enabled = state.tickTickEnabled && hasToken;
-        if (auto* row = findRow(kIdTickTickEnabled)) {
-            row->checked = enabled;
-            row->enabled = true;
-            row->hint = hasToken
-                            ? (enabled
-                                   ? L"已开启自动同步，并在快捷启动卡片中显示今日任务。"
-                                   : L"已关闭自动同步和今日任务入口；API 口令仍保留在本机。")
-                            : L"未配置 API 口令，当前处于隐式关闭状态；开启时会先要求填写口令。";
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-        }
-        if (auto* row = findRow(kIdTickTickApiToken)) {
-            row->hint = L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建并复制；"
-                        L"程序只将口令保存到 Windows 凭据管理器。";
-            row->controlText = state.tickTickApiTokenConfigured ? L"已配置" : L"未配置";
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-            row->enabled = !hasToken || enabled;
-        }
-        if (auto* row = findRow(kIdTickTickConnect)) {
-            row->controlText = state.tickTickConnecting
-                                   ? L"连接中…"
-                                   : state.tickTickConnected ? L"重新连接" : L"连接…";
-            row->hint = state.tickTickStatus.empty()
-                            ? (state.tickTickApiTokenConfigured
-                                   ? L"连接后，卡片会显示今天的未完成任务。"
-                                   : L"请先填写 API 口令。")
-                            : state.tickTickStatus;
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-            row->enabled = enabled && !state.tickTickConnecting &&
-                           !state.tickTickSyncing;
-        }
-        if (auto* row = findRow(kIdTickTickRefresh)) {
-            row->enabled = enabled && state.tickTickConnected && !state.tickTickSyncing;
-            row->controlText = state.tickTickSyncing ? L"同步中…" : L"立即同步";
-        }
-        if (auto* row = findRow(kIdTickTickDisconnect)) {
-            row->enabled = hasToken && !state.tickTickConnecting &&
-                           !state.tickTickSyncing;
-        }
-    }
 
-    void updateIdleQuoteSourceRow() {
-        if (auto* row = findRow(kIdIdleQuoteSource)) {
-            row->hint = idleQuoteSourceHint(state.idleQuoteSource);
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = kRowTallH;
-        }
-    }
 
-    int idleTextMode() const {
-        return state.idleQuoteEnabled ? 0 : state.idleWelcomeEnabled ? 1 : 2;
-    }
 
-    bool embeddedResourceOnlyAvailable() const {
-        return state.taskbarViewMode == 0 && state.embeddedResourceMonitor &&
-               !state.verticalTaskbar;
-    }
 
-    void updateIdleRowsEnabled() {
-        const bool quoteEnabled = state.idleQuoteEnabled;
-        if (auto* row = findRow(kIdIdleQuote)) {
-            row->selected = idleTextMode();
-            row->optionEnabled.assign(row->options.size(), true);
-            if (row->optionEnabled.size() > 2)
-                row->optionEnabled[2] = embeddedResourceOnlyAvailable() || row->selected == 2;
-        }
-        if (auto* row = findRow(kIdIdleQuoteSource))
-            row->enabled = quoteEnabled;
-        if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
-            row->enabled = quoteEnabled;
-        if (auto* row = findRow(kIdIdleQuoteAlignment))
-            row->enabled = quoteEnabled && !state.verticalTaskbar;
-        if (auto* row = findRow(kIdIdleCustomWelcome))
-            row->enabled = state.idleWelcomeEnabled;
-        if (auto* row = findRow(kIdIdleQuoteBackground))
-            row->enabled = !minimalModeActive();
-        if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
-            row->enabled = !minimalModeActive() && state.idleQuoteBackground != 0;
-        if (auto* row = findRow(kIdIdleApps))
-            row->enabled = !minimalModeActive() && state.idleEntryEnabled;
-    }
 
     void openColorPicker(int id) {
         if (colorPicker && colorPicker->isOpen()) {
@@ -1083,10 +430,10 @@ struct SettingsDialog::Impl {
         COLORREF initial = 0;
         const wchar_t* title = nullptr;
         if (id == kIdFloatingCardBackgroundColor) {
-            initial = state.floatingCardBackgroundColor;
+            initial = sections_.state.floatingCardBackgroundColor;
             title = L"悬浮卡片背景颜色";
         } else if (id == kIdSpectrumColor) {
-            initial = state.spectrumColor;
+            initial = sections_.state.spectrumColor;
             title = L"自定义频谱颜色";
         } else {
             return;
@@ -1099,17 +446,17 @@ struct SettingsDialog::Impl {
         }
         colorPicker->setApplyCallback([this, id](COLORREF color) {
             if (id == kIdFloatingCardBackgroundColor) {
-                state.floatingCardBackgroundColor = color;
-                if (actions.onFloatingCardBackgroundColor)
-                    actions.onFloatingCardBackgroundColor(color);
+                sections_.state.floatingCardBackgroundColor = color;
+                if (sections_.actions.onFloatingCardBackgroundColor)
+                    sections_.actions.onFloatingCardBackgroundColor(color);
             } else if (id == kIdSpectrumColor) {
-                state.spectrumColor = color;
-                state.spectrumCustomColor = true;
-                state.spectrumFollowAlbum = false;
+                sections_.state.spectrumColor = color;
+                sections_.state.spectrumCustomColor = true;
+                sections_.state.spectrumFollowAlbum = false;
                 if (auto* mode = findRow(kIdSpectrumColorMode))
                     mode->selected = 2;
-                if (actions.onSpectrumColor)
-                    actions.onSpectrumColor(color);
+                if (sections_.actions.onSpectrumColor)
+                    sections_.actions.onSpectrumColor(color);
             }
             if (auto* row = findRow(id))
                 row->controlText = colorText(color);
@@ -1119,7 +466,6 @@ struct SettingsDialog::Impl {
         colorPicker->show();
     }
 
-    Row& addHeader(int page, const wchar_t* text) { return RowBuilder(rows[page]).addHeader(text); }
 
     D2D1_RECT_F scrollBarHitRect() const {
         if (contentMaxScroll <= 0.0f || scrollTrackRect.bottom <= scrollTrackRect.top)
@@ -1189,7 +535,7 @@ struct SettingsDialog::Impl {
                 rect.bottom += displacement;
             }
         };
-        for (auto& row : rows[activePage]) {
+        for (auto& row : sections_.rows[activePage]) {
             for (auto* rect : {&row.cardRect, &row.iconRect, &row.labelRect, &row.valueRect,
                                &row.hintRect, &row.controlRect, &row.artworkRect,
                                &row.addAppRect})
@@ -1279,387 +625,18 @@ struct SettingsDialog::Impl {
                 setContentScroll(target);
         }
         if (contentScrollAnimating) {
-            if (sliderEditOpen)
+            if (slider_.state().open)
                 commitSliderEditor();
             if (!contentLayerReady) {
                 surface.invalidate();
                 UpdateWindow(hwnd);
             }
             contentRenderer.animateRootScroll(-contentScroll * surface.dipScale(),
-                                               -std::round(contentScrollTarget * surface.dipScale()),
-                                               -contentScrollVelocity * surface.dipScale(),
-                                               kContentScrollFrequency);
+                                              -std::round(contentScrollTarget * surface.dipScale()),
+                                              -contentScrollVelocity * surface.dipScale(),
+                                              kContentScrollFrequency);
             contentRenderer.commit();
         }
-    }
-
-    void createDisplayRows() {
-        const bool minimal = minimalModeActive();
-        const bool vertical = state.verticalTaskbar;
-        addHeader(0, L"主题");
-        addRadio(0, kIdTaskbarTheme, L"任务栏内容主题",
-             L"“系统”和“应用”分别跟随 Windows 的系统模式与应用模式。",
-                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.taskbarThemeMode),
-                 true, kRowTallH);
-        addRadio(0, kIdWindowTheme, L"对话框与悬浮窗主题",
-             L"独立设置普通对话框与悬浮窗的深浅色，不影响任务栏内容。",
-                 {L"系统", L"应用", L"浅色", L"深色"}, themeModeIndex(state.windowThemeMode),
-                 true, kRowTallH);
-        addHeader(0, L"字体");
-        Row& font = addButton(0, kIdPickFont, L"通用字体", kFontSettingNotice,
-                              L"选择字体…", kRowTallH);
-        font.valueText = state.fontDesc;
-        addHeader(0, L"歌曲信息与封面");
-        Row& songInfo = addToggle(0, kIdSongInfo, L"显示歌曲信息",
-                                  vertical ? false : state.songInfoVisible);
-        songInfo.enabled = !vertical;
-        addToggle(0, kIdAlbumCover, L"显示专辑封面", state.albumCoverVisible);
-        Row& platformIcon = addToggle(0, kIdPlatformIcon, L"显示平台图标",
-                                       state.platformIconVisible);
-        platformIcon.enabled = state.albumCoverVisible;
-        addRadio(0, kIdCoverEffect, L"专辑封面效果", nullptr, {L"默认", L"黑胶唱片"},
-                 minimal ? 0 : (state.coverEffectVinyl ? 1 : 0),
-                 state.albumCoverVisible && !minimal, kCoverEffectRowH);
-        addHeader(0, L"菜单交互");
-        Row& taskbarContextMenu = addRow(
-            0, kIdTaskbarContextMenu, ControlKind::Toggle, L"右键显示任务栏歌词菜单",
-            L"关闭后，右键任务栏歌词不再弹出菜单；托盘图标的右键菜单不受影响。",
-            40.0f, kRowTallH);
-        taskbarContextMenu.checked = state.taskbarContextMenu;
-    }
-
-    void createTaskbarModeRows() {
-        const bool vertical = state.verticalTaskbar;
-        addHeader(kTaskbarModePage, L"展示模式");
-        addRadio(kTaskbarModePage, kIdTaskbarViewMode, L"任务栏歌词展示模式",
-                 taskbarViewModeHint(state.mediaSessionAlive, vertical),
-                 {L"内嵌", L"沉浸", L"Dock 模式"}, std::clamp(state.taskbarViewMode, 0, 2),
-                 true, kRowTallH);
-        Row& taskbarMonitor = addButton(
-            kTaskbarModePage, kIdTaskbarMonitor, L"目标显示器",
-            L"内嵌模式固定显示在主显示器；沉浸模式覆盖所选任务栏，全部显示器时只覆盖横向任务栏。Dock 模式占用对应显示器的工作区；断开后切回主显示器。",
-            state.taskbarMonitorLabel.c_str(), kRowTallH);
-        taskbarMonitor.enabled = state.taskbarViewMode != 0;
-        addRadio(kTaskbarModePage, kIdAppBarEdge, L"Dock 位置",
-                 L"当前仅支持水平顶部和底部。", {L"顶部", L"底部"},
-                 std::clamp(state.appBarEdge, 0, 1), state.taskbarViewMode == 2, kRowH);
-        addHeader(kTaskbarModePage, L"沉浸模式背景");
-        addRadio(kTaskbarModePage, kIdImmersiveBackgroundAdjustment, L"调整方式", nullptr,
-                 {L"模糊程度", L"不透明度"},
-                 std::clamp(state.immersiveBackgroundAdjustment, 0, 1),
-                 !vertical && state.taskbarViewMode == 1 && state.backgroundBlurSupported,
-                 kRowH);
-        addSlider(kTaskbarModePage, kIdImmersiveBackgroundBlur,
-                  backgroundAdjustmentLabel(true, state.immersiveBackgroundAdjustment),
-                  state.immersiveBackgroundBlur,
-                  !vertical && state.taskbarViewMode == 1 && state.backgroundBlurSupported,
-                  backgroundAdjustmentHint(state.backgroundBlurSupported,
-                                           state.immersiveBackgroundAdjustment),
-                  kRowTallH);
-        addHeader(kTaskbarModePage, L"Dock 背景");
-        addRadio(kTaskbarModePage, kIdDockBackgroundAdjustment, L"调整方式", nullptr,
-                 {L"模糊程度", L"不透明度"},
-                 std::clamp(state.dockBackgroundAdjustment, 0, 1),
-                 state.taskbarViewMode == 2 && state.backgroundBlurSupported, kRowH);
-        addSlider(kTaskbarModePage, kIdDockBackgroundBlur,
-                  backgroundAdjustmentLabel(false, state.dockBackgroundAdjustment),
-                  state.dockBackgroundBlur,
-                  state.taskbarViewMode == 2 && state.backgroundBlurSupported,
-                  backgroundAdjustmentHint(state.backgroundBlurSupported,
-                                           state.dockBackgroundAdjustment),
-                  kRowTallH);
-        addHeader(kTaskbarModePage, L"资源监视");
-        Row& embeddedResources = addRow(
-            kTaskbarModePage, kIdEmbeddedResourceMonitor, ControlKind::Toggle,
-            L"内嵌模式显示资源监视", L"在任务栏右侧显示 CPU 和内存；扩展指标依次补位，超出一页可用滚轮切换。",
-            40.0f, kRowTallH);
-        embeddedResources.checked = state.embeddedResourceMonitor;
-        embeddedResources.enabled = state.taskbarViewMode == 0 && !vertical;
-        Row& download = addRow(
-            kTaskbarModePage, kIdDockResourceDownload, ControlKind::Toggle,
-            L"显示下行速度", L"扩展指标；关闭后由后续指标补位，没有其他指标时释放对应宽度。",
-            40.0f, kRowTallH);
-        download.checked = state.dockResourceDownload;
-        Row& upload = addRow(
-            kTaskbarModePage, kIdDockResourceUpload, ControlKind::Toggle,
-            L"显示上行速度", L"扩展指标；关闭后由后续指标补位，没有其他指标时释放对应宽度。",
-            40.0f, kRowTallH);
-        upload.checked = state.dockResourceUpload;
-        Row& dockResourceGpu = addRow(
-            kTaskbarModePage, kIdDockResourceGpuUsage, ControlKind::Toggle,
-            L"显示 GPU 使用率", L"示例：GPU: 7%；没有可用 GPU 性能计数器时显示“—”。",
-            40.0f, kRowTallH);
-        dockResourceGpu.checked = state.dockResourceGpuUsage;
-        Row& dockResourceCpuFrequency = addRow(
-            kTaskbarModePage, kIdDockResourceCpuFrequency, ControlKind::Toggle,
-            L"显示 CPU 频率", L"示例：频率: 3.6GHz；系统未提供当前频率时显示“—”。",
-            40.0f, kRowTallH);
-        dockResourceCpuFrequency.checked = state.dockResourceCpuFrequency;
-        const bool resourceExtrasEnabled = state.taskbarViewMode == 2 ||
-            (state.taskbarViewMode == 0 && !vertical && state.embeddedResourceMonitor);
-        if (auto* row = findRow(kIdDockResourceDownload))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceUpload))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceGpuUsage))
-            row->enabled = resourceExtrasEnabled;
-        if (auto* row = findRow(kIdDockResourceCpuFrequency))
-            row->enabled = resourceExtrasEnabled;
-    }
-
-    void createIdleRows() {
-        const bool vertical = state.verticalTaskbar;
-        addHeader(kIdlePage, L"空闲内容");
-        Row& idleEntry = addRow(
-            kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
-            L"播放器未运行时，任务栏显示空闲内容；悬浮后可打开已配置的应用。"
-            L"关闭后，播放器未运行时隐藏任务栏入口。",
-            40.0f, kRowTallH);
-        idleEntry.checked = state.idleEntryEnabled;
-        addRadio(kIdlePage, kIdIdleQuote, L"空闲文字",
-                 L"“不显示”需先开启内嵌模式资源监视；滴答清单仍会在启动时播报一次今日任务。",
-                 {L"每日一言", L"欢迎语", L"不显示"}, idleTextMode(), true, kRowTallH);
-        addButton(kIdlePage, kIdIdleCustomWelcome, L"自定义欢迎语",
-                  L"选择欢迎语时显示自定义内容，最多 20 个字符且不能为纯空格；留空则恢复按时间和日期类型生成的默认欢迎语。",
-                  L"编辑…", kRowTallH);
-        addRadio(kIdlePage, kIdIdleQuoteSource, L"每日一言来源",
-                 idleQuoteSourceHint(state.idleQuoteSource),
-                 {L"一言", L"今日诗词", L"网易云热评"}, state.idleQuoteSource,
-                 state.idleQuoteEnabled, kRowTallH);
-        addRadio(kIdlePage, kIdIdleQuoteRefreshInterval, L"每日一言更新频率", nullptr,
-                 {L"每天", L"每 12 小时", L"每小时"}, state.idleQuoteRefreshInterval,
-                 state.idleQuoteEnabled, kRowTallH);
-        addRadio(kIdlePage, kIdIdleQuoteAlignment, L"每日一言字体对齐方式",
-                 L"仅影响任务栏和悬浮卡片中的每日一言，不影响正常歌词对齐。",
-                 {L"左对齐", L"居中", L"右对齐"}, vertical ? 0 : state.idleQuoteAlignment,
-                 state.idleQuoteEnabled && !vertical, kRowH);
-        addHeader(kIdlePage, L"快捷启动");
-        Row& idleApps = addRow(
-            kIdlePage, kIdIdleApps, ControlKind::AppList, L"可打开的应用",
-            L"可拖动应用条目调整快速启动顺序；通过文件选择器添加本地 EXE，最多添加 10 个应用；开关统一控制名称显示。",
-            0.0f, kIdleAppsBaseH + static_cast<float>(
-                                            std::max<size_t>(1, state.idleApps.size())) *
-                                            kIdleAppItemH);
-        idleApps.checked = state.idleAppNamesVisible;
-        idleApps.height = idleApps.minHeight;
-        idleApps.enabled = state.idleEntryEnabled;
-        updateIdleRowsEnabled();
-        addHeader(kIdlePage, L"滴答清单");
-        Row& tickTickEnabled = addRow(
-            kIdlePage, kIdTickTickEnabled, ControlKind::Toggle, L"启用滴答清单",
-            L"开启后自动同步今日任务，并在快捷启动卡片中显示今日任务入口。",
-            40.0f, kRowTallH);
-        tickTickEnabled.checked = state.tickTickEnabled;
-        addButton(kIdlePage, kIdTickTickApiToken, L"API 口令",
-                  L"在滴答清单网页版的「设置 → 账号与安全 → API 口令」中创建后填写。",
-                  state.tickTickApiTokenConfigured ? L"已配置" : L"编辑…", kRowTallH);
-        addButton(kIdlePage, kIdTickTickConnect, L"连接滴答清单",
-                  L"验证普通用户 API 口令，并读取今天的未完成任务。",
-                  state.tickTickConnected ? L"重新连接" : L"连接…", kRowTallH);
-        addButton(kIdlePage, kIdTickTickRefresh, L"同步今日任务",
-                  L"从滴答清单读取今天的未完成任务，并刷新卡片内容。",
-                  state.tickTickSyncing ? L"同步中…" : L"立即同步", kRowH);
-        addButton(kIdlePage, kIdTickTickDisconnect, L"断开连接",
-                  L"删除本机保存的滴答清单 API 口令。",
-                  L"断开", kRowH);
-        updateTickTickRows();
-    }
-
-    void createBackgroundRows() {
-        const bool minimal = minimalModeActive();
-        addHeader(0, L"背景效果");
-        Row& progressBackground = addRow(
-            0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
-            L"从窗口左缘到歌词右缘，按播放进度填充专辑主题色；与频谱的背景波浪互斥",
-            40.0f, kRowTallH);
-        progressBackground.checked = minimal ? false : state.progressBackground;
-        addSlider(0, kIdProgressBackgroundOpacity, L"进度背景不透明度",
-                  state.progressBackgroundOpacity, !minimal && state.progressBackground);
-        addRadio(0, kIdTaskbarBackground, L"任务栏内容背景",
-             L"封面模糊将专辑封面高斯模糊后铺满背景；纯色跟随任务栏深浅色；画在最底层，可与播放进度背景、背景波浪叠加",
-                 {L"无", L"封面模糊", L"纯色"}, minimal ? 0 : state.taskbarBackground,
-                 !minimal, kRowTallH);
-        addSlider(0, kIdCoverBackgroundOpacity, L"封面背景不透明度",
-                  state.coverBackgroundOpacity,
-                  !minimal && state.taskbarBackground == 1);
-        addRadio(0, kIdIdleQuoteBackground, L"任务栏内容动态背景",
-                 L"选择任务栏动态背景效果；作用范围在下方单独设置，独立频谱容器和悬浮卡片不使用此效果，极简模式下暂时关闭。",
-                 {L"无", L"落叶", L"闪烁星星", L"二进制", L"流光粒子"},
-                 state.idleQuoteBackground,
-                 !minimal,
-                 kIdleQuoteBackgroundRowH);
-        addModeGrid(0, kIdIdleQuoteBackgroundScope, L"动态背景作用范围",
-                    L"选择动态背景显示在待机内容、歌词或两者；待机内容包括每日一言和默认欢迎语，独立频谱容器和悬浮卡片不使用。",
-                    {L"都不启用", L"仅待机内容启用", L"仅歌词启用", L"都启用"},
-                    {L"不显示动态背景", L"只在待机内容时显示", L"只在播放歌词时显示",
-                     L"待机内容和歌词都显示"},
-                    state.idleQuoteBackgroundScope,
-                    !minimal && state.idleQuoteBackground != 0,
-                    kModeGridMinH);
-    }
-
-    void createMediaControlRows() {
-        const bool minimal = minimalModeActive();
-        addHeader(kMediaPopupPage, L"播放控件");
-        addToggle(kMediaPopupPage, kIdHoverControls, L"显示播放控件",
-                  state.hoverControls);
-        addRadio(kMediaPopupPage, kIdHoverControlStyle, L"控件样式",
-                 L"内嵌控件在鼠标悬浮时显示，仅提供播放操作；媒体卡片还显示歌词进度，其打开方式由“悬浮卡片”中的“悬浮卡片展开方式”决定，点击应用图标或名称可打开播放器。",
-                 {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
-                 state.hoverControls && !minimal,
-                 kHoverControlStyleRowH);
-    }
-
-    void createFloatingCardRows() {
-        const bool minimal = minimalModeActive();
-        addHeader(kFloatingCardPage, L"行为");
-        addRadio(kFloatingCardPage, kIdFloatingCardTrigger, L"悬浮卡片展开方式",
-                 L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开。媒体卡片、每日一言和快捷启动卡片共用此设置。",
-                 {L"悬浮展开", L"点击展开"}, state.floatingCardTrigger, !minimal,
-                 kRowTallH);
-        addHeader(kFloatingCardPage, L"背景");
-        addRadio(kFloatingCardPage, kIdFloatingCardBackground, L"悬浮卡片背景",
-                 L"音乐控件、每日一言和快捷启动卡片共用纯色或 Windows 磨砂玻璃背景。",
-                 {L"纯色", L"磨砂玻璃"}, state.floatingCardBackground, !minimal,
-                 kRowTallH);
-        Row& floatingCardBackgroundColor = addButton(
-            kFloatingCardPage, kIdFloatingCardBackgroundColor, L"悬浮卡片背景颜色",
-            L"磨砂背景未使用有效专辑色时，媒体卡片、每日一言和快捷启动卡片共用此颜色。",
-            colorText(state.floatingCardBackgroundColor).c_str(), kRowTallH);
-        floatingCardBackgroundColor.enabled = !minimal && state.floatingCardBackground == 1;
-        Row& floatingCardFollowAlbum = addRow(
-            kFloatingCardPage, kIdFloatingCardFollowAlbum, ControlKind::Toggle,
-            L"磨砂玻璃颜色跟随专辑",
-            L"播放音乐且提取到有效专辑色时，磨砂卡片使用专辑色；无播放时使用上面的自定义颜色。",
-            40.0f, kRowTallH);
-        floatingCardFollowAlbum.checked = state.floatingCardFollowAlbum;
-        addHeader(kFloatingCardPage, L"文字");
-        Row& floatingCardAutoTextContrast = addRow(
-            kFloatingCardPage, kIdFloatingCardAutoTextContrast, ControlKind::Toggle,
-            L"磨砂卡片字体颜色动态变化",
-            L"根据卡片背后内容的明暗，自动切换黑色或白色文字；媒体卡片、每日一言和快捷启动卡片共用此设置。",
-            40.0f, kRowTallH);
-        floatingCardAutoTextContrast.checked = state.floatingCardAutoTextContrast;
-        updateFloatingCardRowsEnabled();
-    }
-
-    void createSongToastRows() {
-        const bool minimal = minimalModeActive();
-        addHeader(kSongToastPage, L"显示与时长");
-        Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
-                                L"切歌时弹出歌曲信息",
-                                L"在所选显示器短暂弹出封面、标题和艺术家；弹窗磨砂半透明，"
-                                L"始终不响应鼠标操作",
-                                40.0f, kRowTallH);
-        songToast.checked = minimal ? false : state.songToastEnabled;
-        songToast.enabled = !minimal;
-        Row& songToastDuration =
-            addSlider(kSongToastPage, kIdSongToastDuration, L"切歌弹窗显示时长",
-                      state.songToastDurationSec, !minimal && state.songToastEnabled);
-        songToastDuration.minValue = 1;
-        songToastDuration.maxValue = 10;
-        songToastDuration.valueSuffix = L" 秒";
-        Row& songToastSkipFullscreen =
-            addToggle(kSongToastPage, kIdSongToastSkipFullscreen, L"全屏应用时关闭弹窗",
-                      state.songToastSkipFullscreen);
-        songToastSkipFullscreen.enabled = !minimal && state.songToastEnabled;
-        addHeader(kSongToastPage, L"弹出位置");
-        addRadio(kSongToastPage, kIdSongToastMonitor, L"显示器选择",
-                 L"在每次弹窗出现时确定显示器，不随鼠标移动。",
-                 {L"主显示器", L"当前鼠标所在显示器"},
-                 state.songToastFollowMouseMonitor ? 1 : 0,
-                 !minimal && state.songToastEnabled, kRowTallH);
-        addRadio(kSongToastPage, kIdSongToastPosition, L"切歌弹窗位置", nullptr,
-                 {L"中上", L"中下"},
-                 state.songToastPosition, !minimal && state.songToastEnabled,
-                 kSongToastPositionRowH);
-        addHeader(kSongToastPage, L"效果预览");
-        Row& songToastPreview = addButton(
-            kSongToastPage, kIdSongToastPreview, L"预览切歌弹窗",
-            L"使用当前歌曲，按所选显示器、位置和停留时间展示；需要开启弹窗且当前有歌曲。",
-            L"预览弹窗", kRowTallH);
-        songToastPreview.enabled = !minimal && state.songToastEnabled &&
-                                   state.songToastPreviewAvailable;
-    }
-
-    void createPerformanceRows() {
-        addHeader(kPerformancePage, L"渲染与资源占用");
-        addModeGrid(kPerformancePage, kIdRenderMode, L"性能模式",
-                    L"模式仅本次运行有效，重启软件后恢复正常模式",
-                    {L"正常", L"低渲染", L"完全停止", L"极简"},
-                    {L"完整视觉效果", L"降低帧率，节省 GPU", L"停止渲染，保留监听",
-                     L"横向歌词，关闭逐字与转场"},
-                    std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
-    }
-
-    void createControls() {
-        createDisplayRows();
-        createTaskbarModeRows();
-        createIdleRows();
-        createBackgroundRows();
-        createMediaControlRows();
-        createFloatingCardRows();
-        createSongToastRows();
-        createPerformanceRows();
-        rows[kSpectrumPage] = settings_ui::createSpectrumRows(state);
-        rows[kLyricsPage] = settings_ui::createLyricRows(state);
-        updateProgressBackgroundRowsEnabled();
-        updateCompactLyricRows();
-        updateImmersiveRowsEnabled();
-    }
-
-    bool searching() const { return searchModel_.active(); }
-
-    void refreshSearch() {
-        std::vector<SettingsSearchEntry> entries;
-        for (int page = 0; page < kSettingsPageCount; ++page) {
-            std::wstring group;
-            for (const auto& row : rows[page]) {
-                if (row.kind == ControlKind::Header) {
-                    group = row.text;
-                    continue;
-                }
-                std::wstring text = pageTitles[page] + L" " + group + L" " +
-                                    row.text + L" " + row.hint;
-                for (const auto& option : row.options)
-                    text += L" " + option;
-                entries.push_back({page, row.id, pageTitles[page] +
-                    (group.empty() ? L"" : L" › " + group), std::move(text)});
-            }
-        }
-        searchModel_.refresh(settingsSearch.text(), entries);
-        selectedSearchResult = searchModel_.results().empty() ? -1 : 0;
-        searchPaletteScroll = 0.0f;
-        searchPaletteHoverKind = kSearchPaletteHitNone;
-        searchPaletteHoverRow = -1;
-        if (searchPaletteOpen) {
-            layoutSearchPalette();
-            searchPaletteSurface.invalidate();
-        }
-    }
-
-    void selectSearchResult(int direction) {
-        if (searchModel_.results().empty())
-            return;
-        const int count = static_cast<int>(searchModel_.results().size());
-        if (direction == 1 || direction == -1) {
-            const int base = selectedSearchResult < 0 ? 0 : selectedSearchResult;
-            selectedSearchResult = (base + direction + count) % count;
-        } else {
-            selectedSearchResult = std::clamp(selectedSearchResult + direction, 0, count - 1);
-        }
-        const float rowTop = kSearchPaletteListPadY + selectedSearchResult * kSearchPaletteRowH;
-        const float rowBottom = rowTop + kSearchPaletteRowH + kSearchPaletteListPadY;
-        const float viewportHeight =
-            std::max(0.0f, searchPaletteListRect.bottom - searchPaletteListRect.top);
-        if (rowTop < searchPaletteScroll + kSearchPaletteListPadY) {
-            searchPaletteScroll =
-                std::clamp(rowTop - kSearchPaletteListPadY, 0.0f, searchPaletteMaxScroll);
-        } else if (rowBottom > searchPaletteScroll + viewportHeight) {
-            searchPaletteScroll =
-                std::clamp(rowBottom - viewportHeight, 0.0f, searchPaletteMaxScroll);
-        }
-        searchPaletteSurface.invalidate();
     }
 
     void stopSearchLocateHighlight() {
@@ -1721,980 +698,6 @@ struct SettingsDialog::Impl {
         return remaining * remaining * (3.0f - 2.0f * remaining);
     }
 
-    void openSearchResult(int index) {
-        if (index < 0 || index >= static_cast<int>(searchModel_.results().size()))
-            return;
-        const auto result = searchModel_.results()[index];
-        closeSearchPalette(true);
-        showPage(result.page);
-        // 先按真实字体测量目标页，再计算定位，避免多行说明改变高度后落点偏移。
-        surface.invalidate();
-        UpdateWindow(hwnd);
-        if (auto* row = findRow(result.id)) {
-            setContentScroll(contentScroll + row->cardRect.top - contentViewportRect.top - 12.0f);
-            startSearchLocateHighlight(result.id);
-            focusedId = row->enabled ? result.id : kIdNav;
-        }
-        SetFocus(hwnd);
-        focusVisible = false;
-        surface.invalidate();
-    }
-
-    static LRESULT CALLBACK searchEditProc(HWND edit, UINT msg, WPARAM wp, LPARAM lp,
-                                          UINT_PTR subclassId, DWORD_PTR refData) {
-        auto* self = reinterpret_cast<Impl*>(refData);
-        if (msg == WM_NCDESTROY) {
-            RemoveWindowSubclass(edit, &Impl::searchEditProc, subclassId);
-            return DefSubclassProc(edit, msg, wp, lp);
-        }
-        if (self && msg == WM_KEYDOWN) {
-            if (wp == VK_ESCAPE) {
-                self->closeSearchPalette(true);
-                return 0;
-            }
-            if (wp == VK_RETURN && self->searching() && self->selectedSearchResult >= 0) {
-                self->openSearchResult(self->selectedSearchResult);
-                return 0;
-            }
-            if ((wp == VK_UP || wp == VK_DOWN) && self->searching()) {
-                self->selectSearchResult(wp == VK_DOWN ? 1 : -1);
-                return 0;
-            }
-            if ((wp == VK_PRIOR || wp == VK_NEXT) && self->searching()) {
-                self->selectSearchResult(wp == VK_NEXT ? 5 : -5);
-                return 0;
-            }
-            if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
-                SendMessageW(edit, EM_SETSEL, 0, -1);
-                return 0;
-            }
-            if (wp == VK_TAB) {
-                return 0;
-            }
-        }
-        if (self && msg == WM_MOUSEWHEEL && self->searchPaletteHwnd) {
-            SendMessageW(self->searchPaletteHwnd, msg, wp, lp);
-            return 0;
-        }
-        if (msg == WM_CHAR &&
-            (wp == VK_RETURN || wp == VK_ESCAPE || wp == VK_TAB || wp == 6))
-            return 0;
-        return DefSubclassProc(edit, msg, wp, lp);
-    }
-
-    void styleSearchPaletteWindow() {
-        if (!searchPaletteHwnd)
-            return;
-        BOOL disableTransitions = TRUE;
-        DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_TRANSITIONS_FORCEDISABLED,
-                              &disableTransitions, sizeof(disableTransitions));
-        fluent::applyRoundCorners(searchPaletteHwnd, false);
-        const bool dark = fluent::isDarkMode();
-        fluent::applyDarkCaption(searchPaletteHwnd, dark);
-        fluent::applyBorderColor(searchPaletteHwnd,
-                                 dark ? RGB(68, 68, 68) : RGB(214, 214, 214));
-    }
-
-    static void setWindowClickThrough(HWND window, bool clickThrough) {
-        if (!window || !IsWindow(window))
-            return;
-        const LONG_PTR exStyle = GetWindowLongPtrW(window, GWL_EXSTYLE);
-        const LONG_PTR nextStyle =
-            clickThrough ? (exStyle | WS_EX_TRANSPARENT)
-                         : (exStyle & ~static_cast<LONG_PTR>(WS_EX_TRANSPARENT));
-        if (nextStyle != exStyle)
-            SetWindowLongPtrW(window, GWL_EXSTYLE, nextStyle);
-    }
-
-    BYTE searchPaletteAlphaByte() const {
-        return static_cast<BYTE>(std::clamp(
-            static_cast<int>(std::lround(searchPaletteProgress * 255.0f)), 0, 255));
-    }
-
-    int searchPaletteOffsetYPx(float scale) const {
-        const float slideDip = searchPaletteAnimTarget > 0.5f
-                                   ? kSearchPaletteOpenSlideDip
-                                   : kSearchPaletteCloseSlideDip;
-        return static_cast<int>(
-            std::lround((1.0f - searchPaletteProgress) * slideDip * scale));
-    }
-
-    void applySearchPaletteAnimationVisuals() {
-        const BYTE alphaByte = searchPaletteAlphaByte();
-        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-            SetLayeredWindowAttributes(searchPaletteHwnd, 0, alphaByte, LWA_ALPHA);
-            SetWindowPos(searchPaletteHwnd, nullptr, searchPaletteBaseX,
-                         searchPaletteBaseY + searchPaletteOffsetYPx(searchPaletteScale),
-                         0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-        }
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
-            searchScrimRenderer.present(searchScrimHwnd, alphaByte);
-    }
-
-    void finalizeSearchPaletteClosed() {
-        if (hwnd)
-            KillTimer(hwnd, kSearchPaletteAnimTimer);
-        searchPaletteAnimating = false;
-        searchPaletteProgress = 0.0f;
-        searchPaletteAnimFrom = 0.0f;
-        searchPaletteAnimTarget = 0.0f;
-        closingSearchPalette = true;
-        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-            ShowWindow(searchPaletteHwnd, SW_HIDE);
-            setWindowClickThrough(searchPaletteHwnd, false);
-            settingsSearch.setText(L"");
-        }
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
-            ShowWindow(searchScrimHwnd, SW_HIDE);
-            setWindowClickThrough(searchScrimHwnd, false);
-        }
-        searchModel_.clear();
-        selectedSearchResult = -1;
-        searchPaletteScroll = 0.0f;
-        searchPaletteMaxScroll = 0.0f;
-        closingSearchPalette = false;
-    }
-
-    void advanceSearchPaletteAnimation() {
-        if (!searchPaletteAnimating)
-            return;
-        const float elapsed =
-            static_cast<float>(GetTickCount64() - searchPaletteAnimStartMs);
-        const float rawProgress =
-            searchPaletteAnimDurationMs <= 1.0f
-                ? 1.0f
-                : std::clamp(elapsed / searchPaletteAnimDurationMs, 0.0f, 1.0f);
-        const float inverse = 1.0f - rawProgress;
-        if (searchPaletteAnimTarget > 0.5f) {
-            const float eased = 1.0f - inverse * inverse * inverse;
-            searchPaletteProgress =
-                searchPaletteAnimFrom + (1.0f - searchPaletteAnimFrom) * eased;
-        } else {
-            const float eased = 1.0f - inverse * inverse;
-            searchPaletteProgress = searchPaletteAnimFrom * (1.0f - eased);
-        }
-        if (rawProgress >= 1.0f) {
-            if (searchPaletteAnimTarget <= 0.5f) {
-                finalizeSearchPaletteClosed();
-                return;
-            }
-            if (hwnd)
-                KillTimer(hwnd, kSearchPaletteAnimTimer);
-            searchPaletteAnimating = false;
-            searchPaletteProgress = 1.0f;
-        }
-        applySearchPaletteAnimationVisuals();
-    }
-
-    float searchPaletteDesiredHeightDip() const {
-        if (!searching())
-            return kSearchPaletteHeaderH + kSearchPaletteEmptyPromptH;
-        if (searchModel_.results().empty())
-            return kSearchPaletteHeaderH + kSearchPaletteNoResultH;
-        const int visibleCount = std::min(static_cast<int>(searchModel_.results().size()),
-                                          kSearchPaletteMaxVisibleRows);
-        const float bodyHeight =
-            kSearchPaletteListPadY * 2.0f + visibleCount * kSearchPaletteRowH;
-        return kSearchPaletteHeaderH + bodyHeight + kSearchPaletteFooterH;
-    }
-
-    void layoutSearchPalette() {
-        if (!searchPaletteHwnd || !hwnd || !IsWindow(hwnd))
-            return;
-        RECT ownerClient{};
-        GetClientRect(hwnd, &ownerClient);
-        POINT topLeft{ownerClient.left, ownerClient.top};
-        POINT bottomRight{ownerClient.right, ownerClient.bottom};
-        ClientToScreen(hwnd, &topLeft);
-        ClientToScreen(hwnd, &bottomRight);
-
-        UINT dpi = GetDpiForWindow(searchPaletteHwnd);
-        if (dpi == 0)
-            dpi = GetDpiForWindow(hwnd);
-        if (dpi == 0)
-            dpi = 96;
-        const float scale = fluent::dipScale(dpi);
-        auto toPx = [scale](float dipValue) {
-            return static_cast<int>(std::lround(dipValue * scale));
-        };
-
-        const int ownerWidthPx = std::max(1, static_cast<int>(bottomRight.x - topLeft.x));
-        const int ownerHeightPx = std::max(1, static_cast<int>(bottomRight.y - topLeft.y));
-        const float ownerWidthDip = static_cast<float>(ownerWidthPx) / scale;
-        const float ownerHeightDip = static_cast<float>(ownerHeightPx) / scale;
-
-        const float maxAllowedWidthDip = std::max(320.0f, ownerWidthDip - 48.0f);
-        const float paletteWidthDip =
-            std::min(maxAllowedWidthDip, std::clamp(ownerWidthDip * 0.58f, 480.0f, 560.0f));
-        const float maxAllowedHeightDip = std::max(132.0f, ownerHeightDip - 88.0f);
-        const float paletteHeightDip =
-            std::min(searchPaletteDesiredHeightDip(), maxAllowedHeightDip);
-
-        const bool hasInputText =
-            settingsSearch.editHwnd() && GetWindowTextLengthW(settingsSearch.editHwnd()) > 0;
-        searchPaletteEscRect =
-            D2D1::RectF(paletteWidthDip - 48.0f, 16.0f, paletteWidthDip - 16.0f, 36.0f);
-        searchPaletteClearRect =
-            hasInputText
-                ? D2D1::RectF(paletteWidthDip - 80.0f, 14.0f, paletteWidthDip - 56.0f, 38.0f)
-                : D2D1_RECT_F{};
-        const float editLeftDip = 46.0f;
-        const float editRightDip =
-            hasInputText ? searchPaletteClearRect.left - 8.0f : searchPaletteEscRect.left - 10.0f;
-
-        if (searching() && !searchModel_.results().empty()) {
-            const float listTop = kSearchPaletteHeaderH;
-            const float listBottom =
-                std::max(listTop, paletteHeightDip - kSearchPaletteFooterH);
-            searchPaletteListRect = D2D1::RectF(0.0f, listTop, paletteWidthDip, listBottom);
-            const float totalListHeight =
-                kSearchPaletteListPadY * 2.0f +
-                static_cast<float>(searchModel_.results().size()) * kSearchPaletteRowH;
-            const float viewportHeight = std::max(0.0f, listBottom - listTop);
-            searchPaletteMaxScroll = std::max(0.0f, totalListHeight - viewportHeight);
-            searchPaletteScroll = std::clamp(searchPaletteScroll, 0.0f, searchPaletteMaxScroll);
-        } else {
-            searchPaletteListRect = D2D1_RECT_F{};
-            searchPaletteMaxScroll = 0.0f;
-            searchPaletteScroll = 0.0f;
-        }
-
-        const int paletteWidthPx = std::max(1, toPx(paletteWidthDip));
-        const int paletteHeightPx = std::max(1, toPx(paletteHeightDip));
-        int screenX = topLeft.x + (ownerWidthPx - paletteWidthPx) / 2;
-        int screenY = topLeft.y + toPx(64.0f);
-
-        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO monitorInfo{};
-        monitorInfo.cbSize = sizeof(monitorInfo);
-        const bool hasWorkArea =
-            monitor != nullptr && GetMonitorInfoW(monitor, &monitorInfo) != FALSE;
-        if (hasWorkArea) {
-            const RECT& workArea = monitorInfo.rcWork;
-            if (screenX + paletteWidthPx > workArea.right - 8)
-                screenX = workArea.right - 8 - paletteWidthPx;
-            if (screenX < workArea.left + 8)
-                screenX = workArea.left + 8;
-            if (screenY + paletteHeightPx > workArea.bottom - 8)
-                screenY = workArea.bottom - 8 - paletteHeightPx;
-            if (screenY < workArea.top + 8)
-                screenY = workArea.top + 8;
-        }
-
-        searchPaletteBaseX = screenX;
-        searchPaletteBaseY = screenY;
-        searchPaletteScale = scale;
-        const int animatedScreenY = screenY + searchPaletteOffsetYPx(scale);
-        SetWindowPos(searchPaletteHwnd, HWND_TOP, screenX, animatedScreenY, paletteWidthPx,
-                     paletteHeightPx, SWP_NOACTIVATE);
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
-            RECT scrimBounds{};
-            if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
-                                             &scrimBounds, sizeof(scrimBounds))) ||
-                scrimBounds.right <= scrimBounds.left ||
-                scrimBounds.bottom <= scrimBounds.top) {
-                scrimBounds = {topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
-            } else if (IsZoomed(hwnd) != FALSE && hasWorkArea) {
-                scrimBounds.left = std::max(scrimBounds.left, monitorInfo.rcWork.left);
-                scrimBounds.top = std::max(scrimBounds.top, monitorInfo.rcWork.top);
-                scrimBounds.right = std::min(scrimBounds.right, monitorInfo.rcWork.right);
-                scrimBounds.bottom = std::min(scrimBounds.bottom, monitorInfo.rcWork.bottom);
-            }
-            const int scrimWidthPx =
-                std::max(1, static_cast<int>(scrimBounds.right - scrimBounds.left));
-            const int scrimHeightPx =
-                std::max(1, static_cast<int>(scrimBounds.bottom - scrimBounds.top));
-            SetWindowPos(searchScrimHwnd, searchPaletteHwnd, scrimBounds.left,
-                         scrimBounds.top, scrimWidthPx, scrimHeightPx, SWP_NOACTIVATE);
-            renderSearchScrim(scrimWidthPx, scrimHeightPx, dpi);
-        }
-        if (settingsSearch.hwnd()) {
-            settingsSearch.move(toPx(editLeftDip), toPx(10.0f),
-                                std::max(1, toPx(editRightDip - editLeftDip)), toPx(32.0f));
-        }
-    }
-
-    void renderSearchScrim(int widthPx, int heightPx, UINT dpi) {
-        if (!searchScrimHwnd || widthPx <= 0 || heightPx <= 0)
-            return;
-        const bool dark = fluent::isDarkMode();
-        const bool zoomed = hwnd && IsZoomed(hwnd) != FALSE;
-        const BYTE alphaByte = searchPaletteAlphaByte();
-        if (widthPx == searchScrimLastWidth && heightPx == searchScrimLastHeight &&
-            dpi == searchScrimLastDpi && dark == searchScrimLastDark &&
-            zoomed == searchScrimLastZoomed) {
-            searchScrimRenderer.present(searchScrimHwnd, alphaByte);
-            return;
-        }
-        if (!searchScrimRenderer.initialize())
-            return;
-        searchScrimRenderer.setDpi(dpi);
-        if (!searchScrimRenderer.bindDC(widthPx, heightPx))
-            return;
-        auto* target = searchScrimRenderer.renderTarget();
-        if (!target)
-            return;
-
-        const float scale = fluent::dipScale(dpi);
-        const float widthDip = static_cast<float>(widthPx) / scale;
-        const float heightDip = static_cast<float>(heightPx) / scale;
-        DWORD cornerPreference = 0;
-        constexpr DWORD kWindowCornerPreferenceAttr = 33;
-        const bool roundedWindow =
-            !zoomed && hwnd &&
-            SUCCEEDED(DwmGetWindowAttribute(hwnd, kWindowCornerPreferenceAttr,
-                                            &cornerPreference, sizeof(cornerPreference))) &&
-            cornerPreference != 1;
-        const float cornerRadius =
-            roundedWindow ? std::min(fluent::metrics::cardRadius,
-                                     std::min(widthDip * 0.5f, heightDip * 0.5f))
-                          : 0.0f;
-        const D2D1_COLOR_F scrimColor =
-            D2D1::ColorF(0.0f, 0.0f, 0.0f, dark ? 0.46f : 0.28f);
-
-        target->BeginDraw();
-        target->SetTransform(D2D1::Matrix3x2F::Identity());
-        target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-        ID2D1SolidColorBrush* scrimBrush = nullptr;
-        if (SUCCEEDED(target->CreateSolidColorBrush(scrimColor, &scrimBrush)) && scrimBrush) {
-            if (cornerRadius > 0.0f) {
-                target->FillRoundedRectangle(
-                    D2D1::RoundedRect(
-                        D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
-                        cornerRadius, cornerRadius),
-                    scrimBrush);
-            } else {
-                target->FillRectangle(D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
-                                      scrimBrush);
-            }
-            scrimBrush->Release();
-        }
-        if (FAILED(target->EndDraw())) {
-            searchScrimRenderer.discard();
-            return;
-        }
-        if (searchScrimRenderer.present(searchScrimHwnd, alphaByte)) {
-            searchScrimLastWidth = widthPx;
-            searchScrimLastHeight = heightPx;
-            searchScrimLastDpi = dpi;
-            searchScrimLastDark = dark;
-            searchScrimLastZoomed = zoomed;
-        }
-    }
-
-    static LRESULT CALLBACK searchScrimWndProc(HWND window, UINT message, WPARAM wp,
-                                               LPARAM lp) {
-        Impl* self = nullptr;
-        if (message == WM_NCCREATE) {
-            self = static_cast<Impl*>(
-                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            self->searchScrimHwnd = window;
-            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        } else {
-            self = reinterpret_cast<Impl*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-        }
-        if (!self)
-            return DefWindowProcW(window, message, wp, lp);
-
-        switch (message) {
-        case WM_MOUSEACTIVATE:
-            return MA_NOACTIVATE;
-        case WM_SETCURSOR:
-            SetCursor(LoadCursorW(nullptr, IDC_ARROW));
-            return TRUE;
-        case WM_LBUTTONDOWN:
-        case WM_RBUTTONDOWN:
-        case WM_MBUTTONDOWN:
-            self->closeSearchPalette(true);
-            return 0;
-        case WM_MOUSEWHEEL:
-            if (self->searchPaletteOpen && self->searchPaletteHwnd)
-                SendMessageW(self->searchPaletteHwnd, message, wp, lp);
-            return 0;
-        case WM_DESTROY:
-            self->searchScrimRenderer.releaseAll();
-            self->searchScrimLastWidth = 0;
-            self->searchScrimLastHeight = 0;
-            self->searchScrimHwnd = nullptr;
-            return 0;
-        }
-        return DefWindowProcW(window, message, wp, lp);
-    }
-
-    bool ensureSearchScrimWindow() {
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
-            return true;
-        WNDCLASSEXW scrimClass{};
-        scrimClass.cbSize = sizeof(scrimClass);
-        scrimClass.lpfnWndProc = &Impl::searchScrimWndProc;
-        scrimClass.hInstance = inst;
-        scrimClass.lpszClassName = L"QQMusicLyricSettingsSearchScrim";
-        scrimClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        RegisterClassExW(&scrimClass);
-
-        searchScrimHwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            L"QQMusicLyricSettingsSearchScrim", L"",
-            WS_POPUP, 0, 0, 1, 1, hwnd, nullptr, inst, this);
-        searchScrimLastWidth = 0;
-        searchScrimLastHeight = 0;
-        return searchScrimHwnd != nullptr;
-    }
-
-    int searchPaletteHitTest(float xDip, float yDip, int* outRow = nullptr) const {
-        if (outRow)
-            *outRow = -1;
-        if (searchPaletteClearRect.right > searchPaletteClearRect.left &&
-            contains(searchPaletteClearRect, xDip, yDip))
-            return kSearchPaletteHitClear;
-        if (contains(searchPaletteEscRect, xDip, yDip))
-            return kSearchPaletteHitClose;
-        if (searching() && !searchModel_.results().empty() &&
-            contains(searchPaletteListRect, xDip, yDip)) {
-            const float listOffset =
-                yDip - searchPaletteListRect.top + searchPaletteScroll - kSearchPaletteListPadY;
-            if (listOffset >= 0.0f) {
-                const int rowIndex = static_cast<int>(listOffset / kSearchPaletteRowH);
-                const float withinRow = listOffset - rowIndex * kSearchPaletteRowH;
-                if (rowIndex >= 0 && rowIndex < static_cast<int>(searchModel_.results().size()) &&
-                    withinRow >= 2.0f && withinRow <= kSearchPaletteRowH - 2.0f &&
-                    xDip >= 8.0f && xDip <= searchPaletteListRect.right - 8.0f) {
-                    if (outRow)
-                        *outRow = rowIndex;
-                    return kSearchPaletteHitRow;
-                }
-            }
-        }
-        return kSearchPaletteHitNone;
-    }
-
-    void paintSearchPalette(fluent::FluentDialogSurface::Painter& painter,
-                            float widthDip, float heightDip) {
-        const auto& paletteColors = fluent::palette();
-        if (auto* backgroundBrush = painter.brush(paletteColors.menuFill)) {
-            painter.target()->FillRectangle(D2D1::RectF(0.0f, 0.0f, widthDip, heightDip),
-                                            backgroundBrush);
-        }
-        painter.strokeRoundRect(
-            paletteColors.menuStroke,
-            D2D1::RectF(0.5f, 0.5f, widthDip - 0.5f, heightDip - 0.5f),
-            1.0f, fluent::metrics::cardRadius);
-
-        if (auto* searchBrush = painter.brush(paletteColors.accent)) {
-            settings_icon::draw(painter.target(), settings_icon::Kind::Search,
-                                D2D1::RectF(18.0f, 17.0f, 36.0f, 35.0f), searchBrush, 1.4f);
-        }
-
-        if (searchPaletteClearRect.right > searchPaletteClearRect.left) {
-            const bool clearHovered = searchPaletteHoverKind == kSearchPaletteHitClear;
-            const bool clearPressed = searchPalettePressedKind == kSearchPaletteHitClear;
-            if (clearPressed || clearHovered) {
-                painter.fillRoundRect(
-                    clearPressed ? paletteColors.listSelected : paletteColors.listHover,
-                    searchPaletteClearRect, 5.0f);
-            }
-            const float centerX =
-                (searchPaletteClearRect.left + searchPaletteClearRect.right) * 0.5f;
-            const float centerY =
-                (searchPaletteClearRect.top + searchPaletteClearRect.bottom) * 0.5f;
-            if (auto* crossBrush = painter.brush(
-                    clearHovered ? paletteColors.text : paletteColors.textSecondary)) {
-                painter.target()->DrawLine(
-                    D2D1::Point2F(centerX - 4.0f, centerY - 4.0f),
-                    D2D1::Point2F(centerX + 4.0f, centerY + 4.0f), crossBrush, 1.35f);
-                painter.target()->DrawLine(
-                    D2D1::Point2F(centerX + 4.0f, centerY - 4.0f),
-                    D2D1::Point2F(centerX - 4.0f, centerY + 4.0f), crossBrush, 1.35f);
-            }
-        }
-
-        const bool escHovered = searchPaletteHoverKind == kSearchPaletteHitClose;
-        const bool escPressed = searchPalettePressedKind == kSearchPaletteHitClose;
-        painter.fillRoundRect(
-            escPressed ? paletteColors.listSelected
-                       : (escHovered ? paletteColors.controlHover : paletteColors.listHover),
-            searchPaletteEscRect, 4.0f);
-        painter.strokeRoundRect(paletteColors.cardStroke, searchPaletteEscRect, 1.0f, 4.0f);
-        painter.drawText(L"Esc", painter.textFormat(11.0f, 500, true, true),
-                         searchPaletteEscRect,
-                         escHovered ? paletteColors.text : paletteColors.textSecondary);
-
-        if (auto* separatorBrush = painter.brush(paletteColors.separator)) {
-            painter.target()->DrawLine(
-                D2D1::Point2F(0.0f, kSearchPaletteHeaderH - 0.5f),
-                D2D1::Point2F(widthDip, kSearchPaletteHeaderH - 0.5f), separatorBrush, 1.0f);
-        }
-
-        if (!searching()) {
-            painter.drawText(
-                L"输入关键词搜索设置名称、选项或说明，支持空格分词筛选",
-                painter.textFormat(13.0f, 400, false, true),
-                D2D1::RectF(20.0f, kSearchPaletteHeaderH, widthDip - 20.0f, heightDip),
-                paletteColors.textSecondary);
-            return;
-        }
-
-        if (searchModel_.results().empty()) {
-            painter.drawText(
-                L"未找到匹配的设置，请尝试其他关键词",
-                painter.textFormat(13.5f, 400, false, true),
-                D2D1::RectF(20.0f, kSearchPaletteHeaderH, widthDip - 20.0f, heightDip),
-                paletteColors.textSecondary);
-            return;
-        }
-
-        painter.target()->PushAxisAlignedClip(searchPaletteListRect,
-                                              D2D1_ANTIALIAS_MODE_ALIASED);
-        const bool hasScrollbar = searchPaletteMaxScroll > 0.5f;
-        const float itemRight = widthDip - (hasScrollbar ? 14.0f : 8.0f);
-        for (int index = 0; index < static_cast<int>(searchModel_.results().size()); ++index) {
-            const float rowTop = searchPaletteListRect.top + kSearchPaletteListPadY +
-                                 index * kSearchPaletteRowH - searchPaletteScroll;
-            if (rowTop + kSearchPaletteRowH < searchPaletteListRect.top ||
-                rowTop > searchPaletteListRect.bottom)
-                continue;
-            const auto& result = searchModel_.results()[index];
-            const auto* row = findRow(result.id);
-            if (!row)
-                continue;
-
-            const D2D1_RECT_F itemRect =
-                D2D1::RectF(8.0f, rowTop + 2.0f, itemRight, rowTop + kSearchPaletteRowH - 2.0f);
-            const bool selected = index == selectedSearchResult;
-            const bool hovered =
-                searchPaletteHoverKind == kSearchPaletteHitRow && searchPaletteHoverRow == index;
-            if (selected) {
-                painter.fillRoundRect(paletteColors.listSelected, itemRect, 6.0f);
-                const float midY = (itemRect.top + itemRect.bottom) * 0.5f;
-                painter.fillRoundRect(
-                    paletteColors.accent,
-                    D2D1::RectF(itemRect.left + 4.0f, midY - 8.0f,
-                                itemRect.left + 7.0f, midY + 8.0f),
-                    1.5f);
-            } else if (hovered) {
-                painter.fillRoundRect(paletteColors.listHover, itemRect, 6.0f);
-            }
-
-            const float iconCenterY = (itemRect.top + itemRect.bottom) * 0.5f;
-            const D2D1_RECT_F iconBadge =
-                D2D1::RectF(itemRect.left + 14.0f, iconCenterY - 15.0f,
-                            itemRect.left + 44.0f, iconCenterY + 15.0f);
-            const D2D1_COLOR_F badgeFill =
-                selected ? D2D1::ColorF(paletteColors.accent.r, paletteColors.accent.g,
-                                        paletteColors.accent.b, 0.12f)
-                         : paletteColors.listHover;
-            painter.fillRoundRect(badgeFill, iconBadge, 6.0f);
-            if (auto* iconBrush = painter.brush(
-                    selected ? paletteColors.accent : paletteColors.textSecondary)) {
-                settings_icon::draw(
-                    painter.target(), iconForRow(result.id),
-                    D2D1::RectF(iconBadge.left + 7.0f, iconBadge.top + 7.0f,
-                                iconBadge.right - 7.0f, iconBadge.bottom - 7.0f),
-                    iconBrush, 1.25f);
-            }
-
-            const float textRight = selected ? itemRect.right - 56.0f : itemRect.right - 14.0f;
-            painter.drawTrimmedText(
-                row->text, painter.textFormat(13.5f, selected ? 600 : 500, false, true),
-                D2D1::RectF(itemRect.left + 54.0f, itemRect.top + 6.0f, textRight,
-                            itemRect.top + 28.0f),
-                paletteColors.text);
-            painter.drawTrimmedText(
-                result.path, painter.textFormat(12.0f, 400, false, true),
-                D2D1::RectF(itemRect.left + 54.0f, itemRect.top + 27.0f, textRight,
-                            itemRect.bottom - 5.0f),
-                paletteColors.textSecondary);
-            if (selected) {
-                painter.drawText(
-                    L"跳转 ↵", painter.textFormat(11.5f, 500, true, true),
-                    D2D1::RectF(itemRect.right - 54.0f, itemRect.top, itemRect.right - 10.0f,
-                                itemRect.bottom),
-                    paletteColors.accent);
-            }
-        }
-
-        if (hasScrollbar) {
-            const float trackTop = searchPaletteListRect.top + 6.0f;
-            const float trackBottom = searchPaletteListRect.bottom - 6.0f;
-            const float trackHeight = std::max(12.0f, trackBottom - trackTop);
-            const float viewportHeight =
-                std::max(1.0f, searchPaletteListRect.bottom - searchPaletteListRect.top);
-            const float totalHeight = viewportHeight + searchPaletteMaxScroll;
-            const float thumbHeight =
-                std::max(20.0f, trackHeight * (viewportHeight / totalHeight));
-            const float scrollRatio =
-                std::clamp(searchPaletteScroll / searchPaletteMaxScroll, 0.0f, 1.0f);
-            const float thumbTop = trackTop + (trackHeight - thumbHeight) * scrollRatio;
-            painter.fillRoundRect(
-                paletteColors.controlStroke,
-                D2D1::RectF(widthDip - 8.0f, thumbTop, widthDip - 4.0f, thumbTop + thumbHeight),
-                2.0f);
-        }
-        painter.target()->PopAxisAlignedClip();
-
-        const float footerTop = heightDip - kSearchPaletteFooterH;
-        if (auto* separatorBrush = painter.brush(paletteColors.separator)) {
-            painter.target()->DrawLine(
-                D2D1::Point2F(0.0f, footerTop + 0.5f),
-                D2D1::Point2F(widthDip, footerTop + 0.5f), separatorBrush, 1.0f);
-        }
-        auto* footerFormat = painter.textFormat(11.5f, 400, false, true);
-        painter.drawText(L"↑↓ 选择    Enter 跳转    Esc 关闭", footerFormat,
-                         D2D1::RectF(16.0f, footerTop, widthDip - 100.0f, heightDip),
-                         paletteColors.textSecondary);
-        const std::wstring countLabel =
-            L"共 " + std::to_wstring(searchModel_.results().size()) + L" 项";
-        const float countWidth = painter.measureTextWidth(countLabel, footerFormat);
-        painter.drawText(
-            countLabel, footerFormat,
-            D2D1::RectF(std::max(16.0f, widthDip - 16.0f - countWidth - 2.0f), footerTop,
-                        widthDip - 14.0f, heightDip),
-            paletteColors.textSecondary);
-    }
-
-    static LRESULT CALLBACK searchPaletteWndProc(HWND window, UINT message, WPARAM wp,
-                                                 LPARAM lp) {
-        Impl* self = nullptr;
-        if (message == WM_NCCREATE) {
-            self = static_cast<Impl*>(
-                reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
-            self->searchPaletteHwnd = window;
-            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
-        } else {
-            self = reinterpret_cast<Impl*>(GetWindowLongPtrW(window, GWLP_USERDATA));
-        }
-        if (!self)
-            return DefWindowProcW(window, message, wp, lp);
-
-        switch (message) {
-        case WM_ERASEBKGND:
-            return 1;
-        case WM_PAINT: {
-            PAINTSTRUCT paintStruct{};
-            HDC dc = BeginPaint(window, &paintStruct);
-            self->searchPaletteSurface.paint(
-                dc, false,
-                [self](fluent::FluentDialogSurface::Painter& painter, float widthDip,
-                       float heightDip) {
-                    self->paintSearchPalette(painter, widthDip, heightDip);
-                });
-            EndPaint(window, &paintStruct);
-            return 0;
-        }
-        case WM_MOUSEMOVE: {
-            TRACKMOUSEEVENT trackEvent{sizeof(trackEvent), TME_LEAVE, window, 0};
-            TrackMouseEvent(&trackEvent);
-            const POINT currentPt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
-            const bool pointerMoved =
-                currentPt.x != self->searchPaletteLastMovePt.x ||
-                currentPt.y != self->searchPaletteLastMovePt.y;
-            self->searchPaletteLastMovePt = currentPt;
-            const float scale = self->searchPaletteSurface.dipScale();
-            int hitRow = -1;
-            const int hitKind = self->searchPaletteHitTest(
-                static_cast<float>(currentPt.x) / scale,
-                static_cast<float>(currentPt.y) / scale, &hitRow);
-            bool changed = hitKind != self->searchPaletteHoverKind ||
-                           hitRow != self->searchPaletteHoverRow;
-            self->searchPaletteHoverKind = hitKind;
-            self->searchPaletteHoverRow = hitRow;
-            if (pointerMoved && hitKind == kSearchPaletteHitRow && hitRow >= 0 &&
-                hitRow != self->selectedSearchResult) {
-                self->selectedSearchResult = hitRow;
-                changed = true;
-            }
-            if (changed)
-                self->searchPaletteSurface.invalidate();
-            return 0;
-        }
-        case WM_MOUSELEAVE:
-            if (self->searchPaletteHoverKind != kSearchPaletteHitNone ||
-                self->searchPaletteHoverRow != -1) {
-                self->searchPaletteHoverKind = kSearchPaletteHitNone;
-                self->searchPaletteHoverRow = -1;
-                self->searchPaletteSurface.invalidate();
-            }
-            return 0;
-        case WM_LBUTTONDOWN: {
-            const float scale = self->searchPaletteSurface.dipScale();
-            int hitRow = -1;
-            const int hitKind = self->searchPaletteHitTest(
-                GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale, &hitRow);
-            self->searchPalettePressedKind = hitKind;
-            self->searchPalettePressedRow = hitRow;
-            if (hitKind != kSearchPaletteHitNone)
-                SetCapture(window);
-            self->settingsSearch.focus();
-            self->searchPaletteSurface.invalidate();
-            return 0;
-        }
-        case WM_LBUTTONUP: {
-            const float scale = self->searchPaletteSurface.dipScale();
-            int hitRow = -1;
-            const int hitKind = self->searchPaletteHitTest(
-                GET_X_LPARAM(lp) / scale, GET_Y_LPARAM(lp) / scale, &hitRow);
-            const int pressedKind = self->searchPalettePressedKind;
-            const int pressedRow = self->searchPalettePressedRow;
-            self->searchPalettePressedKind = kSearchPaletteHitNone;
-            self->searchPalettePressedRow = -1;
-            if (GetCapture() == window)
-                ReleaseCapture();
-            if (pressedKind == kSearchPaletteHitClear &&
-                hitKind == kSearchPaletteHitClear) {
-                self->settingsSearch.setText(L"");
-                self->refreshSearch();
-                self->settingsSearch.focus();
-                return 0;
-            }
-            if (pressedKind == kSearchPaletteHitClose &&
-                hitKind == kSearchPaletteHitClose) {
-                self->closeSearchPalette(true);
-                return 0;
-            }
-            if (pressedKind == kSearchPaletteHitRow &&
-                hitKind == kSearchPaletteHitRow && pressedRow == hitRow && hitRow >= 0) {
-                self->openSearchResult(hitRow);
-                return 0;
-            }
-            self->searchPaletteSurface.invalidate();
-            return 0;
-        }
-        case WM_CAPTURECHANGED:
-            self->searchPalettePressedKind = kSearchPaletteHitNone;
-            self->searchPalettePressedRow = -1;
-            self->searchPaletteSurface.invalidate();
-            return 0;
-        case WM_MOUSEWHEEL: {
-            if (self->searchPaletteMaxScroll > 0.0f) {
-                const int wheelDelta = GET_WHEEL_DELTA_WPARAM(wp);
-                self->searchPaletteScroll = std::clamp(
-                    self->searchPaletteScroll -
-                        static_cast<float>(wheelDelta) / static_cast<float>(WHEEL_DELTA) * 48.0f,
-                    0.0f, self->searchPaletteMaxScroll);
-                self->searchPaletteSurface.invalidate();
-            }
-            return 0;
-        }
-        case WM_KEYDOWN:
-            if (wp == VK_ESCAPE) {
-                self->closeSearchPalette(true);
-                return 0;
-            }
-            if (wp == VK_RETURN && self->searching() && self->selectedSearchResult >= 0) {
-                self->openSearchResult(self->selectedSearchResult);
-                return 0;
-            }
-            if ((wp == VK_UP || wp == VK_DOWN) && self->searching()) {
-                self->selectSearchResult(wp == VK_DOWN ? 1 : -1);
-                return 0;
-            }
-            break;
-        case WM_COMMAND:
-            if (LOWORD(wp) == kIdSettingsSearch && HIWORD(wp) == EN_CHANGE) {
-                if (!self->closingSearchPalette)
-                    self->refreshSearch();
-                return 0;
-            }
-            break;
-        case WM_DPICHANGED:
-            self->layoutSearchPalette();
-            self->searchPaletteSurface.invalidate();
-            return 0;
-        case WM_ACTIVATE:
-            if (LOWORD(wp) == WA_INACTIVE && self->searchPaletteOpen &&
-                !self->closingSearchPalette) {
-                if (self->hwnd && IsWindow(self->hwnd)) {
-                    POINT cursor{};
-                    if (GetCursorPos(&cursor) && ScreenToClient(self->hwnd, &cursor)) {
-                        const float ownerScale = self->surface.dipScale();
-                        const float cursorX = static_cast<float>(cursor.x) / ownerScale;
-                        const float cursorY = static_cast<float>(cursor.y) / ownerScale;
-                        if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 &&
-                            contains(self->searchTriggerRect, cursorX, cursorY)) {
-                            self->suppressNextSearchTriggerPress = true;
-                        }
-                    }
-                }
-                self->closeSearchPalette(false);
-                return 0;
-            }
-            break;
-        case WM_CLOSE:
-            self->closeSearchPalette(true);
-            return 0;
-        case WM_DESTROY:
-            self->searchPaletteOpen = false;
-            self->searchPaletteSurface.discard();
-            self->searchPaletteHwnd = nullptr;
-            return 0;
-        }
-        return DefWindowProcW(window, message, wp, lp);
-    }
-
-    bool ensureSearchPaletteWindow() {
-        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd))
-            return true;
-        WNDCLASSEXW paletteClass{};
-        paletteClass.cbSize = sizeof(paletteClass);
-        paletteClass.style = CS_HREDRAW | CS_VREDRAW;
-        paletteClass.lpfnWndProc = &Impl::searchPaletteWndProc;
-        paletteClass.hInstance = inst;
-        paletteClass.lpszClassName = L"QQMusicLyricSettingsSearchPalette";
-        paletteClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        RegisterClassExW(&paletteClass);
-
-        searchPaletteHwnd = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"QQMusicLyricSettingsSearchPalette", L"",
-            WS_POPUP, 0, 0, 1, 1, hwnd, nullptr, inst, this);
-        if (!searchPaletteHwnd)
-            return false;
-        SetLayeredWindowAttributes(searchPaletteHwnd, 0, 255, LWA_ALPHA);
-        styleSearchPaletteWindow();
-        searchPaletteSurface.initialize(searchPaletteHwnd, false, true);
-        if (!settingsSearch.create(searchPaletteHwnd, kIdSettingsSearch,
-                                   L"搜索设置项、选项或说明…", false, 14.5f)) {
-            DestroyWindow(searchPaletteHwnd);
-            searchPaletteHwnd = nullptr;
-            return false;
-        }
-        settingsSearch.setChromelessStyle(true);
-        SendMessageW(settingsSearch.editHwnd(), EM_SETLIMITTEXT, 120, 0);
-        SetWindowSubclass(settingsSearch.editHwnd(), &Impl::searchEditProc, 2,
-                          reinterpret_cast<DWORD_PTR>(this));
-        return true;
-    }
-
-    void openSearchPalette() {
-        if (!hwnd || !IsWindow(hwnd))
-            return;
-        stopSearchLocateHighlight();
-        if (sliderEditOpen)
-            commitSliderEditor();
-        if (searchPaletteOpen && searchPaletteHwnd && IsWindowVisible(searchPaletteHwnd)) {
-            SetActiveWindow(searchPaletteHwnd);
-            settingsSearch.focus();
-            SendMessageW(settingsSearch.editHwnd(), EM_SETSEL, 0, -1);
-            return;
-        }
-        if (!ensureSearchPaletteWindow())
-            return;
-        ensureSearchScrimWindow();
-
-        const bool wasClosing =
-            !searchPaletteOpen && searchPaletteAnimating && searchPaletteProgress > 0.01f;
-        if (hwnd)
-            KillTimer(hwnd, kSearchPaletteAnimTimer);
-        searchPaletteAnimating = false;
-        setWindowClickThrough(searchPaletteHwnd, false);
-        setWindowClickThrough(searchScrimHwnd, false);
-
-        closingSearchPalette = true;
-        settingsSearch.setText(L"");
-        closingSearchPalette = false;
-        searchModel_.clear();
-        selectedSearchResult = -1;
-        searchPaletteScroll = 0.0f;
-        searchPaletteMaxScroll = 0.0f;
-        searchPaletteHoverKind = kSearchPaletteHitNone;
-        searchPaletteHoverRow = -1;
-        searchPalettePressedKind = kSearchPaletteHitNone;
-        searchPalettePressedRow = -1;
-        searchPaletteLastMovePt = {-1, -1};
-
-        BOOL clientAnimations = TRUE;
-        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
-        const float startProgress =
-            clientAnimations ? (wasClosing ? searchPaletteProgress : 0.0f) : 1.0f;
-        searchPaletteProgress = startProgress;
-        searchPaletteAnimFrom = startProgress;
-        searchPaletteAnimTarget = 1.0f;
-        searchPaletteOpen = true;
-
-        layoutSearchPalette();
-        SetLayeredWindowAttributes(searchPaletteHwnd, 0, searchPaletteAlphaByte(), LWA_ALPHA);
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd))
-            ShowWindow(searchScrimHwnd, SW_SHOWNOACTIVATE);
-        ShowWindow(searchPaletteHwnd, SW_SHOW);
-        SetWindowPos(searchPaletteHwnd, HWND_TOP, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
-            SetWindowPos(searchScrimHwnd, searchPaletteHwnd, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        searchPaletteSurface.invalidate();
-        UpdateWindow(searchPaletteHwnd);
-        SetActiveWindow(searchPaletteHwnd);
-        settingsSearch.focus();
-        if (clientAnimations && startProgress < 0.999f) {
-            searchPaletteAnimating = true;
-            searchPaletteAnimStartMs = GetTickCount64();
-            searchPaletteAnimDurationMs =
-                std::max(40.0f, kSearchPaletteOpenDurationMs * (1.0f - startProgress));
-            SetTimer(hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
-        }
-        surface.invalidate();
-    }
-
-    void closeSearchPalette(bool restoreOwnerFocus, bool immediate = false) {
-        if (immediate) {
-            if (!searchPaletteOpen && !searchPaletteAnimating)
-                return;
-            searchPaletteOpen = false;
-            searchPaletteHoverKind = kSearchPaletteHitNone;
-            searchPaletteHoverRow = -1;
-            searchPalettePressedKind = kSearchPaletteHitNone;
-            searchPalettePressedRow = -1;
-            if (searchPaletteHwnd && GetCapture() == searchPaletteHwnd)
-                ReleaseCapture();
-            finalizeSearchPaletteClosed();
-            if (restoreOwnerFocus && hwnd && IsWindow(hwnd)) {
-                const bool keepFocusVisible = focusVisible;
-                SetActiveWindow(hwnd);
-                SetFocus(hwnd);
-                focusVisible = keepFocusVisible;
-            }
-            if (hwnd && IsWindow(hwnd))
-                surface.invalidate();
-            return;
-        }
-        if (!searchPaletteOpen || closingSearchPalette)
-            return;
-        closingSearchPalette = true;
-        searchPaletteOpen = false;
-        searchPaletteHoverKind = kSearchPaletteHitNone;
-        searchPaletteHoverRow = -1;
-        searchPalettePressedKind = kSearchPaletteHitNone;
-        searchPalettePressedRow = -1;
-        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-            if (GetCapture() == searchPaletteHwnd)
-                ReleaseCapture();
-        }
-        setWindowClickThrough(searchPaletteHwnd, true);
-        setWindowClickThrough(searchScrimHwnd, true);
-        BOOL clientAnimations = TRUE;
-        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &clientAnimations, 0);
-        closingSearchPalette = false;
-        if (restoreOwnerFocus && hwnd && IsWindow(hwnd)) {
-            const bool keepFocusVisible = focusVisible;
-            SetActiveWindow(hwnd);
-            SetFocus(hwnd);
-            focusVisible = keepFocusVisible;
-        }
-        if (!clientAnimations || searchPaletteProgress <= 0.02f || !hwnd) {
-            finalizeSearchPaletteClosed();
-        } else {
-            searchPaletteAnimating = true;
-            searchPaletteAnimFrom = searchPaletteProgress;
-            searchPaletteAnimTarget = 0.0f;
-            searchPaletteAnimStartMs = GetTickCount64();
-            searchPaletteAnimDurationMs =
-                std::max(36.0f, kSearchPaletteCloseDurationMs * searchPaletteProgress);
-            SetTimer(hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
-        }
-        if (hwnd && IsWindow(hwnd))
-            surface.invalidate();
-    }
-
     float measureTextHeight(fluent::FluentDialogSurface::Painter& painter,
                             const std::wstring& text, float width, float textSize) const {
         if (text.empty() || width <= 0.0f)
@@ -2735,7 +738,7 @@ struct SettingsDialog::Impl {
 
     void updateHintHeights(fluent::FluentDialogSurface::Painter& painter) {
         bool changed = false;
-        for (auto& row : rows[activePage]) {
+        for (auto& row : sections_.rows[activePage]) {
             if (row.kind == ControlKind::Header)
                 continue;
             float labelW = row.labelRect.right - row.labelRect.left;
@@ -2856,7 +859,7 @@ struct SettingsDialog::Impl {
         const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
-        searchTriggerRect = D2D1::RectF(16.0f, 14.0f, 12.0f + kNavW - 4.0f, 48.0f);
+        search_.triggerRect() = D2D1::RectF(16.0f, 14.0f, 12.0f + kNavW - 4.0f, 48.0f);
         navRect = D2D1::RectF(12.0f, 58.0f, 12.0f + kNavW, std::max(58.0f, h - 12.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * kNavItemH,
@@ -2899,7 +902,7 @@ struct SettingsDialog::Impl {
         contentLayerReady = false;
 
         float contentEnd = contentTop;
-        auto& pageRows = rows[activePage];
+        auto& pageRows = sections_.rows[activePage];
         for (size_t i = 0; i < pageRows.size(); ++i) {
             auto& row = pageRows[i];
             // 同组设置连续排列，仅在标题和分组之间留白。
@@ -2908,8 +911,8 @@ struct SettingsDialog::Impl {
                 row.gapAfter = fluent::metrics::sectionGap;
             contentEnd += row.height + row.gapAfter;
         }
-        if (!rows[activePage].empty())
-            contentEnd -= rows[activePage].back().gapAfter;
+        if (!sections_.rows[activePage].empty())
+            contentEnd -= sections_.rows[activePage].back().gapAfter;
         contentHeight = std::max(0.0f, contentEnd - contentTop);
         const float viewportHeight =
             std::max(0.0f, contentViewportRect.bottom - contentViewportRect.top);
@@ -2919,7 +922,7 @@ struct SettingsDialog::Impl {
         updateScrollBarGeometry();
 
         float y = contentTop - contentPaintScroll;
-        for (auto& page : rows) {
+        for (auto& page : sections_.rows) {
             for (auto& row : page) {
                 row.cardRect = D2D1::RectF(0, 0, 0, 0);
                 row.iconRect = D2D1::RectF(0, 0, 0, 0);
@@ -2936,7 +939,7 @@ struct SettingsDialog::Impl {
             }
         }
 
-        for (auto& row : rows[activePage]) {
+        for (auto& row : sections_.rows[activePage]) {
             const float rowH = row.height;
             if (row.kind == ControlKind::Header) {
                 // 分组标题无卡片，文字贴内容区左缘、垂直居中
@@ -2970,7 +973,7 @@ struct SettingsDialog::Impl {
                 row.hintRect = D2D1::RectF(labelX, hintTop, innerRight,
                                            hintTop + 30.0f);
                 const float listTop = y + kIdleAppsListTop;
-                const size_t count = state.idleApps.size();
+                const size_t count = sections_.state.idleApps.size();
                 row.appItemRects.reserve(count);
                 row.appEditRects.reserve(count);
                 row.appDeleteRects.reserve(count);
@@ -3188,7 +1191,7 @@ struct SettingsDialog::Impl {
             y += rowH + row.gapAfter;
         }
         layoutSliderEditor();
-        if (searchPaletteOpen || searchPaletteAnimating)
+        if (search_.isOpen() || search_.animating())
             layoutSearchPalette();
     }
 
@@ -3237,7 +1240,7 @@ struct SettingsDialog::Impl {
         if (page < 0 || page >= kSettingsPageCount || page == activePage)
             return;
         stopContentScroll();
-        if (sliderEditOpen)
+        if (slider_.state().open)
             commitSliderEditor();
         advanceNavIndicator();
         navIndicatorFrom = navIndicatorPosition;
@@ -3268,7 +1271,7 @@ struct SettingsDialog::Impl {
         // 导航融入窗口底色，右侧设置卡片承担主要的表面层级。
         const bool triggerHovered = hoverId == kIdSettingsSearch;
         const bool triggerPressed = pressedId == kIdSettingsSearch;
-        const bool triggerActive = triggerPressed || searchPaletteOpen;
+        const bool triggerActive = triggerPressed || search_.isOpen();
         const D2D1_COLOR_F triggerFill =
             triggerActive
                 ? p.listSelected
@@ -3276,37 +1279,36 @@ struct SettingsDialog::Impl {
                        ? p.listHover
                        : D2D1::ColorF(p.listHover.r, p.listHover.g, p.listHover.b,
                                       p.listHover.a * 0.85f));
-        painter.fillRoundRect(triggerFill, searchTriggerRect, 6.0f);
+        painter.fillRoundRect(triggerFill, search_.triggerRect(), 6.0f);
         if (focusedId == kIdSettingsSearch && focusVisible) {
-            painter.strokeRoundRect(p.accent, searchTriggerRect, 1.5f, 6.0f);
+            painter.strokeRoundRect(p.accent, search_.triggerRect(), 1.5f, 6.0f);
         } else {
-            painter.strokeRoundRect(
-                triggerHovered || searchPaletteOpen ? p.controlStroke : p.cardStroke,
-                searchTriggerRect, 1.0f, 6.0f);
+            painter.strokeRoundRect(triggerHovered || search_.isOpen() ? p.controlStroke
+                                                                       : p.cardStroke,
+                                    search_.triggerRect(), 1.0f, 6.0f);
         }
         const float triggerCenterY =
-            (searchTriggerRect.top + searchTriggerRect.bottom) * 0.5f;
+            (search_.triggerRect().top + search_.triggerRect().bottom) * 0.5f;
         const D2D1_RECT_F searchIconRect = D2D1::RectF(
             navRect.left + kNavIconLeft, triggerCenterY - kNavIconSize * 0.5f,
             navRect.left + kNavIconLeft + kNavIconSize, triggerCenterY + kNavIconSize * 0.5f);
-        if (auto* triggerIconBrush = painter.brush(
-                triggerHovered || searchPaletteOpen ? p.accent : p.textSecondary)) {
+        if (auto* triggerIconBrush =
+                painter.brush(triggerHovered || search_.isOpen() ? p.accent : p.textSecondary)) {
             settings_icon::draw(painter.target(), settings_icon::Kind::Search, searchIconRect,
                                 triggerIconBrush, 1.3f);
         }
-        const D2D1_RECT_F shortcutBadgeRect = D2D1::RectF(
-            searchTriggerRect.right - 48.0f, triggerCenterY - 9.5f,
-            searchTriggerRect.right - 7.0f, triggerCenterY + 9.5f);
+        const D2D1_RECT_F shortcutBadgeRect =
+            D2D1::RectF(search_.triggerRect().right - 48.0f, triggerCenterY - 9.5f,
+                        search_.triggerRect().right - 7.0f, triggerCenterY + 9.5f);
         painter.fillRoundRect(p.listHover, shortcutBadgeRect, 4.0f);
         painter.strokeRoundRect(p.cardStroke, shortcutBadgeRect, 1.0f, 4.0f);
         painter.drawText(L"Ctrl+F", painter.textFormat(10.5f, 500, true, true),
                          shortcutBadgeRect, p.textSecondary);
-        painter.drawText(
-            L"搜索设置", painter.textFormat(13.5f, 400, false, true),
-            D2D1::RectF(navRect.left + kNavIconLeft + kNavIconSize + kNavIconTextGap,
-                        searchTriggerRect.top, shortcutBadgeRect.left - 6.0f,
-                        searchTriggerRect.bottom),
-            triggerHovered || searchPaletteOpen ? p.text : p.textSecondary);
+        painter.drawText(L"搜索设置", painter.textFormat(13.5f, 400, false, true),
+                         D2D1::RectF(navRect.left + kNavIconLeft + kNavIconSize + kNavIconTextGap,
+                                     search_.triggerRect().top, shortcutBadgeRect.left - 6.0f,
+                                     search_.triggerRect().bottom),
+                         triggerHovered || search_.isOpen() ? p.text : p.textSecondary);
         if (auto* navSeparatorBrush = painter.brush(p.separator)) {
             painter.target()->DrawLine(
                 D2D1::Point2F(navRect.left + 12.0f, 53.0f),
@@ -3417,7 +1419,8 @@ struct SettingsDialog::Impl {
             const D2D1_RECT_F previewRect =
                 D2D1::RectF(groupLeft, centerY - kPreviewSize * 0.5f,
                             groupLeft + kPreviewSize, centerY + kPreviewSize * 0.5f);
-            painter.fillRoundRect(fluent::toD2D(state.floatingCardBackgroundColor), previewRect, 4.0f);
+            painter.fillRoundRect(fluent::toD2D(sections_.state.floatingCardBackgroundColor),
+                                  previewRect, 4.0f);
             painter.strokeRoundRect(row.enabled ? p.cardStroke : p.disabled, previewRect, 1.0f,
                                     4.0f);
             if (format) {
@@ -3499,34 +1502,41 @@ struct SettingsDialog::Impl {
             painter.target()->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knobX, centerY), 7.0f, 7.0f),
                                                        br);
         }
-        const bool editing = sliderEditOpen && sliderEditRowId == row.id;
+        const bool editing = slider_.state().open && slider_.state().rowId == row.id;
         const auto valueRect = sliderValueRect(row);
         const auto numberRect = sliderNumberRect(row);
         painter.fillRoundRect(row.enabled ? p.controlFill : p.listHover, valueRect);
         painter.strokeRoundRect(editing ? p.accent : p.controlStroke, valueRect);
         auto* numberFormat = painter.textFormat(12.0f, 600, true, true);
-        const std::wstring number = editing ? sliderEditText : std::to_wstring(row.value);
+        const std::wstring number = editing ? slider_.state().text : std::to_wstring(row.value);
         painter.target()->PushAxisAlignedClip(numberRect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         if (editing && numberFormat) {
             const float textWidth = painter.measureTextWidth(number, numberFormat);
             const float textLeft = (numberRect.left + numberRect.right - textWidth) * 0.5f;
             for (size_t i = 0; i <= number.size(); ++i)
-                sliderCaretStops[i] = std::clamp(textLeft +
-                    painter.measureTextWidth(number.substr(0, i), numberFormat),
-                    numberRect.left + 1.0f, numberRect.right - 1.0f);
-            const size_t first = std::min(sliderEditCaret, sliderEditAnchor);
-            const size_t last = std::max(sliderEditCaret, sliderEditAnchor);
+                slider_.setCaretStop(
+                    i, std::clamp(textLeft +
+                                      painter.measureTextWidth(number.substr(0, i), numberFormat),
+                                  numberRect.left + 1.0f, numberRect.right - 1.0f));
+            const size_t first = std::min(slider_.state().caret, slider_.state().anchor);
+            const size_t last = std::max(slider_.state().caret, slider_.state().anchor);
             if (first != last)
-                painter.fillRoundRect(p.listSelected,
-                    D2D1::RectF(sliderCaretStops[first], numberRect.top + 4.0f,
-                                sliderCaretStops[last], numberRect.bottom - 4.0f), 1.0f);
+                painter.fillRoundRect(
+                    p.listSelected,
+                    D2D1::RectF(slider_.state().caretStops[first], numberRect.top + 4.0f,
+                                slider_.state().caretStops[last], numberRect.bottom - 4.0f),
+                    1.0f);
         }
         painter.drawText(number, numberFormat, numberRect, row.enabled ? p.text : p.disabled);
-        if (editing && sliderCaretVisible && sliderEditCaret == sliderEditAnchor) {
+        if (editing && slider_.state().caretVisible &&
+            slider_.state().caret == slider_.state().anchor) {
             if (auto* brush = painter.brush(p.accent))
                 painter.target()->FillRectangle(
-                    D2D1::RectF(sliderCaretStops[sliderEditCaret], numberRect.top + 5.0f,
-                                sliderCaretStops[sliderEditCaret] + 1.0f, numberRect.bottom - 5.0f), brush);
+                    D2D1::RectF(slider_.state().caretStops[slider_.state().caret],
+                                numberRect.top + 5.0f,
+                                slider_.state().caretStops[slider_.state().caret] + 1.0f,
+                                numberRect.bottom - 5.0f),
+                    brush);
         }
         painter.target()->PopAxisAlignedClip();
         painter.drawText(row.valueSuffix, painter.textFormat(12.0f, 600, true, true),
@@ -3975,7 +1985,7 @@ struct SettingsDialog::Impl {
         const float innerX = row.cardRect.left + 16.0f;
         const float innerRight = row.cardRect.right - 16.0f;
         const float listTop = row.cardRect.top + kIdleAppsListTop;
-        const size_t count = state.idleApps.size();
+        const size_t count = sections_.state.idleApps.size();
         auto* nameFormat = painter.textFormat(13.0f, 600, false, true);
         auto* pathFormat = painter.textFormat(11.0f, 400, false, true);
         auto* actionFormat = painter.textFormat(11.0f, 600, true, true);
@@ -4005,7 +2015,7 @@ struct SettingsDialog::Impl {
                    focusedId == kIdIdleAppNames && focusVisible);
 
         for (size_t i = 0; i < count; ++i) {
-            const auto& app = state.idleApps[i];
+            const auto& app = sections_.state.idleApps[i];
             const D2D1_RECT_F item = row.appItemRects[i];
             const int option = hoverId == row.id ? hoverOption : -1;
             const int pressedOptionValue = pressedId == row.id ? pressedOption : -1;
@@ -4110,7 +2120,7 @@ struct SettingsDialog::Impl {
 
     void drawSettingGroups(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
-        const auto& pageRows = rows[activePage];
+        const auto& pageRows = sections_.rows[activePage];
         for (size_t first = 0; first < pageRows.size();) {
             if (pageRows[first].kind == ControlKind::Header) {
                 ++first;
@@ -4194,7 +2204,7 @@ struct SettingsDialog::Impl {
                             located->cardRect.left + 10.5f, indicatorCenterY + 9.0f),
                 1.5f);
         }
-        for (auto& row : rows[activePage]) {
+        for (auto& row : sections_.rows[activePage]) {
             if (row.kind == ControlKind::Header) {
                 painter.drawText(row.text, painter.textFormat(13.0f, 600), row.labelRect,
                                  p.text);
@@ -4296,7 +2306,7 @@ struct SettingsDialog::Impl {
     int hitTest(float x, float y, int* option = nullptr) const {
         if (option)
             *option = -1;
-        if (contains(searchTriggerRect, x, y))
+        if (contains(search_.triggerRect(), x, y))
             return kIdSettingsSearch;
         for (int index = 0; index < kFooterItemCount; ++index) {
             if (contains(footerItemRects[index], x, y))
@@ -4313,7 +2323,7 @@ struct SettingsDialog::Impl {
             return kIdContentScrollBar;
         if (!contains(contentViewportRect, x, y))
             return 0;
-        for (const auto& row : rows[activePage]) {
+        for (const auto& row : sections_.rows[activePage]) {
             if (!row.enabled)
                 continue;
             if (row.kind == ControlKind::AppList) {
@@ -4343,7 +2353,8 @@ struct SettingsDialog::Impl {
                         return row.id;
                     }
                 }
-                if (state.idleApps.size() < kMaxIdleApps && contains(row.addAppRect, x, y))
+                if (sections_.state.idleApps.size() < kMaxIdleApps &&
+                    contains(row.addAppRect, x, y))
                     return row.id;
                 continue;
             }
@@ -4373,7 +2384,7 @@ struct SettingsDialog::Impl {
     std::vector<int> focusOrder() const {
         std::vector<int> order{kIdSettingsSearch, kIdNav, kIdOpenDocs, kIdOpenFeedback,
                                kIdOpenAbout};
-        for (const auto& row : rows[activePage]) {
+        for (const auto& row : sections_.rows[activePage]) {
             if (row.enabled && row.id == kIdIdleApps) {
                 order.push_back(kIdIdleAppNames);
                 order.push_back(row.id);
@@ -4420,679 +2431,8 @@ struct SettingsDialog::Impl {
         surface.invalidate();
     }
 
-    bool onIdleCommand(int id, Row* row, int option) {
-        switch (id) {
-        case kIdIdleEntry:
-            row->checked = !row->checked;
-            state.idleEntryEnabled = row->checked;
-            updateIdleRowsEnabled();
-            updateFloatingCardRowsEnabled();
-            if (actions.onIdleEntryEnabled)
-                actions.onIdleEntryEnabled(row->checked);
-            break;
-        case kIdIdleQuote:
-            state.idleQuoteEnabled = row->selected == 0;
-            state.idleWelcomeEnabled = row->selected == 1;
-            updateIdleRowsEnabled();
-            if (actions.onIdleTextMode)
-                actions.onIdleTextMode(row->selected);
-            break;
-        case kIdIdleCustomWelcome:
-            if (actions.onEditIdleWelcome)
-                actions.onEditIdleWelcome();
-            break;
-        case kIdTickTickEnabled: {
-            const bool requested = !row->checked;
-            state.tickTickEnabled = requested && state.tickTickApiTokenConfigured;
-            row->checked = state.tickTickEnabled;
-            updateTickTickRows();
-            if (actions.onTickTickEnabled)
-                actions.onTickTickEnabled(requested);
-            break;
-        }
-        case kIdTickTickApiToken:
-            if (actions.onEditTickTickApiToken)
-                actions.onEditTickTickApiToken();
-            break;
-        case kIdTickTickConnect:
-            if (actions.onTickTickConnect)
-                actions.onTickTickConnect();
-            break;
-        case kIdTickTickRefresh:
-            if (actions.onTickTickRefresh)
-                actions.onTickTickRefresh();
-            break;
-        case kIdTickTickDisconnect:
-            if (actions.onTickTickDisconnect)
-                actions.onTickTickDisconnect();
-            break;
-        case kIdIdleQuoteSource:
-            state.idleQuoteSource = row->selected;
-            updateIdleQuoteSourceRow();
-            if (actions.onIdleQuoteSource)
-                actions.onIdleQuoteSource(row->selected);
-            break;
-        case kIdIdleQuoteRefreshInterval:
-            state.idleQuoteRefreshInterval = row->selected;
-            if (actions.onIdleQuoteRefreshInterval)
-                actions.onIdleQuoteRefreshInterval(row->selected);
-            break;
-        case kIdIdleQuoteAlignment:
-            state.idleQuoteAlignment = row->selected;
-            if (actions.onIdleQuoteAlignment)
-                actions.onIdleQuoteAlignment(row->selected);
-            break;
-        case kIdIdleQuoteBackground:
-            state.idleQuoteBackground = row->selected;
-            if (actions.onIdleQuoteBackground)
-                actions.onIdleQuoteBackground(row->selected);
-            updateIdleRowsEnabled();
-            break;
-        case kIdIdleQuoteBackgroundScope:
-            state.idleQuoteBackgroundScope = row->selected;
-            if (actions.onIdleQuoteBackgroundScope)
-                actions.onIdleQuoteBackgroundScope(row->selected);
-            break;
-        case kIdIdleApps:
-            if (isIdleAppDragOption(option)) {
-                // 应用条目的普通点击只用于启动拖动，不触发其他操作。
-            } else if (option == kIdleAppNamesOption) {
-                row->checked = !row->checked;
-                state.idleAppNamesVisible = row->checked;
-                if (actions.onIdleAppNamesVisible)
-                    actions.onIdleAppNamesVisible(row->checked);
-            } else if (option >= kIdleAppEditOptionBase) {
-                const int index = option - kIdleAppEditOptionBase;
-                if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size() &&
-                    actions.onEditIdleApp)
-                    actions.onEditIdleApp(index);
-            } else if (option >= 0) {
-                if (actions.onRemoveIdleApp)
-                    actions.onRemoveIdleApp(option);
-            } else if (state.idleApps.size() < kMaxIdleApps && actions.onAddIdleApp) {
-                actions.onAddIdleApp();
-            }
-            break;
-        default:
-            return false;
-        }
-        return true;
-    }
-
-    bool onSpectrumCommand(int id, Row* row) {
-        switch (id) {
-        case kIdSpectrum:
-            row->checked = !row->checked;
-            for (int i = 0; i < kSpectrumEffectCount; ++i) {
-                if (auto* effect = findRow(kIdSpectrumEffectFirst + i))
-                    effect->enabled = row->checked;
-            }
-            if (auto* colorMode = findRow(kIdSpectrumColorMode))
-                colorMode->enabled = row->checked;
-            if (auto* color = findRow(kIdSpectrumColor))
-                color->enabled = row->checked &&
-                                 findRow(kIdSpectrumColorMode) &&
-                                 findRow(kIdSpectrumColorMode)->selected == 2;
-            if (auto* style = findRow(kIdSpectrumStyle))
-                style->enabled = row->checked;
-            if (auto* gradient = findRow(kIdSpectrumGradient))
-                gradient->enabled = row->checked;
-            if (auto* background = findRow(kIdSpectrumBackground))
-                background->enabled = spectrumBackgroundAvailable();
-            if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = spectrumBackgroundAvailable() &&
-                                   findRow(kIdSpectrumBackground) &&
-                                   findRow(kIdSpectrumBackground)->checked;
-            if (actions.onSpectrum)
-                actions.onSpectrum(row->checked);
-            updateProgressBackgroundRowsEnabled();
-            break;
-        case kIdSpectrumColorMode:
-            row->selected = std::clamp(row->selected, 0, 2);
-            state.spectrumCustomColor = row->selected == 2;
-            state.spectrumFollowAlbum = row->selected == 1;
-            if (auto* color = findRow(kIdSpectrumColor))
-                color->enabled = state.spectrumCustomColor &&
-                                 findRow(kIdSpectrum) &&
-                                 findRow(kIdSpectrum)->checked;
-            if (actions.onSpectrumColorMode)
-                actions.onSpectrumColorMode(row->selected);
-            break;
-        case kIdSpectrumColor:
-            openColorPicker(kIdSpectrumColor);
-            break;
-        case kIdSpectrumStyle:
-            if (auto* background = findRow(kIdSpectrumBackground))
-                background->enabled = spectrumBackgroundAvailable();
-            if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = spectrumBackgroundAvailable() &&
-                                   findRow(kIdSpectrumBackground) &&
-                                   findRow(kIdSpectrumBackground)->checked;
-            if (actions.onSpectrumStyle)
-                actions.onSpectrumStyle(row->selected);
-            updateProgressBackgroundRowsEnabled();
-            break;
-        case kIdSpectrumEffectFirst:
-        case kIdSpectrumEffectFirst + 1:
-        case kIdSpectrumEffectFirst + 2:
-        case kIdSpectrumEffectFirst + 3:
-            row->checked = !row->checked;
-            if (actions.onSpectrumEffect)
-                actions.onSpectrumEffect(row->id - kIdSpectrumEffectFirst, row->checked);
-            break;
-        case kIdSpectrumGradient:
-            row->checked = !row->checked;
-            if (actions.onSpectrumGradient)
-                actions.onSpectrumGradient(row->checked);
-            break;
-        case kIdSpectrumBackground:
-            row->checked = !row->checked;
-            if (auto* opacity = findRow(kIdSpectrumOpacity))
-                opacity->enabled = row->checked && spectrumBackgroundAvailable();
-            if (actions.onSpectrumBackground)
-                actions.onSpectrumBackground(row->checked);
-            updateProgressBackgroundRowsEnabled();
-            break;
-        case kIdSpectrumOpacity:
-            if (actions.onSpectrumOpacity)
-                actions.onSpectrumOpacity(row->value);
-            break;
-        default:
-            return false;
-        }
-        return true;
-    }
-
-    bool onFloatingCardCommand(int id, Row* row) {
-        switch (id) {
-        case kIdFloatingCardTrigger:
-            state.floatingCardTrigger = row->selected;
-            if (actions.onFloatingCardTrigger)
-                actions.onFloatingCardTrigger(row->selected);
-            break;
-        case kIdFloatingCardBackground:
-            state.floatingCardBackground = row->selected;
-            if (actions.onFloatingCardBackground)
-                actions.onFloatingCardBackground(row->selected);
-            updateFloatingCardRowsEnabled();
-            break;
-        case kIdFloatingCardBackgroundColor:
-            openColorPicker(kIdFloatingCardBackgroundColor);
-            break;
-        case kIdFloatingCardFollowAlbum:
-            row->checked = !row->checked;
-            state.floatingCardFollowAlbum = row->checked;
-            if (actions.onFloatingCardFollowAlbum)
-                actions.onFloatingCardFollowAlbum(row->checked);
-            break;
-        case kIdFloatingCardAutoTextContrast:
-            row->checked = !row->checked;
-            state.floatingCardAutoTextContrast = row->checked;
-            if (actions.onFloatingCardAutoTextContrast)
-                actions.onFloatingCardAutoTextContrast(row->checked);
-            break;
-        default:
-            return false;
-        }
-        return true;
-    }
-
-    bool onSongToastCommand(int id, Row* row) {
-        switch (id) {
-        case kIdSongToast:
-            row->checked = !row->checked;
-            state.songToastEnabled = row->checked;
-            if (auto* monitor = findRow(kIdSongToastMonitor))
-                monitor->enabled = row->checked;
-            if (auto* preview = findRow(kIdSongToastPreview))
-                preview->enabled = row->checked && state.songToastPreviewAvailable;
-            if (auto* duration = findRow(kIdSongToastDuration))
-                duration->enabled = row->checked;
-            if (auto* skipFullscreen = findRow(kIdSongToastSkipFullscreen))
-                skipFullscreen->enabled = row->checked;
-            if (auto* position = findRow(kIdSongToastPosition))
-                position->enabled = row->checked;
-            if (actions.onSongToastEnabled)
-                actions.onSongToastEnabled(row->checked);
-            break;
-        case kIdSongToastDuration:
-            if (actions.onSongToastDuration)
-                actions.onSongToastDuration(row->value);
-            break;
-        case kIdSongToastSkipFullscreen:
-            row->checked = !row->checked;
-            if (actions.onSongToastSkipFullscreen)
-                actions.onSongToastSkipFullscreen(row->checked);
-            break;
-        case kIdSongToastPosition:
-            if (actions.onSongToastPosition)
-                actions.onSongToastPosition(row->selected);
-            break;
-        case kIdSongToastMonitor:
-            state.songToastFollowMouseMonitor = row->selected == 1;
-            if (actions.onSongToastFollowMouseMonitor)
-                actions.onSongToastFollowMouseMonitor(state.songToastFollowMouseMonitor);
-            break;
-        case kIdSongToastPreview:
-            if (actions.onPreviewSongToast)
-                actions.onPreviewSongToast();
-            break;
-        default:
-            return false;
-        }
-        return true;
-    }
-
-    void onCommand(int id, int option = -1) {
-        if (id >= kIdOpenDocs && id <= kIdOpenAbout) {
-            const auto& action = id == kIdOpenDocs       ? actions.onOpenDocs
-                                 : id == kIdOpenFeedback ? actions.onOpenFeedback
-                                                         : actions.onOpenAbout;
-            if (action)
-                action();
-            return;
-        }
-        if (id == kIdNav)
-            return;
-        if (id == kIdIdleAppNames) {
-            Row* appRow = findRow(kIdIdleApps);
-            if (!appRow || !appRow->enabled)
-                return;
-            appRow->checked = !appRow->checked;
-            state.idleAppNamesVisible = appRow->checked;
-            if (actions.onIdleAppNamesVisible)
-                actions.onIdleAppNamesVisible(appRow->checked);
-            if (hwnd)
-                surface.invalidate();
-            return;
-        }
-        Row* row = findRow(id);
-        if (!row || !row->enabled)
-            return;
-        if (settings_ui::handleLyricCommand(id, *row, rows[kLyricsPage], state, actions)) {
-            if (hwnd)
-                surface.invalidate();
-            return;
-        }
-        if (onIdleCommand(id, row, option) || onSpectrumCommand(id, row) ||
-            onFloatingCardCommand(id, row) || onSongToastCommand(id, row)) {
-            if (hwnd)
-                surface.invalidate();
-            return;
-        }
-        switch (id) {
-        case kIdSongInfo:
-            row->checked = !row->checked;
-            if (actions.onSongInfoVisible)
-                actions.onSongInfoVisible(row->checked);
-            break;
-        case kIdAlbumCover:
-            row->checked = !row->checked;
-            if (actions.onAlbumCoverVisible)
-                actions.onAlbumCoverVisible(row->checked);
-            if (auto* effect = findRow(kIdCoverEffect))
-                effect->enabled = row->checked && !minimalModeActive();
-            if (auto* platformIcon = findRow(kIdPlatformIcon))
-                platformIcon->enabled = row->checked;
-            break;
-        case kIdPlatformIcon:
-            row->checked = !row->checked;
-            if (actions.onPlatformIconVisible)
-                actions.onPlatformIconVisible(row->checked);
-            break;
-        case kIdCoverEffect:
-            if (actions.onCoverEffectVinyl)
-                actions.onCoverEffectVinyl(row->selected == 1);
-            break;
-        case kIdTaskbarContextMenu:
-            row->checked = !row->checked;
-            if (actions.onTaskbarContextMenu)
-                actions.onTaskbarContextMenu(row->checked);
-            break;
-        case kIdTaskbarViewMode:
-            if (row->selected == 1 && (!state.mediaSessionAlive || state.verticalTaskbar)) {
-                row->selected = std::clamp(state.taskbarViewMode, 0, 2);
-                break;
-            }
-            state.taskbarViewMode = std::clamp(row->selected, 0, 2);
-            updateImmersiveRowsEnabled();
-            updateIdleRowsEnabled();
-            if (actions.onTaskbarViewMode)
-                actions.onTaskbarViewMode(state.taskbarViewMode);
-            break;
-        case kIdTaskbarMonitor:
-            if (actions.onChooseTaskbarMonitor)
-                actions.onChooseTaskbarMonitor();
-            break;
-        case kIdAppBarEdge:
-            state.appBarEdge = std::clamp(row->selected, 0, 1);
-            if (actions.onAppBarEdge)
-                actions.onAppBarEdge(state.appBarEdge);
-            break;
-        case kIdImmersiveBackgroundAdjustment:
-            state.immersiveBackgroundAdjustment = std::clamp(row->selected, 0, 1);
-            updateBackgroundAdjustmentPresentation();
-            if (actions.onImmersiveBackgroundAdjustment)
-                actions.onImmersiveBackgroundAdjustment(state.immersiveBackgroundAdjustment);
-            break;
-        case kIdDockBackgroundAdjustment:
-            state.dockBackgroundAdjustment = std::clamp(row->selected, 0, 1);
-            updateBackgroundAdjustmentPresentation();
-            if (actions.onDockBackgroundAdjustment)
-                actions.onDockBackgroundAdjustment(state.dockBackgroundAdjustment);
-            break;
-        case kIdImmersiveBackgroundBlur:
-            if (actions.onImmersiveBackgroundBlur)
-                actions.onImmersiveBackgroundBlur(row->value);
-            break;
-        case kIdDockBackgroundBlur:
-            if (actions.onDockBackgroundBlur)
-                actions.onDockBackgroundBlur(row->value);
-            break;
-        case kIdEmbeddedResourceMonitor:
-            row->checked = !row->checked;
-            state.embeddedResourceMonitor = row->checked;
-            updateImmersiveRowsEnabled();
-            updateIdleRowsEnabled();
-            if (actions.onEmbeddedResourceMonitor)
-                actions.onEmbeddedResourceMonitor(row->checked);
-            break;
-        case kIdDockResourceGpuUsage:
-            row->checked = !row->checked;
-            if (actions.onDockResourceGpuUsage)
-                actions.onDockResourceGpuUsage(row->checked);
-            break;
-        case kIdDockResourceDownload:
-            row->checked = !row->checked;
-            state.dockResourceDownload = row->checked;
-            if (actions.onDockResourceDownload)
-                actions.onDockResourceDownload(row->checked);
-            break;
-        case kIdDockResourceUpload:
-            row->checked = !row->checked;
-            state.dockResourceUpload = row->checked;
-            if (actions.onDockResourceUpload)
-                actions.onDockResourceUpload(row->checked);
-            break;
-        case kIdDockResourceCpuFrequency:
-            row->checked = !row->checked;
-            if (actions.onDockResourceCpuFrequency)
-                actions.onDockResourceCpuFrequency(row->checked);
-            break;
-        case kIdTaskbarBackground:
-            if (auto* opacity = findRow(kIdCoverBackgroundOpacity))
-                opacity->enabled = row->selected == 1;
-            if (actions.onTaskbarBackground)
-                actions.onTaskbarBackground(row->selected);
-            break;
-        case kIdCoverBackgroundOpacity:
-            if (actions.onCoverBackgroundOpacity)
-                actions.onCoverBackgroundOpacity(row->value);
-            break;
-        case kIdProgressBackground:
-            row->checked = !row->checked;
-            updateProgressBackgroundRowsEnabled();
-            if (actions.onProgressBackground)
-                actions.onProgressBackground(row->checked);
-            break;
-        case kIdProgressBackgroundOpacity:
-            if (actions.onProgressBackgroundOpacity)
-                actions.onProgressBackgroundOpacity(row->value);
-            break;
-        case kIdHoverControls:
-            row->checked = !row->checked;
-            if (actions.onHoverControls)
-                actions.onHoverControls(row->checked);
-            if (auto* style = findRow(kIdHoverControlStyle))
-                style->enabled = row->checked && !minimalModeActive();
-            updateFloatingCardRowsEnabled();
-            break;
-        case kIdHoverControlStyle:
-            if (actions.onHoverControlStyle)
-                actions.onHoverControlStyle(row->selected);
-            updateFloatingCardRowsEnabled();
-            updateIdleRowsEnabled();
-            break;
-        case kIdTaskbarTheme:
-            if (actions.onTaskbarTheme)
-                actions.onTaskbarTheme(themeModeFromIndex(row->selected));
-            break;
-        case kIdWindowTheme:
-            if (actions.onWindowTheme)
-                actions.onWindowTheme(themeModeFromIndex(row->selected));
-            break;
-        case kIdRenderMode:
-            if (actions.onRenderMode)
-                actions.onRenderMode(row->selected);
-            break;
-        case kIdPickFont:
-            if (actions.onPickFont)
-                actions.onPickFont();
-            break;
-        }
-        if (hwnd)
-            surface.invalidate();
-    }
-
-    void updateCompactLyricRows() { settings_ui::updateCompactLyricRows(rows[kLyricsPage], state); }
-
-    void syncIdleRows(const SettingsState& s) {
-        const bool vertical = s.verticalTaskbar;
-        if (auto* row = findRow(kIdIdleEntry))
-            row->checked = s.idleEntryEnabled;
-        if (auto* row = findRow(kIdIdleQuote))
-            row->selected = idleTextMode();
-        if (auto* row = findRow(kIdIdleQuoteSource))
-            row->selected = std::clamp(s.idleQuoteSource, 0, 2);
-        if (auto* row = findRow(kIdIdleQuoteRefreshInterval))
-            row->selected = std::clamp(s.idleQuoteRefreshInterval, 0, 2);
-        if (auto* row = findRow(kIdIdleQuoteAlignment))
-            row->selected = vertical ? 0 : std::clamp(s.idleQuoteAlignment, 0, 2);
-        if (auto* row = findRow(kIdIdleQuoteBackground))
-            row->selected = std::clamp(s.idleQuoteBackground, 0, 4);
-        if (auto* row = findRow(kIdIdleQuoteBackgroundScope))
-            row->selected = std::clamp(s.idleQuoteBackgroundScope, 0, 3);
-        if (auto* row = findRow(kIdIdleApps))
-            row->checked = s.idleAppNamesVisible;
-        if (auto* row = findRow(kIdTickTickEnabled))
-            row->checked = s.tickTickEnabled;
-        updateIdleQuoteSourceRow();
-        updateIdleAppsRowHeight();
-        updateTickTickRows();
-    }
-
-    void syncDisplayRows(const SettingsState& s) {
-        const bool vertical = s.verticalTaskbar;
-        const bool minimal = s.renderMode == kRenderModeMinimal;
-        if (auto* row = findRow(kIdSongInfo)) {
-            row->checked = vertical ? false : s.songInfoVisible;
-            row->enabled = !vertical;
-        }
-        if (auto* row = findRow(kIdAlbumCover))
-            row->checked = s.albumCoverVisible;
-        if (auto* row = findRow(kIdPlatformIcon)) {
-            row->checked = s.platformIconVisible;
-            row->enabled = s.albumCoverVisible;
-        }
-        if (auto* row = findRow(kIdCoverEffect)) {
-            row->selected = minimal ? 0 : (s.coverEffectVinyl ? 1 : 0);
-            row->enabled = s.albumCoverVisible && !minimal;
-        }
-        if (auto* row = findRow(kIdTaskbarContextMenu))
-            row->checked = s.taskbarContextMenu;
-    }
-
-    void syncTaskbarModeRows(const SettingsState& s) {
-        const bool vertical = s.verticalTaskbar;
-        if (auto* row = findRow(kIdTaskbarViewMode)) {
-            row->selected = std::clamp(s.taskbarViewMode, 0, 2);
-            row->hint = taskbarViewModeHint(s.mediaSessionAlive, vertical);
-            row->showHint = true;
-        }
-        if (auto* row = findRow(kIdTaskbarMonitor)) {
-            row->controlText = s.taskbarMonitorLabel;
-            row->enabled = s.taskbarViewMode != 0;
-        }
-        if (auto* row = findRow(kIdAppBarEdge)) {
-            row->selected = std::clamp(s.appBarEdge, 0, 1);
-            row->enabled = s.taskbarViewMode == 2;
-        }
-        if (auto* row = findRow(kIdImmersiveBackgroundAdjustment)) {
-            row->selected = std::clamp(s.immersiveBackgroundAdjustment, 0, 1);
-            row->enabled = !vertical && s.taskbarViewMode == 1 &&
-                           s.backgroundBlurSupported;
-        }
-        if (auto* row = findRow(kIdDockBackgroundAdjustment)) {
-            row->selected = std::clamp(s.dockBackgroundAdjustment, 0, 1);
-            row->enabled = s.taskbarViewMode == 2 && s.backgroundBlurSupported;
-        }
-        if (auto* row = findRow(kIdImmersiveBackgroundBlur)) {
-            row->value = std::clamp(s.immersiveBackgroundBlur, 0, 100);
-            row->enabled = !vertical && s.taskbarViewMode == 1 &&
-                           s.backgroundBlurSupported;
-            row->hint = backgroundAdjustmentHint(
-                s.backgroundBlurSupported, s.immersiveBackgroundAdjustment);
-            row->showHint = true;
-        }
-        if (auto* row = findRow(kIdDockBackgroundBlur)) {
-            row->value = std::clamp(s.dockBackgroundBlur, 0, 100);
-            row->enabled = s.taskbarViewMode == 2 && s.backgroundBlurSupported;
-            row->hint = backgroundAdjustmentHint(
-                s.backgroundBlurSupported, s.dockBackgroundAdjustment);
-            row->showHint = true;
-        }
-        updateBackgroundAdjustmentPresentation();
-        if (auto* row = findRow(kIdEmbeddedResourceMonitor)) {
-            row->checked = s.embeddedResourceMonitor;
-            row->enabled = s.taskbarViewMode == 0 && !vertical;
-        }
-        const bool resourceExtrasEnabled = s.taskbarViewMode == 2 ||
-            (s.taskbarViewMode == 0 && !vertical && s.embeddedResourceMonitor);
-        if (auto* row = findRow(kIdDockResourceDownload)) {
-            row->checked = s.dockResourceDownload;
-            row->enabled = resourceExtrasEnabled;
-        }
-        if (auto* row = findRow(kIdDockResourceUpload)) {
-            row->checked = s.dockResourceUpload;
-            row->enabled = resourceExtrasEnabled;
-        }
-        if (auto* row = findRow(kIdDockResourceGpuUsage)) {
-            row->checked = s.dockResourceGpuUsage;
-            row->enabled = resourceExtrasEnabled;
-        }
-        if (auto* row = findRow(kIdDockResourceCpuFrequency)) {
-            row->checked = s.dockResourceCpuFrequency;
-            row->enabled = resourceExtrasEnabled;
-        }
-        settings_ui::updateSpectrumRows(rows[kSpectrumPage], s);
-    }
-
-    void syncBackgroundRows(const SettingsState& s) {
-        const bool minimal = s.renderMode == kRenderModeMinimal;
-        if (auto* row = findRow(kIdTaskbarBackground)) {
-            row->selected = minimal ? 0 : std::clamp(s.taskbarBackground, 0, 2);
-            row->enabled = !minimal;
-        }
-        if (auto* row = findRow(kIdCoverBackgroundOpacity)) {
-            row->value = std::clamp(s.coverBackgroundOpacity, 0, 100);
-            row->enabled = !minimal && s.taskbarBackground == 1;
-        }
-        if (auto* row = findRow(kIdProgressBackground))
-            row->checked = minimal ? false : s.progressBackground;
-        if (auto* row = findRow(kIdProgressBackgroundOpacity))
-            row->value = std::clamp(s.progressBackgroundOpacity, 0, 100);
-        updateProgressBackgroundRowsEnabled();
-    }
-
-    void syncMediaControlRows(const SettingsState& s) {
-        const bool minimal = s.renderMode == kRenderModeMinimal;
-        if (auto* row = findRow(kIdHoverControls))
-            row->checked = s.hoverControls;
-        if (auto* row = findRow(kIdHoverControlStyle)) {
-            row->selected = minimal ? 0 : s.hoverControlStyle;
-            row->enabled = s.hoverControls && !minimal;
-        }
-    }
-
-    void syncFloatingCardRows(const SettingsState& s) {
-        if (auto* row = findRow(kIdFloatingCardTrigger))
-            row->selected = std::clamp(s.floatingCardTrigger, 0, 1);
-        if (auto* row = findRow(kIdFloatingCardBackground))
-            row->selected = std::clamp(s.floatingCardBackground, 0, 1);
-        if (auto* row = findRow(kIdFloatingCardBackgroundColor))
-            row->controlText = colorText(s.floatingCardBackgroundColor);
-        if (auto* row = findRow(kIdFloatingCardFollowAlbum))
-            row->checked = s.floatingCardFollowAlbum;
-        if (auto* row = findRow(kIdFloatingCardAutoTextContrast))
-            row->checked = s.floatingCardAutoTextContrast;
-        updateFloatingCardRowsEnabled();
-        updateIdleRowsEnabled();
-    }
-
-    void syncSongToastRows(const SettingsState& s) {
-        const bool minimal = s.renderMode == kRenderModeMinimal;
-        if (auto* row = findRow(kIdSongToast)) {
-            row->checked = minimal ? false : s.songToastEnabled;
-            row->enabled = !minimal;
-        }
-        if (auto* row = findRow(kIdSongToastDuration)) {
-            row->value = std::clamp(s.songToastDurationSec, 1, 10);
-            row->enabled = !minimal && s.songToastEnabled;
-        }
-        if (auto* row = findRow(kIdSongToastSkipFullscreen)) {
-            row->checked = s.songToastSkipFullscreen;
-            row->enabled = !minimal && s.songToastEnabled;
-        }
-        if (auto* row = findRow(kIdSongToastPosition)) {
-            row->selected = std::clamp(s.songToastPosition, 0, 1);
-            row->enabled = !minimal && s.songToastEnabled;
-        }
-        if (auto* row = findRow(kIdSongToastMonitor)) {
-            row->selected = s.songToastFollowMouseMonitor ? 1 : 0;
-            row->enabled = !minimal && s.songToastEnabled;
-        }
-        if (auto* row = findRow(kIdSongToastPreview))
-            row->enabled = !minimal && s.songToastEnabled && s.songToastPreviewAvailable;
-    }
-
-    void syncThemeFontRows(const SettingsState& s) {
-        if (auto* row = findRow(kIdTaskbarTheme))
-            row->selected = themeModeIndex(s.taskbarThemeMode);
-        if (auto* row = findRow(kIdWindowTheme))
-            row->selected = themeModeIndex(s.windowThemeMode);
-        if (auto* row = findRow(kIdRenderMode))
-            row->selected = std::clamp(s.renderMode, 0, kRenderModeMinimal);
-        if (auto* row = findRow(kIdPickFont)) {
-            row->valueText = s.fontDesc;
-            row->hint = kFontSettingNotice;
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-        }
-    }
-
-    void updateState(const SettingsState& s) {
-        if (sliderEditOpen)
-            commitSliderEditor();
-        state = s;
-        resetIdleAppDrag();
-        syncIdleRows(s);
-        syncDisplayRows(s);
-        syncTaskbarModeRows(s);
-        settings_ui::updateSpectrumRows(rows[kSpectrumPage], s);
-        syncBackgroundRows(s);
-        syncMediaControlRows(s);
-        syncFloatingCardRows(s);
-        syncSongToastRows(s);
-        syncThemeFontRows(s);
-        settings_ui::updateLyricRows(rows[kLyricsPage], s);
-        updateImmersiveRowsEnabled();
-        layout();
-        surface.invalidate();
-    }
-
     void updateFontDescription(const std::wstring& description) {
-        state.fontDesc = description;
+        sections_.state.fontDesc = description;
         if (auto* row = findRow(kIdPickFont)) {
             row->valueText = description;
             row->hint = kFontSettingNotice;
@@ -5108,8 +2448,8 @@ struct SettingsDialog::Impl {
         switch (msg) {
         case WM_TIMER:
             if (wp == kSliderCaretTimer) {
-                if (sliderEditOpen) {
-                    sliderCaretVisible = !sliderCaretVisible;
+                if (slider_.state().open) {
+                    slider_.blink();
                     surface.invalidate();
                 }
                 return 0;
@@ -5145,8 +2485,7 @@ struct SettingsDialog::Impl {
             }
             break;
         case WM_CREATE:
-            searchModel_.clear();
-            selectedSearchResult = -1;
+            search_.resetResults();
             searchLocatedId = 0;
             searchLocatedStartMs = 0;
             searchLocateFading = false;
@@ -5159,7 +2498,7 @@ struct SettingsDialog::Impl {
             layout();
             return 0;
         case WM_MOVE:
-            if (searchPaletteOpen || searchPaletteAnimating)
+            if (search_.isOpen() || search_.animating())
                 layoutSearchPalette();
             return 0;
         case WM_SIZE:
@@ -5196,15 +2535,7 @@ struct SettingsDialog::Impl {
             stopNavIndicator();
             backdrop = fluent::restyleDialogWindow(hwnd, backdrop, false);
             surface.setBackdrop(backdrop);
-            searchScrimLastWidth = 0;
-            searchScrimLastHeight = 0;
-            if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-                styleSearchPaletteWindow();
-                settingsSearch.refreshTheme();
-                if (searchPaletteOpen)
-                    layoutSearchPalette();
-                searchPaletteSurface.invalidate();
-            }
+            search_.refreshTheme();
             surface.invalidate();
             return 0;
         case WM_PAINT: {
@@ -5236,7 +2567,7 @@ struct SettingsDialog::Impl {
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
             TrackMouseEvent(&tme);
             const float s = surface.dipScale();
-            if (sliderEditOpen && sliderEditSelecting && GetCapture() == hwnd) {
+            if (slider_.state().open && slider_.state().selecting && GetCapture() == hwnd) {
                 placeSliderCaret(GET_X_LPARAM(lp) / s, true);
                 return 0;
             }
@@ -5263,7 +2594,8 @@ struct SettingsDialog::Impl {
                 const float dy = pointerY - idleAppDragStartY;
                 if (dx * dx + dy * dy >= kIdleAppDragThreshold * kIdleAppDragThreshold) {
                     const int index = pressedOption - kIdleAppDragOptionBase;
-                    if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size()) {
+                    if (index >= 0 &&
+                        static_cast<size_t>(index) < sections_.state.idleApps.size()) {
                         idleAppDragging = true;
                         idleAppDragIndex = index;
                         pressedId = 0;
@@ -5322,8 +2654,7 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_LBUTTONDOWN: {
-            const bool suppressSearchTrigger = suppressNextSearchTriggerPress;
-            suppressNextSearchTriggerPress = false;
+            const bool suppressSearchTrigger = search_.consumeTriggerSuppression();
             advanceContentScroll();
             stopContentScroll();
             SetFocus(hwnd);
@@ -5345,7 +2676,7 @@ struct SettingsDialog::Impl {
             }
             if (pressedId == kIdIdleApps && isIdleAppDragOption(pressedOption)) {
                 const int index = pressedOption - kIdleAppDragOptionBase;
-                if (index >= 0 && static_cast<size_t>(index) < state.idleApps.size()) {
+                if (index >= 0 && static_cast<size_t>(index) < sections_.state.idleApps.size()) {
                     idleAppDragIndex = index;
                     idleAppDragStartX = pointerX;
                     idleAppDragStartY = pointerY;
@@ -5354,12 +2685,12 @@ struct SettingsDialog::Impl {
             Row* pressedRow = findRow(pressedId);
             const bool numberHit = pressedRow && pressedRow->kind == ControlKind::Slider &&
                 pressedRow->enabled && contains(sliderValueRect(*pressedRow), pointerX, pointerY);
-            if (sliderEditOpen && (!numberHit || pressedId != sliderEditRowId))
+            if (slider_.state().open && (!numberHit || pressedId != slider_.state().rowId))
                 commitSliderEditor();
             if (numberHit) {
-                if (sliderEditOpen) {
+                if (slider_.state().open) {
                     placeSliderCaret(pointerX, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
-                    sliderEditSelecting = true;
+                    slider_.setSelecting(true);
                     SetCapture(hwnd);
                 } else {
                     openSliderEditor(*pressedRow);
@@ -5388,8 +2719,8 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_LBUTTONUP: {
-            if (sliderEditSelecting) {
-                sliderEditSelecting = false;
+            if (slider_.state().selecting) {
+                slider_.setSelecting(false);
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
                 return 0;
@@ -5398,17 +2729,17 @@ struct SettingsDialog::Impl {
             if (idleAppDragging) {
                 const int fromIndex = idleAppDragIndex;
                 const int toIndex = idleAppDropIndex;
-                const bool validDrop = fromIndex >= 0 &&
-                                       static_cast<size_t>(fromIndex) < state.idleApps.size() &&
-                                       toIndex >= 0 &&
-                                       toIndex <= static_cast<int>(state.idleApps.size());
+                const bool validDrop =
+                    fromIndex >= 0 &&
+                    static_cast<size_t>(fromIndex) < sections_.state.idleApps.size() &&
+                    toIndex >= 0 && toIndex <= static_cast<int>(sections_.state.idleApps.size());
                 resetIdleAppDrag();
                 pressedId = 0;
                 pressedOption = -1;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
-                if (validDrop && actions.onReorderIdleApps)
-                    actions.onReorderIdleApps(fromIndex, toIndex);
+                if (validDrop && sections_.actions.onReorderIdleApps)
+                    sections_.actions.onReorderIdleApps(fromIndex, toIndex);
                 surface.invalidate();
                 return 0;
             }
@@ -5456,7 +2787,7 @@ struct SettingsDialog::Impl {
             return 0;
         }
         case WM_CAPTURECHANGED:
-            sliderEditSelecting = false;
+            slider_.setSelecting(false);
             pressedId = 0;
             pressedOption = -1;
             scrollDragging = false;
@@ -5478,11 +2809,11 @@ struct SettingsDialog::Impl {
         case WM_GETDLGCODE:
             return DLGC_WANTALLKEYS | DLGC_WANTTAB;
         case WM_CHAR:
-            if (sliderEditOpen && wp >= L'0' && wp <= L'9')
+            if (slider_.state().open && wp >= L'0' && wp <= L'9')
                 replaceSliderSelection(std::wstring(1, static_cast<wchar_t>(wp)));
             return 0;
         case WM_KEYDOWN:
-            if (sliderEditOpen && handleSliderEditKey(wp))
+            if (slider_.state().open && handleSliderEditKey(wp))
                 return 0;
             if (wp == 'F' && (GetKeyState(VK_CONTROL) & 0x8000)) {
                 openSearchPalette();
@@ -5634,18 +2965,7 @@ struct SettingsDialog::Impl {
             stopNavIndicator();
             stopSearchLocateHighlight();
             KillTimer(hwnd, kSearchPaletteAnimTimer);
-            searchPaletteAnimating = false;
-            if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-                DestroyWindow(searchPaletteHwnd);
-                searchPaletteHwnd = nullptr;
-            }
-            if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
-                DestroyWindow(searchScrimHwnd);
-                searchScrimHwnd = nullptr;
-            }
-            searchScrimRenderer.releaseAll();
-            searchPaletteOpen = false;
-            searchPaletteSurface.discard();
+            search_.destroy();
             contentRenderer.releaseAll();
             contentLayerReady = false;
             contentWindow = nullptr;
@@ -5661,16 +2981,8 @@ struct SettingsDialog::Impl {
 
     void destroy() {
         closeSearchPalette(false, true);
-        if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-            DestroyWindow(searchPaletteHwnd);
-            searchPaletteHwnd = nullptr;
-        }
-        if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
-            DestroyWindow(searchScrimHwnd);
-            searchScrimHwnd = nullptr;
-        }
-        searchScrimRenderer.releaseAll();
-        if (sliderEditOpen)
+        search_.destroy();
+        if (slider_.state().open)
             cancelSliderEditor();
         if (colorPicker) {
             colorPicker->destroy();
@@ -5694,8 +3006,8 @@ bool SettingsDialog::create(HINSTANCE inst, HWND parent, const SettingsState& st
                             SettingsActions actions) {
     impl_->notifyHwnd = parent;
     impl_->inst = inst;
-    impl_->state = state;
-    impl_->actions = std::move(actions);
+    impl_->sections_.state = state;
+    impl_->sections_.actions = std::move(actions);
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

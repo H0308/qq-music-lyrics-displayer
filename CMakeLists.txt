@@ -60,6 +60,19 @@ add_executable(QQMusicLyric
     src/ui/taskbar/cover_image.cpp
     src/ui/settings/lyric_section.cpp
     src/ui/settings/spectrum_section.cpp
+    src/ui/taskbar/karaoke_tracker.cpp
+    src/ui/taskbar/text_scroll.cpp
+    src/ui/taskbar/lyric_text_renderer.cpp
+    src/ui/taskbar/interaction.cpp
+    src/ui/settings/sections_create.cpp
+    src/ui/settings/sections_state.cpp
+    src/ui/settings/sections_commands.cpp
+    src/ui/settings/search_palette.cpp
+    src/ui/settings/slider_editor.cpp
+    src/ui/media_popup/page_layout.cpp
+    src/ui/media_popup/page_painter_common.cpp
+    src/ui/media_popup/media_page_painter.cpp
+    src/ui/media_popup/idle_page_painter.cpp
     src/ui/taskbar/spectrum_renderer.cpp
     src/ui/taskbar/placement_probe.cpp
     src/ui/taskbar/placement.cpp
