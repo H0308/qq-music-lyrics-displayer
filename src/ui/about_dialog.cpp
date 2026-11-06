@@ -5,6 +5,7 @@
 #include "ui/dialog_notify.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/fluent_theme.h"
+#include "ui/ui_dispatcher.h"
 #include "logging/runtime_logger.h"
 
 #include <curl/curl.h>
@@ -519,20 +520,18 @@ void openUrl(const std::wstring& url) {
         openUrl(url.c_str());
 }
 
-void postUpdateResult(HWND hwnd, uint64_t requestId, UpdateState state,
-                      std::wstring version = {}, std::wstring releaseUrl = {},
-                      std::wstring detail = {}, std::optional<ReleaseInfo> release = std::nullopt) {
-    auto* payload = new UpdatePayload{requestId, state, std::move(version), std::move(releaseUrl),
-                                      std::move(detail), std::move(release)};
-    if (!PostMessageW(hwnd, kMsgUpdateReady, 0, reinterpret_cast<LPARAM>(payload)))
-        delete payload;
-}
-
-void requestLatestRelease(HWND hwnd, uint64_t requestId, UpdateSource source) {
-    std::thread([hwnd, requestId, source] {
+void requestLatestRelease(uint64_t requestId, UpdateSource source,
+                          std::function<void(UpdatePayload)> onResult) {
+    std::thread([requestId, source, onResult = std::move(onResult)] {
+        const auto publish = [&](UpdateState state, std::wstring version = {},
+                                 std::wstring releaseUrl = {}, std::wstring detail = {},
+                                 std::optional<ReleaseInfo> release = std::nullopt) {
+            onResult(UpdatePayload{requestId, state, std::move(version), std::move(releaseUrl),
+                                   std::move(detail), std::move(release)});
+        };
         CURL* curl = curl_easy_init();
         if (!curl) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {}, L"无法初始化网络请求");
+            publish(UpdateState::Failed, {}, {}, L"无法初始化网络请求");
             return;
         }
 
@@ -567,31 +566,29 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId, UpdateSource source) {
         curl_easy_cleanup(curl);
 
         if (rc != CURLE_OK) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"网络请求失败：" + wideOf(curl_easy_strerror(rc)));
+            publish(UpdateState::Failed, {}, {},
+                    L"网络请求失败：" + wideOf(curl_easy_strerror(rc)));
             return;
         }
         if (responseCode == 404) {
-            postUpdateResult(hwnd, requestId, UpdateState::NoRelease, {}, {},
-                             sourceName + L" 尚未发布可供检查的正式版本");
+            publish(UpdateState::NoRelease, {}, {},
+                    sourceName + L" 尚未发布可供检查的正式版本");
             return;
         }
         if (responseCode != 200) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             sourceName + L" 返回 HTTP " + std::to_wstring(responseCode));
+            publish(UpdateState::Failed, {}, {},
+                    sourceName + L" 返回 HTTP " + std::to_wstring(responseCode));
             return;
         }
 
         auto json = nlohmann::json::parse(body, nullptr, false);
         if (json.is_discarded() || !json.is_object()) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"无法读取 " + sourceName + L" 返回的数据");
+            publish(UpdateState::Failed, {}, {}, L"无法读取 " + sourceName + L" 返回的数据");
             return;
         }
 
         if (!json.contains("tag_name") || !json["tag_name"].is_string()) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"最新版本信息不完整");
+            publish(UpdateState::Failed, {}, {}, L"最新版本信息不完整");
             return;
         }
 
@@ -635,17 +632,23 @@ void requestLatestRelease(HWND hwnd, uint64_t requestId, UpdateSource source) {
         auto remoteVersion = parseVersion(version);
         auto localVersion = parseVersion(app_info::kVersion);
         if (version.empty() || !remoteVersion || !localVersion) {
-            postUpdateResult(hwnd, requestId, UpdateState::Failed, {}, {},
-                             L"最新版本标签格式无法识别");
+            publish(UpdateState::Failed, {}, {}, L"最新版本标签格式无法识别");
             return;
         }
 
         UpdateState state = compareVersions(*remoteVersion, *localVersion) > 0
                                 ? UpdateState::Available
                                 : UpdateState::Current;
-        postUpdateResult(hwnd, requestId, state, std::move(version), std::move(releaseUrl), {},
-                         std::move(latestRelease));
+        publish(state, std::move(version), std::move(releaseUrl), {}, std::move(latestRelease));
     }).detach();
+}
+
+void requestLatestRelease(HWND hwnd, uint64_t requestId, UpdateSource source) {
+    requestLatestRelease(requestId, source, [hwnd](UpdatePayload result) {
+        auto* payload = new UpdatePayload(std::move(result));
+        if (!PostMessageW(hwnd, kMsgUpdateReady, 0, reinterpret_cast<LPARAM>(payload)))
+            delete payload;
+    });
 }
 
 uint64_t nextRequestId() {
@@ -1343,6 +1346,41 @@ public:
 
 } // namespace
 
+struct StartupUpdateCheck::Impl {
+    UiDispatcher dispatcher;
+    UpdateSource source = UpdateSource::GitHub;
+    std::optional<UpdatePayload> result;
+};
+
+StartupUpdateCheck::StartupUpdateCheck(
+    bool useGiteeUpdateSource, std::function<void(const std::wstring&)> onAvailable)
+    : impl_(std::make_unique<Impl>()) {
+    impl_->source = useGiteeUpdateSource ? UpdateSource::Gitee : UpdateSource::GitHub;
+    const uint64_t request = nextRequestId();
+    runtime_log::writef(L"[action][update] check-start source=%s request=%llu",
+                        updateSourceName(impl_->source), static_cast<unsigned long long>(request));
+    std::function<void(UpdatePayload)> receive =
+        [this, onAvailable = std::move(onAvailable)](UpdatePayload result) {
+            runtime_log::writef(L"[action][update] check-result state=%s version=%s source=%s",
+                                updateStateName(result.state), result.version.c_str(),
+                                updateSourceName(impl_->source));
+            if (result.state != UpdateState::Available)
+                return;
+            const std::wstring version = displayVersion(result.version);
+            // 仅保留新版本结果；普通结果和网络响应在本次回调结束后释放。
+            impl_->result = std::move(result);
+            if (onAvailable)
+                onAvailable(version);
+        };
+    requestLatestRelease(request, impl_->source,
+                         impl_->dispatcher.callback(std::move(receive)));
+}
+
+StartupUpdateCheck::~StartupUpdateCheck() {
+    // 后台请求只持有派发器的弱引用，关闭队列后不能再调用 App 或本对象。
+    impl_->dispatcher.close();
+}
+
 struct AboutDialog::Impl {
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
@@ -1352,7 +1390,6 @@ struct AboutDialog::Impl {
     bool downloading = false;
     bool installingUpdate = false;
     bool autoCheckOnStartup = true;
-    bool notifyStartupUpdate = false;
     bool downloadAfterCheck = false;
     UpdateSource updateSource = UpdateSource::GitHub;
     uint64_t activeRequest = 0;
@@ -1360,7 +1397,6 @@ struct AboutDialog::Impl {
     std::function<void(bool)> onAutoCheckChanged;
     std::function<void(bool)> onUpdateSourceChanged;
     std::function<bool(const std::wstring&)> onInstallUpdate;
-    std::function<void(const std::wstring&)> onStartupUpdateAvailable;
     std::optional<ReleaseInfo> latestRelease;
     std::shared_ptr<std::atomic_bool> downloadCancel;
     std::wstring downloadedInstallerPath;
@@ -1856,11 +1892,7 @@ struct AboutDialog::Impl {
             runtime_log::writef(L"[action][update] check-result state=%s version=%s source=%s",
                                 updateStateName(result->state), result->version.c_str(),
                                 updateSourceName(updateSource));
-            const bool shouldNotifyStartupUpdate =
-                notifyStartupUpdate && result->state == UpdateState::Available;
             const bool shouldDownloadAfterCheck = downloadAfterCheck;
-            // 一次启动检查只提示一次；用户打开关于页或手动检查不复用这个标记。
-            notifyStartupUpdate = false;
             downloadAfterCheck = false;
             checking = false;
             latestRelease.reset();
@@ -1901,8 +1933,6 @@ struct AboutDialog::Impl {
             if (shouldDownloadAfterCheck && result->state == UpdateState::Available &&
                 latestRelease && !latestRelease->installerUrl.empty())
                 startDownload();
-            if (shouldNotifyStartupUpdate && onStartupUpdateAvailable)
-                onStartupUpdateAvailable(visibleVersion);
             return 0;
         }
         case kMsgDownloadProgress: {
@@ -2163,7 +2193,7 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
                          std::function<void(bool)> onAutoCheckChanged,
                          std::function<void(bool)> onUpdateSourceChanged,
                          std::function<bool(const std::wstring&)> onInstallUpdate,
-                         std::function<void(const std::wstring&)> onStartupUpdateAvailable) {
+                         StartupUpdateCheck* startupCheck) {
     impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者。
     impl_->inst = inst;
     impl_->autoCheckOnStartup = autoCheckOnStartup;
@@ -2171,8 +2201,6 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
     impl_->onAutoCheckChanged = std::move(onAutoCheckChanged);
     impl_->onUpdateSourceChanged = std::move(onUpdateSourceChanged);
     impl_->onInstallUpdate = std::move(onInstallUpdate);
-    impl_->onStartupUpdateAvailable = std::move(onStartupUpdateAvailable);
-    impl_->notifyStartupUpdate = false;
     impl_->downloadAfterCheck = false;
     impl_->checking = false;
     impl_->downloading = false;
@@ -2216,18 +2244,19 @@ bool AboutDialog::create(HINSTANCE inst, HWND parent, bool autoCheckOnStartup,
                                      kMinClientWidthDip, kMinClientHeightDip);
     app_icon::applyWindowIcon(impl_->hwnd);
 
-    // 启动检查受设置控制；AboutDialog::show() 不受此设置影响。
-    if (impl_->autoCheckOnStartup) {
-        impl_->notifyStartupUpdate = true;
-        impl_->startCheck();
+    // 弹窗触发下载时复用启动检查结果；界面仍只在用户打开时创建。
+    if (startupCheck && startupCheck->impl_->source == impl_->updateSource &&
+        startupCheck->impl_->result) {
+        auto result = std::make_unique<UpdatePayload>(std::move(*startupCheck->impl_->result));
+        startupCheck->impl_->result.reset();
+        impl_->activeRequest = result->requestId;
+        impl_->handle(kMsgUpdateReady, 0, reinterpret_cast<LPARAM>(result.release()));
     }
     return true;
 }
 
 void AboutDialog::show(bool downloadUpdate) {
     if (impl_->hwnd) {
-        // 用户已经主动打开关于页，不再把本次检查当成启动通知。
-        impl_->notifyStartupUpdate = false;
         const bool canStartDownload =
             downloadUpdate && !impl_->checking && !impl_->downloading &&
             !impl_->installingUpdate && impl_->downloadedInstallerPath.empty() &&

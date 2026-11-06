@@ -223,6 +223,7 @@ private:
     // 在退出后的重新探测期间保留该状态，窗口恢复显示后由实际显示状态接管。
     bool taskbarEnabledBeforeStopped_ = false;
     std::unique_ptr<AboutDialog> aboutDialog;
+    std::unique_ptr<StartupUpdateCheck> startupUpdateCheck_;
     std::unique_ptr<ManualSearchDialog> manualSearchDialog;
     std::wstring manualSearchTrackKey;
     std::unique_ptr<FontPickerDialog> fontPickerDialog;

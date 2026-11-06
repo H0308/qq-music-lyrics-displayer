@@ -170,6 +170,8 @@ public:
     float offset() const;
     float targetOffset() const { return target_; }
     bool animating() const { return animating_; }
+    // 保留窗口、布局和偏移，释放滚动缓存及借用的设备链引用。
+    void discardDeviceResources();
     void reset();
 
 private:

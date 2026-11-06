@@ -754,6 +754,14 @@ bool CompositedScrollView::tick(WPARAM timer) {
     return true;
 }
 
+void CompositedScrollView::discardDeviceResources() {
+    stop();
+    setVisible(false);
+    renderer_.releaseAll();
+    ready_ = false;
+    cacheTop_ = cacheHeight_ = 0.0f;
+}
+
 void CompositedScrollView::reset() {
     if (parent_ && IsWindow(parent_))
         KillTimer(parent_, timer_);

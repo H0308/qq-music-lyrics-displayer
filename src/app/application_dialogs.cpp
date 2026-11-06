@@ -632,9 +632,6 @@ void App::showSettings() {
             ShowWindow(settingsDialog->hwnd(), SW_RESTORE);
         SetForegroundWindow(settingsDialog->hwnd());
         return;
-    } else {
-        // 启动时窗口已预创建但仍隐藏，打开前同步最新状态快照。
-        refreshSettingsDialog();
     }
     settingsDialog->show();
 }
@@ -671,6 +668,7 @@ void App::onDialogClosed(DialogKind kind) {
 void App::showAbout(bool downloadUpdate) {
     runtime_log::writef(L"[action][dialog] open=about download-update=%d", downloadUpdate ? 1 : 0);
     if (aboutDialog && aboutDialog->isOpen()) {
+        startupUpdateCheck_.reset();
         aboutDialog->show(downloadUpdate);
         return;
     }
@@ -687,10 +685,11 @@ void App::showAbout(bool downloadUpdate) {
                 saveSettings();
             },
             [this](const std::wstring& path) { return launchUpdateInstaller(path); },
-            [this](const std::wstring& version) { showUpdatePrompt(version); })) {
+            startupUpdateCheck_.get())) {
         aboutDialog.reset();
         return;
     }
+    startupUpdateCheck_.reset();
     aboutDialog->show(downloadUpdate);
 }
 

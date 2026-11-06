@@ -4,6 +4,7 @@
 #include "logging/ui_timing.h"
 namespace lyrics_app {
 App::~App() {
+    startupUpdateCheck_.reset();
     // 显示线程可能仍读取频谱原子快照；必须在采样器等成员析构前停止宿主。
     destroyTaskbar();
 }
@@ -42,6 +43,7 @@ void App::requestQuit() {
     if (shutdownRequested_)
         return;
     shutdownRequested_ = true;
+    startupUpdateCheck_.reset();
     flushBackgroundBlurSettingsSave();
     runtimeLogger_.write(L"[lifecycle] quit requested");
     runtimeLogger_.flushSync();
@@ -181,25 +183,12 @@ bool App::initialize(HINSTANCE inst, bool wantTaskbar) {
         runtime_log::writef(L"failed to create tray window");
         return false;
     }
-    // 关于窗口保持隐藏，用于在程序启动后自动检查更新；用户打开关于时会再次检查。
-    aboutDialog = std::make_unique<AboutDialog>();
-    if (!aboutDialog->create(
-            inst, trayHwnd, settings_.autoCheckOnStartup_, settings_.useGiteeUpdateSource_,
-            [this](bool enabled) { setAutoCheckOnStartup(enabled); },
-            [this](bool useGitee) {
-                if (settings_.useGiteeUpdateSource_ == useGitee)
-                    return;
-                settings_.useGiteeUpdateSource_ = useGitee;
-                saveSettings();
-            },
-            [this](const std::wstring& path) { return launchUpdateInstaller(path); },
-            [this](const std::wstring& version) { showUpdatePrompt(version); }))
-        aboutDialog.reset();
-    // 设置窗口预创建（保持隐藏）：把首次打开时的控件构建成本挪到启动阶段；
-    // 关闭后仍会销毁，下一次打开重新创建。
-    settingsDialog = std::make_unique<SettingsDialog>();
-    if (!settingsDialog->create(inst, trayHwnd, currentSettingsState(), buildSettingsActions()))
-        settingsDialog.reset();
+    // 对话框按需创建；启动检查通过主线程队列接收结果，不预创建关于界面。
+    if (settings_.autoCheckOnStartup_) {
+        startupUpdateCheck_ = std::make_unique<StartupUpdateCheck>(
+            settings_.useGiteeUpdateSource_,
+            [this](const std::wstring& version) { showUpdatePrompt(version); });
+    }
     if (wantTaskbar) {
         const TaskbarCreateResult result = createTaskbar(inst);
         if (result == TaskbarCreateResult::Failed) {

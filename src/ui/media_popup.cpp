@@ -654,6 +654,7 @@ struct MediaPopup::Impl {
 
     void releaseDrawingResources() {
         releaseDeviceResources();
+        idleScrollView.discardDeviceResources();
         renderer.discard();
         deviceGeneration = 0;
     }
@@ -2221,7 +2222,8 @@ struct MediaPopup::Impl {
     }
 
     bool render() {
-        if (!hwnd)
+        // 仅打开准备阶段和可见阶段允许创建设备，隐藏后的消息不能重建缓存。
+        if (!hwnd || (!visibility.visible() && !visibility.opening()))
             return false;
         if ((!idleMode && !categoryTransition.active()) || !visibility.visible() ||
             visibility.animating()) {
@@ -3004,7 +3006,7 @@ struct MediaPopup::Impl {
         if (canUseFrostedBackdropOnEitherPage)
             backdropDirty = true;
         if (!render()) {
-            visibility.finishOpen();
+            hideImmediate();
             return;
         }
         const auto rendered = runtime_log::uiTimeMs();
@@ -3132,7 +3134,9 @@ struct MediaPopup::Impl {
         stopQuickExpandTransition();
         categoryHoverEnvelopeActive = false;
         categoryHoverEnvelope = {};
-        idleContentTransition.active = false;
+        idleContentTransition = {};
+        categorySnapshot = {};
+        songTransitionPending = false;
         volumeSliderOn = false;
         volumeSliderT = 0.0f;
         volumeDragging = false;
@@ -3154,6 +3158,8 @@ struct MediaPopup::Impl {
         ShowWindow(hwnd, SW_HIDE);
         renderer.resetRoot();
         renderer.commit();
+        // 关闭动画已经结束；先隐藏窗口并撤除转场，再回收卡片专属资源。
+        releaseAll();
     }
 
     LRESULT handle(UINT msg, WPARAM wp, LPARAM lp) {
@@ -3777,9 +3783,6 @@ void MediaPopup::setEnabled(bool enabled) {
         impl_->enabled = enabled;
         if (!enabled) {
             impl_->hideImmediate();
-            // 媒体卡片是极简模式明确关闭的附加窗口；禁用时连同 DComp/D2D 资源一起释放，
-            // 下次重新启用时由现有 bind/render 路径惰性重建。
-            impl_->releaseAll();
             return;
         }
         if (!impl_->hwnd)

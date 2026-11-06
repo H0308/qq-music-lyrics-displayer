@@ -14,8 +14,11 @@ struct DCompSharedDevice {
     ID3D11Device* d3d = nullptr;
     IDXGIDevice* dxgi = nullptr;
     std::atomic<bool> invalid{false};
+    std::shared_ptr<std::atomic_bool> releasedNormally;
 
     ~DCompSharedDevice() {
+        if (releasedNormally && !invalid && d3d && SUCCEEDED(d3d->GetDeviceRemovedReason()))
+            releasedNormally->store(true, std::memory_order_relaxed);
         if (dxgi)
             dxgi->Release();
         if (d3d)
@@ -37,11 +40,15 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
     static thread_local std::chrono::steady_clock::time_point lastAttempt;
     static thread_local bool attempted = false;
     static thread_local bool throttleLogged = false;
+    // 设备正常回收后再次打开窗口不属于故障重试，不能被两秒限频挡住。
+    static thread_local auto releasedNormally = std::make_shared<std::atomic_bool>(false);
 
     if (auto shared = weak.lock(); shared && !shared->invalid)
         return shared;
 
     const auto now = std::chrono::steady_clock::now();
+    if (releasedNormally->exchange(false, std::memory_order_relaxed))
+        attempted = false;
     if (attempted && now - lastAttempt < kDeviceRecreateInterval) {
         if (!throttleLogged) {
             throttleLogged = true;
@@ -70,6 +77,7 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
     }
 
     weak = shared;
+    shared->releasedNormally = releasedNormally;
     runtime_log::writef(L"[dcomp] thread device created thread=%lu", GetCurrentThreadId());
     return shared;
 }
