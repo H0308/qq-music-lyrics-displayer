@@ -1,6 +1,7 @@
 #pragma once
 #include "ui/lyric_window.h"
 #include "media/smtc_monitor.h"
+#include "model/presentation_update.h"
 struct AppSettings;
 struct PlaybackState;
 
@@ -18,8 +19,7 @@ public:
     const PresentationFrame& frame() const { return frame_; }
     const PresentationFrame& update(const SmtcSnapshot& snap, const AppSettings& settings,
                                     const PlaybackState& playback, const IdleFrameInput& idle,
-                                    bool animateTransition, bool lyricsChanged,
-                                    bool durationOnlyUpdate);
+                                    PresentationUpdate update);
     const PresentationFrame& updateAlbumColor(COLORREF color);
     PlaybackPatch updatePlayback(const SmtcSnapshot& snap);
 

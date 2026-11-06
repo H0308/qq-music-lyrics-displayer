@@ -95,12 +95,14 @@ void fillPresentationFrame(PresentationFrame& frame, const SmtcSnapshot& snap,
 }
 } // namespace
 
-const PresentationFrame&
-PresentationModel::update(const SmtcSnapshot& snap, const AppSettings& settings,
-                          const PlaybackState& playback, const IdleFrameInput& idle,
-                          bool animateTransition, bool lyricsChanged, bool durationOnlyUpdate) {
-    fillPresentationFrame(frame_, snap, animateTransition, revision_ == 0 || lyricsChanged,
-                          durationOnlyUpdate, settings, playback, idle);
+const PresentationFrame& PresentationModel::update(const SmtcSnapshot& snap,
+                                                   const AppSettings& settings,
+                                                   const PlaybackState& playback,
+                                                   const IdleFrameInput& idle,
+                                                   PresentationUpdate update) {
+    fillPresentationFrame(frame_, snap, update.animateTransition,
+                          revision_ == 0 || update.lyricsChanged, update.durationOnlyUpdate,
+                          settings, playback, idle);
     frame_.frameRevision = ++revision_;
     return frame_;
 }

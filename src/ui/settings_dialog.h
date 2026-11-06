@@ -1,6 +1,7 @@
 #pragma once
 
 #include "idle/idle_types.h"
+#include "model/display_types.h"
 #include "ui/fluent_theme.h"
 #include "ui/spectrum_effects.h"
 #include "ui/lyric_effects.h"
@@ -86,7 +87,7 @@ struct SettingsState {
     int lyricAlignment = 0; // 0 左对齐 1 居中 2 右对齐
     bool secondaryEnabled = true;
     bool preferRomanization = false;
-    int secondaryAvailability = 0; // 0 可用 1 检查中 2 当前歌曲无翻译/罗马音
+    SecondaryLyricAvailability secondaryAvailability = SecondaryLyricAvailability::Available;
     bool qqLocalLyricsEnabled = false;
     bool qqLocalLyricsPersistOrder = false;
     std::wstring qqLocalLyricsPath;

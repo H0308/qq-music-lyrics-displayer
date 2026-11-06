@@ -1,6 +1,7 @@
 #pragma once
 #include <dwrite.h>
 #include <wrl/client.h>
+#include "ui/font_style.h"
 #include <string>
 #include <vector>
 struct VerticalLyricPart {
@@ -17,6 +18,12 @@ struct LyricTextInput {
     bool doubleLine = false;
     bool vertical = false;
     float verticalWidth = 0.0f;
+};
+struct LyricFontSizes {
+    float title{}, artist{}, lyric{}, next{}, secondary{};
+};
+struct SongTextMetrics {
+    float titleWidth{}, titleHeight{}, artistWidth{}, artistHeight{};
 };
 struct LyricTextMetrics {
     float width = 0, height = 0;
@@ -52,9 +59,19 @@ public:
         std::vector<VerticalLyricPart> verticalLyricParts_;
         std::vector<VerticalLyricPart> outgoingVerticalLyricParts_;
     };
-    // 协调层在重建或移交旧行时使用写入端；绘制组件接收只读快照。
-    Resources& resources() { return resources_; }
+    // 绘制侧只借用资源；创建、替换和释放统一由排版组件执行。
     const Resources& resources() const { return resources_; }
+    void recreateLyricFormats(const std::wstring& family, LyricFontStyle style,
+                              const LyricFontSizes& sizes);
+    void recreateClockFormats(const std::wstring& family, LyricFontStyle style, float timeSize,
+                              float dateSize);
+    void createDragPreviewFormat();
+    bool ensureResourceFormat(const std::wstring& family, LyricFontStyle style, float size);
+    void resetResourceFormat() { resources_.fmtResource_.Reset(); }
+    SongTextMetrics buildSongInfo(const std::wstring& title, const std::wstring& artist,
+                                  bool visible);
+    void clearCurrentContent();
+    void clearNextContent() { resources_.nextLyricLayout_.Reset(); }
     LyricTextMetrics buildContent(const LyricTextInput& input);
     void retainCurrentForTransition(bool doubleLine);
     void releaseOutgoing();
@@ -81,6 +98,9 @@ public:
                                         float& height);
 
 private:
+    void createFormat(Microsoft::WRL::ComPtr<IDWriteTextFormat>& format, const std::wstring& family,
+                      LyricFontStyle style, float size, DWRITE_FONT_WEIGHT weight,
+                      DWRITE_TEXT_ALIGNMENT alignment, const wchar_t* locale = L"zh-cn");
     IDWriteFactory* factory_ = nullptr; // renderer 持有，仅排版调用期间借用
     Resources resources_;
 };

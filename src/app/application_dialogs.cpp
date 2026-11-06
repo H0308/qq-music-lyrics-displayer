@@ -22,7 +22,7 @@ void App::addIdleApp(const std::wstring& path) {
     runtime_log::writef(L"[action][idle-entry] app-added path=%s", path.c_str());
     saveSettings();
     refreshSettingsDialog();
-    publishPresentationFrame(monitor.snapshot(), false, true);
+    publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
 }
 
 void App::editIdleApp(int index) {
@@ -52,7 +52,7 @@ void App::editIdleApp(int index) {
                             app.name.c_str());
         saveSettings();
         refreshSettingsDialog();
-        publishPresentationFrame(monitor.snapshot(), false, true);
+        publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
     });
     idleAppNameDialog = std::move(dialog);
     idleAppNameDialog->show();
@@ -79,7 +79,7 @@ void App::editIdleWelcome() {
         runtime_log::writef(L"[action][idle-quote] custom-welcome len=%llu",
                             static_cast<unsigned long long>(normalized.size()));
         saveSettings();
-        publishPresentationFrame(monitor.snapshot(), false, true);
+        publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
     });
     idleWelcomeDialog = std::move(dialog);
     idleWelcomeDialog->show();
@@ -93,7 +93,7 @@ void App::removeIdleApp(int index) {
     settings_.idleApps_.erase(settings_.idleApps_.begin() + index);
     saveSettings();
     refreshSettingsDialog();
-    publishPresentationFrame(monitor.snapshot(), false, true);
+    publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
 }
 
 void App::reorderIdleApps(int fromIndex, int toIndex) {
@@ -114,7 +114,7 @@ void App::reorderIdleApps(int fromIndex, int toIndex) {
                         toIndex, path.c_str());
     saveSettings();
     refreshSettingsDialog();
-    publishPresentationFrame(monitor.snapshot(), false, true);
+    publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
 }
 
 void App::pickIdleApp() {

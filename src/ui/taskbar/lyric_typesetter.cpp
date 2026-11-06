@@ -1,5 +1,6 @@
 #include "ui/taskbar/lyric_typesetter.h"
 #include <algorithm>
+#include "ui/fluent_theme.h"
 #include <cwctype>
 #include <utility>
 bool LyricTypesetter::isCjkVerticalCharacter(wchar_t ch) {
@@ -412,4 +413,103 @@ LyricTextMetrics LyricTypesetter::buildContent(const LyricTextInput& input) {
         create(input.next, resources_.fmtNextLyric_.Get(), resources_.nextLyricLayout_,
                metrics.nextWidth, metrics.nextHeight);
     return metrics;
+}
+
+void LyricTypesetter::createFormat(Microsoft::WRL::ComPtr<IDWriteTextFormat>& format,
+                                   const std::wstring& family, LyricFontStyle style, float size,
+                                   DWRITE_FONT_WEIGHT weight, DWRITE_TEXT_ALIGNMENT alignment,
+                                   const wchar_t* locale) {
+    if (!factory_)
+        return;
+    format.Reset();
+    const auto effectiveWeight = isBoldFontStyle(style) ? DWRITE_FONT_WEIGHT_BOLD : weight;
+    factory_->CreateTextFormat(family.c_str(), nullptr, effectiveWeight, dwriteStyleOf(style),
+                               DWRITE_FONT_STRETCH_NORMAL, size, locale,
+                               format.ReleaseAndGetAddressOf());
+    if (format) {
+        format->SetTextAlignment(alignment);
+        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        format->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        fluent::applyUiFontFallback(format.Get());
+    }
+}
+
+void LyricTypesetter::recreateLyricFormats(const std::wstring& family, LyricFontStyle style,
+                                           const LyricFontSizes& sizes) {
+    createFormat(resources_.fmtTitle_, family, style, sizes.title, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                 DWRITE_TEXT_ALIGNMENT_LEADING);
+    createFormat(resources_.fmtArtist_, family, style, sizes.artist, DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_TEXT_ALIGNMENT_LEADING);
+    createFormat(resources_.fmtLyric_, family, style, sizes.lyric, DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_TEXT_ALIGNMENT_LEADING);
+    createFormat(resources_.fmtNextLyric_, family, style, sizes.next, DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_TEXT_ALIGNMENT_LEADING);
+    createFormat(resources_.fmtSecondary_, family, style, sizes.secondary,
+                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING);
+}
+
+void LyricTypesetter::recreateClockFormats(const std::wstring& family, LyricFontStyle style,
+                                           float timeSize, float dateSize) {
+    createFormat(resources_.fmtClockTime_, family, style, timeSize, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                 DWRITE_TEXT_ALIGNMENT_CENTER, L"");
+    createFormat(resources_.fmtClockDate_, family, style, dateSize, DWRITE_FONT_WEIGHT_NORMAL,
+                 DWRITE_TEXT_ALIGNMENT_CENTER, L"");
+    if (resources_.fmtClockTime_)
+        resources_.fmtClockTime_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (resources_.fmtClockDate_)
+        resources_.fmtClockDate_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+}
+
+void LyricTypesetter::createDragPreviewFormat() {
+    createFormat(resources_.fmtDragPreview_, fluent::uiFontFamily(), LyricFontStyle::Normal, 11.0f,
+                 DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+    if (resources_.fmtDragPreview_)
+        resources_.fmtDragPreview_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+}
+
+bool LyricTypesetter::ensureResourceFormat(const std::wstring& family, LyricFontStyle style,
+                                           float size) {
+    if (!resources_.fmtResource_) {
+        createFormat(resources_.fmtResource_, family, style, size, dwriteWeightOf(style),
+                     DWRITE_TEXT_ALIGNMENT_LEADING);
+        if (resources_.fmtResource_)
+            resources_.fmtResource_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    return resources_.fmtResource_ != nullptr;
+}
+
+SongTextMetrics LyricTypesetter::buildSongInfo(const std::wstring& title,
+                                               const std::wstring& artist, bool visible) {
+    resources_.titleLayout_.Reset();
+    resources_.artistLayout_.Reset();
+    SongTextMetrics result;
+    if (!factory_ || !visible)
+        return result;
+    auto build = [&](const std::wstring& text, IDWriteTextFormat* format,
+                     Microsoft::WRL::ComPtr<IDWriteTextLayout>& layout, float& width,
+                     float& height) {
+        if (text.empty() || !format)
+            return;
+        factory_->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format,
+                                   100000.0f, 40.0f, layout.ReleaseAndGetAddressOf());
+        if (layout) {
+            DWRITE_TEXT_METRICS metrics{};
+            layout->GetMetrics(&metrics);
+            width = metrics.width;
+            height = metrics.height;
+        }
+    };
+    build(title, resources_.fmtTitle_.Get(), resources_.titleLayout_, result.titleWidth,
+          result.titleHeight);
+    build(artist, resources_.fmtArtist_.Get(), resources_.artistLayout_, result.artistWidth,
+          result.artistHeight);
+    return result;
+}
+
+void LyricTypesetter::clearCurrentContent() {
+    resources_.lyricLayout_.Reset();
+    resources_.verticalLyricLayout_.Reset();
+    resources_.verticalLyricParts_.clear();
+    resources_.secondaryLayout_.Reset();
+    clearNextContent();
 }

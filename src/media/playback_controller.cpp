@@ -48,10 +48,10 @@ const wchar_t* statusName(PlaybackStatus s) {
 }
 } // namespace
 
-PlaybackController::PlaybackController(std::function<SmtcSnapshot()> snapshot,
-                                       std::function<void(const SmtcSnapshot&, bool, bool)> publish,
-                                       std::function<void(const SmtcSnapshot&)> logState,
-                                       std::function<void()> coverChanged)
+PlaybackController::PlaybackController(
+    std::function<SmtcSnapshot()> snapshot,
+    std::function<void(const SmtcSnapshot&, PresentationUpdate)> publish,
+    std::function<void(const SmtcSnapshot&)> logState, std::function<void()> coverChanged)
     : snapshot_(std::move(snapshot)), publish_(std::move(publish)), logState_(std::move(logState)),
       coverChanged_(std::move(coverChanged)) {}
 
@@ -184,7 +184,7 @@ void PlaybackController::applyManualLyrics(LyricResult result, const SmtcSnapsho
     state_.lyricLoading_ = false;
     updateLyricCapabilities(state_.currentLyrics_);
     logLyricsCreated(L"manual");
-    publish_(snap, true, true);
+    publish_(snap, {.animateTransition = true, .lyricsChanged = true, .refreshSettings = true});
     runtime_log::writef(L"[lyric] manual override applied: %s", state_.currentKey.c_str());
     logState_(snap);
     // 手动选择后同样兜底封面；网易云不依赖手动候选，仍使用当前播放歌曲 ID。
@@ -382,7 +382,7 @@ void PlaybackController::onLyricReady(std::unique_ptr<LyricPayload> payload) {
             // 时长过滤，不能据此判定「暂无歌词」。保持「加载中」，等新时间线
             // 可信后由 onSmtcChanged 的重试分支用正确时长重发。
             state_.lyricLoading_ = true;
-            publish_(snap, false, false);
+            publish_(snap, {.refreshSettings = true});
             logState_(snap);
             return;
         }
@@ -399,7 +399,7 @@ void PlaybackController::onLyricReady(std::unique_ptr<LyricPayload> payload) {
         else
             requestQqCoverInfoFallback(snap);
     }
-    publish_(snap, true, true);
+    publish_(snap, {.animateTransition = true, .lyricsChanged = true, .refreshSettings = true});
     logState_(snap);
 }
 
@@ -432,7 +432,7 @@ void PlaybackController::onCoverReady(std::unique_ptr<CoverPayload> payload) {
     state_.lastCover_ = payload->cover;
     state_.lastCoverSource_ = payload->source;
     logCoverCreated(payload->source, state_.lastCover_);
-    publish_(snap, true, false);
+    publish_(snap, {.animateTransition = true});
     coverChanged_();
     logState_(snap);
 }
@@ -452,5 +452,5 @@ void PlaybackController::reloadCurrentQqLyrics(bool forceOnline, bool forceLocal
     releaseCurrentLyrics();
     state_.lyricLoading_ = true;
     startLyricRequest(snap, forceOnline, forceLocal, persistOrder);
-    publish_(snap, false, true);
+    publish_(snap, {.lyricsChanged = true, .refreshSettings = true});
 }

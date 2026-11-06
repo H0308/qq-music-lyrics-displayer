@@ -1,4 +1,5 @@
 #pragma once
+#include "model/presentation_update.h"
 #include "app/messages.h"
 #include "media/smtc_monitor.h"
 #include "lyric/cover_provider.h"
@@ -61,7 +62,7 @@ struct TrackChange {
 class PlaybackController {
 public:
     PlaybackController(std::function<SmtcSnapshot()> snapshot,
-                       std::function<void(const SmtcSnapshot&, bool, bool)> publish,
+                       std::function<void(const SmtcSnapshot&, PresentationUpdate)> publish,
                        std::function<void(const SmtcSnapshot&)> logState,
                        std::function<void()> coverChanged);
     const PlaybackState& state() const { return state_; }
@@ -97,7 +98,7 @@ private:
     DWORD mainThread_ = GetCurrentThreadId();
     HWND timerWindow_ = nullptr;
     std::function<SmtcSnapshot()> snapshot_;
-    std::function<void(const SmtcSnapshot&, bool, bool)> publish_;
+    std::function<void(const SmtcSnapshot&, PresentationUpdate)> publish_;
     std::function<void(const SmtcSnapshot&)> logState_;
     std::function<void()> coverChanged_;
     LyricProvider provider;

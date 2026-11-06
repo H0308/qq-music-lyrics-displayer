@@ -280,7 +280,7 @@ void App::launchIdleApp(const std::wstring& path) {
             }
         }
         refreshSettingsDialog();
-        publishPresentationFrame(monitor.snapshot(), false, true);
+        publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
     }
 }
 

@@ -188,19 +188,19 @@ private:
     DWORD mainThread = GetCurrentThreadId();
     runtime_log::RuntimeLogger runtimeLogger_;
     SmtcMonitor monitor;
-    PlaybackController playback_{
-        [this] { return monitor.snapshot(); },
-        [this](const SmtcSnapshot& snap, bool animate, bool lyricsChanged) {
-            publishPresentationFrame(snap, animate, lyricsChanged);
-        },
-        [this](const SmtcSnapshot& snap) { updateRuntimeLogState(snap); },
-        [this] { tryExtractAlbumColor(); }};
-    IdleController idle_{settings_,
-                         [this] { saveSettings(); },
-                         [this] { publishPresentationFrame(monitor.snapshot(), false, true); },
-                         [this] { refreshSettingsDialog(); },
-                         [this] { return monitor.snapshot().sessionAlive; },
-                         [this] { return taskbarVertical_; }};
+    PlaybackController playback_{[this] { return monitor.snapshot(); },
+                                 [this](const SmtcSnapshot& snap, PresentationUpdate update) {
+                                     publishPresentationFrame(snap, update);
+                                 },
+                                 [this](const SmtcSnapshot& snap) { updateRuntimeLogState(snap); },
+                                 [this] { tryExtractAlbumColor(); }};
+    IdleController idle_{
+        settings_,
+        [this] { saveSettings(); },
+        [this] { publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true}); },
+        [this] { refreshSettingsDialog(); },
+        [this] { return monitor.snapshot().sessionAlive; },
+        [this] { return taskbarVertical_; }};
     AppVolumeController appVolume_;           // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;           // 最近推送给宿主的音量状态（去重用）
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
@@ -308,7 +308,9 @@ private:
     // 设置变更只有一个 UI 同步入口，避免每个动作都重复判断窗口生命周期。
     void refreshSettingsDialog(bool onlyWhenOpen = false);
 
-    void applySecondaryLyricMode();
+    void enforceSecondaryLyricConstraint();
+
+    void commitAppearanceSettings();
 
     void logSettingBool(const wchar_t* name, bool value);
 
@@ -491,11 +493,9 @@ private:
     void pickIdleApp();
 
     const PresentationFrame& preparePresentationFrame(const SmtcSnapshot& snap,
-                                                      bool animateTransition, bool lyricsChanged,
-                                                      bool durationOnlyUpdate = false);
+                                                      PresentationUpdate update);
 
-    void publishPresentationFrame(const SmtcSnapshot& snap, bool animateTransition,
-                                  bool lyricsChanged = false, bool durationOnlyUpdate = false);
+    void publishPresentationFrame(const SmtcSnapshot& snap, PresentationUpdate update);
 
     void armTaskbarAutoRestore();
 

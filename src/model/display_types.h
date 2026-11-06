@@ -4,6 +4,7 @@
 
 // 设置与显示共同使用的值类型，不依赖窗口或渲染器。
 inline constexpr wchar_t kDefaultUiFontFamily[] = L"Noto Sans SC";
+enum class SecondaryLyricAvailability { Available, Loading, Unavailable };
 enum class LyricFontStyle {
     Normal,
     Bold,

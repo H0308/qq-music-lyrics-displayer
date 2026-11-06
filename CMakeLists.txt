@@ -55,6 +55,11 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 add_executable(QQMusicLyric
     src/main.cpp
     src/settings/taskbar_appearance.cpp
+    src/settings/display_rules.cpp
+    src/ui/taskbar/resource_panel.cpp
+    src/ui/taskbar/cover_image.cpp
+    src/ui/settings/lyric_section.cpp
+    src/ui/settings/spectrum_section.cpp
     src/ui/taskbar/spectrum_renderer.cpp
     src/ui/taskbar/placement_probe.cpp
     src/ui/taskbar/placement.cpp

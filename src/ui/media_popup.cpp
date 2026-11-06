@@ -1,4 +1,6 @@
 #include "media_popup.h"
+#include "ui/media_popup/visibility.h"
+#include "ui/media_popup/transitions.h"
 
 #include "util/com_release.h"
 
@@ -231,10 +233,7 @@ float backdropLuminance(const void* pixels, int width, int height) {
 } // namespace
 
 struct MediaPopup::Impl {
-    enum class PopupPage {
-        Media,
-        Idle,
-    };
+    using PopupPage = media_popup_detail::Page;
 
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
@@ -250,9 +249,7 @@ struct MediaPopup::Impl {
     bool triggerOnHover = true;
     bool anchorHover = false;
     bool popupHover = false;
-    bool popupVisible = false;
-    bool closing = false;
-    bool entering = false;
+    PopupVisibility visibility;
     bool deferredRender = false;
     int presentationUpdateDepth = 0;
     bool presentationUpdatePending = false;
@@ -278,34 +275,14 @@ struct MediaPopup::Impl {
     UINT scrollTimerInterval = 0; // kScrollTimer 当前实际间隔，用于按驱动目的切换帧率
     bool clientAnimations = true;
     bool songTransitionPending = false;
-    bool categoryTransitionActive = false;
-    PopupPage categoryTransitionFrom = PopupPage::Media;
-    IdlePresentation categoryTransitionIdle;
-    OverlayMediaInfo categoryTransitionMedia;
-    float categoryTransitionTitleScrollOffset = 0.0f;
-    float categoryTransitionArtistScrollOffset = 0.0f;
-    float categoryTransitionIdleQuoteScrollOffset = 0.0f;
-    float categoryTransitionIdleQuoteSourceScrollOffset = 0.0f;
-    float categoryTransitionIdleScrollOffset = 0.0f;
-    int categoryTransitionDirection = 1;
-    // 转场内容是否已承载到两个 DComp 合成层上；承载后横向滑动由合成器
-    // 按刷新率执行（与面板滑出动画同一机制），UI 线程不再逐帧重绘。
-    bool categoryLayersActive = false;
-    // 快速打开展开/收起是否正由 DComp 合成层呈现（一言区、展开态标题/Tab、
-    // 收起态标题和列表主体四层，位移与裁剪由合成器执行）；进行中交换链不再
-    // 绘制空闲页内容。
-    bool quickExpandTransitionActive = false;
-    bool quickExpandLayersBuilt = false;
-    // 卡片高度变化时，旧卡片和新卡片的屏幕位置可能不同。这个区域只用于
-    // 转场后的鼠标连续性判断，不参与绘制，也不会扩大媒体卡片的可见外观。
+    media_popup_detail::LayerTransition categoryTransition;
+    media_popup_detail::PageSnapshot categorySnapshot;
+    media_popup_detail::LayerTransition quickExpandTransition;
+    // 只用于卡片高度变化后的鼠标连续性判断，不扩大可见范围。
     bool categoryHoverEnvelopeActive = false;
     RECT categoryHoverEnvelope{};
-    bool idleContentTransitionActive = false;
-    IdlePresentation idleContentTransitionFrom;
-    ULONGLONG idleContentTransitionStartMs = 0;
-    bool idleQuickExpanded = false;
-    bool idleQuickExpandOpening = false;
-    float idleQuickExpandT = 0.0f;
+    media_popup_detail::IdleContentTransition idleContentTransition;
+    media_popup_detail::QuickExpansion quickExpansion;
     bool dynamicBackgroundDirty = true;
     int cardScreenX = 0;
     int cardScreenY = 0;
@@ -468,16 +445,7 @@ struct MediaPopup::Impl {
     }
 
     float idleContentTransitionProgress() const {
-        if (!idleContentTransitionActive || idleContentTransitionStartMs == 0)
-            return 1.0f;
-        const ULONGLONG now = GetTickCount64();
-        const float linear = std::clamp(
-            static_cast<float>(now >= idleContentTransitionStartMs
-                                   ? now - idleContentTransitionStartMs
-                                   : 0) /
-                kInnerContentTransitionMs,
-            0.0f, 1.0f);
-        return linear * linear * (3.0f - 2.0f * linear);
+        return idleContentTransition.progress(GetTickCount64(), kInnerContentTransitionMs);
     }
 
     float idleQuickExpandProgress(const IdlePresentation& content) const {
@@ -485,7 +453,7 @@ struct MediaPopup::Impl {
             return 0.0f;
         if (!content.showText)
             return 1.0f;
-        const float linear = std::clamp(idleQuickExpandT, 0.0f, 1.0f);
+        const float linear = std::clamp(quickExpansion.progress, 0.0f, 1.0f);
         return linear * linear * (3.0f - 2.0f * linear);
     }
 
@@ -565,8 +533,8 @@ struct MediaPopup::Impl {
                                          const IdlePresentation& content) const {
         // 收起时按钮仍贴右对齐；随着内容向上展开，再同步向左让出返回箭头
         // 的槽位。页面转场期间沿用当前展开进度，避免旧页快照横向跳位。
-        const bool reservePageArrowSlot = idleReturnArrowVisible(content) ||
-                                          categoryTransitionActive;
+        const bool reservePageArrowSlot =
+            idleReturnArrowVisible(content) || categoryTransition.active();
         const float reserveProgress = reservePageArrowSlot
                                           ? idleQuickExpandProgress(content)
                                           : 0.0f;
@@ -823,7 +791,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kCategoryTimer);
         KillTimer(hwnd, kCopyFeedbackTimer);
         scrollTimerRunning = false;
-        entering = false;
+        visibility.finishOpen();
         deferredRender = false;
     }
 
@@ -831,24 +799,21 @@ struct MediaPopup::Impl {
     // 收尾定时器。多次调用安全；调用方负责在必要时把最终交换链帧提交后，
     // 再提交层的移除。两个转场共用同一组临时合成层，不会同时激活（切换按钮
     // 在页面互切期间禁点，setPage 也会先停掉另一个转场）。
-    void stopLayerTransition(bool& transitionActive, bool& layersActive, UINT_PTR timer) {
-        transitionActive = false;
+    void stopLayerTransition(media_popup_detail::LayerTransition& transition, UINT_PTR timer) {
+        const bool hadLayers = transition.hasLayers();
+        transition.reset();
         deferredPositionMs = -1;
-        if (layersActive) {
-            layersActive = false;
+        if (hadLayers) {
             renderer.clearLyricTransitionLayers();
         }
         if (hwnd)
             KillTimer(hwnd, timer);
     }
 
-    void stopCategoryTransition() {
-        stopLayerTransition(categoryTransitionActive, categoryLayersActive, kCategoryTimer);
-    }
+    void stopCategoryTransition() { stopLayerTransition(categoryTransition, kCategoryTimer); }
 
     void stopQuickExpandTransition() {
-        stopLayerTransition(quickExpandTransitionActive, quickExpandLayersBuilt,
-                            kIdleQuickExpandTimer);
+        stopLayerTransition(quickExpandTransition, kIdleQuickExpandTimer);
     }
 
     void releaseDeviceResources() {
@@ -1158,7 +1123,7 @@ struct MediaPopup::Impl {
             return true;
         // 页面互切不改变窗口后方的场景；已有快照时直接复用，即使其他设置
         // 把 dirty 标记置上，也不能在可见转场中通过隐藏窗口重新抓屏。
-        if (categoryTransitionActive && backdropBmp && lastBackdropLuminance >= 0.0f) {
+        if (categoryTransition.active() && backdropBmp && lastBackdropLuminance >= 0.0f) {
             backdropDirty = false;
             return true;
         }
@@ -1297,9 +1262,9 @@ struct MediaPopup::Impl {
             stopCategoryTransition();
             categoryHoverEnvelopeActive = false;
             categoryHoverEnvelope = {};
-            idleContentTransitionActive = false;
-            idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
-            idleQuickExpandOpening = false;
+            idleContentTransition.active = false;
+            quickExpansion.progress = quickExpansion.expanded ? 1.0f : 0.0f;
+            quickExpansion.opening = false;
             stopQuickExpandTransition();
         }
     }
@@ -1473,11 +1438,11 @@ struct MediaPopup::Impl {
         const bool idleSourceOverflow = idleQuoteSourceWidth > idleAreaWidth;
         const bool idleOverflow = idleQuoteOverflow || idleSourceOverflow;
         const bool mediaOverflow = titleWidth > areaWidth || artistWidth > areaWidth;
-        const bool transitionDriving = idleContentTransitionActive;
+        const bool transitionDriving = idleContentTransition.active;
         const bool textDriving = transitionDriving || (idleMode && idleOverflow) ||
                                  (!idleMode && available && media.playing && mediaOverflow);
         const bool petDriving = !idleMode && available && pet.animating();
-        const bool shouldRun = popupVisible && !entering && !closing && enabled &&
+        const bool shouldRun = visibility.visible() && !visibility.animating() && enabled &&
                                clientAnimations && (textDriving || petDriving);
         if (shouldRun) {
             // 短转场由这个定时器逐帧驱动，需要 60fps 级别才平滑；
@@ -1905,8 +1870,8 @@ struct MediaPopup::Impl {
 
         // 复制和返回操作放在同一排，二者之间固定留出 8 DIP，避免悬浮底互相覆盖。
         // 页面互切时箭头可能暂时不绘制，但它的槽位仍要保留，避免复制按钮横向跳动。
-        const bool reservePageArrowSlot = idleReturnArrowVisible(content) ||
-                                          categoryTransitionActive;
+        const bool reservePageArrowSlot =
+            idleReturnArrowVisible(content) || categoryTransition.active();
         const float copyRight = reservePageArrowSlot ? w - 52.0f : w - 16.0f;
         const D2D1_RECT_F localCopy =
             D2D1::RectF(copyRight - 32.0f, 7.0f, copyRight, 39.0f);
@@ -1965,10 +1930,8 @@ struct MediaPopup::Impl {
 
         // 收起状态提示向上展开，展开状态提示向下收起。
         drawVerticalChevron(
-            rt,
-            D2D1::Point2F((local.left + local.right) * 0.5f,
-                          (local.top + local.bottom) * 0.5f),
-            6.5f, brushSecondary, !idleQuickExpanded);
+            rt, D2D1::Point2F((local.left + local.right) * 0.5f, (local.top + local.bottom) * 0.5f),
+            6.5f, brushSecondary, !quickExpansion.expanded);
     }
 
     void drawIdleQuickTabs(ID2D1DeviceContext* rt, float w, float top, float progress,
@@ -2238,12 +2201,13 @@ struct MediaPopup::Impl {
         const float progress = idleQuickExpandProgress(content);
         drawIdleQuickTabs(rt, w, idleQuickTabTop(top, progress, content), progress,
                           content, updateHitTest);
-        const bool composited = updateHitTest && popupVisible && idleMode &&
-                                !entering && !closing && !categoryTransitionActive &&
-                                !quickExpandTransitionActive;
+        const bool composited = updateHitTest && visibility.visible() && idleMode &&
+                                !visibility.animating() && !categoryTransition.active() &&
+                                !quickExpandTransition.active();
         if (composited) {
             // 收尾预绘制时保持滚动内容透明，避免它叠在仍可见的转场快照上。
-            idleScrollView.setContentVisible(!categoryLayersActive && !quickExpandLayersBuilt);
+            idleScrollView.setContentVisible(!categoryTransition.hasLayers() &&
+                                             !quickExpandTransition.hasLayers());
             idleScrollView.layout(
                 D2D1::RectF(idleListRect.left, idleListRect.top + cardOriginDip,
                             idleListRect.right, idleListRect.bottom + cardOriginDip),
@@ -2298,10 +2262,10 @@ struct MediaPopup::Impl {
                      D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
                      brushText);
 
-            if (idleContentTransitionActive && !categoryTransitionActive) {
+            if (idleContentTransition.active && !categoryTransition.active()) {
                 const float progress = idleContentTransitionProgress();
                 if (progress >= 1.0f) {
-                    idleContentTransitionActive = false;
+                    idleContentTransition.active = false;
                     drawIdleQuoteUnit(rt, w, idle, true);
                 } else {
                     const float travel = w + 24.0f;
@@ -2314,7 +2278,7 @@ struct MediaPopup::Impl {
                                                             w - 8.0f, transitionBottom),
                                                 D2D1_ANTIALIAS_MODE_ALIASED);
                         rt->SetTransform(D2D1::Matrix3x2F::Translation(oldOffset, cardOriginDip));
-                        drawIdleQuoteUnit(rt, w, idleContentTransitionFrom, false);
+                        drawIdleQuoteUnit(rt, w, idleContentTransition.from, false);
                         rt->SetTransform(D2D1::Matrix3x2F::Translation(newOffset, cardOriginDip));
                         drawIdleQuoteUnit(rt, w, idle, true);
                         rt->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, cardOriginDip));
@@ -2410,9 +2374,9 @@ struct MediaPopup::Impl {
         createMeasuredTextLayout(snapshot.artist, fmtArtist, 40.0f, &snapshotArtistLayout,
                                  snapshotArtistWidth, snapshotArtistHeight);
         drawMediaTitles(rt, w, snapshotTitleLayout, snapshotTitleWidth, snapshotTitleHeight,
-                        categoryTransitionTitleScrollOffset, snapshotArtistLayout,
+                        categorySnapshot.titleScrollOffset, snapshotArtistLayout,
                         snapshotArtistWidth, snapshotArtistHeight,
-                        categoryTransitionArtistScrollOffset);
+                        categorySnapshot.artistScrollOffset);
         drawMediaPet(rt, w);
         drawProgress(rt, w, snapshot);
         for (int i = 0; i < 3; ++i)
@@ -2725,11 +2689,10 @@ struct MediaPopup::Impl {
             drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                      D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
                      brushText);
-            drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout,
-                              snapshotQuoteWidth, snapshotQuoteHeight,
-                              categoryTransitionIdleQuoteScrollOffset, snapshotSourceLayout,
-                              snapshotSourceWidth, snapshotSourceHeight,
-                              categoryTransitionIdleQuoteSourceScrollOffset);
+            drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout, snapshotQuoteWidth,
+                              snapshotQuoteHeight, categorySnapshot.idleQuoteScrollOffset,
+                              snapshotSourceLayout, snapshotSourceWidth, snapshotSourceHeight,
+                              categorySnapshot.idleQuoteSourceScrollOffset);
             drawIdleCopyButton(rt, w, content, false);
             rt->PopAxisAlignedClip();
         }
@@ -2737,7 +2700,7 @@ struct MediaPopup::Impl {
         drawIdleQuickDivider(rt, w, layout.headerTop, content);
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
         const float savedScrollOffset = idleScrollOffset;
-        idleScrollOffset = categoryTransitionIdleScrollOffset;
+        idleScrollOffset = categorySnapshot.idleScrollOffset;
         drawIdleQuickList(rt, w, layout.listTop, content, false);
         idleScrollOffset = savedScrollOffset;
         releaseCom(snapshotQuoteLayout);
@@ -2747,13 +2710,13 @@ struct MediaPopup::Impl {
     void drawPageContent(ID2D1DeviceContext* rt, float w, PopupPage page, bool oldLayer,
                          bool updateHitTest, bool useCachedLayers) {
         if (page == PopupPage::Idle) {
-            if (oldLayer && categoryTransitionFrom == PopupPage::Idle)
-                drawIdleSnapshot(rt, w, categoryTransitionIdle);
+            if (oldLayer && categorySnapshot.from == PopupPage::Idle)
+                drawIdleSnapshot(rt, w, categorySnapshot.idle);
             else
                 drawIdle(rt, w, updateHitTest);
         } else {
-            if (oldLayer && categoryTransitionFrom == PopupPage::Media)
-                drawMediaSnapshot(rt, w, categoryTransitionMedia, useCachedLayers);
+            if (oldLayer && categorySnapshot.from == PopupPage::Media)
+                drawMediaSnapshot(rt, w, categorySnapshot.media, useCachedLayers);
             else
                 drawMediaContent(rt, w, useCachedLayers);
         }
@@ -2839,11 +2802,11 @@ struct MediaPopup::Impl {
         // 页面互切期间，两页内容承载在两个 DComp 合成层上，横向滑动由合成器
         // 按刷新率执行（BeginDraw 前统一启动）；交换链保留上一张完整卡片，不
         // 重绘或提交透明底，UI 线程不再逐帧刷新主卡片。
-        if (categoryTransitionActive)
+        if (categoryTransition.active())
             return;
         // 快速打开展开/收起期间，一言区、标题/Tab、列表主体承载在 DComp 合成层上，
         // 交换链只画卡片底与返回箭头，不重复绘制空闲页内容。
-        if (quickExpandTransitionActive && currentPage() == PopupPage::Idle) {
+        if (quickExpandTransition.active() && currentPage() == PopupPage::Idle) {
             drawPageArrow(rt, w, PopupPage::Idle, false);
             return;
         }
@@ -2864,7 +2827,7 @@ struct MediaPopup::Impl {
                                                     kPopupCornerDip * scale()))
             return false;
         if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
-            drawCardBackground(dc, w, popupHeightDip(), categoryTransitionFrom, false);
+            drawCardBackground(dc, w, popupHeightDip(), categorySnapshot.from, false);
             if (!renderer.endLyricTransitionBackdropDraw(dc))
                 return false;
         } else {
@@ -2877,7 +2840,7 @@ struct MediaPopup::Impl {
             bool oldLayer;
         };
         const LayerJob jobs[2] = {
-            {0, categoryTransitionFrom, true},
+            {0, categorySnapshot.from, true},
             {1, currentPage(), false},
         };
         for (const auto& job : jobs) {
@@ -2896,7 +2859,7 @@ struct MediaPopup::Impl {
         renderer.commit();
         renderer.waitForCommitCompletion();
         const float travel = kCategoryTransitionTravelDip * scale();
-        const float dir = static_cast<float>(categoryTransitionDirection);
+        const float dir = static_cast<float>(categorySnapshot.direction);
         const float durationSec = kCategoryTransitionMs / 1000.0f;
         if (!renderer.showLyricTransitionBackdrop() ||
             !renderer.animateLyricLayerX(0, 0.0f, -dir * travel, baseY, 1.0f, 0.0f,
@@ -2904,7 +2867,7 @@ struct MediaPopup::Impl {
             !renderer.animateLyricLayerX(1, dir * travel, 0.0f, baseY, 0.0f, 1.0f,
                                          durationSec))
             return false;
-        categoryLayersActive = true;
+        categoryTransition.markComposited();
         // 滚动层与转场层共用合成设备，在同一事务中交接，避免重复显示。
         idleScrollView.setContentVisible(false);
         renderer.commit();
@@ -2927,7 +2890,7 @@ struct MediaPopup::Impl {
             return false;
 
         const float s = scale();
-        const bool opening = idleQuickExpanded;
+        const bool opening = quickExpansion.expanded;
         const IdleLayout layout = idleLayout(idle, idleUnitHeight(idle, true));
         const float collapsedHeaderTop = layout.collapsedHeaderTop;
         const float expandedHeaderTop = kIdleQuickExpandedTopDip;
@@ -3009,10 +2972,10 @@ struct MediaPopup::Impl {
         // 收起时下移并淡出；列表主体单独放在层 3，避免图标跟随整层透明度
         // 在转场首尾闪烁。
         if (auto* dc = renderer.beginLyricLayerDraw(1)) {
-            const bool savedExpanded = idleQuickExpanded;
-            const float savedT = idleQuickExpandT;
-            idleQuickExpanded = true;
-            idleQuickExpandT = 1.0f;
+            const bool savedExpanded = quickExpansion.expanded;
+            const float savedT = quickExpansion.progress;
+            quickExpansion.expanded = true;
+            quickExpansion.progress = 1.0f;
             // 保留 BeginDraw 的表面更新偏移，在其上叠加层原点平移
             D2D1_MATRIX_3X2_F baseTransform;
             dc->GetTransform(&baseTransform);
@@ -3020,8 +2983,8 @@ struct MediaPopup::Impl {
                              baseTransform);
             drawIdleQuickHeader(dc, w, expandedHeaderTop, idle, false);
             drawIdleQuickTabs(dc, w, expandedTabTop, 1.0f, idle, false);
-            idleQuickExpanded = savedExpanded;
-            idleQuickExpandT = savedT;
+            quickExpansion.expanded = savedExpanded;
+            quickExpansion.progress = savedT;
             if (!renderer.endLyricLayerDraw(1, dc))
                 return false;
         } else {
@@ -3031,17 +2994,17 @@ struct MediaPopup::Impl {
         // 层 2：收起态标题/按钮。它与层 1 使用相同的垂直轨迹，但反向交叉淡入，
         // 使收起动画的最后一帧已经包含最终静态态的标题和按钮，避免撤层时补画闪烁。
         if (auto* dc = renderer.beginLyricLayerDraw(2)) {
-            const bool savedExpanded = idleQuickExpanded;
-            const float savedT = idleQuickExpandT;
-            idleQuickExpanded = false;
-            idleQuickExpandT = 0.0f;
+            const bool savedExpanded = quickExpansion.expanded;
+            const float savedT = quickExpansion.progress;
+            quickExpansion.expanded = false;
+            quickExpansion.progress = 0.0f;
             D2D1_MATRIX_3X2_F baseTransform;
             dc->GetTransform(&baseTransform);
             dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -collapsedButtonTop) *
                              baseTransform);
             drawIdleQuickHeader(dc, w, collapsedHeaderTop, idle, false);
-            idleQuickExpanded = savedExpanded;
-            idleQuickExpandT = savedT;
+            quickExpansion.expanded = savedExpanded;
+            quickExpansion.progress = savedT;
             if (!renderer.endLyricLayerDraw(2, dc))
                 return false;
         } else {
@@ -3052,23 +3015,23 @@ struct MediaPopup::Impl {
         // 原点放在列表顶部，因此视觉层可以从收起态列表顶平滑移动到展开态列表顶，
         // 且整个过程保持不透明，避免图标在交换链清空或层淡出时短暂消失。
         if (auto* dc = renderer.beginLyricLayerDraw(3)) {
-            const bool savedExpanded = idleQuickExpanded;
-            const float savedT = idleQuickExpandT;
+            const bool savedExpanded = quickExpansion.expanded;
+            const float savedT = quickExpansion.progress;
             const D2D1_RECT_F savedListRect = idleListRect;
             const D2D1_RECT_F savedScrollTrackRect = idleScrollTrackRect;
             const D2D1_RECT_F savedScrollThumbRect = idleScrollThumbRect;
             const float savedScrollMax = idleScrollMax;
             const float savedScrollOffset = idleScrollOffset;
-            idleQuickExpanded = true;
-            idleQuickExpandT = 1.0f;
+            quickExpansion.expanded = true;
+            quickExpansion.progress = 1.0f;
             layoutIdleList(w, expandedListTop, &idle);
             D2D1_MATRIX_3X2_F baseTransform;
             dc->GetTransform(&baseTransform);
             dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, -expandedListTop) *
                              baseTransform);
             drawIdleQuickListContent(dc, w, idle);
-            idleQuickExpanded = savedExpanded;
-            idleQuickExpandT = savedT;
+            quickExpansion.expanded = savedExpanded;
+            quickExpansion.progress = savedT;
             idleListRect = savedListRect;
             idleScrollTrackRect = savedScrollTrackRect;
             idleScrollThumbRect = savedScrollThumbRect;
@@ -3119,7 +3082,7 @@ struct MediaPopup::Impl {
                 (opening ? collapsedListHeight : expandedListHeight) * s,
                 (opening ? expandedListHeight : collapsedListHeight) * s, durationSec))
             return false;
-        quickExpandLayersBuilt = true;
+        quickExpandTransition.markComposited();
         // 原列表不能留在移动快照上方；与动画启动一起提交隐藏操作。
         idleScrollView.setContentVisible(false);
         renderer.commit();
@@ -3129,15 +3092,16 @@ struct MediaPopup::Impl {
     bool render() {
         if (!hwnd)
             return false;
-        if ((!idleMode && !categoryTransitionActive) || !popupVisible || entering || closing) {
+        if ((!idleMode && !categoryTransition.active()) || !visibility.visible() ||
+            visibility.animating()) {
             idleScrollOffset = idleScrollView.offset();
             idleScrollView.stop();
             idleScrollView.setVisible(false);
         }
         // 合成层已经覆盖卡片时，任何额外的交换链 Present 都可能把透明底单独
         // 推给合成器；状态会在转场收尾时统一预绘制并交接。
-        if ((categoryTransitionActive && categoryLayersActive) ||
-            (quickExpandTransitionActive && quickExpandLayersBuilt))
+        if ((categoryTransition.active() && categoryTransition.hasLayers()) ||
+            (quickExpandTransition.active() && quickExpandTransition.hasLayers()))
             return true;
         if (presentationUpdateDepth > 0) {
             presentationUpdatePending = true;
@@ -3170,21 +3134,19 @@ struct MediaPopup::Impl {
         if (!createResources())
             return false;
         const bool categoryTransitionNeedsDynamicBackground =
-            categoryTransitionActive &&
-            (dynamicBackgroundEnabledForPage(categoryTransitionFrom) ||
+            categoryTransition.active() &&
+            (dynamicBackgroundEnabledForPage(categorySnapshot.from) ||
              dynamicBackgroundEnabledForPage(currentPage()));
         if (categoryTransitionNeedsDynamicBackground)
             createDynamicBackgroundResources(true);
         else if (dynamicBackgroundEnabled())
             createDynamicBackgroundResources();
         const bool categoryTransitionNeedsBackdrop =
-            categoryTransitionActive &&
-            (frostedBackgroundActiveForPage(categoryTransitionFrom) ||
-             frostedBackgroundActiveForPage(currentPage()));
+            categoryTransition.active() && (frostedBackgroundActiveForPage(categorySnapshot.from) ||
+                                            frostedBackgroundActiveForPage(currentPage()));
         const bool prewarmBackdrop =
-            !popupVisible &&
-            (frostedBackgroundActiveForPage(PopupPage::Media) ||
-             frostedBackgroundActiveForPage(PopupPage::Idle));
+            !visibility.visible() && (frostedBackgroundActiveForPage(PopupPage::Media) ||
+                                      frostedBackgroundActiveForPage(PopupPage::Idle));
         if (frostedBackgroundActive() || categoryTransitionNeedsBackdrop || prewarmBackdrop)
             captureBackdrop(!frostedBackgroundActive() &&
                             (categoryTransitionNeedsBackdrop || prewarmBackdrop));
@@ -3193,8 +3155,7 @@ struct MediaPopup::Impl {
             decodeCover();
         if (sourceIconDirty)
             decodeSourceIcon();
-        if (idleMode ||
-            (categoryTransitionActive && categoryTransitionFrom == PopupPage::Idle)) {
+        if (idleMode || (categoryTransition.active() && categorySnapshot.from == PopupPage::Idle)) {
             if (idleMode)
                 buildIdleTextLayout();
             decodeIdleIcons();
@@ -3216,13 +3177,14 @@ struct MediaPopup::Impl {
 
         // 页面互切：把固定圆角底板、两页内容和横向位移动画一次性提交到
         // DComp。主交换链保留上一张完整卡片，切换期间不再清空或 Present。
-        if (categoryTransitionActive && !categoryLayersActive &&
+        if (categoryTransition.active() && !categoryTransition.hasLayers() &&
             !startCategoryLayerTransition(w)) {
             stopCategoryTransition();
         }
-        const bool categoryLayersCoverCard = categoryTransitionActive && categoryLayersActive;
+        const bool categoryLayersCoverCard =
+            categoryTransition.active() && categoryTransition.hasLayers();
         const bool quickExpandLayersCoverCard =
-            quickExpandTransitionActive && quickExpandLayersBuilt;
+            quickExpandTransition.active() && quickExpandTransition.hasLayers();
         if (categoryLayersCoverCard || quickExpandLayersCoverCard) {
             idleScrollView.setVisible(false);
             return true;
@@ -3256,7 +3218,7 @@ struct MediaPopup::Impl {
         // 快速展开的固定背景和内容层已在 startQuickExpandLayerTransition() 中完成
         // 两段提交并等待表面进入合成树；这里直接 Present 基准帧，避免再插入一批
         // 背景/内容交接命令。
-        if (quickExpandTransitionActive && !quickExpandLayersBuilt &&
+        if (quickExpandTransition.active() && !quickExpandTransition.hasLayers() &&
             !startQuickExpandLayerTransition(w)) {
             stopQuickExpandTransition();
             return render();
@@ -3281,9 +3243,9 @@ struct MediaPopup::Impl {
 
         const bool pending = presentationUpdatePending;
         presentationUpdatePending = false;
-        if (!pending || !popupVisible)
+        if (!pending || !visibility.visible())
             return;
-        if (entering || closing) {
+        if (visibility.animating()) {
             deferredRender = true;
             return;
         }
@@ -3292,28 +3254,28 @@ struct MediaPopup::Impl {
 
     // 层转场收尾（页面互切与快速打开展开/收起共用）：先保留终点层并把最终页面
     // 送入交换链，等待目标帧进入合成器后再撤层，避免撤层与交换链帧交接时闪烁。
-    void finishLayerTransition(bool& transitionActive, bool& layersActive, UINT_PTR timer) {
-        if (!transitionActive)
+    void finishLayerTransition(media_popup_detail::LayerTransition& transition, UINT_PTR timer) {
+        if (!transition.active())
             return;
         // 转场期间挂起的进度先取出来：预绘制必须用冻结的旧值，与层内快照
         // 逐像素一致；撤层交接完成后再应用新进度，表现为正常的一帧跳秒。
         const int64_t pendingPosition = deferredPositionMs;
-        const bool canPrimeTarget = popupVisible && !entering && !closing;
+        const bool canPrimeTarget = visibility.visible() && !visibility.animating();
         if (canPrimeTarget) {
             // 先保留终点层，只结束“转场中”状态，让 render() 把最终卡片画到
             // 交换链。转场层仍在合成树中时，Present/Commit 的交接不会露出空白
             // 的图标区域；等待目标帧真正进入合成器后再撤层。
-            transitionActive = false;
+            transition.retainFinal();
             if (render())
                 renderer.waitForCommitCompletion();
             else
                 renderer.commit();
-            stopLayerTransition(transitionActive, layersActive, timer);
+            stopLayerTransition(transition, timer);
             if (idleMode)
                 idleScrollView.setContentVisible(true);
             renderer.commit();
         } else {
-            stopLayerTransition(transitionActive, layersActive, timer);
+            stopLayerTransition(transition, timer);
             renderer.commit();
         }
         if (pendingPosition >= 0 && positionMs != pendingPosition) {
@@ -3438,7 +3400,7 @@ struct MediaPopup::Impl {
     }
 
     int hitButton(float x, float y) const {
-        if (categoryTransitionActive)
+        if (categoryTransition.active())
             return -1;
         for (int i = 0; i < 3; ++i) {
             if (buttonEnabled(i, media) && contains(buttonRects[i], x, y))
@@ -3448,35 +3410,30 @@ struct MediaPopup::Impl {
     }
 
     bool hitVolumeIcon(float x, float y) const {
-        return !categoryTransitionActive &&
-               currentPage() == PopupPage::Media &&
+        return !categoryTransition.active() && currentPage() == PopupPage::Media &&
                volume.available && contains(volumeIconRect, x, y);
     }
 
     bool hitVolumeSlider(float x, float y) const {
         // 展开过半才允许拖动；命中区域比细轨道上下左右各扩一圈余量
-        if (categoryTransitionActive ||
-            currentPage() != PopupPage::Media ||
-            !volume.available || !volumeSliderOn ||
-            volumeSliderT < 0.6f)
+        if (categoryTransition.active() || currentPage() != PopupPage::Media || !volume.available ||
+            !volumeSliderOn || volumeSliderT < 0.6f)
             return false;
         return x >= volumeSliderRect.left - 7.0f && x <= volumeSliderRect.right + 7.0f &&
                y >= volumeSliderRect.top - 8.0f && y <= volumeSliderRect.bottom + 8.0f;
     }
 
     bool hitPageArrow(float x, float y) const {
-        return !categoryTransitionActive && playbackScene && idlePageAllowed() &&
+        return !categoryTransition.active() && playbackScene && idlePageAllowed() &&
                (currentPage() == PopupPage::Media ||
                 (currentPage() == PopupPage::Idle && idlePanelManual)) &&
-               pageArrowRect.right > pageArrowRect.left &&
-               contains(pageArrowRect, x, y);
+               pageArrowRect.right > pageArrowRect.left && contains(pageArrowRect, x, y);
     }
 
     bool hitCopy(float x, float y) const {
-        return !categoryTransitionActive && currentPage() == PopupPage::Idle &&
-               idle.copyEnabled && !idle.loading &&
-               !idle.sentence.empty() && copyRect.right > copyRect.left &&
-               contains(copyRect, x, y);
+        return !categoryTransition.active() && currentPage() == PopupPage::Idle &&
+               idle.copyEnabled && !idle.loading && !idle.sentence.empty() &&
+               copyRect.right > copyRect.left && contains(copyRect, x, y);
     }
 
     void copyIdleQuote() {
@@ -3541,7 +3498,7 @@ struct MediaPopup::Impl {
         }
 
         const RECT fromCardRect = popupCardScreenRect();
-        const bool hasFromCardRect = popupVisible && cardWidthPx > 0 && cardHeightPx > 0;
+        const bool hasFromCardRect = visibility.visible() && cardWidthPx > 0 && cardHeightPx > 0;
         if (hwnd)
             KillTimer(hwnd, kHideTimer);
         if (userInitiated && from == PopupPage::Media && target == PopupPage::Idle)
@@ -3555,21 +3512,21 @@ struct MediaPopup::Impl {
         // render() 会在同一帧内换上新层，不会闪空帧。
         stopCategoryTransition();
         stopQuickExpandTransition();
-        categoryTransitionActive = popupVisible && clientAnimations && !entering && !closing;
-        if (categoryTransitionActive) {
-            categoryTransitionFrom = from;
-            categoryTransitionIdle = idleContentTransitionActive
-                                         ? idleContentTransitionFrom
-                                         : idle;
-            categoryTransitionMedia = media;
-            categoryTransitionTitleScrollOffset = titleScrollOffset;
-            categoryTransitionArtistScrollOffset = artistScrollOffset;
-            categoryTransitionIdleQuoteScrollOffset = idleQuoteScrollOffset;
-            categoryTransitionIdleQuoteSourceScrollOffset = idleQuoteSourceScrollOffset;
-            categoryTransitionIdleScrollOffset = idleScrollOffset;
-            categoryTransitionDirection = categoryDirection(from, target);
+        if (visibility.visible() && clientAnimations && !visibility.animating())
+            categoryTransition.begin();
+        if (categoryTransition.active()) {
+            categorySnapshot.from = from;
+            categorySnapshot.idle =
+                idleContentTransition.active ? idleContentTransition.from : idle;
+            categorySnapshot.media = media;
+            categorySnapshot.titleScrollOffset = titleScrollOffset;
+            categorySnapshot.artistScrollOffset = artistScrollOffset;
+            categorySnapshot.idleQuoteScrollOffset = idleQuoteScrollOffset;
+            categorySnapshot.idleQuoteSourceScrollOffset = idleQuoteSourceScrollOffset;
+            categorySnapshot.idleScrollOffset = idleScrollOffset;
+            categorySnapshot.direction = categoryDirection(from, target);
         }
-        idleContentTransitionActive = false;
+        idleContentTransition.active = false;
         idleScrollOffset = 0.0f;
         idleQuoteScrollOffset = 0.0f;
         idleQuoteSourceScrollOffset = 0.0f;
@@ -3586,12 +3543,12 @@ struct MediaPopup::Impl {
         renderer.resetRoot();
         // 两个页面的外层尺寸已经统一；切换时保持 HWND 的位置和大小，
         // 避免 SetWindowPos 在内容转场之外再触发一次窗口级重绘。
-        if (categoryTransitionActive && hasFromCardRect) {
+        if (categoryTransition.active() && hasFromCardRect) {
             categoryHoverEnvelope = mergeScreenRects(fromCardRect, popupCardScreenRect());
             categoryHoverEnvelopeActive = true;
         }
-        if (popupVisible) {
-            if (entering || closing)
+        if (visibility.visible()) {
+            if (visibility.animating())
                 deferredRender = true;
             else
                 render();
@@ -3608,15 +3565,14 @@ struct MediaPopup::Impl {
     }
 
     bool hitIdleQuickExpand(float x, float y) const {
-        return !categoryTransitionActive && idleMode && idle.quickStartEnabled &&
-               idle.showText &&
-               idleQuickExpandRect.right > idleQuickExpandRect.left &&
+        return !categoryTransition.active() && idleMode && idle.quickStartEnabled &&
+               idle.showText && idleQuickExpandRect.right > idleQuickExpandRect.left &&
                contains(idleQuickExpandRect, x, y);
     }
 
     int hitIdleQuickTab(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || quickExpandTransitionActive || !idleMode ||
+        if (categoryTransition.active() || quickExpandTransition.active() || !idleMode ||
             !idle.quickStartEnabled || !idle.todayTasksEnabled ||
             idleQuickExpandProgress(idle) < 0.99f)
             return -1;
@@ -3629,10 +3585,9 @@ struct MediaPopup::Impl {
 
     int hitIdleApp(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode ||
+        if (categoryTransition.active() || !idleMode ||
             (idle.todayTasksEnabled && idleQuickTab != IdleQuickTab::QuickStart) ||
-            idle.apps.empty() ||
-            !contains(idleListRect, x, y))
+            idle.apps.empty() || !contains(idleListRect, x, y))
             return -1;
         const float contentY = y - idleListRect.top + idleScrollOffset;
         const int rowIndex = static_cast<int>(contentY / kIdleQuickRowPitchDip);
@@ -3665,7 +3620,7 @@ struct MediaPopup::Impl {
 
     int hitIdleTask(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode || !idle.todayTasksEnabled ||
+        if (categoryTransition.active() || !idleMode || !idle.todayTasksEnabled ||
             idleQuickTab != IdleQuickTab::TodayTasks || idle.todayTasks.empty() ||
             !contains(idleListRect, x, y))
             return -1;
@@ -3702,7 +3657,7 @@ struct MediaPopup::Impl {
 
     bool hitIdleScrollBar(float x, float y) const {
         y -= cardOriginDip;
-        if (categoryTransitionActive || !idleMode || idleScrollMax <= 0.0f)
+        if (categoryTransition.active() || !idleMode || idleScrollMax <= 0.0f)
             return false;
         const D2D1_RECT_F hit = D2D1::RectF(
             idleScrollTrackRect.left - (kIdleScrollBarHitWidthDip -
@@ -3775,22 +3730,21 @@ struct MediaPopup::Impl {
         if (!hwnd || !idleMode || !idle.quickStartEnabled || !idle.showText)
             return;
         // 再次点击时先完成上一目标的图层交接，再从该状态反向展开/收起。
-        if (quickExpandTransitionActive)
-            finishLayerTransition(quickExpandTransitionActive, quickExpandLayersBuilt,
-                                  kIdleQuickExpandTimer);
+        if (quickExpandTransition.active())
+            finishLayerTransition(quickExpandTransition, kIdleQuickExpandTimer);
         idleScrollOffset = idleScrollView.offset();
         idleScrollView.stop();
-        idleQuickExpanded = !idleQuickExpanded;
-        idleQuickExpandT = idleQuickExpanded ? 1.0f : 0.0f;
-        idleQuickExpandOpening = false;
-        if (!clientAnimations || !popupVisible || entering || closing) {
+        quickExpansion.expanded = !quickExpansion.expanded;
+        quickExpansion.progress = quickExpansion.expanded ? 1.0f : 0.0f;
+        quickExpansion.opening = false;
+        if (!clientAnimations || !visibility.visible() || visibility.animating()) {
             KillTimer(hwnd, kIdleQuickExpandTimer);
             renderOrDefer();
             return;
         }
         // 展开/收起由 DComp 合成层执行（render() 里装层）；定时器在合成器
         // 动画到达终点并静止后收尾：先预绘制最终状态，再撤层完成交接。
-        quickExpandTransitionActive = true;
+        quickExpandTransition.begin();
         SetTimer(hwnd, kIdleQuickExpandTimer,
                  static_cast<UINT>(kIdleQuickExpandMs) + 32, nullptr);
         render();
@@ -3810,7 +3764,7 @@ struct MediaPopup::Impl {
     }
 
     bool hitSource(float x, float y) const {
-        if (!available || categoryTransitionActive || currentPage() != PopupPage::Media ||
+        if (!available || categoryTransition.active() || currentPage() != PopupPage::Media ||
             media.sourceAppUserModelId.empty())
             return false;
         // 与 drawSource 的顶部来源行保持同一块可点击区域，给图标和名称都留出
@@ -3840,7 +3794,7 @@ struct MediaPopup::Impl {
     }
 
     void refreshPopupHoverAfterTransition() {
-        if (!hwnd || !popupVisible)
+        if (!hwnd || !visibility.visible())
             return;
 
         if (cursorInsidePopupCard()) {
@@ -3866,8 +3820,8 @@ struct MediaPopup::Impl {
     }
 
     void scheduleHide() {
-        if (!hwnd || !popupVisible || anchorHover || popupHover ||
-            categoryTransitionActive || quickExpandTransitionActive)
+        if (!hwnd || !visibility.visible() || anchorHover || popupHover ||
+            categoryTransition.active() || quickExpandTransition.active())
             return;
         KillTimer(hwnd, kShowTimer);
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
@@ -3876,9 +3830,9 @@ struct MediaPopup::Impl {
     void renderOrDefer() {
         // DComp 正在独立驱动内容层时，交换链重绘既不能更新层内快照，
         // 又会制造额外 Present；最终收尾帧会统一提交最新状态。
-        if (categoryTransitionActive || quickExpandTransitionActive)
+        if (categoryTransition.active() || quickExpandTransition.active())
             return;
-        if (entering || closing) {
+        if (visibility.animating()) {
             deferredRender = true;
             return;
         }
@@ -3888,7 +3842,7 @@ struct MediaPopup::Impl {
     void showPopup() {
         if (!hwnd || !enabled || !available)
             return;
-        const bool wasVisible = popupVisible;
+        const bool wasVisible = visibility.visible();
         KillTimer(hwnd, kShowTimer);
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kCloseTimer);
@@ -3898,8 +3852,7 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kIdleQuickExpandTimer);
         scrollTimerRunning = false;
         deferredRender = false;
-        entering = true;
-        closing = false;
+        visibility.beginOpen();
         reposition();
         const bool canUseFrostedBackdropOnEitherPage =
             frostedBackgroundActiveForPage(PopupPage::Media) ||
@@ -3907,7 +3860,7 @@ struct MediaPopup::Impl {
         if (canUseFrostedBackdropOnEitherPage)
             backdropDirty = true;
         if (!render()) {
-            entering = false;
+            visibility.finishOpen();
             return;
         }
 
@@ -3928,7 +3881,7 @@ struct MediaPopup::Impl {
         }
         renderer.commit();
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        popupVisible = true;
+        visibility.markVisible();
         runtime_log::writef(L"[action][media-popup] shown trigger=%s",
                             opensOnHover() ? L"hover" : L"click");
         if (!wasVisible && onPanelOpened)
@@ -3937,8 +3890,8 @@ struct MediaPopup::Impl {
     }
 
     void hideAnimated() {
-        if (!popupVisible || closing || categoryTransitionActive ||
-            quickExpandTransitionActive)
+        if (!visibility.visible() || visibility.closing() || categoryTransition.active() ||
+            quickExpandTransition.active())
             return;
         idleScrollOffset = idleScrollView.offset();
         idleScrollView.stop();
@@ -3949,9 +3902,8 @@ struct MediaPopup::Impl {
         KillTimer(hwnd, kVolumeTimer);
         KillTimer(hwnd, kIdleQuickExpandTimer);
         scrollTimerRunning = false;
-        entering = false;
         deferredRender = false;
-        closing = true;
+        visibility.beginClose();
         if (!render()) {
             hideImmediate();
             return;
@@ -3976,13 +3928,13 @@ struct MediaPopup::Impl {
 
     void onPopupEnter() {
         popupHover = true;
-        if (!categoryTransitionActive) {
+        if (!categoryTransition.active()) {
             categoryHoverEnvelopeActive = false;
             categoryHoverEnvelope = {};
         }
         KillTimer(hwnd, kHideTimer);
         trackMouseLeave();
-        if (closing)
+        if (visibility.closing())
             showPopup();
     }
 
@@ -3996,13 +3948,13 @@ struct MediaPopup::Impl {
         if (!hwnd)
             return;
         KillTimer(hwnd, kHideTimer);
-        if (enabled && available && !popupVisible && opensOnHover())
+        if (enabled && available && !visibility.visible() && opensOnHover())
             SetTimer(hwnd, kShowTimer, kShowDelayMs, nullptr);
     }
 
     void onAnchorClick() {
         anchorHover = true;
-        if (!hwnd || !enabled || !available || popupVisible || opensOnHover())
+        if (!hwnd || !enabled || !available || visibility.visible() || opensOnHover())
             return;
         KillTimer(hwnd, kHideTimer);
         KillTimer(hwnd, kShowTimer);
@@ -4022,13 +3974,12 @@ struct MediaPopup::Impl {
         if (playbackScene && idleMode && !inlineControls)
             idleMode = false;
         idlePanelManual = false;
-        popupVisible = false;
-        closing = false;
+        visibility.hide();
         stopCategoryTransition();
         stopQuickExpandTransition();
         categoryHoverEnvelopeActive = false;
         categoryHoverEnvelope = {};
-        idleContentTransitionActive = false;
+        idleContentTransition.active = false;
         volumeSliderOn = false;
         volumeSliderT = 0.0f;
         volumeDragging = false;
@@ -4041,9 +3992,9 @@ struct MediaPopup::Impl {
         pressedIdleTask = -1;
         idleScrollDragging = false;
         resetPageInteractionState();
-        idleQuickExpanded = false;
-        idleQuickExpandOpening = false;
-        idleQuickExpandT = 0.0f;
+        quickExpansion.expanded = false;
+        quickExpansion.opening = false;
+        quickExpansion.progress = 0.0f;
         if (!hwnd)
             return;
         killTimers();
@@ -4416,7 +4367,7 @@ struct MediaPopup::Impl {
                     showPopup();
             } else if (wp == kHideTimer) {
                 KillTimer(hwnd, kHideTimer);
-                if (categoryTransitionActive || quickExpandTransitionActive)
+                if (categoryTransition.active() || quickExpandTransition.active())
                     return 0;
                 if (categoryHoverEnvelopeActive) {
                     if (cursorInsidePopupCard()) {
@@ -4438,14 +4389,14 @@ struct MediaPopup::Impl {
                     hideAnimated();
             } else if (wp == kCloseTimer) {
                 KillTimer(hwnd, kCloseTimer);
-                if (closing && !anchorHover && !popupHover)
+                if (visibility.closing() && !anchorHover && !popupHover)
                     hideImmediate();
-                else if (closing)
+                else if (visibility.closing())
                     showPopup();
             } else if (wp == kEnterTimer) {
                 KillTimer(hwnd, kEnterTimer);
-                entering = false;
-                if (popupVisible && !closing) {
+                visibility.finishOpen();
+                if (visibility.visible() && !visibility.closing()) {
                     if (deferredRender || idleMode) {
                         deferredRender = false;
                         render();
@@ -4453,25 +4404,25 @@ struct MediaPopup::Impl {
                     updateScrollTimer(textAreaWidth(kPopupWidthDip));
                 }
             } else if (wp == kScrollTimer) {
-                if (entering || closing || !popupVisible)
+                if (visibility.animating() || !visibility.visible())
                     return 0;
                 // 层转场期间内容承载在静态合成层快照上，滚动偏移必须保持冻结；
                 // 否则收尾帧用推进后的偏移重绘，交接瞬间文字横向跳变。
                 // 冻结只停偏移、计时基准照常推进，避免收尾后第一帧把转场
                 // 时长一次性补进偏移造成二次跳动。
-                if (categoryTransitionActive || quickExpandTransitionActive) {
+                if (categoryTransition.active() || quickExpandTransition.active()) {
                     scrollTickMs = GetTickCount64();
                     return 0;
                 }
                 advanceTextScroll();
                 renderOrDefer();
             } else if (wp == kVolumeTimer) {
-                if (entering || closing || !popupVisible) {
+                if (visibility.animating() || !visibility.visible()) {
                     KillTimer(hwnd, kVolumeTimer);
                     return 0;
                 }
                 // 与文本滚动同理：层转场期间冻结滑块展开进度，保持与层内快照一致。
-                if (categoryTransitionActive || quickExpandTransitionActive)
+                if (categoryTransition.active() || quickExpandTransition.active())
                     return 0;
                 advanceVolumeSlider();
             } else if (wp == kCopyFeedbackTimer) {
@@ -4482,14 +4433,10 @@ struct MediaPopup::Impl {
                 // 合成器动画已到终点并静止：先隐藏着预绘制最终页面，再撤层完成交接。
                 KillTimer(hwnd, wp);
                 const bool quickExpand = wp == kIdleQuickExpandTimer;
-                bool& transitionActive =
-                    quickExpand ? quickExpandTransitionActive : categoryTransitionActive;
-                if (transitionActive) {
-                    finishLayerTransition(transitionActive,
-                                          quickExpand ? quickExpandLayersBuilt
-                                                      : categoryLayersActive,
-                                          wp);
-                    if (popupVisible && !entering && !closing) {
+                auto& transition = quickExpand ? quickExpandTransition : categoryTransition;
+                if (transition.active()) {
+                    finishLayerTransition(transition, wp);
+                    if (visibility.visible() && !visibility.animating()) {
                         refreshPopupHoverAfterTransition();
                     }
                 }
@@ -4499,7 +4446,7 @@ struct MediaPopup::Impl {
             dpi = GetDpiForWindow(hwnd);
             releaseDrawingResources();
             reposition();
-            if (popupVisible)
+            if (visibility.visible())
                 render();
             return 0;
         case WM_DISPLAYCHANGE:
@@ -4508,12 +4455,12 @@ struct MediaPopup::Impl {
         case WM_SETTINGCHANGE:
             refreshClientAnimations();
             releaseDrawingResources();
-            if (popupVisible)
+            if (visibility.visible())
                 render();
             return 0;
         case WM_THEMECHANGED:
             releaseDrawingResources();
-            if (popupVisible)
+            if (visibility.visible())
                 render();
             return 0;
         case WM_PAINT: {
@@ -4609,7 +4556,7 @@ void MediaPopup::setAppVolume(const AppVolumeState& state) {
         if (impl_->hwnd)
             KillTimer(impl_->hwnd, kVolumeTimer);
     }
-    if (changed && impl_->popupVisible)
+    if (changed && impl_->visibility.visible())
         impl_->renderOrDefer();
 }
 
@@ -4650,7 +4597,7 @@ void MediaPopup::setEnabled(bool enabled) {
     if (!impl_->hwnd)
         return;
     if (impl_->opensOnHover() && impl_->anchorHover && impl_->available &&
-        !impl_->popupVisible)
+        !impl_->visibility.visible())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
 
@@ -4663,7 +4610,7 @@ void MediaPopup::setTriggerOnHover(bool on) {
     if (!impl_->opensOnHover()) {
         KillTimer(impl_->hwnd, kShowTimer);
     } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
-               !impl_->popupVisible) {
+               !impl_->visibility.visible()) {
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
     }
 }
@@ -4677,9 +4624,9 @@ void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
     if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
-    if (!impl_->popupVisible)
+    if (!impl_->visibility.visible())
         return;
-    if (impl_->entering || impl_->closing)
+    if (impl_->visibility.animating())
         impl_->deferredRender = true;
     else
         impl_->render();
@@ -4694,9 +4641,9 @@ void MediaPopup::setBackgroundColor(COLORREF color, bool customized) {
     if (!impl_->hwnd)
         return;
     impl_->releaseDrawingResources();
-    if (!impl_->popupVisible)
+    if (!impl_->visibility.visible())
         return;
-    if (impl_->entering || impl_->closing)
+    if (impl_->visibility.animating())
         impl_->deferredRender = true;
     else
         impl_->render();
@@ -4710,9 +4657,9 @@ void MediaPopup::setFollowAlbumBackground(bool on) {
         impl_->releaseDynamicBackgroundResources();
     else
         impl_->dynamicBackgroundDirty = true;
-    if (!impl_->hwnd || !impl_->popupVisible)
+    if (!impl_->hwnd || !impl_->visibility.visible())
         return;
-    if (impl_->entering || impl_->closing)
+    if (impl_->visibility.animating())
         impl_->deferredRender = true;
     else
         impl_->render();
@@ -4726,9 +4673,9 @@ void MediaPopup::setAutoTextContrast(bool on) {
         impl_->backdropDirty = true;
     else
         impl_->resetBackdropTextColors();
-    if (!impl_->hwnd || !impl_->popupVisible)
+    if (!impl_->hwnd || !impl_->visibility.visible())
         return;
-    if (impl_->entering || impl_->closing)
+    if (impl_->visibility.animating())
         impl_->deferredRender = true;
     else
         impl_->render();
@@ -4736,9 +4683,9 @@ void MediaPopup::setAutoTextContrast(bool on) {
 
 void MediaPopup::refreshTheme() {
     impl_->releaseDrawingResources();
-    if (!impl_->hwnd || !impl_->popupVisible)
+    if (!impl_->hwnd || !impl_->visibility.visible())
         return;
-    if (impl_->entering || impl_->closing)
+    if (impl_->visibility.animating())
         impl_->deferredRender = true;
     else
         impl_->render();
@@ -4781,19 +4728,18 @@ void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
         impl_->hideImmediate();
         return;
     }
-    impl_->songTransitionPending = animateSongTransition && changed && impl_->popupVisible &&
-                                   !impl_->entering && !impl_->closing &&
+    impl_->songTransitionPending = animateSongTransition && changed &&
+                                   impl_->visibility.visible() && !impl_->visibility.animating() &&
                                    impl_->clientAnimations && !impl_->idleMode &&
-                                   !impl_->categoryTransitionActive;
-    if (changed && impl_->popupVisible &&
-        !impl_->categoryTransitionActive && !impl_->quickExpandTransitionActive &&
-        (!impl_->idleMode || dominantColorChanged)) {
-        if (impl_->entering || impl_->closing)
+                                   !impl_->categoryTransition.active();
+    if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
+        !impl_->quickExpandTransition.active() && (!impl_->idleMode || dominantColorChanged)) {
+        if (impl_->visibility.animating())
             impl_->deferredRender = true;
         else
             impl_->render();
     }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
+    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
         impl_->opensOnHover())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
@@ -4861,18 +4807,17 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
     }
 
     if (quoteContentChanged) {
-        const bool canAnimateQuote = impl_->idleMode &&
-                                     impl_->popupVisible && impl_->clientAnimations &&
-                                     !impl_->entering && !impl_->closing &&
-                                     !impl_->categoryTransitionActive;
+        const bool canAnimateQuote = impl_->idleMode && impl_->visibility.visible() &&
+                                     impl_->clientAnimations && !impl_->visibility.animating() &&
+                                     !impl_->categoryTransition.active();
         if (canAnimateQuote) {
-            if (!impl_->idleContentTransitionActive) {
-                impl_->idleContentTransitionFrom = impl_->idle;
-                impl_->idleContentTransitionStartMs = GetTickCount64();
+            if (!impl_->idleContentTransition.active) {
+                impl_->idleContentTransition.from = impl_->idle;
+                impl_->idleContentTransition.startMs = GetTickCount64();
             }
-            impl_->idleContentTransitionActive = true;
+            impl_->idleContentTransition.active = true;
         } else {
-            impl_->idleContentTransitionActive = false;
+            impl_->idleContentTransition.active = false;
         }
     }
     impl_->idle = content;
@@ -4893,19 +4838,19 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
         impl_->idleScrollDragging = false;
     }
     if (!content.quickStartEnabled) {
-        impl_->idleQuickExpanded = false;
-        impl_->idleQuickExpandOpening = false;
-        impl_->idleQuickExpandT = 0.0f;
+        impl_->quickExpansion.expanded = false;
+        impl_->quickExpansion.opening = false;
+        impl_->quickExpansion.progress = 0.0f;
         impl_->stopQuickExpandTransition();
     } else if (!content.showText) {
-        impl_->idleQuickExpanded = true;
-        impl_->idleQuickExpandOpening = false;
-        impl_->idleQuickExpandT = 1.0f;
+        impl_->quickExpansion.expanded = true;
+        impl_->quickExpansion.opening = false;
+        impl_->quickExpansion.progress = 1.0f;
         impl_->stopQuickExpandTransition();
     } else if (textVisibilityChanged) {
-        impl_->idleQuickExpanded = false;
-        impl_->idleQuickExpandOpening = false;
-        impl_->idleQuickExpandT = 0.0f;
+        impl_->quickExpansion.expanded = false;
+        impl_->quickExpansion.opening = false;
+        impl_->quickExpansion.progress = 0.0f;
         impl_->stopQuickExpandTransition();
     }
     if (changed) {
@@ -4918,22 +4863,21 @@ void MediaPopup::setIdleContent(const IdlePresentation& content, bool available)
             impl_->idleTextDirty = true;
         if (appIconsChanged)
             impl_->idleIconsDirty = true;
-        if (impl_->popupVisible && impl_->idleMode)
+        if (impl_->visibility.visible() && impl_->idleMode)
             impl_->reposition();
     }
     if (!available) {
         impl_->hideImmediate();
         return;
     }
-    if (changed && impl_->popupVisible &&
-        !impl_->categoryTransitionActive && !impl_->quickExpandTransitionActive &&
-        (impl_->idleMode || idleAvailabilityChanged)) {
-        if (impl_->entering || impl_->closing)
+    if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
+        !impl_->quickExpandTransition.active() && (impl_->idleMode || idleAvailabilityChanged)) {
+        if (impl_->visibility.animating())
             impl_->deferredRender = true;
         else
             impl_->render();
     }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->popupVisible &&
+    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
         impl_->opensOnHover())
         SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
 }
@@ -4954,8 +4898,7 @@ void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool in
         impl_->syncPetMode(false);
         impl_->playbackScene = false;
         impl_->idlePanelManual = false;
-        impl_->categoryTransitionActive = false;
-        impl_->idleContentTransitionActive = false;
+        impl_->idleContentTransition.active = false;
         impl_->hideImmediate();
         return;
     }
@@ -4980,14 +4923,14 @@ void MediaPopup::setProgress(int64_t positionMs) {
     const int64_t nextPositionMs = std::max<int64_t>(positionMs, 0);
     // 层转场期间新页内容承载在静态合成层快照上：进度只挂起不应用，
     // 由 finishLayerTransition 在撤层交接后再落到 positionMs 并重绘。
-    if (impl_->categoryTransitionActive || impl_->quickExpandTransitionActive) {
+    if (impl_->categoryTransition.active() || impl_->quickExpandTransition.active()) {
         impl_->deferredPositionMs = nextPositionMs;
         return;
     }
     if (impl_->positionMs == nextPositionMs)
         return;
     impl_->positionMs = nextPositionMs;
-    if (impl_->popupVisible)
+    if (impl_->visibility.visible())
         impl_->renderOrDefer();
 }
 

@@ -40,7 +40,7 @@ void LyricEffectsRenderer::discardDeviceResources() {
     brushLyricFx_.Reset();
     brushLyricFollow_.Reset();
     lyricStar_.reset();
-    context_.target = nullptr;
+    context_ = {};
 }
 bool LyricEffectsRenderer::lyricEffectEnabled(LyricEffect effect) const {
     return (context_.effects & lyricEffectBit(effect)) != 0;

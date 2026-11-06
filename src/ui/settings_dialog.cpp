@@ -10,6 +10,10 @@
 #include "ui/media_control_icons.h"
 #include "ui/settings/artwork.h"
 #include "ui/settings/search_model.h"
+#include "ui/settings/ids.h"
+#include "ui/settings/row.h"
+#include "ui/settings/lyric_section.h"
+#include "ui/settings/spectrum_section.h"
 #include "ui/settings_icons.h"
 
 #include <commctrl.h>
@@ -28,22 +32,10 @@
 #include <utility>
 #include <vector>
 
+using namespace settings_ui;
+
 namespace {
 
-constexpr int kSettingsPageCount = 9;
-constexpr int kTaskbarModePage = 1;
-constexpr int kPerformancePage = 2;
-constexpr int kFloatingCardPage = 3;
-constexpr int kMediaPopupPage = 4;
-constexpr int kSpectrumPage = 5;
-constexpr int kLyricsPage = 6;
-constexpr int kSongToastPage = 7;
-constexpr int kIdlePage = kSettingsPageCount - 1;
-constexpr int kIdNav = 400;
-constexpr int kIdSettingsSearch = 4900;
-constexpr int kIdOpenDocs = 4901;
-constexpr int kIdOpenFeedback = 4902;
-constexpr int kIdOpenAbout = 4903;
 constexpr int kFooterItemCount = 3;
 constexpr float kFooterItemH = 32.0f;
 constexpr float kSearchPaletteHeaderH = 52.0f;
@@ -69,83 +61,7 @@ constexpr float kSearchPaletteCloseDurationMs = 120.0f;
 constexpr float kSearchPaletteOpenSlideDip = -10.0f;
 constexpr float kSearchPaletteCloseSlideDip = -8.0f;
 constexpr float kContentScrollFrequency = 28.0f;
-constexpr int kRenderModeMinimal = 3;
-constexpr int kIdSongInfo = 410;
-constexpr int kIdAlbumCover = 411;
-constexpr int kIdPlatformIcon = 412;
-constexpr int kIdCoverEffect = 413;
-constexpr int kIdSpectrum = 414;
-constexpr int kIdSpectrumStyle = 419;
-constexpr int kIdSpectrumOpacity = 423;
-constexpr int kIdSpectrumBackground = 428;
-constexpr int kIdSpectrumGradient = 429;
-constexpr int kIdSpectrumEffectFirst = 486;
-constexpr int kIdLyricEffectFirst = 500;
-constexpr int kIdSpectrumColorMode = 450;
-constexpr int kIdSpectrumColor = 452;
-constexpr int kIdProgressBackground = 438;
-constexpr int kIdProgressBackgroundOpacity = 439;
-constexpr int kIdTaskbarBackground = 444;
-constexpr int kIdCoverBackgroundOpacity = 445;
-constexpr int kIdHoverControls = 415;
-constexpr int kIdRenderMode = 416;
-constexpr int kIdHoverControlStyle = 417;
-constexpr int kIdFloatingCardTrigger = 437;
-constexpr int kIdFloatingCardBackground = 418;
-constexpr int kIdFloatingCardFollowAlbum = 426;
-constexpr int kIdFloatingCardAutoTextContrast = 427;
-constexpr int kIdSongToast = 440;
-constexpr int kIdSongToastDuration = 441;
-constexpr int kIdSongToastSkipFullscreen = 442;
-constexpr int kIdSongToastPosition = 443;
-constexpr int kIdSongToastMonitor = 484;
-constexpr int kIdSongToastPreview = 485;
-constexpr int kIdPickFont = 420;
-constexpr int kIdFontColor = 421;
-constexpr int kIdFollowAlbum = 422;
-constexpr int kIdTaskbarTheme = 424;
-constexpr int kIdWindowTheme = 425;
-constexpr int kIdDoubleLine = 430;
-constexpr int kIdAlignment = 431;
-constexpr int kIdSecondaryOn = 432;
-constexpr int kIdSecondaryType = 433;
-constexpr int kIdQqLocalLyricsEnabled = 434;
-constexpr int kIdQqLocalLyricsPath = 435;
-constexpr int kIdQqLocalLyricsPersistOrder = 436;
-constexpr int kIdIdleEntry = 446;
-constexpr int kIdIdleQuoteSource = 447;
-constexpr int kIdIdleQuoteRefreshInterval = 448;
-constexpr int kIdIdleApps = 449;
-constexpr int kIdFloatingCardBackgroundColor = 451;
-constexpr int kIdIdleQuoteAlignment = 453;
-constexpr int kIdIdleQuote = 454;
-constexpr int kIdIdleQuoteBackground = 458;
-constexpr int kIdIdleQuoteBackgroundScope = 459;
-constexpr int kIdIdleCustomWelcome = 461;
-constexpr int kIdTickTickApiToken = 462;
-constexpr int kIdTickTickConnect = 463;
-constexpr int kIdTickTickRefresh = 464;
-constexpr int kIdTickTickDisconnect = 465;
-constexpr int kIdTickTickEnabled = 466;
-constexpr int kIdTaskbarContextMenu = 467;
-constexpr int kIdTaskbarViewMode = 468;
-constexpr int kIdAppBarEdge = 469;
-constexpr int kIdTaskbarMonitor = 470;
-constexpr int kIdImmersiveBackgroundBlur = 471;
-constexpr int kIdDockBackgroundBlur = 474;
-constexpr int kIdEmbeddedResourceMonitor = 481;
-constexpr int kIdDockResourceDownload = 482;
-constexpr int kIdDockResourceUpload = 483;
-constexpr int kIdDockResourceGpuUsage = 473;
-constexpr int kIdDockResourceCpuFrequency = 477;
-constexpr int kIdImmersiveBackgroundAdjustment = 479;
-constexpr int kIdDockBackgroundAdjustment = 480;
-constexpr int kIdContentScrollBar = 401;
 // 应用列表卡片内嵌开关的键盘焦点 ID，不对应独立设置行。
-constexpr int kIdIdleAppNames = 460;
-constexpr int kIdleAppNamesOption = -2;
-constexpr int kIdleAppEditOptionBase = 1000;
-constexpr int kIdleAppDragOptionBase = 2000;
 
 constexpr float kWindowW = 988.0f;
 constexpr float kWindowH = 718.0f;
@@ -158,10 +74,6 @@ constexpr float kNavIconSize = 16.0f;
 constexpr float kNavIconLeft = 18.0f;
 constexpr float kNavItemH = 40.0f;
 constexpr float kNavIconTextGap = 10.0f;
-constexpr float kRowH = 56.0f;
-constexpr float kRowTallH = 72.0f;
-constexpr float kHeaderH = 30.0f;
-constexpr float kTitleMinHeight = 22.0f;
 constexpr float kTitleTopPadding = 12.0f;
 constexpr float kTitleHintGap = 2.0f;
 constexpr float kHintBottomPadding = 8.0f;
@@ -175,7 +87,6 @@ constexpr float kModeGridNoteGap = 12.0f;
 constexpr float kModeGridMinH = 196.0f;
 constexpr float kSpectrumStyleCardH = 96.0f;
 constexpr float kSpectrumStyleCardGap = 8.0f;
-constexpr float kSpectrumStyleRowH = 252.0f;
 constexpr float kSpectrumBackgroundArtworkMaxW = 144.0f;
 constexpr float kSpectrumBackgroundArtworkMinW = 96.0f;
 constexpr float kSpectrumBackgroundArtworkH = 34.0f;
@@ -249,11 +160,6 @@ int themeModeIndex(fluent::ThemeMode mode) {
     }
 }
 
-std::wstring colorText(COLORREF color) {
-    wchar_t text[10]{};
-    swprintf_s(text, L"#%02X%02X%02X", GetRValue(color), GetGValue(color), GetBValue(color));
-    return text;
-}
 
 constexpr const wchar_t* kFontSettingNotice =
     L"字体修改不会影响到界面字体，只会影响到任务栏歌词、每日一言、歌曲信息、沉浸模式时间/日期和 Dock、内嵌模式资源监视";
@@ -474,54 +380,8 @@ settings_icon::Kind iconForRow(int id) {
 
 struct SettingsDialog::Impl {
     SettingsArtwork artwork_;
-    enum class ControlKind {
-        Toggle,
-        Radio,
-        ModeGrid, // 2×2 模式选择卡片
-        Slider,
-        Button,
-        AppList,
-        Header, // 分组标题：无卡片背景，不参与交互与焦点
-    };
-
-    struct Row {
-        int id = 0;
-        ControlKind kind = ControlKind::Toggle;
-        std::wstring text;
-        std::wstring hint;
-        std::wstring valueText;
-        std::wstring controlText;
-        std::vector<std::wstring> options;
-        std::vector<bool> optionEnabled;
-        bool showHint = false;
-        bool choiceInline = false;
-        bool checked = false;
-        bool enabled = true;
-        int selected = -1;
-        int value = 0;
-        int minValue = 0;
-        int maxValue = 100;
-        std::wstring valueSuffix = L"%";
-        float controlW = 0.0f;
-        float minHeight = kRowH;
-        float height = kRowH;
-        float gapAfter = 0.0f;
-        float titleHeight = kTitleMinHeight;
-        float valueHeight = 0.0f;
-        D2D1_RECT_F cardRect{};
-        D2D1_RECT_F iconRect{};
-        D2D1_RECT_F labelRect{};
-        D2D1_RECT_F valueRect{};
-        D2D1_RECT_F hintRect{};
-        D2D1_RECT_F controlRect{};
-        D2D1_RECT_F artworkRect{};
-        D2D1_RECT_F addAppRect{};
-        std::vector<D2D1_RECT_F> appItemRects;
-        std::vector<D2D1_RECT_F> appEditRects;
-        std::vector<D2D1_RECT_F> appDeleteRects;
-        std::vector<D2D1_RECT_F> optionRects;
-        std::vector<std::wstring> optionHints;
-    };
+    using ControlKind = settings_ui::ControlKind;
+    using Row = settings_ui::Row;
 
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
@@ -948,23 +808,11 @@ struct SettingsDialog::Impl {
 
     Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
                 float controlW, float height) {
-        Row row;
-        row.id = id;
-        row.kind = kind;
-        row.text = text ? text : L"";
-        row.hint = hint ? hint : L"";
-        row.showHint = !row.hint.empty();
-        row.controlW = controlW;
-        row.minHeight = height;
-        row.height = height;
-        rows[page].push_back(std::move(row));
-        return rows[page].back();
+        return RowBuilder(rows[page]).addRow(id, kind, text, hint, controlW, height);
     }
 
     Row& addToggle(int page, int id, const wchar_t* text, bool checked) {
-        Row& row = addRow(page, id, ControlKind::Toggle, text, nullptr, 40.0f, kRowH);
-        row.checked = checked;
-        return row;
+        return RowBuilder(rows[page]).addToggle(id, text, checked);
     }
 
     void updateFloatingCardRowsEnabled() {
@@ -1101,12 +949,8 @@ struct SettingsDialog::Impl {
 
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height) {
-        Row& row = addRow(page, id, ControlKind::Radio, text, hint, 0.0f, height);
-        row.options = std::move(options);
-        row.optionEnabled.assign(row.options.size(), true);
-        row.selected = selected;
-        row.enabled = enabled;
-        return row;
+        return RowBuilder(rows[page])
+            .addRadio(id, text, hint, std::move(options), selected, enabled, height);
     }
 
     Row& addModeGrid(int page, int id, const wchar_t* text, const wchar_t* hint,
@@ -1123,19 +967,12 @@ struct SettingsDialog::Impl {
 
     Row& addSlider(int page, int id, const wchar_t* text, int value, bool enabled,
                    const wchar_t* hint = nullptr, float height = kRowH) {
-        Row& row = addRow(page, id, ControlKind::Slider, text, hint, 216.0f, height);
-        row.value = std::clamp(value, 0, 100);
-        row.minValue = 0;
-        row.maxValue = 100;
-        row.enabled = enabled;
-        return row;
+        return RowBuilder(rows[page]).addSlider(id, text, value, enabled, hint, height);
     }
 
     Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
                    const wchar_t* controlText, float height = kRowH) {
-        Row& row = addRow(page, id, ControlKind::Button, text, hint, 132.0f, height);
-        row.controlText = controlText ? controlText : L"";
-        return row;
+        return RowBuilder(rows[page]).addButton(id, text, hint, controlText, height);
     }
 
     void updateIdleAppsRowHeight() {
@@ -1282,11 +1119,7 @@ struct SettingsDialog::Impl {
         colorPicker->show();
     }
 
-    Row& addHeader(int page, const wchar_t* text) {
-        Row& row = addRow(page, 0, ControlKind::Header, text, nullptr, 0.0f, kHeaderH);
-        row.enabled = false;
-        return row;
-    }
+    Row& addHeader(int page, const wchar_t* text) { return RowBuilder(rows[page]).addHeader(text); }
 
     D2D1_RECT_F scrollBarHitRect() const {
         if (contentMaxScroll <= 0.0f || scrollTrackRect.bottom <= scrollTrackRect.top)
@@ -1460,8 +1293,8 @@ struct SettingsDialog::Impl {
         }
     }
 
-    void createControls() {
-        const bool minimal = state.renderMode == kRenderModeMinimal;
+    void createDisplayRows() {
+        const bool minimal = minimalModeActive();
         const bool vertical = state.verticalTaskbar;
         addHeader(0, L"主题");
         addRadio(0, kIdTaskbarTheme, L"任务栏内容主题",
@@ -1493,6 +1326,10 @@ struct SettingsDialog::Impl {
             L"关闭后，右键任务栏歌词不再弹出菜单；托盘图标的右键菜单不受影响。",
             40.0f, kRowTallH);
         taskbarContextMenu.checked = state.taskbarContextMenu;
+    }
+
+    void createTaskbarModeRows() {
+        const bool vertical = state.verticalTaskbar;
         addHeader(kTaskbarModePage, L"展示模式");
         addRadio(kTaskbarModePage, kIdTaskbarViewMode, L"任务栏歌词展示模式",
                  taskbarViewModeHint(state.mediaSessionAlive, vertical),
@@ -1568,6 +1405,10 @@ struct SettingsDialog::Impl {
             row->enabled = resourceExtrasEnabled;
         if (auto* row = findRow(kIdDockResourceCpuFrequency))
             row->enabled = resourceExtrasEnabled;
+    }
+
+    void createIdleRows() {
+        const bool vertical = state.verticalTaskbar;
         addHeader(kIdlePage, L"空闲内容");
         Row& idleEntry = addRow(
             kIdlePage, kIdIdleEntry, ControlKind::Toggle, L"无播放时保留任务栏入口",
@@ -1622,6 +1463,10 @@ struct SettingsDialog::Impl {
                   L"删除本机保存的滴答清单 API 口令。",
                   L"断开", kRowH);
         updateTickTickRows();
+    }
+
+    void createBackgroundRows() {
+        const bool minimal = minimalModeActive();
         addHeader(0, L"背景效果");
         Row& progressBackground = addRow(
             0, kIdProgressBackground, ControlKind::Toggle, L"播放进度背景",
@@ -1651,6 +1496,10 @@ struct SettingsDialog::Impl {
                     state.idleQuoteBackgroundScope,
                     !minimal && state.idleQuoteBackground != 0,
                     kModeGridMinH);
+    }
+
+    void createMediaControlRows() {
+        const bool minimal = minimalModeActive();
         addHeader(kMediaPopupPage, L"播放控件");
         addToggle(kMediaPopupPage, kIdHoverControls, L"显示播放控件",
                   state.hoverControls);
@@ -1659,6 +1508,10 @@ struct SettingsDialog::Impl {
                  {L"内嵌控件", L"媒体卡片"}, minimal ? 0 : state.hoverControlStyle,
                  state.hoverControls && !minimal,
                  kHoverControlStyleRowH);
+    }
+
+    void createFloatingCardRows() {
+        const bool minimal = minimalModeActive();
         addHeader(kFloatingCardPage, L"行为");
         addRadio(kFloatingCardPage, kIdFloatingCardTrigger, L"悬浮卡片展开方式",
                  L"悬浮展开：鼠标在歌词区域停留片刻后展开；点击展开：点击歌词区域任意位置立即展开。媒体卡片、每日一言和快捷启动卡片共用此设置。",
@@ -1688,6 +1541,10 @@ struct SettingsDialog::Impl {
             40.0f, kRowTallH);
         floatingCardAutoTextContrast.checked = state.floatingCardAutoTextContrast;
         updateFloatingCardRowsEnabled();
+    }
+
+    void createSongToastRows() {
+        const bool minimal = minimalModeActive();
         addHeader(kSongToastPage, L"显示与时长");
         Row& songToast = addRow(kSongToastPage, kIdSongToast, ControlKind::Toggle,
                                 L"切歌时弹出歌曲信息",
@@ -1723,6 +1580,9 @@ struct SettingsDialog::Impl {
             L"预览弹窗", kRowTallH);
         songToastPreview.enabled = !minimal && state.songToastEnabled &&
                                    state.songToastPreviewAvailable;
+    }
+
+    void createPerformanceRows() {
         addHeader(kPerformancePage, L"渲染与资源占用");
         addModeGrid(kPerformancePage, kIdRenderMode, L"性能模式",
                     L"模式仅本次运行有效，重启软件后恢复正常模式",
@@ -1730,100 +1590,20 @@ struct SettingsDialog::Impl {
                     {L"完整视觉效果", L"降低帧率，节省 GPU", L"停止渲染，保留监听",
                      L"横向歌词，关闭逐字与转场"},
                     std::clamp(state.renderMode, 0, kRenderModeMinimal), true, kModeGridMinH);
+    }
 
-        const bool spectrumEnabled = !minimal && !vertical;
-        addHeader(kSpectrumPage, L"启用与配色");
-        Row& spectrum = addToggle(kSpectrumPage, kIdSpectrum, L"频谱",
-                                  spectrumEnabled ? state.spectrumOn : false);
-        spectrum.enabled = spectrumEnabled;
-        addRadio(kSpectrumPage, kIdSpectrumColorMode, L"频谱颜色",
-                 L"跟随已播放色恢复原有配色；跟随专辑主题色与歌词设置行为一致；自定义颜色作为频谱基色。",
-                 {L"跟随已播放色", L"跟随专辑主题色", L"自定义颜色"},
-                 state.spectrumCustomColor ? 2 : state.spectrumFollowAlbum ? 1 : 0,
-                 state.spectrumOn && spectrumEnabled, kRowTallH);
-        Row& spectrumColor = addButton(
-            kSpectrumPage, kIdSpectrumColor, L"自定义频谱颜色",
-            L"只在上面选择“自定义颜色”时生效。",
-            colorText(state.spectrumColor).c_str(), kRowTallH);
-        spectrumColor.enabled = state.spectrumOn && state.spectrumCustomColor && spectrumEnabled;
-        addHeader(kSpectrumPage, L"频谱样式");
-        addRadio(kSpectrumPage, kIdSpectrumStyle, L"选择样式", nullptr,
-                 {L"默认", L"柱状图", L"梦幻波浪", L"分段电平", L"底缘频谱带"},
-                 vertical ? 0 : state.spectrumStyle,
-                 state.spectrumOn && spectrumEnabled,
-                 kSpectrumStyleRowH);
-        addHeader(kSpectrumPage, L"频谱特效");
-        const wchar_t* effectNames[kSpectrumEffectCount] = {
-            L"柔光辉晕", L"衰减残影", L"峰值散粒", L"流动光泽"};
-        for (int i = 0; i < kSpectrumEffectCount; ++i) {
-            Row& effect = addToggle(kSpectrumPage, kIdSpectrumEffectFirst + i,
-                effectNames[i], (state.spectrumEffects & spectrumEffectBit(kSpectrumEffects[i])) != 0);
-            effect.enabled = state.spectrumOn && spectrumEnabled;
-        }
-        Row& spectrumGradient =
-            addToggle(kSpectrumPage, kIdSpectrumGradient, L"频谱渐变色",
-                      spectrumEnabled ? state.spectrumGradient : false);
-        spectrumGradient.enabled = state.spectrumOn && spectrumEnabled;
-        Row& spectrumBackground =
-            addRow(kSpectrumPage, kIdSpectrumBackground, ControlKind::Toggle, L"背景波浪",
-                   L"仅在选择“梦幻波浪”样式时可开启。", 40.0f, kRowTallH);
-        spectrumBackground.checked = spectrumEnabled ? state.spectrumBackground : false;
-        spectrumBackground.enabled = state.spectrumOn && state.spectrumStyle == 2 &&
-                                     spectrumEnabled;
-        addSlider(kSpectrumPage, kIdSpectrumOpacity, L"背景波浪不透明度", state.spectrumOpacity,
-                  state.spectrumOn && state.spectrumStyle == 2 && state.spectrumBackground &&
-                      spectrumEnabled);
-        // 频谱行创建完毕后才能按互斥关系刷新进度背景行的可用态
+    void createControls() {
+        createDisplayRows();
+        createTaskbarModeRows();
+        createIdleRows();
+        createBackgroundRows();
+        createMediaControlRows();
+        createFloatingCardRows();
+        createSongToastRows();
+        createPerformanceRows();
+        rows[kSpectrumPage] = settings_ui::createSpectrumRows(state);
+        rows[kLyricsPage] = settings_ui::createLyricRows(state);
         updateProgressBackgroundRowsEnabled();
-
-        addHeader(kLyricsPage, L"排版");
-        addToggle(kLyricsPage, kIdDoubleLine, L"双行歌词",
-                  vertical ? false : state.doubleLineLyrics).enabled = !vertical;
-        addRadio(kLyricsPage, kIdAlignment, L"歌词对齐", nullptr,
-                 {L"左对齐", L"居中", L"右对齐"},
-                 vertical ? 0 : state.lyricAlignment,
-                 !vertical && state.taskbarViewMode == 0, kRowH);
-        addHeader(kLyricsPage, L"颜色与效果");
-        addButton(kLyricsPage, kIdFontColor, L"歌词字体颜色与效果", nullptr, L"打开…");
-        addToggle(kLyricsPage, kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
-        addHeader(kLyricsPage, L"歌词特效");
-        const wchar_t* lyricEffectNames[kLyricEffectCount] = {
-            L"星尘跟唱", L"跟唱流光", L"笔触下划线", L"字间涟漪"};
-        for (int i = 0; i < kLyricEffectCount; ++i) {
-            Row& effect = addRow(kLyricsPage, kIdLyricEffectFirst + i, ControlKind::Toggle,
-                lyricEffectNames[i], i == 0 ? L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。"
-                    : L"需要逐字歌词，仅作用于当前演唱行。", 40.0f, kRowTallH);
-            effect.checked = (state.lyricEffects & (1u << i)) != 0;
-            effect.enabled = !minimalModeActive() && (i != 0 || vertical || !state.doubleLineLyrics);
-        }
-        addHeader(kLyricsPage, L"翻译与罗马音");
-        addToggle(kLyricsPage, kIdSecondaryOn, L"开启翻译/罗马音",
-                  vertical ? false : state.secondaryEnabled).enabled = !vertical;
-        const wchar_t* secondaryHint = state.secondaryAvailability == 1
-                                            ? L"正在检查翻译和罗马音…"
-                                            : state.secondaryAvailability == 2
-                                                  ? L"当前歌曲无翻译或罗马音"
-                                                  : L"";
-        addRadio(kLyricsPage, kIdSecondaryType, L"辅助歌词类型", secondaryHint,
-                 {L"翻译", L"罗马音"}, vertical ? 0 : (state.preferRomanization ? 1 : 0),
-                 !vertical && state.secondaryEnabled && state.secondaryAvailability == 0,
-                 *secondaryHint ? kRowTallH : kRowH);
-        addHeader(kLyricsPage, L"本地歌词");
-        addToggle(kLyricsPage, kIdQqLocalLyricsEnabled, L"使用 QQ 音乐本地歌词",
-                  state.qqLocalLyricsEnabled);
-        Row& persistOrder = addRow(kLyricsPage, kIdQqLocalLyricsPersistOrder,
-                                   ControlKind::Toggle,
-                                   L"记住歌词版本选择",
-                                   L"记住每首歌切换后的本地/在线版本；关闭后不保存新记录，但仍读取已有记录",
-                                   40.0f, kRowTallH);
-        persistOrder.checked = state.qqLocalLyricsPersistOrder;
-        persistOrder.enabled = state.qqLocalLyricsEnabled;
-        const std::wstring localPathHint = state.qqLocalLyricsPath.empty()
-                                                ? std::wstring(L"未配置")
-                                                : state.qqLocalLyricsPath;
-        Row& localPath = addButton(kLyricsPage, kIdQqLocalLyricsPath, L"QQ 音乐本地歌词目录",
-                                   localPathHint.c_str(), L"选择文件夹…", kRowTallH);
-        localPath.enabled = state.qqLocalLyricsEnabled;
         updateCompactLyricRows();
         updateImmersiveRowsEnabled();
     }
@@ -4640,32 +4420,7 @@ struct SettingsDialog::Impl {
         surface.invalidate();
     }
 
-    void onCommand(int id, int option = -1) {
-        if (id >= kIdOpenDocs && id <= kIdOpenAbout) {
-            const auto& action = id == kIdOpenDocs ? actions.onOpenDocs
-                               : id == kIdOpenFeedback ? actions.onOpenFeedback
-                                                      : actions.onOpenAbout;
-            if (action)
-                action();
-            return;
-        }
-        if (id == kIdNav)
-            return;
-        if (id == kIdIdleAppNames) {
-            Row* appRow = findRow(kIdIdleApps);
-            if (!appRow || !appRow->enabled)
-                return;
-            appRow->checked = !appRow->checked;
-            state.idleAppNamesVisible = appRow->checked;
-            if (actions.onIdleAppNamesVisible)
-                actions.onIdleAppNamesVisible(appRow->checked);
-            if (hwnd)
-                surface.invalidate();
-            return;
-        }
-        Row* row = findRow(id);
-        if (!row || !row->enabled)
-            return;
+    bool onIdleCommand(int id, Row* row, int option) {
         switch (id) {
         case kIdIdleEntry:
             row->checked = !row->checked;
@@ -4758,106 +4513,14 @@ struct SettingsDialog::Impl {
                 actions.onAddIdleApp();
             }
             break;
-        case kIdSongInfo:
-            row->checked = !row->checked;
-            if (actions.onSongInfoVisible)
-                actions.onSongInfoVisible(row->checked);
-            break;
-        case kIdAlbumCover:
-            row->checked = !row->checked;
-            if (actions.onAlbumCoverVisible)
-                actions.onAlbumCoverVisible(row->checked);
-            if (auto* effect = findRow(kIdCoverEffect))
-                effect->enabled = row->checked && !minimalModeActive();
-            if (auto* platformIcon = findRow(kIdPlatformIcon))
-                platformIcon->enabled = row->checked;
-            break;
-        case kIdPlatformIcon:
-            row->checked = !row->checked;
-            if (actions.onPlatformIconVisible)
-                actions.onPlatformIconVisible(row->checked);
-            break;
-        case kIdCoverEffect:
-            if (actions.onCoverEffectVinyl)
-                actions.onCoverEffectVinyl(row->selected == 1);
-            break;
-        case kIdTaskbarContextMenu:
-            row->checked = !row->checked;
-            if (actions.onTaskbarContextMenu)
-                actions.onTaskbarContextMenu(row->checked);
-            break;
-        case kIdTaskbarViewMode:
-            if (row->selected == 1 &&
-                (!state.mediaSessionAlive || state.verticalTaskbar)) {
-                row->selected = std::clamp(state.taskbarViewMode, 0, 2);
-                break;
-            }
-            state.taskbarViewMode = std::clamp(row->selected, 0, 2);
-            updateImmersiveRowsEnabled();
-            updateIdleRowsEnabled();
-            if (actions.onTaskbarViewMode)
-                actions.onTaskbarViewMode(state.taskbarViewMode);
-            break;
-        case kIdTaskbarMonitor:
-            if (actions.onChooseTaskbarMonitor)
-                actions.onChooseTaskbarMonitor();
-            break;
-        case kIdAppBarEdge:
-            state.appBarEdge = std::clamp(row->selected, 0, 1);
-            if (actions.onAppBarEdge)
-                actions.onAppBarEdge(state.appBarEdge);
-            break;
-        case kIdImmersiveBackgroundAdjustment:
-            state.immersiveBackgroundAdjustment = std::clamp(row->selected, 0, 1);
-            updateBackgroundAdjustmentPresentation();
-            if (actions.onImmersiveBackgroundAdjustment)
-                actions.onImmersiveBackgroundAdjustment(
-                    state.immersiveBackgroundAdjustment);
-            break;
-        case kIdDockBackgroundAdjustment:
-            state.dockBackgroundAdjustment = std::clamp(row->selected, 0, 1);
-            updateBackgroundAdjustmentPresentation();
-            if (actions.onDockBackgroundAdjustment)
-                actions.onDockBackgroundAdjustment(state.dockBackgroundAdjustment);
-            break;
-        case kIdImmersiveBackgroundBlur:
-            if (actions.onImmersiveBackgroundBlur)
-                actions.onImmersiveBackgroundBlur(row->value);
-            break;
-        case kIdDockBackgroundBlur:
-            if (actions.onDockBackgroundBlur)
-                actions.onDockBackgroundBlur(row->value);
-            break;
-        case kIdEmbeddedResourceMonitor:
-            row->checked = !row->checked;
-            state.embeddedResourceMonitor = row->checked;
-            updateImmersiveRowsEnabled();
-            updateIdleRowsEnabled();
-            if (actions.onEmbeddedResourceMonitor)
-                actions.onEmbeddedResourceMonitor(row->checked);
-            break;
-        case kIdDockResourceGpuUsage:
-            row->checked = !row->checked;
-            if (actions.onDockResourceGpuUsage)
-                actions.onDockResourceGpuUsage(row->checked);
-            break;
-        case kIdDockResourceDownload:
-            row->checked = !row->checked;
-            state.dockResourceDownload = row->checked;
-            if (actions.onDockResourceDownload)
-                actions.onDockResourceDownload(row->checked);
-            break;
-        case kIdDockResourceUpload:
-            row->checked = !row->checked;
-            state.dockResourceUpload = row->checked;
-            if (actions.onDockResourceUpload)
-                actions.onDockResourceUpload(row->checked);
-            break;
-        case kIdDockResourceCpuFrequency:
-            row->checked = !row->checked;
-            if (actions.onDockResourceCpuFrequency)
-                actions.onDockResourceCpuFrequency(row->checked);
-            break;
+        default:
+            return false;
+        }
+        return true;
+    }
+
+    bool onSpectrumCommand(int id, Row* row) {
+        switch (id) {
         case kIdSpectrum:
             row->checked = !row->checked;
             for (int i = 0; i < kSpectrumEffectCount; ++i) {
@@ -4934,40 +4597,14 @@ struct SettingsDialog::Impl {
             if (actions.onSpectrumOpacity)
                 actions.onSpectrumOpacity(row->value);
             break;
-        case kIdTaskbarBackground:
-            if (auto* opacity = findRow(kIdCoverBackgroundOpacity))
-                opacity->enabled = row->selected == 1;
-            if (actions.onTaskbarBackground)
-                actions.onTaskbarBackground(row->selected);
-            break;
-        case kIdCoverBackgroundOpacity:
-            if (actions.onCoverBackgroundOpacity)
-                actions.onCoverBackgroundOpacity(row->value);
-            break;
-        case kIdProgressBackground:
-            row->checked = !row->checked;
-            updateProgressBackgroundRowsEnabled();
-            if (actions.onProgressBackground)
-                actions.onProgressBackground(row->checked);
-            break;
-        case kIdProgressBackgroundOpacity:
-            if (actions.onProgressBackgroundOpacity)
-                actions.onProgressBackgroundOpacity(row->value);
-            break;
-        case kIdHoverControls:
-            row->checked = !row->checked;
-            if (actions.onHoverControls)
-                actions.onHoverControls(row->checked);
-            if (auto* style = findRow(kIdHoverControlStyle))
-                style->enabled = row->checked && !minimalModeActive();
-            updateFloatingCardRowsEnabled();
-            break;
-        case kIdHoverControlStyle:
-            if (actions.onHoverControlStyle)
-                actions.onHoverControlStyle(row->selected);
-            updateFloatingCardRowsEnabled();
-            updateIdleRowsEnabled();
-            break;
+        default:
+            return false;
+        }
+        return true;
+    }
+
+    bool onFloatingCardCommand(int id, Row* row) {
+        switch (id) {
         case kIdFloatingCardTrigger:
             state.floatingCardTrigger = row->selected;
             if (actions.onFloatingCardTrigger)
@@ -4994,6 +4631,14 @@ struct SettingsDialog::Impl {
             if (actions.onFloatingCardAutoTextContrast)
                 actions.onFloatingCardAutoTextContrast(row->checked);
             break;
+        default:
+            return false;
+        }
+        return true;
+    }
+
+    bool onSongToastCommand(int id, Row* row) {
+        switch (id) {
         case kIdSongToast:
             row->checked = !row->checked;
             state.songToastEnabled = row->checked;
@@ -5032,6 +4677,182 @@ struct SettingsDialog::Impl {
             if (actions.onPreviewSongToast)
                 actions.onPreviewSongToast();
             break;
+        default:
+            return false;
+        }
+        return true;
+    }
+
+    void onCommand(int id, int option = -1) {
+        if (id >= kIdOpenDocs && id <= kIdOpenAbout) {
+            const auto& action = id == kIdOpenDocs       ? actions.onOpenDocs
+                                 : id == kIdOpenFeedback ? actions.onOpenFeedback
+                                                         : actions.onOpenAbout;
+            if (action)
+                action();
+            return;
+        }
+        if (id == kIdNav)
+            return;
+        if (id == kIdIdleAppNames) {
+            Row* appRow = findRow(kIdIdleApps);
+            if (!appRow || !appRow->enabled)
+                return;
+            appRow->checked = !appRow->checked;
+            state.idleAppNamesVisible = appRow->checked;
+            if (actions.onIdleAppNamesVisible)
+                actions.onIdleAppNamesVisible(appRow->checked);
+            if (hwnd)
+                surface.invalidate();
+            return;
+        }
+        Row* row = findRow(id);
+        if (!row || !row->enabled)
+            return;
+        if (settings_ui::handleLyricCommand(id, *row, rows[kLyricsPage], state, actions)) {
+            if (hwnd)
+                surface.invalidate();
+            return;
+        }
+        if (onIdleCommand(id, row, option) || onSpectrumCommand(id, row) ||
+            onFloatingCardCommand(id, row) || onSongToastCommand(id, row)) {
+            if (hwnd)
+                surface.invalidate();
+            return;
+        }
+        switch (id) {
+        case kIdSongInfo:
+            row->checked = !row->checked;
+            if (actions.onSongInfoVisible)
+                actions.onSongInfoVisible(row->checked);
+            break;
+        case kIdAlbumCover:
+            row->checked = !row->checked;
+            if (actions.onAlbumCoverVisible)
+                actions.onAlbumCoverVisible(row->checked);
+            if (auto* effect = findRow(kIdCoverEffect))
+                effect->enabled = row->checked && !minimalModeActive();
+            if (auto* platformIcon = findRow(kIdPlatformIcon))
+                platformIcon->enabled = row->checked;
+            break;
+        case kIdPlatformIcon:
+            row->checked = !row->checked;
+            if (actions.onPlatformIconVisible)
+                actions.onPlatformIconVisible(row->checked);
+            break;
+        case kIdCoverEffect:
+            if (actions.onCoverEffectVinyl)
+                actions.onCoverEffectVinyl(row->selected == 1);
+            break;
+        case kIdTaskbarContextMenu:
+            row->checked = !row->checked;
+            if (actions.onTaskbarContextMenu)
+                actions.onTaskbarContextMenu(row->checked);
+            break;
+        case kIdTaskbarViewMode:
+            if (row->selected == 1 && (!state.mediaSessionAlive || state.verticalTaskbar)) {
+                row->selected = std::clamp(state.taskbarViewMode, 0, 2);
+                break;
+            }
+            state.taskbarViewMode = std::clamp(row->selected, 0, 2);
+            updateImmersiveRowsEnabled();
+            updateIdleRowsEnabled();
+            if (actions.onTaskbarViewMode)
+                actions.onTaskbarViewMode(state.taskbarViewMode);
+            break;
+        case kIdTaskbarMonitor:
+            if (actions.onChooseTaskbarMonitor)
+                actions.onChooseTaskbarMonitor();
+            break;
+        case kIdAppBarEdge:
+            state.appBarEdge = std::clamp(row->selected, 0, 1);
+            if (actions.onAppBarEdge)
+                actions.onAppBarEdge(state.appBarEdge);
+            break;
+        case kIdImmersiveBackgroundAdjustment:
+            state.immersiveBackgroundAdjustment = std::clamp(row->selected, 0, 1);
+            updateBackgroundAdjustmentPresentation();
+            if (actions.onImmersiveBackgroundAdjustment)
+                actions.onImmersiveBackgroundAdjustment(state.immersiveBackgroundAdjustment);
+            break;
+        case kIdDockBackgroundAdjustment:
+            state.dockBackgroundAdjustment = std::clamp(row->selected, 0, 1);
+            updateBackgroundAdjustmentPresentation();
+            if (actions.onDockBackgroundAdjustment)
+                actions.onDockBackgroundAdjustment(state.dockBackgroundAdjustment);
+            break;
+        case kIdImmersiveBackgroundBlur:
+            if (actions.onImmersiveBackgroundBlur)
+                actions.onImmersiveBackgroundBlur(row->value);
+            break;
+        case kIdDockBackgroundBlur:
+            if (actions.onDockBackgroundBlur)
+                actions.onDockBackgroundBlur(row->value);
+            break;
+        case kIdEmbeddedResourceMonitor:
+            row->checked = !row->checked;
+            state.embeddedResourceMonitor = row->checked;
+            updateImmersiveRowsEnabled();
+            updateIdleRowsEnabled();
+            if (actions.onEmbeddedResourceMonitor)
+                actions.onEmbeddedResourceMonitor(row->checked);
+            break;
+        case kIdDockResourceGpuUsage:
+            row->checked = !row->checked;
+            if (actions.onDockResourceGpuUsage)
+                actions.onDockResourceGpuUsage(row->checked);
+            break;
+        case kIdDockResourceDownload:
+            row->checked = !row->checked;
+            state.dockResourceDownload = row->checked;
+            if (actions.onDockResourceDownload)
+                actions.onDockResourceDownload(row->checked);
+            break;
+        case kIdDockResourceUpload:
+            row->checked = !row->checked;
+            state.dockResourceUpload = row->checked;
+            if (actions.onDockResourceUpload)
+                actions.onDockResourceUpload(row->checked);
+            break;
+        case kIdDockResourceCpuFrequency:
+            row->checked = !row->checked;
+            if (actions.onDockResourceCpuFrequency)
+                actions.onDockResourceCpuFrequency(row->checked);
+            break;
+        case kIdTaskbarBackground:
+            if (auto* opacity = findRow(kIdCoverBackgroundOpacity))
+                opacity->enabled = row->selected == 1;
+            if (actions.onTaskbarBackground)
+                actions.onTaskbarBackground(row->selected);
+            break;
+        case kIdCoverBackgroundOpacity:
+            if (actions.onCoverBackgroundOpacity)
+                actions.onCoverBackgroundOpacity(row->value);
+            break;
+        case kIdProgressBackground:
+            row->checked = !row->checked;
+            updateProgressBackgroundRowsEnabled();
+            if (actions.onProgressBackground)
+                actions.onProgressBackground(row->checked);
+            break;
+        case kIdProgressBackgroundOpacity:
+            if (actions.onProgressBackgroundOpacity)
+                actions.onProgressBackgroundOpacity(row->value);
+            break;
+        case kIdHoverControls:
+            row->checked = !row->checked;
+            if (actions.onHoverControls)
+                actions.onHoverControls(row->checked);
+            if (auto* style = findRow(kIdHoverControlStyle))
+                style->enabled = row->checked && !minimalModeActive();
+            updateFloatingCardRowsEnabled();
+            break;
+        case kIdHoverControlStyle:
+            if (actions.onHoverControlStyle)
+                actions.onHoverControlStyle(row->selected);
+            updateFloatingCardRowsEnabled();
+            updateIdleRowsEnabled();
+            break;
         case kIdTaskbarTheme:
             if (actions.onTaskbarTheme)
                 actions.onTaskbarTheme(themeModeFromIndex(row->selected));
@@ -5048,98 +4869,15 @@ struct SettingsDialog::Impl {
             if (actions.onPickFont)
                 actions.onPickFont();
             break;
-        case kIdFontColor:
-            if (actions.onFontColorEffect)
-                actions.onFontColorEffect();
-            break;
-        case kIdFollowAlbum:
-            row->checked = !row->checked;
-            if (actions.onFollowAlbum)
-                actions.onFollowAlbum(row->checked);
-            break;
-        case kIdLyricEffectFirst:
-        case kIdLyricEffectFirst + 1:
-        case kIdLyricEffectFirst + 2:
-        case kIdLyricEffectFirst + 3:
-            row->checked = !row->checked;
-            if (actions.onLyricEffect)
-                actions.onLyricEffect(row->id - kIdLyricEffectFirst, row->checked);
-            break;
-        case kIdDoubleLine:
-            row->checked = !row->checked;
-            if (auto* stardust = findRow(kIdLyricEffectFirst))
-                stardust->enabled = !row->checked && !minimalModeActive();
-            if (actions.onDoubleLineLyrics)
-                actions.onDoubleLineLyrics(row->checked);
-            break;
-        case kIdAlignment:
-            if (actions.onLyricAlignment)
-                actions.onLyricAlignment(row->selected);
-            break;
-        case kIdSecondaryOn:
-            row->checked = !row->checked;
-            if (actions.onSecondaryEnabled)
-                actions.onSecondaryEnabled(row->checked);
-            if (auto* type = findRow(kIdSecondaryType))
-                type->enabled = row->checked && state.secondaryAvailability == 0;
-            break;
-        case kIdSecondaryType:
-            if (actions.onPreferRomanization)
-                actions.onPreferRomanization(row->selected == 1);
-            break;
-        case kIdQqLocalLyricsEnabled:
-            row->checked = !row->checked;
-            if (auto* persist = findRow(kIdQqLocalLyricsPersistOrder))
-                persist->enabled = row->checked;
-            if (auto* path = findRow(kIdQqLocalLyricsPath))
-                path->enabled = row->checked;
-            if (actions.onQqLocalLyricsEnabled)
-                actions.onQqLocalLyricsEnabled(row->checked);
-            break;
-        case kIdQqLocalLyricsPersistOrder:
-            row->checked = !row->checked;
-            if (actions.onQqLocalLyricsPersistOrder)
-                actions.onQqLocalLyricsPersistOrder(row->checked);
-            break;
-        case kIdQqLocalLyricsPath:
-            if (actions.onPickQqLocalLyricsPath)
-                actions.onPickQqLocalLyricsPath();
-            break;
         }
         if (hwnd)
             surface.invalidate();
     }
 
-    void updateCompactLyricRows() {
-        const wchar_t* compactHint = L"小任务栏下暂时停用，恢复正常大小后自动恢复；已保留开关偏好。";
-        for (int id : {kIdDoubleLine, kIdSecondaryOn}) {
-            if (auto* row = findRow(id)) {
-                row->hint = state.compactTaskbar ? compactHint : L"";
-                row->showHint = state.compactTaskbar;
-                row->minHeight = row->showHint ? kRowTallH : kRowH;
-                row->height = row->minHeight;
-                if (state.compactTaskbar)
-                    row->enabled = false;
-            }
-        }
-        if (auto* row = findRow(kIdLyricEffectFirst)) {
-            row->hint = state.compactTaskbar ? compactHint
-                : L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。";
-            if (state.compactTaskbar)
-                row->enabled = false;
-        }
-        if (state.compactTaskbar) {
-            if (auto* row = findRow(kIdSecondaryType))
-                row->enabled = false;
-        }
-    }
+    void updateCompactLyricRows() { settings_ui::updateCompactLyricRows(rows[kLyricsPage], state); }
 
-    void updateState(const SettingsState& s) {
-        if (sliderEditOpen)
-            commitSliderEditor();
-        state = s;
+    void syncIdleRows(const SettingsState& s) {
         const bool vertical = s.verticalTaskbar;
-        resetIdleAppDrag();
         if (auto* row = findRow(kIdIdleEntry))
             row->checked = s.idleEntryEnabled;
         if (auto* row = findRow(kIdIdleQuote))
@@ -5161,6 +4899,10 @@ struct SettingsDialog::Impl {
         updateIdleQuoteSourceRow();
         updateIdleAppsRowHeight();
         updateTickTickRows();
+    }
+
+    void syncDisplayRows(const SettingsState& s) {
+        const bool vertical = s.verticalTaskbar;
         const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongInfo)) {
             row->checked = vertical ? false : s.songInfoVisible;
@@ -5178,6 +4920,10 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdTaskbarContextMenu))
             row->checked = s.taskbarContextMenu;
+    }
+
+    void syncTaskbarModeRows(const SettingsState& s) {
+        const bool vertical = s.verticalTaskbar;
         if (auto* row = findRow(kIdTaskbarViewMode)) {
             row->selected = std::clamp(s.taskbarViewMode, 0, 2);
             row->hint = taskbarViewModeHint(s.mediaSessionAlive, vertical);
@@ -5238,43 +4984,11 @@ struct SettingsDialog::Impl {
             row->checked = s.dockResourceCpuFrequency;
             row->enabled = resourceExtrasEnabled;
         }
-        if (auto* row = findRow(kIdSpectrum)) {
-            row->checked = minimal || vertical ? false : s.spectrumOn;
-            row->enabled = !minimal && !vertical;
-        }
-        if (auto* row = findRow(kIdSpectrumColorMode)) {
-            row->selected = vertical ? 0
-                                     : (s.spectrumCustomColor ? 2
-                                                               : s.spectrumFollowAlbum ? 1 : 0);
-            row->enabled = s.spectrumOn && !minimal && !vertical;
-        }
-        if (auto* row = findRow(kIdSpectrumColor)) {
-            row->controlText = colorText(s.spectrumColor);
-            row->enabled = s.spectrumOn && s.spectrumCustomColor && !minimal && !vertical;
-        }
-        if (auto* row = findRow(kIdSpectrumStyle)) {
-            row->selected = vertical ? 0 : std::clamp(s.spectrumStyle, 0, 4);
-            row->enabled = s.spectrumOn && !minimal && !vertical;
-        }
-        if (auto* row = findRow(kIdSpectrumGradient)) {
-            row->checked = minimal || vertical ? false : s.spectrumGradient;
-            row->enabled = s.spectrumOn && !minimal && !vertical;
-        }
-        for (int i = 0; i < kSpectrumEffectCount; ++i) {
-            if (auto* row = findRow(kIdSpectrumEffectFirst + i)) {
-                row->checked = (s.spectrumEffects & spectrumEffectBit(kSpectrumEffects[i])) != 0;
-                row->enabled = s.spectrumOn && !minimal && !vertical;
-            }
-        }
-        if (auto* row = findRow(kIdSpectrumBackground)) {
-            row->checked = minimal || vertical ? false : s.spectrumBackground;
-            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && !minimal && !vertical;
-        }
-        if (auto* row = findRow(kIdSpectrumOpacity)) {
-            row->value = std::clamp(s.spectrumOpacity, 0, 100);
-            row->enabled = s.spectrumOn && s.spectrumStyle == 2 && s.spectrumBackground &&
-                           !minimal && !vertical;
-        }
+        settings_ui::updateSpectrumRows(rows[kSpectrumPage], s);
+    }
+
+    void syncBackgroundRows(const SettingsState& s) {
+        const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdTaskbarBackground)) {
             row->selected = minimal ? 0 : std::clamp(s.taskbarBackground, 0, 2);
             row->enabled = !minimal;
@@ -5288,12 +5002,19 @@ struct SettingsDialog::Impl {
         if (auto* row = findRow(kIdProgressBackgroundOpacity))
             row->value = std::clamp(s.progressBackgroundOpacity, 0, 100);
         updateProgressBackgroundRowsEnabled();
+    }
+
+    void syncMediaControlRows(const SettingsState& s) {
+        const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdHoverControls))
             row->checked = s.hoverControls;
         if (auto* row = findRow(kIdHoverControlStyle)) {
             row->selected = minimal ? 0 : s.hoverControlStyle;
             row->enabled = s.hoverControls && !minimal;
         }
+    }
+
+    void syncFloatingCardRows(const SettingsState& s) {
         if (auto* row = findRow(kIdFloatingCardTrigger))
             row->selected = std::clamp(s.floatingCardTrigger, 0, 1);
         if (auto* row = findRow(kIdFloatingCardBackground))
@@ -5306,6 +5027,10 @@ struct SettingsDialog::Impl {
             row->checked = s.floatingCardAutoTextContrast;
         updateFloatingCardRowsEnabled();
         updateIdleRowsEnabled();
+    }
+
+    void syncSongToastRows(const SettingsState& s) {
+        const bool minimal = s.renderMode == kRenderModeMinimal;
         if (auto* row = findRow(kIdSongToast)) {
             row->checked = minimal ? false : s.songToastEnabled;
             row->enabled = !minimal;
@@ -5328,6 +5053,9 @@ struct SettingsDialog::Impl {
         }
         if (auto* row = findRow(kIdSongToastPreview))
             row->enabled = !minimal && s.songToastEnabled && s.songToastPreviewAvailable;
+    }
+
+    void syncThemeFontRows(const SettingsState& s) {
         if (auto* row = findRow(kIdTaskbarTheme))
             row->selected = themeModeIndex(s.taskbarThemeMode);
         if (auto* row = findRow(kIdWindowTheme))
@@ -5341,51 +5069,23 @@ struct SettingsDialog::Impl {
             row->minHeight = kRowTallH;
             row->height = row->minHeight;
         }
-        if (auto* row = findRow(kIdFollowAlbum))
-            row->checked = s.followAlbum;
-        if (auto* row = findRow(kIdDoubleLine)) {
-            row->checked = vertical ? false : s.doubleLineLyrics;
-            row->enabled = !vertical;
-        }
-        for (int i = 0; i < kLyricEffectCount; ++i) {
-            if (auto* row = findRow(kIdLyricEffectFirst + i)) {
-                row->checked = (s.lyricEffects & (1u << i)) != 0;
-                row->enabled = !minimal && (i != 0 || vertical || !s.doubleLineLyrics);
-            }
-        }
-        if (auto* row = findRow(kIdAlignment)) {
-            row->selected = vertical ? 0 : s.lyricAlignment;
-            row->enabled = !vertical && s.taskbarViewMode == 0;
-        }
-        if (auto* row = findRow(kIdSecondaryOn)) {
-            row->checked = vertical ? false : s.secondaryEnabled;
-            row->enabled = !vertical;
-        }
-        if (auto* row = findRow(kIdSecondaryType)) {
-            row->hint = s.secondaryAvailability == 1
-                            ? L"正在检查翻译和罗马音…"
-                            : s.secondaryAvailability == 2 ? L"当前歌曲无翻译或罗马音" : L"";
-            row->showHint = !row->hint.empty();
-            row->minHeight = row->showHint ? kRowTallH : kRowH;
-            row->height = row->minHeight;
-            row->selected = vertical ? 0 : (s.preferRomanization ? 1 : 0);
-            row->enabled = !vertical && s.secondaryEnabled && s.secondaryAvailability == 0;
-        }
-        if (auto* row = findRow(kIdQqLocalLyricsEnabled))
-            row->checked = s.qqLocalLyricsEnabled;
-        if (auto* row = findRow(kIdQqLocalLyricsPersistOrder)) {
-            row->checked = s.qqLocalLyricsPersistOrder;
-            row->enabled = s.qqLocalLyricsEnabled;
-        }
-        if (auto* row = findRow(kIdQqLocalLyricsPath)) {
-            row->hint = s.qqLocalLyricsPath.empty() ? std::wstring(L"未配置")
-                                                    : s.qqLocalLyricsPath;
-            row->showHint = true;
-            row->minHeight = kRowTallH;
-            row->height = row->minHeight;
-            row->enabled = s.qqLocalLyricsEnabled;
-        }
-        updateCompactLyricRows();
+    }
+
+    void updateState(const SettingsState& s) {
+        if (sliderEditOpen)
+            commitSliderEditor();
+        state = s;
+        resetIdleAppDrag();
+        syncIdleRows(s);
+        syncDisplayRows(s);
+        syncTaskbarModeRows(s);
+        settings_ui::updateSpectrumRows(rows[kSpectrumPage], s);
+        syncBackgroundRows(s);
+        syncMediaControlRows(s);
+        syncFloatingCardRows(s);
+        syncSongToastRows(s);
+        syncThemeFontRows(s);
+        settings_ui::updateLyricRows(rows[kLyricsPage], s);
         updateImmersiveRowsEnabled();
         layout();
         surface.invalidate();

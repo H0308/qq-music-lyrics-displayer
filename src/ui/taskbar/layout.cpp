@@ -87,4 +87,26 @@ VerticalLayout verticalLayout(float width, float height, DisplayScene scene, boo
     }
     return layout;
 }
+
+float expandedSpectrumWidth(float hostWidth) {
+    return hostWidth <= 0.0f ? 0.0f : std::clamp(hostWidth * 0.22f, 220.0f, 440.0f);
+}
+
+float expandedClockWidth(float hostWidth) {
+    return hostWidth <= 0.0f ? 0.0f : std::clamp(hostWidth * 0.045f, 80.0f, 96.0f);
+}
+
+ExpandedSideLayout expandedSideLayout(float w, bool dock, float resourceWidth) {
+    ExpandedSideLayout result;
+    result.zoneWidth = expandedSpectrumWidth(w);
+    result.resourceWidth = dock ? resourceWidth : 0.0f;
+    result.resourceX = w - result.resourceWidth - (dock ? 3.0f : kTextPadding);
+    result.zoneX =
+        dock ? result.resourceX - 10.0f - result.zoneWidth : w - result.zoneWidth - kTextPadding;
+    result.clockWidth = dock ? 0.0f : std::min(result.zoneWidth, expandedClockWidth(w));
+    result.clockX = w - result.clockWidth - kTextPadding;
+    result.spectrumRight = dock ? result.resourceX - 10.0f : result.clockX - 10.0f;
+    result.spectrumWidth = std::max(0.0f, result.spectrumRight - result.zoneX);
+    return result;
+}
 } // namespace taskbar_detail

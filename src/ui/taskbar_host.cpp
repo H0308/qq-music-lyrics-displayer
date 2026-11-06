@@ -55,7 +55,8 @@ using taskbar_detail::VerticalLayout;
 #include "lyric_star.h"
 #include "media_control_icons.h"
 #include "media_popup.h"
-#include "monitor/resource_monitor.h"
+#include "ui/taskbar/resource_panel.h"
+#include "ui/taskbar/cover_image.h"
 #include "dock_backdrop.h"
 #include "platform_icon.h"
 #include "settings_icons.h"
@@ -64,7 +65,6 @@ using taskbar_detail::VerticalLayout;
 #include <d2d1.h>
 #include <d2d1effects.h>
 #include <dwrite.h>
-#include <gdiplus.h>
 #include <objbase.h>
 #include <shellapi.h>
 #include <uiautomation.h>
@@ -162,58 +162,19 @@ constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
 constexpr float kCompactTaskbarHeightDip = 36.0f;
 
-constexpr float kImmersiveSpectrumZoneRatio = 0.22f;
-constexpr float kImmersiveSpectrumZoneMinW = 220.0f;
-constexpr float kImmersiveSpectrumZoneMaxW = 440.0f;
 
-constexpr float kImmersiveClockZoneRatio = 0.045f;
-constexpr float kImmersiveClockZoneMinW = 80.0f;
-constexpr float kImmersiveClockZoneMaxW = 96.0f;
 constexpr float kImmersiveSpectrumClockGap = 10.0f;
 constexpr float kDockResourceZoneGap = 10.0f;
-constexpr float kDefaultResourceLeftColumnW = 76.0f;
-constexpr float kDefaultResourceRightColumnW = 100.0f;
 constexpr float kResourceFontSize = 13.5f;
-constexpr float kResourceCellSafetyPadding = 1.0f;
 constexpr float kDockResourceRightPadding = 3.0f;
 constexpr float kDockPetSeatW = 42.0f;
 constexpr float kPetLaneMinWidthDip = 44.0f;
-constexpr UINT kResourceSnapshotPollMs = 250;
 constexpr float kVinylRotationDegPerSecond = 30.0f; // 黑胶唱片转速：12 秒一圈，保持视觉克制
 constexpr float kVinylArmParkedAngle = -18.0f;
 constexpr ULONGLONG kVinylArmDurationMs = 240;
 constexpr float kVinylHaloWidth = 0.5f;
 constexpr float kVinylOuterRatio = 0.40f; // 唱片直径约为底座边长的 80%，四边各留约 10%
 constexpr float kVinylInnerRatio = 0.25f; // 圆形专辑封面半径 / 封面槽边长
-constexpr float kCoverBlurStdDev =
-    6.0f; // 封面模糊背景的高斯模糊强度（封面按显示尺寸解码，拉伸后等效更强）
-
-// d2d1effects.h 只声明这些 GUID；当前工程的链接配置不提供其外部定义，
-// 这里保留 Direct2D 标准 Gaussian Blur / Scale CLSID 的内部定义（与 media_popup.cpp 一致）。
-constexpr CLSID kGaussianBlurClsid = {
-    0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
-constexpr CLSID kScaleClsid = {
-    0x9daf9369, 0x3846, 0x4d0e, {0xa4, 0x4e, 0x0c, 0x60, 0x79, 0x34, 0xa5, 0xd7}};
-
-// GDI+ 一次性初始化（封面解码）
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-GdiplusInit g_gdiplusInit;
 
 // 读取注册表 DWORD，失败返回默认值
 
@@ -483,7 +444,7 @@ struct TaskbarHost::Impl {
     // 媒体信息
     OverlayMediaInfo media;
     IdlePresentation idle;
-    Microsoft::WRL::ComPtr<ID2D1Bitmap> coverBmp;
+    CoverImage cover_;
     Microsoft::WRL::ComPtr<ID2D1Bitmap> platformIconBmp;
 
     // 交互
@@ -575,24 +536,7 @@ struct TaskbarHost::Impl {
     std::wstring clockTimeText_;
     std::wstring clockDateText_;
     uint64_t clockMinuteKey_ = 0;
-    system_monitor::ResourceMonitor resourceMonitor_;
-    uint64_t resourceSnapshotRevision_ = 0;
-    ULONGLONG nextResourceSnapshotPollMs_ = 0;
-    std::wstring resourceCpuText_ = L"—";
-    std::wstring resourceMemoryText_ = L"—";
-    std::wstring resourceDownloadText_ = L"—";
-    std::wstring resourceUploadText_ = L"—";
-    std::wstring resourceGpuText_ = L"—";
-    std::wstring resourceCpuFrequencyText_ = L"—";
-    DockResourceVisibility dockResourceVisibility_{};
-    struct DockResourceRow {
-        std::wstring left;
-        std::wstring right;
-    };
-    size_t dockResourcePage_ = 0;
-    float resourceLeftColumnW_ = kDefaultResourceLeftColumnW;
-    float resourceRightColumnW_ = kDefaultResourceRightColumnW;
-    std::array<float, 2> resourceSingleLineWidths_{};
+    ResourcePanel resourcePanel_;
     ULONGLONG lastTickMs_ = 0;
     int slowTick_ = 0; // 慢速分支计数器
 
@@ -707,9 +651,6 @@ struct TaskbarHost::Impl {
     // 伴听宠物已见到的曲目（title|artist），用于检测"播放中切歌"并触发雀跃。
     std::wstring dockPetTrack_;
     Microsoft::WRL::ComPtr<ID2D1StrokeStyle> dragPreviewStroke_;
-    Microsoft::WRL::ComPtr<ID2D1Effect> coverBlurFx_;
-    Microsoft::WRL::ComPtr<ID2D1Effect> coverScaleFx_;
-    ID2D1Bitmap* coverBlurInput_ = nullptr; // 模糊链当前绑定的封面（不持有引用，仅用于比较）
     bool spectrumVisible_ = false;
     Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> coverClip_;
     Microsoft::WRL::ComPtr<ID2D1EllipseGeometry> vinylCoverClip_;
@@ -841,34 +782,20 @@ struct TaskbarHost::Impl {
     bool isAppBarView() const { return viewMode_ == TaskbarViewMode::AppBar; }
 
     bool resourceMonitoringEnabled() const {
-        return isAppBarView() ||
-               (viewMode_ == TaskbarViewMode::Embedded && dockResourceVisibility_.embeddedEnabled);
+        return isAppBarView() || (viewMode_ == TaskbarViewMode::Embedded &&
+                                  resourcePanel_.visibility().embeddedEnabled);
     }
 
     bool embeddedResourceVisible() const {
-        return viewMode_ == TaskbarViewMode::Embedded && dockResourceVisibility_.embeddedEnabled &&
-               !isVerticalTaskbar();
+        return viewMode_ == TaskbarViewMode::Embedded &&
+               resourcePanel_.visibility().embeddedEnabled && !isVerticalTaskbar();
     }
 
     bool embeddedResourceOnly() const {
         return embeddedResourceVisible() && scene_ == DisplayScene::Idle && statusText.empty();
     }
 
-    float resourceZoneWidth() const {
-        if (compactTaskbarHeight_ > 0.0f) {
-            float width = 0.0f;
-            int count = 0;
-            for (float cellWidth : resourceSingleLineWidths_) {
-                if (cellWidth > 0.0f) {
-                    width += cellWidth;
-                    ++count;
-                }
-            }
-            return width + std::max(0, count - 1) * kDockResourceZoneGap;
-        }
-        return resourceLeftColumnW_ +
-               (resourceRightColumnW_ > 0.0f ? kDockResourceZoneGap + resourceRightColumnW_ : 0.0f);
-    }
+    float resourceZoneWidth() const { return resourcePanel_.width(); }
 
     float embeddedResourceExtra() const {
         if (embeddedResourceOnly())
@@ -1723,21 +1650,8 @@ struct TaskbarHost::Impl {
         rt->CreateLayer(lyricEdgeFadeLayer_.ReleaseAndGetAddressOf());
         rt->CreateLayer(lyricRightFadeLayer_.ReleaseAndGetAddressOf());
         recreateFormats();
-        if (auto* dwrite = renderer.dwrite()) {
-            dwrite->CreateTextFormat(
-                fluent::uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"zh-cn",
-                typesetter_.resources().fmtDragPreview_.ReleaseAndGetAddressOf());
-            if (typesetter_.resources().fmtDragPreview_.Get()) {
-                typesetter_.resources().fmtDragPreview_->SetTextAlignment(
-                    DWRITE_TEXT_ALIGNMENT_CENTER);
-                typesetter_.resources().fmtDragPreview_->SetParagraphAlignment(
-                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                typesetter_.resources().fmtDragPreview_->SetWordWrapping(
-                    DWRITE_WORD_WRAPPING_NO_WRAP);
-                fluent::applyUiFontFallback(typesetter_.resources().fmtDragPreview_.Get());
-            }
-        }
+        typesetter_.setFactory(renderer.dwrite());
+        typesetter_.createDragPreviewFormat();
         if (auto* factory = renderer.d2d()) {
             D2D1_STROKE_STYLE_PROPERTIES props{};
             props.startCap = D2D1_CAP_STYLE_FLAT;
@@ -1808,18 +1722,14 @@ struct TaskbarHost::Impl {
         textEffectsCache_.invalidate(); // 颜色变化使离屏缓存失效
         if (brushLyric_.Get()) {
             brushLyric_.Reset();
-            brushLyric_.Reset();
         }
         if (brushLyricDim_.Get()) {
-            brushLyricDim_.Reset();
             brushLyricDim_.Reset();
         }
         if (brushLyricGlow_.Get()) {
             brushLyricGlow_.Reset();
-            brushLyricGlow_.Reset();
         }
         if (brushLyricOutline_.Get()) {
-            brushLyricOutline_.Reset();
             brushLyricOutline_.Reset();
         }
         auto rgb = [](COLORREF c, float a) {
@@ -1994,17 +1904,7 @@ struct TaskbarHost::Impl {
             mediaPopup.onAnchorEnter();
     }
 
-    void releaseCoverBackgroundResources() {
-        if (coverBlurFx_.Get()) {
-            coverBlurFx_.Reset();
-            coverBlurFx_.Reset();
-        }
-        if (coverScaleFx_.Get()) {
-            coverScaleFx_.Reset();
-            coverScaleFx_.Reset();
-        }
-        coverBlurInput_ = nullptr;
-    }
+    void releaseCoverBackgroundResources() { cover_.releaseBackground(); }
 
     void setControlsOnHover(bool on) {
         if (controlsOnHover_ == on)
@@ -2245,7 +2145,7 @@ struct TaskbarHost::Impl {
             immersiveBackdropPrepared = true;
         }
         dockPet_.setMode(DockPetMode::Hidden, monotonicNowMs());
-        dockResourcePage_ = 0;
+        resourcePanel_.resetPage();
         volumeHover_ = false;
         immersiveControlHover_ = -1;
         volumePopup_.hide();
@@ -2385,15 +2285,15 @@ struct TaskbarHost::Impl {
     }
 
     void setDockResourceVisibility(const DockResourceVisibility& visibility) {
-        if (dockResourceVisibility_.embeddedEnabled == visibility.embeddedEnabled &&
-            dockResourceVisibility_.download == visibility.download &&
-            dockResourceVisibility_.upload == visibility.upload &&
-            dockResourceVisibility_.gpuUsage == visibility.gpuUsage &&
-            dockResourceVisibility_.cpuFrequency == visibility.cpuFrequency)
+        if (resourcePanel_.visibility().embeddedEnabled == visibility.embeddedEnabled &&
+            resourcePanel_.visibility().download == visibility.download &&
+            resourcePanel_.visibility().upload == visibility.upload &&
+            resourcePanel_.visibility().gpuUsage == visibility.gpuUsage &&
+            resourcePanel_.visibility().cpuFrequency == visibility.cpuFrequency)
             return;
         const bool embeddedChanged =
-            dockResourceVisibility_.embeddedEnabled != visibility.embeddedEnabled;
-        dockResourceVisibility_ = visibility;
+            resourcePanel_.visibility().embeddedEnabled != visibility.embeddedEnabled;
+        resourcePanel_.setVisibility(visibility);
         updateResourceColumnWidths();
         if (embeddedChanged && viewMode_ == TaskbarViewMode::Embedded && hwnd) {
             if (visibility.embeddedEnabled && !isStoppedMode())
@@ -2401,7 +2301,7 @@ struct TaskbarHost::Impl {
             else
                 stopResourceMonitoring();
         }
-        dockResourcePage_ = 0;
+        resourcePanel_.resetPage();
         requestInvalidation(toMask(RenderInvalidation::Layout) | toMask(RenderInvalidation::Paint) |
                             toMask(RenderInvalidation::Text));
         if (isAppBarView() || viewMode_ == TaskbarViewMode::Embedded)
@@ -2443,7 +2343,6 @@ struct TaskbarHost::Impl {
         if (!on) {
             requestInvalidation(RenderInvalidation::PlatformIcon);
             if (platformIconBmp.Get()) {
-                platformIconBmp.Reset();
                 platformIconBmp.Reset();
             }
         } else if (platformIconVisible_) {
@@ -2663,10 +2562,7 @@ struct TaskbarHost::Impl {
             currentLine = frame.currentLine;
             if (!sceneTransitionInProgress) {
                 resetLyricTransition();
-                if (typesetter_.resources().nextLyricLayout_.Get()) {
-                    typesetter_.resources().nextLyricLayout_.Reset();
-                    typesetter_.resources().nextLyricLayout_.Reset();
-                }
+                typesetter_.clearNextContent();
                 nextLyricWidth_ = 0.0f;
                 nextLyricHeight_ = 0.0f;
                 requestInvalidation(RenderInvalidation::Text);
@@ -2727,49 +2623,18 @@ struct TaskbarHost::Impl {
     float immersiveSpectrumZoneW(float hostW) const {
         if (!horizontalImmersiveMode() || hostW <= 0.0f)
             return 0.0f;
-        return std::clamp(hostW * kImmersiveSpectrumZoneRatio, kImmersiveSpectrumZoneMinW,
-                          kImmersiveSpectrumZoneMaxW);
+        return taskbar_detail::expandedSpectrumWidth(hostW);
     }
 
     float immersiveClockZoneW(float hostW) const {
         if (!horizontalImmersiveMode() || hostW <= 0.0f)
             return 0.0f;
-        return std::clamp(hostW * kImmersiveClockZoneRatio, kImmersiveClockZoneMinW,
-                          kImmersiveClockZoneMaxW);
+        return taskbar_detail::expandedClockWidth(hostW);
     }
 
     bool dockResourceExtrasVisible() const { return dockResourcePageCount() > 1; }
 
-    std::vector<DockResourceRow> dockResourceRows() const {
-        std::vector<std::wstring> cells{L"CPU: " + resourceCpuText_,
-                                        L"内存: " + resourceMemoryText_};
-        if (dockResourceVisibility_.download)
-            cells.push_back(L"下行: " + resourceDownloadText_);
-        if (dockResourceVisibility_.upload)
-            cells.push_back(L"上行: " + resourceUploadText_);
-        if (dockResourceVisibility_.gpuUsage)
-            cells.push_back(L"GPU: " + resourceGpuText_);
-        if (dockResourceVisibility_.cpuFrequency)
-            cells.push_back(L"频率: " + resourceCpuFrequencyText_);
-
-        std::vector<DockResourceRow> rows;
-        if (compactTaskbarHeight_ > 0.0f) {
-            for (size_t i = 0; i < cells.size(); i += 2)
-                rows.push_back({cells[i], i + 1 < cells.size() ? cells[i + 1] : L""});
-            return rows;
-        }
-        for (size_t i = 0; i < cells.size(); i += 4) {
-            rows.push_back({cells[i], i + 2 < cells.size() ? cells[i + 2] : L""});
-            rows.push_back({i + 1 < cells.size() ? cells[i + 1] : L"",
-                            i + 3 < cells.size() ? cells[i + 3] : L""});
-        }
-        return rows;
-    }
-
-    size_t dockResourcePageCount() const {
-        const auto rows = dockResourceRows();
-        return compactTaskbarHeight_ > 0.0f ? rows.size() : rows.size() / 2;
-    }
+    size_t dockResourcePageCount() const { return resourcePanel_.pageCount(); }
 
     float dockResourceZoneW(float hostW) const {
         if (!isAppBarView() || hostW <= 0.0f)
@@ -2798,16 +2663,8 @@ struct TaskbarHost::Impl {
     }
 
     void advanceDockResourcePage(int steps) {
-        const size_t pageCount = dockResourcePageCount();
-        if (pageCount <= 1 || steps == 0)
+        if (!resourcePanel_.advancePage(steps))
             return;
-
-        const long long count = static_cast<long long>(pageCount);
-        long long next = static_cast<long long>(dockResourcePage_) + steps;
-        next %= count;
-        if (next < 0)
-            next += count;
-        dockResourcePage_ = static_cast<size_t>(next);
         requestInvalidation(toMask(RenderInvalidation::Paint) | toMask(RenderInvalidation::Text));
         requestFrameAndFlush();
     }
@@ -2972,83 +2829,12 @@ struct TaskbarHost::Impl {
         return changed;
     }
 
-    static std::wstring formatResourcePercent(double percent) {
-        wchar_t text[16]{};
-        swprintf_s(text, L"%.0f%%", std::clamp(percent, 0.0, 100.0));
-        return text;
-    }
+    void startResourceMonitoring() { resourcePanel_.start(); }
 
-    static std::wstring formatNetworkRate(uint64_t bytesPerSecond) {
-        static constexpr const wchar_t* units[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s", L"TB/s"};
-        double value = static_cast<double>(bytesPerSecond);
-        size_t unit = 0;
-        while (std::round(value) >= 1000.0 && unit + 1 < std::size(units)) {
-            value /= 1024.0;
-            ++unit;
-        }
-        if (unit + 1 == std::size(units))
-            value = std::min(value, 999.0);
-
-        const double roundedTenths = std::round(value * 10.0) / 10.0;
-        wchar_t text[32]{};
-        if (unit == 0 || roundedTenths >= 100.0)
-            swprintf_s(text, L"%.0f%ls", std::round(value), units[unit]);
-        else
-            swprintf_s(text, L"%.1f%ls", roundedTenths, units[unit]);
-        return text;
-    }
-
-    static std::wstring formatFrequency(bool available, double gigahertz) {
-        if (!available)
-            return L"—";
-        wchar_t text[24]{};
-        swprintf_s(text, L"%.1fGHz", std::clamp(gigahertz, 0.0, 99.0));
-        return text;
-    }
-
-    void startResourceMonitoring() {
-        resourceCpuText_ = L"—";
-        resourceMemoryText_ = L"—";
-        resourceDownloadText_ = L"—";
-        resourceUploadText_ = L"—";
-        resourceGpuText_ = L"—";
-        resourceCpuFrequencyText_ = L"—";
-        resourceSnapshotRevision_ = UINT64_MAX;
-        nextResourceSnapshotPollMs_ = 0;
-        resourceMonitor_.start();
-    }
-
-    void stopResourceMonitoring() {
-        resourceMonitor_.stop();
-        nextResourceSnapshotPollMs_ = 0;
-    }
+    void stopResourceMonitoring() { resourcePanel_.stop(); }
 
     bool refreshResourceSnapshot() {
-        if (!resourceMonitoringEnabled())
-            return false;
-
-        const ULONGLONG now = monotonicNowMs();
-        if (now < nextResourceSnapshotPollMs_)
-            return false;
-        nextResourceSnapshotPollMs_ = now + kResourceSnapshotPollMs;
-
-        const system_monitor::ResourceSnapshot snapshot = resourceMonitor_.snapshot();
-        if (snapshot.revision == resourceSnapshotRevision_)
-            return false;
-        resourceSnapshotRevision_ = snapshot.revision;
-        resourceCpuText_ =
-            snapshot.cpuAvailable ? formatResourcePercent(snapshot.cpuPercent) : L"—";
-        resourceMemoryText_ =
-            snapshot.memoryAvailable ? formatResourcePercent(snapshot.memoryPercent) : L"—";
-        resourceDownloadText_ =
-            snapshot.networkAvailable ? formatNetworkRate(snapshot.downloadBytesPerSecond) : L"—";
-        resourceUploadText_ =
-            snapshot.networkAvailable ? formatNetworkRate(snapshot.uploadBytesPerSecond) : L"—";
-        resourceGpuText_ =
-            snapshot.gpuAvailable ? formatResourcePercent(snapshot.gpuPercent) : L"—";
-        resourceCpuFrequencyText_ =
-            formatFrequency(snapshot.cpuFrequencyAvailable, snapshot.cpuFrequencyGHz);
-        return true;
+        return resourceMonitoringEnabled() && resourcePanel_.refresh();
     }
 
     void drawImmersiveClock(float x, float h, float width) {
@@ -3072,69 +2858,9 @@ struct TaskbarHost::Impl {
     }
 
     void drawDockResourceStatus(float x, float h, float width) {
-        auto* rt = renderer.renderTarget();
-        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !brushText_.Get() ||
-            !ensureResourceFormat())
-            return;
-
-        const auto rows = dockResourceRows();
-        const size_t pageCount = compactTaskbarHeight_ > 0.0f ? rows.size() : rows.size() / 2;
-        const size_t page = std::min(dockResourcePage_, pageCount - 1);
-
-        if (compactTaskbarHeight_ > 0.0f) {
-            const std::array<const std::wstring*, 2> cells{&rows[page].left, &rows[page].right};
-            rt->PushAxisAlignedClip(D2D1::RectF(x, 0.0f, x + width, h),
-                                    D2D1_ANTIALIAS_MODE_ALIASED);
-            float cellX = x;
-            for (size_t i = 0; i < cells.size(); ++i) {
-                if (cells[i]->empty())
-                    continue;
-                const float cellRight = std::min(x + width, cellX + resourceSingleLineWidths_[i]);
-                if (cellRight <= cellX)
-                    break;
-                rt->DrawTextW(cells[i]->c_str(), static_cast<UINT32>(cells[i]->size()),
-                              typesetter_.resources().fmtResource_.Get(),
-                              D2D1::RectF(cellX, 0.0f, cellRight, h), brushText_.Get(),
-                              D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
-                cellX += resourceSingleLineWidths_[i] + kDockResourceZoneGap;
-            }
-            rt->PopAxisAlignedClip();
-            return;
-        }
-
-        std::array<DockResourceRow, 2> visibleRows{};
-        visibleRows[0] = rows[page * 2];
-        visibleRows[1] = rows[page * 2 + 1];
-        const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
-        const float top = std::max(0.0f, (h - blockH) * 0.5f);
-        const float rowH = blockH * 0.5f;
-        const float leftColumnW =
-            std::min(resourceLeftColumnW_, std::max(1.0f, width - kDockResourceZoneGap));
-        const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
-        const float rightColumnW = std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
-        const D2D1_DRAW_TEXT_OPTIONS drawOptions = width + 1.0f >= resourceZoneWidth()
-                                                       ? D2D1_DRAW_TEXT_OPTIONS_NONE
-                                                       : D2D1_DRAW_TEXT_OPTIONS_CLIP;
-
-        auto drawResourceCell = [&](const std::wstring& text, float left, float rowTop,
-                                    float cellW) {
-            if (text.empty() || cellW <= 0.0f)
-                return;
-            rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()),
-                          typesetter_.resources().fmtResource_.Get(),
-                          D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH), brushText_.Get(),
-                          drawOptions, DWRITE_MEASURING_MODE_NATURAL);
-        };
-        for (size_t row = 0; row < visibleRows.size(); ++row) {
-            const auto& current = visibleRows[row];
-            const float rowTop = top + row * rowH;
-            if (current.right.empty()) {
-                drawResourceCell(current.left, x, rowTop, width);
-            } else {
-                drawResourceCell(current.left, x, rowTop, leftColumnW);
-                drawResourceCell(current.right, rightColumnX, rowTop, rightColumnW);
-            }
-        }
+        if (resourceMonitoringEnabled() && ensureResourceFormat())
+            resourcePanel_.draw(renderer.renderTarget(), typesetter_.resources().fmtResource_.Get(),
+                                brushText_.Get(), x, h, width);
     }
 
     DockPetMode dockPetMode() const {
@@ -3187,17 +2913,16 @@ struct TaskbarHost::Impl {
         if (!horizontalImmersiveMode())
             return;
 
-        const float zoneW = immersiveSpectrumZoneW(w);
         const bool dock = isAppBarView();
-        const float resourceW = dock ? dockResourceZoneW(w) : 0.0f;
-        const float resourceX = w - resourceW - (dock ? kDockResourceRightPadding : kTextPadding);
-        const float zoneX =
-            dock ? resourceX - kDockResourceZoneGap - zoneW : w - zoneW - kTextPadding;
-        const float clockW = dock ? 0.0f : std::min(zoneW, immersiveClockZoneW(w));
-        const float clockX = w - clockW - kTextPadding;
-        const float spectrumRight =
-            dock ? resourceX - kDockResourceZoneGap : clockX - kImmersiveSpectrumClockGap;
-        const float spectrumW = std::max(0.0f, spectrumRight - zoneX);
+        const auto side = taskbar_detail::expandedSideLayout(w, dock, dockResourceZoneW(w));
+        const float zoneW = side.zoneWidth;
+        const float zoneX = side.zoneX;
+        const float resourceW = side.resourceWidth;
+        const float resourceX = side.resourceX;
+        const float clockW = side.clockWidth;
+        const float clockX = side.clockX;
+        const float spectrumRight = side.spectrumRight;
+        const float spectrumW = side.spectrumWidth;
         if (showSpectrum && spectrumW > 0.0f) {
             if (spectrumStyle_ == SpectrumStyle::DreamyWave) {
                 drawSpectrum(zoneX, h, spectrumW);
@@ -3536,12 +3261,12 @@ struct TaskbarHost::Impl {
 
         D2D1_RECT_F innerRect = D2D1::RectF(center.x - innerRadius, center.y - innerRadius,
                                             center.x + innerRadius, center.y + innerRadius);
-        if (coverBmp.Get() && vinylCoverClip_.Get() && coverLayer_.Get()) {
+        if (cover_.bitmap() && vinylCoverClip_.Get() && coverLayer_.Get()) {
             rt->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), vinylCoverClip_.Get(),
                                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                                  D2D1::Matrix3x2F::Translation(coverX, coverY)),
                           coverLayer_.Get());
-            rt->DrawBitmap(coverBmp.Get(), innerRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            rt->DrawBitmap(cover_.bitmap(), innerRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             rt->PopLayer();
         } else if (brushDim_.Get()) {
             rt->FillEllipse(inner, brushDim_.Get());
@@ -3677,162 +3402,31 @@ struct TaskbarHost::Impl {
     }
 
     void recreateClockFormats() {
-        IDWriteFactory* dwrite = renderer.dwrite();
-        if (!dwrite)
-            return;
-        auto make = [&](float size, DWRITE_FONT_WEIGHT weight, IDWriteTextFormat** out) {
-            if (*out) {
-                (*out)->Release();
-                *out = nullptr;
-            }
-            DWRITE_FONT_WEIGHT effectiveWeight =
-                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight;
-            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
-                                     dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, size,
-                                     L"", out);
-            if (*out) {
-                (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                fluent::applyUiFontFallback(*out);
-            }
-        };
-        make(fitCompactFontSize(13.5f, (compactTaskbarHeight_ - 2.0f) * 0.56f,
-                                DWRITE_FONT_WEIGHT_SEMI_BOLD),
-             DWRITE_FONT_WEIGHT_SEMI_BOLD,
-             typesetter_.resources().fmtClockTime_.ReleaseAndGetAddressOf());
-        make(fitCompactFontSize(11.0f, (compactTaskbarHeight_ - 2.0f) * 0.44f),
-             DWRITE_FONT_WEIGHT_NORMAL,
-             typesetter_.resources().fmtClockDate_.ReleaseAndGetAddressOf());
-    }
-
-    static float measureResourceTextWidth(IDWriteFactory* dwrite, IDWriteTextFormat* format,
-                                          const std::wstring& text) {
-        if (!dwrite || !format || text.empty())
-            return 0.0f;
-        IDWriteTextLayout* layout = nullptr;
-        if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format,
-                                            0.0f, 0.0f, &layout)) ||
-            !layout)
-            return 0.0f;
-        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        float measuredWidth = 0.0f;
-        DWRITE_TEXT_METRICS metrics{};
-        if (SUCCEEDED(layout->GetMetrics(&metrics)))
-            measuredWidth = std::max(measuredWidth, metrics.widthIncludingTrailingWhitespace);
-        DWRITE_OVERHANG_METRICS overhangs{};
-        if (SUCCEEDED(layout->GetOverhangMetrics(&overhangs)))
-            measuredWidth = std::max(measuredWidth, overhangs.right);
-        layout->Release();
-        return measuredWidth;
+        typesetter_.setFactory(renderer.dwrite());
+        typesetter_.recreateClockFormats(
+            fontFamily_, fontStyle_,
+            fitCompactFontSize(13.5f, (compactTaskbarHeight_ - 2.0f) * 0.56f,
+                               DWRITE_FONT_WEIGHT_SEMI_BOLD),
+            fitCompactFontSize(11.0f, (compactTaskbarHeight_ - 2.0f) * 0.44f));
     }
 
     bool ensureResourceFormat() {
-        if (typesetter_.resources().fmtResource_.Get())
-            return true;
-        IDWriteFactory* dwrite = renderer.dwrite();
-        if (!dwrite) {
+        if (!renderer.dwrite())
             renderer.initialize();
-            dwrite = renderer.dwrite();
-        }
-        if (!dwrite)
-            return false;
-        const DWRITE_FONT_WEIGHT effectiveWeight = dwriteWeightOf(fontStyle_);
-        dwrite->CreateTextFormat(
-            fontFamily_.c_str(), nullptr, effectiveWeight, dwriteStyleOf(fontStyle_),
-            DWRITE_FONT_STRETCH_NORMAL,
-            fitCompactFontSize(kResourceFontSize, compactTaskbarHeight_ - 2.0f), L"zh-cn",
-            typesetter_.resources().fmtResource_.ReleaseAndGetAddressOf());
-        if (!typesetter_.resources().fmtResource_.Get())
-            return false;
-        typesetter_.resources().fmtResource_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        typesetter_.resources().fmtResource_->SetParagraphAlignment(
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        typesetter_.resources().fmtResource_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        fluent::applyUiFontFallback(typesetter_.resources().fmtResource_.Get());
-        return true;
+        typesetter_.setFactory(renderer.dwrite());
+        return typesetter_.ensureResourceFormat(
+            fontFamily_, fontStyle_,
+            fitCompactFontSize(kResourceFontSize, compactTaskbarHeight_ - 2.0f));
     }
 
     bool updateResourceColumnWidths() {
-        if (!ensureResourceFormat())
-            return false;
-        IDWriteFactory* dwrite = renderer.dwrite();
-        if (!dwrite)
-            return false;
-
-        wchar_t widestDigit = L'8';
-        float widestDigitWidth = -1.0f;
-        for (wchar_t digit = L'0'; digit <= L'9'; ++digit) {
-            const float digitWidth = measureResourceTextWidth(
-                dwrite, typesetter_.resources().fmtResource_.Get(), std::wstring(1, digit));
-            if (digitWidth > widestDigitWidth) {
-                widestDigitWidth = digitWidth;
-                widestDigit = digit;
-            }
-        }
-
-        const std::wstring singleDigit(1, widestDigit);
-        const std::wstring twoDigits = singleDigit + singleDigit;
-        const std::wstring threeDigits = twoDigits + singleDigit;
-        const std::wstring decimalDigits = twoDigits + L"." + singleDigit;
-
-        float leftMaxWidth = 0.0f;
-        float rightMaxWidth = 0.0f;
-        std::array<float, 2> singleLineWidths{};
-        size_t cellIndex = 0;
-        auto measureCell = [&](const std::vector<std::wstring>& samples) {
-            float& columnWidth = cellIndex % 4 < 2 ? leftMaxWidth : rightMaxWidth;
-            for (const auto& sample : samples) {
-                const float measured = measureResourceTextWidth(
-                    dwrite, typesetter_.resources().fmtResource_.Get(), sample);
-                columnWidth = std::max(columnWidth, measured);
-                singleLineWidths[cellIndex % 2] =
-                    std::max(singleLineWidths[cellIndex % 2], measured);
-            }
-            ++cellIndex;
-        };
-        measureCell({L"CPU: 100%", L"CPU: " + twoDigits + L"%"});
-        measureCell({L"内存: 100%", L"内存: " + twoDigits + L"%"});
-        static constexpr const wchar_t* rateUnits[] = {L"B/s", L"KB/s", L"MB/s", L"GB/s", L"TB/s"};
-        auto measureRate = [&](const wchar_t* prefixLabel) {
-            std::vector<std::wstring> samples;
-            for (const wchar_t* unitLabel : rateUnits) {
-                samples.push_back(std::wstring(prefixLabel) + decimalDigits + unitLabel);
-                samples.push_back(std::wstring(prefixLabel) + threeDigits + unitLabel);
-            }
-            measureCell(samples);
-        };
-        if (dockResourceVisibility_.download)
-            measureRate(L"下行: ");
-        if (dockResourceVisibility_.upload)
-            measureRate(L"上行: ");
-        if (dockResourceVisibility_.gpuUsage)
-            measureCell({L"GPU: 100%", L"GPU: " + twoDigits + L"%"});
-        if (dockResourceVisibility_.cpuFrequency)
-            measureCell({L"频率: " + decimalDigits + L"GHz"});
-
-        const float nextLeftWidth =
-            std::max(1.0f, std::ceil(leftMaxWidth) + kResourceCellSafetyPadding);
-        const float nextRightWidth =
-            rightMaxWidth > 0.0f ? std::ceil(rightMaxWidth) + kResourceCellSafetyPadding : 0.0f;
-        for (float& cellWidth : singleLineWidths)
-            if (cellWidth > 0.0f)
-                cellWidth = std::ceil(cellWidth) + kResourceCellSafetyPadding;
-
-        const bool changed = nextLeftWidth != resourceLeftColumnW_ ||
-                             nextRightWidth != resourceRightColumnW_ ||
-                             singleLineWidths != resourceSingleLineWidths_;
-        resourceLeftColumnW_ = nextLeftWidth;
-        resourceRightColumnW_ = nextRightWidth;
-        resourceSingleLineWidths_ = singleLineWidths;
-        return changed;
+        return ensureResourceFormat() &&
+               resourcePanel_.updateColumnWidths(renderer.dwrite(),
+                                                 typesetter_.resources().fmtResource_.Get());
     }
 
     void recreateResourceFormat() {
-        if (typesetter_.resources().fmtResource_.Get()) {
-            typesetter_.resources().fmtResource_.Reset();
-            typesetter_.resources().fmtResource_.Reset();
-        }
+        typesetter_.resetResourceFormat();
         if (updateResourceColumnWidths())
             requestInvalidation(RenderInvalidation::Layout);
     }
@@ -3874,13 +3468,8 @@ struct TaskbarHost::Impl {
                 : 0.0f;
         if (compactHeight == compactTaskbarHeight_)
             return;
-        const bool wasCompact = compactTaskbarHeight_ > 0.0f;
         compactTaskbarHeight_ = compactHeight;
-        if (!wasCompact && compactHeight > 0.0f)
-            dockResourcePage_ *= 2;
-        else if (wasCompact && compactHeight <= 0.0f)
-            dockResourcePage_ /= 2;
-        dockResourcePage_ = std::min(dockResourcePage_, dockResourcePageCount() - 1);
+        resourcePanel_.setCompact(compactHeight > 0.0f);
         resetLyricTransition();
         clearImmersiveSongContentTransition();
         releaseSpectrumEffectResources();
@@ -3901,45 +3490,19 @@ struct TaskbarHost::Impl {
         if (!dwrite)
             return;
         recreateClockFormats();
-        auto make = [&](float size, DWRITE_FONT_WEIGHT weight, DWRITE_PARAGRAPH_ALIGNMENT pa,
-                        IDWriteTextFormat** out) {
-            if (*out) {
-                (*out)->Release();
-                *out = nullptr;
-            }
-            DWRITE_FONT_WEIGHT effectiveWeight =
-                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight;
-            dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
-                                     dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, size,
-                                     L"zh-cn", out);
-            if (*out) {
-                (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                (*out)->SetParagraphAlignment(pa);
-                (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                // 不裁剪，超长时由 drawScrollingText 滚动显示
-                fluent::applyUiFontFallback(*out);
-            }
-        };
-        // 歌名/歌手固定字号，不随歌词字号调整；只有歌词跟随 fontSize_
-        make(fitCompactFontSize(kBaseFontSize * 1.05f,
-                                (compactTaskbarHeight_ - 6.0f) * 1.05f / 1.97f,
-                                DWRITE_FONT_WEIGHT_SEMI_BOLD),
-             DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             typesetter_.resources().fmtTitle_.ReleaseAndGetAddressOf());
-        make(fitCompactFontSize(kBaseFontSize * 0.92f,
-                                (compactTaskbarHeight_ - 6.0f) * 0.92f / 1.97f),
-             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             typesetter_.resources().fmtArtist_.ReleaseAndGetAddressOf());
         const float lyricPad = lyricGlow_ ? 6.0f : lyricOutline_ ? 4.0f : 2.0f;
-        make(fitCompactFontSize(fontSize_ * kLyricMainFontScale, compactTaskbarHeight_ - lyricPad),
-             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             typesetter_.resources().fmtLyric_.ReleaseAndGetAddressOf());
-        // 双行模式的下一行：比翻译字号（0.78）略大，但明显小于核心歌词（1.18）。
-        make(fontSize_ * kLyricPreviewFontScale, DWRITE_FONT_WEIGHT_NORMAL,
-             DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             typesetter_.resources().fmtNextLyric_.ReleaseAndGetAddressOf());
-        make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             typesetter_.resources().fmtSecondary_.ReleaseAndGetAddressOf());
+        LyricFontSizes sizes;
+        sizes.title = fitCompactFontSize(kBaseFontSize * 1.05f,
+                                         (compactTaskbarHeight_ - 6.0f) * 1.05f / 1.97f,
+                                         DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        sizes.artist = fitCompactFontSize(kBaseFontSize * 0.92f,
+                                          (compactTaskbarHeight_ - 6.0f) * 0.92f / 1.97f);
+        sizes.lyric =
+            fitCompactFontSize(fontSize_ * kLyricMainFontScale, compactTaskbarHeight_ - lyricPad);
+        sizes.next = fontSize_ * kLyricPreviewFontScale;
+        sizes.secondary = fontSize_ * 0.78f;
+        typesetter_.setFactory(dwrite);
+        typesetter_.recreateLyricFormats(fontFamily_, fontStyle_, sizes);
         requestInvalidation(RenderInvalidation::Text);
         requestInvalidation(RenderInvalidation::SongInfo);
     }
@@ -4012,9 +3575,7 @@ struct TaskbarHost::Impl {
         brushIdleAccent_.Reset();
         dockPet_.discardDeviceResources();
         dragPreviewStroke_.Reset();
-        coverBlurFx_.Reset();
-        coverScaleFx_.Reset();
-        coverBlurInput_ = nullptr;
+        cover_.discardDeviceResources();
         textEffectsCache_.clear();
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
@@ -4028,12 +3589,7 @@ struct TaskbarHost::Impl {
         lyricRightFadeLayer_.Reset();
         songInfoDividerBrush_.Reset();
         media_control::release(controlGeometry);
-        if (coverBmp.Get()) {
-            coverBmp.Reset();
-            coverBmp.Reset();
-        }
         if (platformIconBmp.Get()) {
-            platformIconBmp.Reset();
             platformIconBmp.Reset();
         }
         drawTargetOverride_ = nullptr;
@@ -4154,115 +3710,19 @@ struct TaskbarHost::Impl {
     // ---------- 封面解码 ----------
 
     void decodeCover() {
-        if (coverBmp.Get()) {
-            coverBmp.Reset();
-            coverBmp.Reset();
-            // 旧封面可能仍被模糊链引用，强制下帧重新绑定输入
-            coverBlurInput_ = nullptr;
-        }
-        auto* rt = renderer.renderTarget();
-        if (!rt || !media.thumbnail || media.thumbnail->empty())
-            return;
-
-        HGLOBAL hglobal = GlobalAlloc(GHND, media.thumbnail->size());
-        if (!hglobal)
-            return;
-        void* ptr = GlobalLock(hglobal);
-        if (ptr) {
-            memcpy(ptr, media.thumbnail->data(), media.thumbnail->size());
-            GlobalUnlock(hglobal);
-        }
-        IStream* stream = nullptr;
-        HRESULT hr = CreateStreamOnHGlobal(hglobal, TRUE, &stream);
-        if (FAILED(hr) || !stream) {
-            GlobalFree(hglobal);
-            return;
-        }
-        Gdiplus::Bitmap bitmap(stream);
-        if (bitmap.GetLastStatus() != Gdiplus::Ok) {
-            stream->Release();
-            return;
-        }
-        UINT w = bitmap.GetWidth();
-        UINT h = bitmap.GetHeight();
-        // 只按显示尺寸（封面槽 DIP × DPI 缩放）生成位图：原图常达 500~1000px，
-        // 全尺寸 LockBits/CreateBitmap 会把 MB 级像素常驻显存，实际只显示约 30px。
-        const UINT targetPx = std::max(1u, static_cast<UINT>(std::ceil(coverSize() * scale())));
-        Gdiplus::Bitmap* pixels = &bitmap;
-        Gdiplus::Bitmap scaled(static_cast<INT>(targetPx), static_cast<INT>(targetPx),
-                               PixelFormat32bppPARGB);
-        if ((w > targetPx || h > targetPx) && scaled.GetLastStatus() == Gdiplus::Ok) {
-            Gdiplus::Graphics g(&scaled);
-            g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-            g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
-            // 目标为正方形，与绘制时拉伸到方形封面槽的行为一致
-            if (g.DrawImage(
-                    &bitmap,
-                    Gdiplus::Rect(0, 0, static_cast<INT>(targetPx), static_cast<INT>(targetPx)), 0,
-                    0, static_cast<INT>(w), static_cast<INT>(h),
-                    Gdiplus::UnitPixel) == Gdiplus::Ok) {
-                pixels = &scaled;
-                w = targetPx;
-                h = targetPx;
-            }
-        }
-        Gdiplus::BitmapData bitmapData{};
-        Gdiplus::Rect rect(0, 0, static_cast<INT>(w), static_cast<INT>(h));
-        if (pixels->LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppPARGB,
-                             &bitmapData) != Gdiplus::Ok) {
-            stream->Release();
-            return;
-        }
-        D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
-            D2D1_BITMAP_OPTIONS_NONE,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-            static_cast<float>(dpi_), static_cast<float>(dpi_));
-        ID2D1Bitmap1* decoded = nullptr;
-        hr = rt->CreateBitmap(D2D1::SizeU(w, h), bitmapData.Scan0, bitmapData.Stride, &props,
-                              &decoded);
-        coverBmp.Attach(decoded); // ID2D1Bitmap1 派生自 ID2D1Bitmap
-        pixels->UnlockBits(&bitmapData);
-        stream->Release();
+        cover_.decode(renderer.renderTarget(), media.thumbnail.get(), dpi_,
+                      std::max(1u, static_cast<UINT>(std::ceil(coverSize() * scale()))));
     }
 
     // 封面模糊链：GaussianBlur → Scale 铺满全窗。效果与设备同生命周期，
     // 封面更换或设备重建后经 coverBlurInput_ 惰性重绑；窗口尺寸每帧可能变化，
     // Scale 参数便宜，直接按帧写入
     ID2D1Effect* ensureCoverBlurChain(float w, float h) {
-        auto* rt = renderer.renderTarget();
-        if (!rt || !coverBmp.Get())
-            return nullptr;
-        if (!coverBlurFx_.Get()) {
-            if (FAILED(rt->CreateEffect(kGaussianBlurClsid, coverBlurFx_.ReleaseAndGetAddressOf())))
-                return nullptr;
-            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, kCoverBlurStdDev);
-            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
-                                   D2D1_GAUSSIANBLUR_OPTIMIZATION_SPEED);
-            // SOFT（镜像）避免边缘模糊后透出黑边
-            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_SOFT);
-        }
-        if (!coverScaleFx_.Get()) {
-            if (FAILED(rt->CreateEffect(kScaleClsid, coverScaleFx_.ReleaseAndGetAddressOf())))
-                return nullptr;
-            coverScaleFx_->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE,
-                                    D2D1_SCALE_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-            coverScaleFx_->SetInputEffect(0, coverBlurFx_.Get());
-        }
-        if (coverBlurInput_ != coverBmp.Get()) {
-            coverBlurFx_->SetInput(0, coverBmp.Get());
-            coverBlurInput_ = coverBmp.Get();
-        }
-        const D2D1_SIZE_F size = coverBmp->GetSize();
-        if (size.width <= 0.0f || size.height <= 0.0f)
-            return nullptr;
-        coverScaleFx_->SetValue(D2D1_SCALE_PROP_SCALE,
-                                D2D1::Vector2F(w / size.width, h / size.height));
-        return coverScaleFx_.Get();
+        return cover_.blurred(renderer.renderTarget(), w, h);
     }
 
     void decodePlatformIcon() {
         if (platformIconBmp.Get()) {
-            platformIconBmp.Reset();
             platformIconBmp.Reset();
         }
         if (!albumCoverVisible_ || !platformIconVisible_ || media.sourceAppUserModelId.empty())
@@ -4442,10 +3902,6 @@ struct TaskbarHost::Impl {
     // 常见括号转换为竖排字形；避免 UTF-16 代理项被拆开后出现半个字符。
     // 纯拉丁文本走整句旋转布局。
 
-    void releaseVerticalLyricParts(std::vector<VerticalLyricPart>& parts) {
-        typesetter_.setFactory(renderer.dwrite());
-        typesetter_.releaseVerticalLyricParts(parts);
-    }
 
     void buildTextLayouts(float leftW, float rightW) {
         // 文本布局以超宽无换行创建，度量与区域宽度无关，leftW/rightW 仅保留签名兼容
@@ -4459,42 +3915,13 @@ struct TaskbarHost::Impl {
         // 歌曲信息（标题/歌手）独立重建：换行只走下面的歌词分支，
         // 歌曲信息变化也不触碰歌词布局与行过渡状态
         if (isInvalidated(RenderInvalidation::SongInfo)) {
-            if (typesetter_.resources().titleLayout_.Get()) {
-                typesetter_.resources().titleLayout_.Reset();
-                typesetter_.resources().titleLayout_.Reset();
-            }
-            if (typesetter_.resources().artistLayout_.Get()) {
-                typesetter_.resources().artistLayout_.Reset();
-                typesetter_.resources().artistLayout_.Reset();
-            }
-            titleWidth_ = 0.0f;
-            titleHeight_ = 0.0f;
-            artistWidth_ = 0.0f;
-            artistHeight_ = 0.0f;
-            if (songInfoVisible_ && !media.title.empty()) {
-                dwrite->CreateTextLayout(
-                    media.title.c_str(), (UINT32)media.title.size(),
-                    typesetter_.resources().fmtTitle_.Get(), 100000.0f, 40.0f,
-                    typesetter_.resources().titleLayout_.ReleaseAndGetAddressOf());
-                if (typesetter_.resources().titleLayout_.Get()) {
-                    DWRITE_TEXT_METRICS m{};
-                    typesetter_.resources().titleLayout_->GetMetrics(&m);
-                    titleWidth_ = m.width;
-                    titleHeight_ = m.height;
-                }
-            }
-            if (songInfoVisible_ && !media.artist.empty()) {
-                dwrite->CreateTextLayout(
-                    media.artist.c_str(), (UINT32)media.artist.size(),
-                    typesetter_.resources().fmtArtist_.Get(), 100000.0f, 40.0f,
-                    typesetter_.resources().artistLayout_.ReleaseAndGetAddressOf());
-                if (typesetter_.resources().artistLayout_.Get()) {
-                    DWRITE_TEXT_METRICS m{};
-                    typesetter_.resources().artistLayout_->GetMetrics(&m);
-                    artistWidth_ = m.width;
-                    artistHeight_ = m.height;
-                }
-            }
+            typesetter_.setFactory(dwrite);
+            const auto metrics =
+                typesetter_.buildSongInfo(media.title, media.artist, songInfoVisible_);
+            titleWidth_ = metrics.titleWidth;
+            titleHeight_ = metrics.titleHeight;
+            artistWidth_ = metrics.artistWidth;
+            artistHeight_ = metrics.artistHeight;
             const bool titleChanged = media.title != lastTitle_;
             const bool artistChanged = media.artist != lastArtist_;
             if (titleChanged) {
@@ -4552,22 +3979,11 @@ struct TaskbarHost::Impl {
             preparedTransition = true;
         } else {
             resetLyricTransition();
-            if (typesetter_.resources().lyricLayout_.Get())
-                typesetter_.resources().lyricLayout_.Reset();
-            if (typesetter_.resources().verticalLyricLayout_.Get())
-                typesetter_.resources().verticalLyricLayout_.Reset();
-            releaseVerticalLyricParts(typesetter_.resources().verticalLyricParts_);
-            if (typesetter_.resources().secondaryLayout_.Get())
-                typesetter_.resources().secondaryLayout_.Reset();
-            typesetter_.resources().lyricLayout_.Reset();
-            typesetter_.resources().secondaryLayout_.Reset();
+            typesetter_.clearCurrentContent();
         }
         // 排版已接管待启动转场；成功构建目标布局后会转换为 Running。
 
-        if (typesetter_.resources().nextLyricLayout_.Get()) {
-            typesetter_.resources().nextLyricLayout_.Reset();
-            typesetter_.resources().nextLyricLayout_.Reset();
-        }
+        typesetter_.clearNextContent();
         nextLyricWidth_ = 0.0f;
         nextLyricHeight_ = 0.0f;
 
@@ -4884,10 +4300,8 @@ struct TaskbarHost::Impl {
 
         if (coverClip_.Get()) {
             coverClip_.Reset();
-            coverClip_.Reset();
         }
         if (vinylCoverClip_.Get()) {
-            vinylCoverClip_.Reset();
             vinylCoverClip_.Reset();
         }
         media_control::release(controlGeometry);
@@ -7011,13 +6425,13 @@ struct TaskbarHost::Impl {
                 drawVinylCover(coverX, coverY, s);
             } else {
                 const D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-                if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
+                if (cover_.bitmap() && coverClip_.Get() && coverLayer_.Get()) {
                     contentRt->PushLayer(
                         D2D1::LayerParameters1(D2D1::InfiniteRect(), coverClip_.Get(),
                                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                                D2D1::Matrix3x2F::Translation(coverX, coverY)),
                         coverLayer_.Get());
-                    contentRt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
+                    contentRt->DrawBitmap(cover_.bitmap(), coverRect, 1.0f,
                                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                     contentRt->PopLayer();
                 } else {
@@ -7334,13 +6748,13 @@ struct TaskbarHost::Impl {
             } else {
                 const D2D1_RECT_F coverRect =
                     D2D1::RectF(layout.coverX, layout.coverY, layout.coverX + s, layout.coverY + s);
-                if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
+                if (cover_.bitmap() && coverClip_.Get() && coverLayer_.Get()) {
                     rt->PushLayer(D2D1::LayerParameters1(
                                       D2D1::InfiniteRect(), coverClip_.Get(),
                                       D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                       D2D1::Matrix3x2F::Translation(layout.coverX, layout.coverY)),
                                   coverLayer_.Get());
-                    rt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
+                    rt->DrawBitmap(cover_.bitmap(), coverRect, 1.0f,
                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                     rt->PopLayer();
                 } else if (brushDim_.Get()) {
@@ -7505,7 +6919,7 @@ struct TaskbarHost::Impl {
                 clearLyricDCompState();
             }
             ID2D1Effect* coverBlurChain =
-                background_ == TaskbarBackground::CoverBlur && coverBmp.Get()
+                background_ == TaskbarBackground::CoverBlur && cover_.bitmap()
                     ? ensureCoverBlurChain(dip(pxW), dip(pxH))
                     : nullptr;
             if (renderVerticalTaskbar(dip(pxW), dip(pxH), coverBlurChain))
@@ -7553,7 +6967,7 @@ struct TaskbarHost::Impl {
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
         // 模糊效果链涉及资源创建（CreateEffect），与画刷一样放在 BeginDraw 之前
-        ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp.Get()
+        ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && cover_.bitmap()
                                           ? ensureCoverBlurChain(w, h)
                                           : nullptr;
 
@@ -7625,13 +7039,13 @@ struct TaskbarHost::Impl {
                     drawVinylCover(coverX, coverY, s);
                 } else {
                     D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-                    if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
+                    if (cover_.bitmap() && coverClip_.Get() && coverLayer_.Get()) {
                         rt->PushLayer(
                             D2D1::LayerParameters1(D2D1::InfiniteRect(), coverClip_.Get(),
                                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                                    D2D1::Matrix3x2F::Translation(coverX, coverY)),
                             coverLayer_.Get());
-                        rt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
+                        rt->DrawBitmap(cover_.bitmap(), coverRect, 1.0f,
                                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                         rt->PopLayer();
                     } else {

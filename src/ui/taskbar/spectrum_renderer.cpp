@@ -46,7 +46,7 @@ void SpectrumRenderer::discardDeviceResources() {
     releaseSpectrumEffectResources();
     brushSpectrum_.Reset();
     brushSpectrumBarGradient_.Reset();
-    context_.target = nullptr;
+    context_ = {};
     drawTargetOverride_ = nullptr;
 }
 void SpectrumRenderer::drawCluster(float x, float height, float width, int count) {

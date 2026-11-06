@@ -45,6 +45,17 @@ struct HorizontalLayoutInput {
     float coverSlotWidth;
 };
 
+// 沉浸模式与 Dock 右侧区域的纯几何结果。
+struct ExpandedSideLayout {
+    float zoneWidth{}, zoneX{};
+    float resourceWidth{}, resourceX{};
+    float clockWidth{}, clockX{};
+    float spectrumRight{}, spectrumWidth{};
+};
+float expandedSpectrumWidth(float hostWidth);
+float expandedClockWidth(float hostWidth);
+ExpandedSideLayout expandedSideLayout(float hostWidth, bool dock, float resourceWidth);
+
 // 纯几何计算。渲染与命中检测读取同一份布局，窗口句柄和设备资源不进入计算。
 LayoutMetrics horizontalLayout(const HorizontalLayoutInput& input);
 VerticalLayout verticalLayout(float width, float height, DisplayScene scene, bool albumCoverVisible,

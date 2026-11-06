@@ -44,12 +44,11 @@ void App::refreshIdleWelcome() {
         return;
     if (presentation_.frame().idle.sentence == idle_.defaultIdleWelcome())
         return;
-    publishPresentationFrame(snap, false, true);
+    publishPresentationFrame(snap, {.lyricsChanged = true});
 }
 
 const PresentationFrame& App::preparePresentationFrame(const SmtcSnapshot& snap,
-                                                       bool animateTransition, bool lyricsChanged,
-                                                       bool durationOnlyUpdate) {
+                                                       PresentationUpdate update) {
     IdleFrameInput input;
     input.presentation = idle_.currentIdlePresentation();
     input.summaryActive = idle_.state().startupTaskSummaryActive_;
@@ -57,17 +56,15 @@ const PresentationFrame& App::preparePresentationFrame(const SmtcSnapshot& snap,
     input.tasksEnabled = idle_.tickTickEffectiveEnabled();
     if (input.summaryActive)
         input.summaryText = idle_.startupTaskSummaryText();
-    return presentation_.update(snap, settings_, playback_.state(), input, animateTransition,
-                                lyricsChanged, durationOnlyUpdate);
+    return presentation_.update(snap, settings_, playback_.state(), input, update);
 }
 
-void App::publishPresentationFrame(const SmtcSnapshot& snap, bool animateTransition,
-                                   bool lyricsChanged, bool durationOnlyUpdate) {
+void App::publishPresentationFrame(const SmtcSnapshot& snap, PresentationUpdate update) {
     // SMTC 状态/控制/封面事件只刷新帧字段；完整歌词仅在内容事务变化时复制。
-    preparePresentationFrame(snap, animateTransition, lyricsChanged, durationOnlyUpdate);
+    preparePresentationFrame(snap, update);
     forEachHost([&](ILyricHost* host) { host->applyPresentationFrame(presentation_.frame()); });
-    // 歌词内容事务也会改变辅助歌词的可用状态，同步刷新已打开的设置窗口。
-    if (lyricsChanged)
+    // 设置窗口同步由状态变化显式声明，不再借用“歌词内容变化”的含义。
+    if (update.refreshSettings)
         refreshSettingsDialog(true);
     // 弹窗可见期间异步补齐封面等字段；隐藏时只缓存不渲染
     if (songToast_)
@@ -84,7 +81,7 @@ void App::syncHost(ILyricHost* host) {
     if (!host)
         return;
     if (presentation_.frame().frameRevision == 0) {
-        preparePresentationFrame(monitor.snapshot(), false, true);
+        preparePresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
     }
     host->applyPresentationFrame(presentation_.frame());
 }
@@ -142,19 +139,18 @@ void App::onSmtcChanged() {
         spectrumSessionKey_.clear();
         playback_.closeSession();
         idle_.refreshIdleQuote(false);
-        publishPresentationFrame(snap, false, true);
+        publishPresentationFrame(snap,
+                                 {.lyricsChanged = true, .refreshSettings = mediaSessionChanged});
         cancelSongToastCoverWait();
         if (songToast_)
             songToast_->hideImmediate();
         updateRuntimeLogState(snap);
-        if (mediaSessionChanged)
-            refreshSettingsDialog(true);
         return;
     }
     const wchar_t* spectrumProcess = spectrumProcessName(snap.player);
     if (*spectrumProcess) {
         spectrum_.setTargetProcessName(std::wstring(spectrumProcess));
-        if (settings_.spectrumOn_ && isNormalRenderMode())
+        if (settings_.spectrumOn_ && !taskbarVertical_ && isNormalRenderMode())
             spectrum_.start();
         // 把播放器源纳入频谱会话键：两个播放器播放同一首歌时也必须切换捕获目标。
         std::wstring spectrumKey = makeTrackKey(snap);
@@ -182,7 +178,10 @@ void App::onSmtcChanged() {
     const bool trackChanged = change.trackChanged;
     const bool durationOnlyTrackUpdate = change.durationOnly;
     const bool songIdentityChanged = change.songIdentityChanged;
-    publishPresentationFrame(snap, !trackChanged, trackChanged, durationOnlyTrackUpdate);
+    publishPresentationFrame(snap, {.animateTransition = !trackChanged,
+                                    .lyricsChanged = trackChanged,
+                                    .durationOnlyUpdate = durationOnlyTrackUpdate,
+                                    .refreshSettings = mediaSessionChanged || trackChanged});
     if (trackChanged && songIdentityChanged && settings_.songToastEnabled_ &&
         !isMinimalRenderMode()) {
         cancelSongToastCoverWait();
@@ -195,8 +194,6 @@ void App::onSmtcChanged() {
     }
     tryExtractAlbumColor();
     updateRuntimeLogState(snap);
-    if (mediaSessionChanged || trackChanged)
-        refreshSettingsDialog(true);
 }
 
 void App::onFrame() {
@@ -206,7 +203,7 @@ void App::onFrame() {
         (idle_.state().startupTaskSummaryPending_ || idle_.state().startupTaskSummaryActive_)) {
         // 定时器也检查一次，避免媒体事件消息尚未出队时让启动播报多停留一帧。
         idle_.cancelStartupSummary();
-        publishPresentationFrame(snap, false, true);
+        publishPresentationFrame(snap, {.lyricsChanged = true});
     }
     if (!snap.sessionAlive)
         return;

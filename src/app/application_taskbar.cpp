@@ -237,24 +237,10 @@ void App::syncTaskbarOrientation() {
         return;
 
     taskbarVertical_ = vertical;
-    if (vertical) {
-        const bool spectrumChanged = settings_.spectrumOn_ || settings_.spectrumBackground_ ||
-                                     settings_.spectrumStyle_ != SpectrumStyle::Default;
-        // 频谱及其背景会侵占窄栏的可用空间；切换到竖向时固定关闭并持久化。
-        settings_.spectrumOn_ = false;
-        settings_.spectrumBackground_ = false;
-        settings_.spectrumStyle_ = SpectrumStyle::Default;
-        if (spectrumChanged) {
-            logSettingBool(L"spectrum", false);
-            logSettingBool(L"spectrum-background", false);
-            logSettingInt(L"spectrum-style", 0);
-            saveSettings();
-        }
-    }
-
+    // 方向只影响实际显示与采样，保留用户配置，回到横向后重新应用。
     applyEffectiveTaskbarSettings();
     syncSpectrumWithMode();
-    publishPresentationFrame(monitor.snapshot(), false, true);
+    publishPresentationFrame(monitor.snapshot(), {.lyricsChanged = true});
     refreshSettingsDialog(true);
 }
 
