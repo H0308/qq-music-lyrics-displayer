@@ -54,6 +54,24 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 
 add_executable(QQMusicLyric
     src/main.cpp
+    src/app/application_dialogs.cpp
+    src/app/application_lifecycle.cpp
+    src/app/application_presentation.cpp
+    src/app/application_settings.cpp
+    src/app/application_support.cpp
+    src/app/application_taskbar.cpp
+    src/app/application_tray.cpp
+    src/app/presentation_model.cpp
+    src/idle/idle_controller.cpp
+    src/media/playback_controller.cpp
+    src/media/track_identity.cpp
+    src/settings/app_settings.cpp
+    src/ui/settings/artwork.cpp
+    src/ui/settings/search_model.cpp
+    src/ui/taskbar/platform.cpp
+    src/ui/taskbar/layout.cpp
+    src/ui/taskbar/text_effects_cache.cpp
+    src/ui/taskbar/window_attachment.cpp
     src/settings/settings_store.cpp
     src/logging/runtime_logger.cpp
     src/media/smtc_monitor.cpp

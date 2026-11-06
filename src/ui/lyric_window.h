@@ -2,7 +2,7 @@
 
 #include "ui/font_style.h"
 #include "idle/idle_types.h"
-#include "lyric/lyric_provider.h"
+#include "lyric/lyric_types.h"
 
 #include <array>
 #include <cstdint>
@@ -112,7 +112,6 @@ public:
     virtual void applyPresentationFrame(const PresentationFrame& frame) = 0;
     virtual void applyPlaybackPatch(const PlaybackPatch& patch) = 0;
     virtual void applySpectrumPatch(const SpectrumPatch& patch) = 0;
-    virtual void setMediaInfo(const OverlayMediaInfo& info) = 0;
     virtual void setControlCallback(std::function<void(MediaControl)> cb) = 0;
 
     // 应用音量：state 由宿主缓存展示；cb 在用户拖动音量滑块时回调（percent 0-100）
@@ -132,10 +131,6 @@ public:
 
     virtual void show() = 0;
     virtual void hide() = 0;
-    virtual void setLyrics(const std::vector<LyricLine>& lines) = 0;
-    virtual void setCurrentLine(int index) = 0; // 兼容入口；正式播放链路使用 PlaybackPatch
-    virtual void setPosition(int64_t positionMs) = 0; // 兼容入口；正式播放链路使用 PlaybackPatch
-    virtual void setStatusText(const std::wstring& text) = 0;
     // 翻译与罗马音互斥；两者均 false 时只显示原文。
     virtual void setSecondaryLyricMode(bool translation, bool romanization) = 0;
 };

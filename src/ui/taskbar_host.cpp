@@ -1,4 +1,33 @@
 #include "taskbar_host.h"
+#include "ui/taskbar/render_state.h"
+#include "ui/taskbar/platform.h"
+#include "ui/taskbar/window_attachment.h"
+#include "ui/taskbar/text_effects_cache.h"
+#include "ui/taskbar/layout.h"
+
+using taskbar_detail::RenderInvalidation;
+using taskbar_detail::RenderInvalidationMask;
+using taskbar_detail::toMask;
+using taskbar_detail::RenderState;
+using taskbar_detail::InvalidationSnapshot;
+using taskbar_detail::LayoutMetrics;
+using taskbar_detail::VerticalLayout;
+using taskbar_detail::kCoverPadding;
+using taskbar_detail::kTextPadding;
+using taskbar_detail::kSongInfoLyricGap;
+using taskbar_detail::kLeftRatio;
+using taskbar_detail::kVerticalRailPadding;
+using taskbar_detail::kVerticalCoverGap;
+using taskbar_detail::kVerticalControlsGap;
+using taskbar_detail::kVerticalLyricGap;
+using taskbar_detail::isTaskbarCenterAlign;
+using taskbar_detail::isValidTaskbarEdge;
+using taskbar_detail::queryTaskbarEdge;
+using taskbar_detail::isVerticalTaskbarEdge;
+using taskbar_detail::taskbarCrossPixels;
+using taskbar_detail::queryKugouTaskbarWindows;
+using taskbar_detail::queryTaskbarButtonsUia;
+using taskbar_detail::findTrafficMonitorWnd;
 #include "logging/runtime_logger.h"
 #include "ui/app_icon.h"
 #include "fluent_theme.h"
@@ -65,23 +94,18 @@ constexpr wchar_t kWndClassName[] = L"QQMusicLyricTaskbar";
 constexpr float kMinWidthDip = 160.0f;
 constexpr float kMaxWidthDip = 280.0f;
 constexpr float kCompressedMinWidthRatio = 0.5f;
-constexpr float kLeftRatio = 0.38f;
-constexpr float kCoverPadding = 4.0f;
-constexpr float kTextPadding = 8.0f;
+
 constexpr wchar_t kDragPreviewText[] = L"松手固定到这里";
 constexpr float kLyricDragThresholdDip = 6.0f;
 // 滚动文本左缘（滚出侧）的渐隐宽度
 constexpr float kLyricEdgeFadeDip = 18.0f;
-constexpr float kSongInfoLyricGap = 8.0f; // 歌曲信息与歌词之间的分隔间距
+ // 歌曲信息与歌词之间的分隔间距
 constexpr float kSongInfoDividerWidth = 1.0f;
 constexpr float kSongInfoDividerInset = 5.0f;
 constexpr float kCornerRadius = 8.0f;
 constexpr float kVerticalMinLengthDip = 220.0f;
 constexpr float kVerticalMaxLengthDip = 320.0f;
-constexpr float kVerticalRailPadding = 4.0f;
-constexpr float kVerticalCoverGap = 6.0f;
-constexpr float kVerticalControlsGap = 4.0f;
-constexpr float kVerticalLyricGap = 6.0f;
+
 constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
 constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
 constexpr ULONGLONG kOneShotStatusTextHoldMs = 5000; // 不足以滚动时保留完整文案的时长
@@ -189,331 +213,6 @@ private:
 GdiplusInit g_gdiplusInit;
 
 // 读取注册表 DWORD，失败返回默认值
-template <class T>
-T regDword(HKEY root, const wchar_t* path, const wchar_t* name, T defaultValue) {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(root, path, 0, KEY_READ, &key) != ERROR_SUCCESS)
-        return defaultValue;
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    DWORD type = REG_DWORD;
-    LONG err = RegQueryValueExW(key, name, nullptr, &type,
-                                reinterpret_cast<LPBYTE>(&value), &size);
-    RegCloseKey(key);
-    if (err != ERROR_SUCCESS || type != REG_DWORD)
-        return defaultValue;
-    return static_cast<T>(value);
-}
-
-bool isTaskbarCenterAlign() {
-    // 0 = 左对齐，1 = 居中（默认）
-    return regDword(HKEY_CURRENT_USER,
-                    L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
-                    L"TaskbarAl", 1) != 0;
-}
-
-bool isValidTaskbarEdge(UINT edge) {
-    return edge == ABE_LEFT || edge == ABE_TOP || edge == ABE_RIGHT || edge == ABE_BOTTOM;
-}
-
-UINT queryTaskbarEdge(HWND taskbar, const RECT& taskbarRect) {
-    APPBARDATA data{};
-    data.cbSize = sizeof(data);
-    if (SHAppBarMessage(ABM_GETTASKBARPOS, &data) != 0 && isValidTaskbarEdge(data.uEdge) &&
-        data.rc.left == taskbarRect.left && data.rc.top == taskbarRect.top &&
-        data.rc.right == taskbarRect.right && data.rc.bottom == taskbarRect.bottom)
-        return data.uEdge;
-
-    // ABM_GETTASKBARPOS 是首选；旧版 Shell 或第三方任务栏替代实现不可用时，
-    // 用任务栏矩形相对显示器边界的位置兜底，避免把侧边任务栏误判成横向。
-    HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (monitor && GetMonitorInfoW(monitor, &info)) {
-        const int width = taskbarRect.right - taskbarRect.left;
-        const int height = taskbarRect.bottom - taskbarRect.top;
-        if (height > width) {
-            if (taskbarRect.left <= info.rcMonitor.left)
-                return ABE_LEFT;
-            if (taskbarRect.right >= info.rcMonitor.right)
-                return ABE_RIGHT;
-        } else {
-            if (taskbarRect.top <= info.rcMonitor.top)
-                return ABE_TOP;
-            if (taskbarRect.bottom >= info.rcMonitor.bottom)
-                return ABE_BOTTOM;
-        }
-    }
-    return (taskbarRect.bottom - taskbarRect.top) > (taskbarRect.right - taskbarRect.left)
-               ? ABE_LEFT
-               : ABE_BOTTOM;
-}
-
-struct DisplayEnumeration {
-    std::vector<TaskbarDisplayInfo>* displays = nullptr;
-};
-
-BOOL CALLBACK collectDisplayMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM parameter) {
-    auto* enumeration = reinterpret_cast<DisplayEnumeration*>(parameter);
-    if (!enumeration || !enumeration->displays)
-        return FALSE;
-
-    MONITORINFOEXW info{};
-    info.cbSize = sizeof(info);
-    if (!GetMonitorInfoW(monitor, &info))
-        return TRUE;
-    if (info.rcMonitor.right <= info.rcMonitor.left ||
-        info.rcMonitor.bottom <= info.rcMonitor.top)
-        return TRUE;
-
-    TaskbarDisplayInfo display;
-    display.monitor = monitor;
-    display.deviceName = info.szDevice;
-    display.displayName = display.deviceName;
-    display.monitorRect = info.rcMonitor;
-    display.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
-
-    std::wstring activeMonitorLabel;
-    std::wstring fallbackMonitorLabel;
-    for (DWORD monitorIndex = 0;; ++monitorIndex) {
-        DISPLAY_DEVICEW device{};
-        device.cb = sizeof(device);
-        if (!EnumDisplayDevicesW(info.szDevice, monitorIndex, &device, 0))
-            break;
-        if (device.DeviceString[0] == L'\0')
-            continue;
-        if (fallbackMonitorLabel.empty())
-            fallbackMonitorLabel = device.DeviceString;
-        if ((device.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0)
-            continue;
-        if (activeMonitorLabel.empty()) {
-            activeMonitorLabel = device.DeviceString;
-        } else if (activeMonitorLabel.find(device.DeviceString) == std::wstring::npos) {
-            activeMonitorLabel += L" / ";
-            activeMonitorLabel += device.DeviceString;
-        }
-    }
-    if (!activeMonitorLabel.empty())
-        display.displayName = std::move(activeMonitorLabel);
-    else if (!fallbackMonitorLabel.empty())
-        display.displayName = std::move(fallbackMonitorLabel);
-
-    enumeration->displays->push_back(std::move(display));
-    return TRUE;
-}
-
-struct TaskbarWindowEnumeration {
-    std::vector<TaskbarDisplayInfo>* displays = nullptr;
-    DWORD shellProcessId = 0;
-};
-
-BOOL CALLBACK findTaskbarForDisplay(HWND window, LPARAM parameter) {
-    auto* enumeration = reinterpret_cast<TaskbarWindowEnumeration*>(parameter);
-    if (!enumeration || !enumeration->displays)
-        return FALSE;
-
-    wchar_t className[128]{};
-    const int length = GetClassNameW(window, className, static_cast<int>(std::size(className)));
-    if (length <= 0 ||
-        (wcscmp(className, L"Shell_TrayWnd") != 0 &&
-         wcscmp(className, L"Shell_SecondaryTrayWnd") != 0))
-        return TRUE;
-
-    DWORD processId = 0;
-    GetWindowThreadProcessId(window, &processId);
-    if (enumeration->shellProcessId != 0 && processId != enumeration->shellProcessId)
-        return TRUE;
-
-    const HMONITOR monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
-    auto it = std::find_if(enumeration->displays->begin(), enumeration->displays->end(),
-                           [monitor](const TaskbarDisplayInfo& display) {
-                               return display.monitor == monitor;
-                           });
-    if (it == enumeration->displays->end())
-        return TRUE;
-
-    it->taskbarWindow = window;
-    RECT taskbarRect{};
-    if (GetWindowRect(window, &taskbarRect)) {
-        const UINT edge = queryTaskbarEdge(window, taskbarRect);
-        it->horizontalTaskbar = edge == ABE_TOP || edge == ABE_BOTTOM;
-    }
-    return TRUE;
-}
-
-bool isVerticalTaskbarEdge(UINT edge) {
-    return edge == ABE_LEFT || edge == ABE_RIGHT;
-}
-
-int taskbarCrossPixels(const RECT& rect, UINT edge) {
-    return isVerticalTaskbarEdge(edge) ? rect.right - rect.left : rect.bottom - rect.top;
-}
-
-// 避让探测统一在工作线程执行；其中 UIA 会阻塞等待 Explorer。
-// UI 线程不能调用 UIA，也不能同步等待探测线程退出，否则 Explorer 同时
-// 等待任务栏子窗口处理消息时会形成循环等待（WER: AppHangXProcB1）。
-
-HWND findTrafficMonitorWnd(HWND taskbar) {
-    if (!taskbar)
-        return nullptr;
-    HWND child = nullptr;
-    while ((child = FindWindowExW(taskbar, child, nullptr, nullptr)) != nullptr) {
-        wchar_t text[256] = {};
-        GetWindowTextW(child, text, 256);
-        if (wcscmp(text, L"TrafficMonitorTaskbarWindow") == 0)
-            return child;
-    }
-    return nullptr;
-}
-
-// 酷狗官方任务栏歌词可能是酷狗进程创建的任务栏子窗口，也可能是叠在任务栏上的独立窗口。
-// 不能依赖固定窗口类名：不同版本的酷狗客户端可能使用不同的 UI 框架和类名；这里按进程
-// 镜像名识别，再只保留与当前任务栏相交的可见窗口。所有调用都在探测工作线程执行。
-struct KugouWindowProbeContext {
-    RECT taskbarRect{};
-    std::vector<RECT>* out = nullptr;
-    std::unordered_map<DWORD, bool> processCache;
-};
-
-bool isKugouProcess(DWORD processId, std::unordered_map<DWORD, bool>& cache) {
-    const auto cached = cache.find(processId);
-    if (cached != cache.end())
-        return cached->second;
-
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (!process) {
-        cache.emplace(processId, false);
-        return false;
-    }
-
-    wchar_t path[32768]{};
-    DWORD length = static_cast<DWORD>(std::size(path));
-    const bool queried = QueryFullProcessImageNameW(process, 0, path, &length) != FALSE;
-    CloseHandle(process);
-    if (!queried) {
-        cache.emplace(processId, false);
-        return false;
-    }
-
-    const wchar_t* fileName = wcsrchr(path, L'\\');
-    fileName = fileName ? fileName + 1 : path;
-    const bool match = _wcsicmp(fileName, L"KuGou.exe") == 0;
-    cache.emplace(processId, match);
-    return match;
-}
-
-void collectKugouTaskbarWindow(HWND window, KugouWindowProbeContext& context) {
-    if (!window || !IsWindowVisible(window))
-        return;
-
-    DWORD processId = 0;
-    GetWindowThreadProcessId(window, &processId);
-    if (!isKugouProcess(processId, context.processCache))
-        return;
-
-    RECT windowRect{};
-    RECT intersection{};
-    if (GetWindowRect(window, &windowRect) &&
-        IntersectRect(&intersection, &windowRect, &context.taskbarRect))
-        context.out->push_back(intersection);
-}
-
-BOOL CALLBACK collectKugouTopLevelWindow(HWND window, LPARAM parameter) {
-    auto* context = reinterpret_cast<KugouWindowProbeContext*>(parameter);
-    if (context)
-        collectKugouTaskbarWindow(window, *context);
-    return TRUE;
-}
-
-BOOL CALLBACK collectKugouTaskbarChildWindow(HWND window, LPARAM parameter) {
-    auto* context = reinterpret_cast<KugouWindowProbeContext*>(parameter);
-    if (context)
-        collectKugouTaskbarWindow(window, *context);
-    return TRUE;
-}
-
-void queryKugouTaskbarWindows(HWND taskbar, std::vector<RECT>& out) {
-    out.clear();
-    if (!taskbar)
-        return;
-
-    KugouWindowProbeContext context;
-    if (!GetWindowRect(taskbar, &context.taskbarRect))
-        return;
-    context.out = &out;
-
-    // 顶层枚举覆盖独立置顶/覆盖窗口；任务栏子树枚举覆盖被 Explorer 承载的嵌入窗口。
-    EnumWindows(collectKugouTopLevelWindow, reinterpret_cast<LPARAM>(&context));
-    EnumChildWindows(taskbar, collectKugouTaskbarChildWindow,
-                     reinterpret_cast<LPARAM>(&context));
-
-    std::sort(out.begin(), out.end(), [](const RECT& a, const RECT& b) {
-        if (a.left != b.left)
-            return a.left < b.left;
-        if (a.top != b.top)
-            return a.top < b.top;
-        if (a.right != b.right)
-            return a.right < b.right;
-        return a.bottom < b.bottom;
-    });
-    out.erase(std::unique(out.begin(), out.end(), [](const RECT& a, const RECT& b) {
-                  return EqualRect(&a, &b) != FALSE;
-              }),
-              out.end());
-}
-
-// 通过 UI Automation 取任务栏 XAML 部件（开始/搜索/任务视图/小组件/固定与运行中的
-// 应用图标）的屏幕包围矩形。这些按钮是 XAML 元素而非窗口，HWND 枚举看不到，
-// 但 UIA 的 TaskbarFrame 子树完整暴露；小组件等后续新增的按钮同样作为其子元素出现。
-// uia 实例由探测工作线程创建与持有
-void queryTaskbarButtonsUia(IUIAutomation* uia, HWND taskbar, std::vector<RECT>& out) {
-    out.clear();
-    if (!taskbar || !uia)
-        return;
-    IUIAutomationElement* tb = nullptr;
-    if (FAILED(uia->ElementFromHandle(taskbar, &tb)) || !tb)
-        return;
-    VARIANT aid{};
-    aid.vt = VT_BSTR;
-    aid.bstrVal = SysAllocString(L"TaskbarFrame");
-    IUIAutomationCondition* cond = nullptr;
-    uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, aid, &cond);
-    VariantClear(&aid);
-    IUIAutomationElement* frame = nullptr;
-    if (cond) {
-        tb->FindFirst(TreeScope_Descendants, cond, &frame);
-        cond->Release();
-    }
-    tb->Release();
-    if (!frame)
-        return;
-    IUIAutomationCondition* trueCond = nullptr;
-    uia->CreateTrueCondition(&trueCond);
-    IUIAutomationElementArray* arr = nullptr;
-    if (trueCond) {
-        frame->FindAll(TreeScope_Children, trueCond, &arr);
-        trueCond->Release();
-    }
-    frame->Release();
-    if (!arr)
-        return;
-    int n = 0;
-    arr->get_Length(&n);
-    for (int i = 0; i < n; ++i) {
-        IUIAutomationElement* el = nullptr;
-        arr->GetElement(i, &el);
-        if (!el)
-            continue;
-        BOOL offscreen = FALSE;
-        RECT rc{};
-        el->get_CurrentIsOffscreen(&offscreen);
-        el->get_CurrentBoundingRectangle(&rc);
-        el->Release();
-        if (!offscreen && rc.right > rc.left && rc.bottom > rc.top)
-            out.push_back(rc);
-    }
-    arr->Release();
-}
 
 bool sameLyricLine(const LyricLine& a, const LyricLine& b) {
     if (a.ms != b.ms || a.text != b.text || a.translation != b.translation ||
@@ -540,41 +239,7 @@ bool sameLyrics(const std::vector<LyricLine>& a, const std::vector<LyricLine>& b
 
 // 这些位表示“需要重新处理什么”，不再分别由多个布尔量表达。它们不是
 // 生命周期阶段：阶段使用下面 RenderState 中的枚举表示，失效位只描述待处理工作。
-enum class RenderInvalidation : uint32_t {
-    Paint = 1u << 0,
-    Text = 1u << 1,
-    SongInfo = 1u << 2,
-    Geometry = 1u << 3,
-    Layout = 1u << 4,
-    Cover = 1u << 5,
-    PlatformIcon = 1u << 6,
-};
-
-using RenderInvalidationMask = uint32_t;
-
-constexpr RenderInvalidationMask toMask(RenderInvalidation value) {
-    return static_cast<RenderInvalidationMask>(value);
-}
-
 } // namespace
-
-std::vector<TaskbarDisplayInfo> enumerateTaskbarDisplays() {
-    std::vector<TaskbarDisplayInfo> displays;
-    DisplayEnumeration displayEnumeration{&displays};
-    EnumDisplayMonitors(nullptr, nullptr, collectDisplayMonitor,
-                        reinterpret_cast<LPARAM>(&displayEnumeration));
-
-    DWORD shellProcessId = 0;
-    if (const HWND primaryTaskbar = FindWindowW(L"Shell_TrayWnd", nullptr))
-        GetWindowThreadProcessId(primaryTaskbar, &shellProcessId);
-    TaskbarWindowEnumeration taskbarEnumeration{&displays, shellProcessId};
-    EnumWindows(findTaskbarForDisplay, reinterpret_cast<LPARAM>(&taskbarEnumeration));
-
-    std::stable_sort(displays.begin(), displays.end(), [](const auto& left, const auto& right) {
-        return left.primary && !right.primary;
-    });
-    return displays;
-}
 
 struct TaskbarHost::Impl {
     struct WindowPlacement {
@@ -583,138 +248,6 @@ struct TaskbarHost::Impl {
         int width = 0;
         int height = 0;
         int availableMajor = 0;
-    };
-
-    struct InvalidationSnapshot {
-        RenderInvalidationMask mask = 0;
-        std::array<uint64_t, 7> generations{};
-    };
-
-    class InvalidationState {
-    public:
-        InvalidationState()
-            : pending_(toMask(RenderInvalidation::Paint) |
-                       toMask(RenderInvalidation::Text) |
-                       toMask(RenderInvalidation::SongInfo) |
-                       toMask(RenderInvalidation::Geometry) |
-                       toMask(RenderInvalidation::Layout) |
-                       toMask(RenderInvalidation::Cover) |
-                       toMask(RenderInvalidation::PlatformIcon)) {}
-
-        void request(RenderInvalidation value) {
-            request(toMask(value));
-        }
-
-        void request(RenderInvalidationMask mask) {
-            pending_ |= mask;
-            for (size_t i = 0; i < generations_.size(); ++i) {
-                if (mask & (1u << i))
-                    ++generations_[i];
-            }
-        }
-
-        bool contains(RenderInvalidation value) const {
-            return (pending_ & toMask(value)) != 0;
-        }
-
-        bool any() const { return pending_ != 0; }
-
-        InvalidationSnapshot begin() const {
-            return InvalidationSnapshot{pending_, generations_};
-        }
-
-        void commit(const InvalidationSnapshot& snapshot) {
-            for (size_t i = 0; i < generations_.size(); ++i) {
-                const RenderInvalidationMask bit = 1u << i;
-                if ((snapshot.mask & bit) && generations_[i] == snapshot.generations[i])
-                    pending_ &= ~bit;
-            }
-        }
-
-    private:
-        RenderInvalidationMask pending_ = 0;
-        std::array<uint64_t, 7> generations_{};
-    };
-
-    // 渲染阶段集中在一个对象内：外部只看到枚举/查询，窗口、转场和资源阶段
-    // 不再由宿主成员函数各自拼接多个布尔量表达。
-    class RenderState {
-    public:
-        enum class WindowPhase {
-            Hidden,
-            Visible,
-        };
-        enum class LyricTransitionPhase {
-            Idle,
-            Pending,
-            Running,
-        };
-        enum class DCompTransitionPhase {
-            Inactive,
-            Active,
-            EndRequested,
-        };
-        enum class SongTransitionPhase {
-            Idle,
-            Pending,
-        };
-        enum class DeviceResourcePhase {
-            Uninitialized,
-            Ready,
-        };
-
-        RenderMode mode() const { return mode_; }
-        WindowPhase windowPhase() const { return window_; }
-        LyricTransitionPhase lyricTransitionPhase() const { return lyricTransition_; }
-        DCompTransitionPhase dcompTransitionPhase() const { return dcompTransition_; }
-        DeviceResourcePhase deviceResourcePhase() const { return deviceResources_; }
-        bool sessionVisible() const { return sessionVisible_; }
-        bool visibilitySuppressed() const { return visibilitySuppressed_; }
-        bool songTransitionPending() const {
-            return songTransition_ == SongTransitionPhase::Pending;
-        }
-
-        void setMode(RenderMode mode) { mode_ = mode; }
-        void setWindowPhase(WindowPhase phase) { window_ = phase; }
-        void setSessionVisible(bool visible) { sessionVisible_ = visible; }
-        void setVisibilitySuppressed(bool suppressed) {
-            visibilitySuppressed_ = suppressed;
-        }
-        void setLyricTransitionPhase(LyricTransitionPhase phase) {
-            lyricTransition_ = phase;
-        }
-        void setDCompTransitionPhase(DCompTransitionPhase phase) {
-            dcompTransition_ = phase;
-        }
-        void setDeviceResourcePhase(DeviceResourcePhase phase) {
-            deviceResources_ = phase;
-        }
-        void setSongTransitionPending(bool pending) {
-            songTransition_ = pending ? SongTransitionPhase::Pending
-                                       : SongTransitionPhase::Idle;
-        }
-
-        void requestInvalidation(RenderInvalidation value) { invalidation_.request(value); }
-        void requestInvalidation(RenderInvalidationMask mask) { invalidation_.request(mask); }
-        bool isInvalidated(RenderInvalidation value) const {
-            return invalidation_.contains(value);
-        }
-        bool hasInvalidation() const { return invalidation_.any(); }
-        InvalidationSnapshot beginInvalidation() const { return invalidation_.begin(); }
-        void commitInvalidation(const InvalidationSnapshot& snapshot) {
-            invalidation_.commit(snapshot);
-        }
-
-    private:
-        RenderMode mode_ = RenderMode::Normal;
-        WindowPhase window_ = WindowPhase::Hidden;
-        LyricTransitionPhase lyricTransition_ = LyricTransitionPhase::Idle;
-        DCompTransitionPhase dcompTransition_ = DCompTransitionPhase::Inactive;
-        DeviceResourcePhase deviceResources_ = DeviceResourcePhase::Uninitialized;
-        bool sessionVisible_ = false;
-        bool visibilitySuppressed_ = false;
-        SongTransitionPhase songTransition_ = SongTransitionPhase::Idle;
-        InvalidationState invalidation_;
     };
 
     RenderState renderState_;
@@ -734,7 +267,7 @@ struct TaskbarHost::Impl {
     HWND taskbar_ = nullptr;
     HMONITOR targetMonitor_ = nullptr;
     std::wstring targetMonitorDeviceName_;
-    bool taskbarEmbedded_ = false;
+    TaskbarWindowAttachment attachment_;
     bool appBarRegistered_ = false;
     bool appBarFullscreenOpen_ = false;
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
@@ -1179,23 +712,8 @@ struct TaskbarHost::Impl {
     bool karaokeSettled_ = true;
     // 光晕/描边离屏缓存：glow+outline+本体三层只合成一次，滚动/淡变时做 DrawImage 平移，
     // 避免每帧对主歌词重复 16+ 次 DrawTextLayout。双行转场同时绘制旧/新布局，保留两个
-    // 缓存槽，避免两套布局在同一帧互相驱逐。布局、画刷或效果组合变化时经 textFxGen_ 失效。
-    struct TextFxCacheEntry {
-        ID2D1BitmapRenderTarget* target = nullptr;
-        const IDWriteTextLayout* layout = nullptr;
-        ID2D1Brush* brush = nullptr;
-        ID2D1Brush* outline = nullptr;
-        ID2D1Brush* glow = nullptr;
-        uint64_t generation = 0;
-        uint64_t lastUse = 0;
-        UINT dpi = 0;
-        float w = 0.0f;
-        float h = 0.0f;
-        float pad = 0.0f;
-    };
-    std::array<TextFxCacheEntry, 2> textFxCaches_{};
-    uint64_t textFxUse_ = 0;
-    uint64_t textFxGen_ = 0;
+    // 缓存槽，避免两套布局在同一帧互相驱逐。布局、画刷或效果组合变化时由效果缓存的失效代次控制。
+    LyricTextEffectsCache textEffectsCache_;
 
     bool isWindowVisible() const {
         return renderState_.windowPhase() == RenderState::WindowPhase::Visible;
@@ -1524,89 +1042,12 @@ struct TaskbarHost::Impl {
     }
 
     bool attachToTaskbar(HWND window) {
-        taskbarEmbedded_ = false;
-        if (!window || !taskbar_ || !IsWindow(taskbar_))
-            return false;
-
-        SetLastError(ERROR_SUCCESS);
-        const LONG_PTR originalStyle = GetWindowLongPtrW(window, GWL_STYLE);
-        if (originalStyle == 0 && GetLastError() != ERROR_SUCCESS)
-            return false;
-
-        // SetParent 不会替窗口切换 WS_POPUP/WS_CHILD；先切成真正的子窗口，
-        // 否则后续 SetWindowPos 仍可能按顶层窗口的屏幕坐标解释。
-        const LONG_PTR childStyle =
-            (originalStyle & ~static_cast<LONG_PTR>(WS_POPUP)) |
-            static_cast<LONG_PTR>(WS_CHILD);
-        SetLastError(ERROR_SUCCESS);
-        if (SetWindowLongPtrW(window, GWL_STYLE, childStyle) == 0 &&
-            GetLastError() != ERROR_SUCCESS)
-            return false;
-
-        // 初始窗口没有父窗口时，SetParent 成功也会返回 nullptr（返回的是旧父窗口），
-        // 必须结合 GetLastError 和实际父窗口判断，不能直接判断返回值。
-        SetLastError(ERROR_SUCCESS);
-        const HWND previousParent = SetParent(window, taskbar_);
-        const DWORD error = GetLastError();
-        if (!previousParent && error != ERROR_SUCCESS) {
-            SetParent(window, nullptr);
-            SetWindowLongPtrW(window, GWL_STYLE, originalStyle);
-            runtime_log::writef(L"[taskbar] SetParent failed: error=%lu hwnd=%p parent=%p",
-                                static_cast<unsigned long>(error), window, taskbar_);
-            return false;
-        }
-
-        if (GetParent(window) != taskbar_) {
-            SetParent(window, nullptr);
-            SetWindowLongPtrW(window, GWL_STYLE, originalStyle);
-            runtime_log::writef(L"[taskbar] SetParent parent mismatch: hwnd=%p parent=%p",
-                                window, taskbar_);
-            return false;
-        }
-
-        taskbarEmbedded_ = true;
-        return true;
+        return attachment_.attach(window, taskbar_);
     }
 
     bool detachFromTaskbar() {
-        if (!hwnd)
-            return false;
         cancelTaskbarAttachRetry();
-        const HWND originalParent = GetParent(hwnd);
-        const LONG_PTR originalStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if (originalParent) {
-            SetLastError(ERROR_SUCCESS);
-            const HWND previousParent = SetParent(hwnd, nullptr);
-            const DWORD error = GetLastError();
-            if (!previousParent && error != ERROR_SUCCESS) {
-                runtime_log::writef(L"[appbar] detach failed: error=%lu",
-                                    static_cast<unsigned long>(error));
-                return false;
-            }
-        }
-
-        // SetParent 不会自动切换 WS_CHILD/WS_POPUP。仍带 WS_CHILD 时，桌面窗口会被
-        // GetParent 返回为父窗口，因此必须先完成顶层样式切换，再校验是否真正脱离。
-        SetLastError(ERROR_SUCCESS);
-        const LONG_PTR popupStyle =
-            (originalStyle & ~static_cast<LONG_PTR>(WS_CHILD)) |
-            static_cast<LONG_PTR>(WS_POPUP);
-        if (SetWindowLongPtrW(hwnd, GWL_STYLE, popupStyle) == 0 &&
-            GetLastError() != ERROR_SUCCESS) {
-            runtime_log::writef(L"[appbar] popup style failed: error=%lu",
-                                static_cast<unsigned long>(GetLastError()));
-            return false;
-        }
-        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
-                         SWP_FRAMECHANGED);
-        if (GetParent(hwnd) != nullptr) {
-            runtime_log::writef(L"[appbar] detach verification failed: parent=%p",
-                                GetParent(hwnd));
-            return false;
-        }
-        taskbarEmbedded_ = false;
-        return true;
+        return attachment_.detach(hwnd);
     }
 
     HMONITOR appBarMonitor() const {
@@ -1777,7 +1218,7 @@ struct TaskbarHost::Impl {
         if (immersiveBackdropPrepared)
             initializeBackdropForCurrentViewMode();
         if (isAppBarView()) {
-            taskbarEmbedded_ = false;
+            attachment_.reset();
             renderState_.setVisibilitySuppressed(false);
             setPlacementStatus(TaskbarPlacementStatus::Safe);
         } else if (!attachToTaskbar(h)) {
@@ -2128,7 +1569,7 @@ struct TaskbarHost::Impl {
             return;
 
         POINT pt{placement.x, placement.y};
-        if (taskbarEmbedded_)
+        if (attachment_.embedded())
             ScreenToClient(taskbar_, &pt);
 
         // 把窗口提到任务栏子窗口最前面，避免被其他任务栏子窗口盖住。
@@ -2148,7 +1589,7 @@ struct TaskbarHost::Impl {
     // 这里只在发现宿主不在顶部时修正，并明确禁止激活，避免伪装成“跑到前台”。
     void ensureImmersiveZOrder() {
         if (viewMode_ != TaskbarViewMode::Immersive || !hwnd || !taskbar_ ||
-            !taskbarEmbedded_ || GetParent(hwnd) != taskbar_)
+            !attachment_.embedded() || GetParent(hwnd) != taskbar_)
             return;
         if (GetTopWindow(taskbar_) == hwnd)
             return;
@@ -2517,7 +1958,7 @@ struct TaskbarHost::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
-        ++textFxGen_; // 颜色变化使离屏缓存失效
+        textEffectsCache_.invalidate(); // 颜色变化使离屏缓存失效
         if (brushLyric_) {
             brushLyric_->Release();
             brushLyric_ = nullptr;
@@ -2641,7 +2082,7 @@ struct TaskbarHost::Impl {
         lyricGlow_ = on;
         if (compactTaskbarHeight_ > 0.0f)
             recreateFormats();
-        ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
+        textEffectsCache_.invalidate(); // 效果组合变化，不能复用旧的离屏缓存
         requestFrameAndFlush();
     }
 
@@ -2651,7 +2092,7 @@ struct TaskbarHost::Impl {
         lyricOutline_ = on;
         if (compactTaskbarHeight_ > 0.0f)
             recreateFormats();
-        ++textFxGen_; // 效果组合变化，不能复用旧的离屏缓存
+        textEffectsCache_.invalidate(); // 效果组合变化，不能复用旧的离屏缓存
         requestFrameAndFlush();
     }
 
@@ -3097,7 +2538,7 @@ struct TaskbarHost::Impl {
         viewMode_ = mode;
         bool immersiveBackdropPrepared = false;
         if (mode == TaskbarViewMode::Immersive && !dockBackdrop_.available()) {
-            if (!taskbarEmbedded_ || detachFromTaskbar())
+            if (!attachment_.embedded() || detachFromTaskbar())
                 initializeBackdropForCurrentViewMode();
             else
                 backgroundBlurSupported_ = false;
@@ -5095,7 +4536,7 @@ struct TaskbarHost::Impl {
                 const bool immersiveBackdropPrepared =
                     viewMode_ == TaskbarViewMode::Immersive && !dockBackdrop_.available();
                 if (immersiveBackdropPrepared) {
-                    if (!taskbarEmbedded_ || detachFromTaskbar())
+                    if (!attachment_.embedded() || detachFromTaskbar())
                         initializeBackdropForCurrentViewMode();
                     else
                         backgroundBlurSupported_ = false;
@@ -5117,7 +4558,7 @@ struct TaskbarHost::Impl {
                 reconcileWindowVisibility();
                 requestFrameAndFlush();
             } else {
-                taskbarEmbedded_ = false;
+                attachment_.reset();
                 if (!isAppBarView())
                     scheduleTaskbarAttachRetry();
             }
@@ -5128,7 +4569,7 @@ struct TaskbarHost::Impl {
         dockBackdrop_.reset();
         hwnd = nullptr;
         resetImmersivePresence();
-        taskbarEmbedded_ = false;
+        attachment_.reset();
         // Explorer 强制退出时旧窗口可能没有走 WM_DESTROY，Shell 侧与本地的
         // AppBar 注册状态都必须按已失效处理，避免重建窗口跳过 ABM_NEW。
         appBarRegistered_ = false;
@@ -5510,11 +4951,7 @@ struct TaskbarHost::Impl {
         r(coverBlurFx_);
         r(coverScaleFx_);
         coverBlurInput_ = nullptr;
-        for (auto& cache : textFxCaches_) {
-            r(cache.target);
-            cache = {};
-        }
-        textFxUse_ = 0;
+        textEffectsCache_.clear();
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
         karaokeGeometryLayout_ = nullptr;
@@ -6459,7 +5896,7 @@ struct TaskbarHost::Impl {
         }
         if (!isInvalidated(RenderInvalidation::Text))
             return;
-        ++textFxGen_; // 布局指针重建，离屏缓存全部失效
+        textEffectsCache_.invalidate(); // 布局指针重建，离屏缓存全部失效
         clearLyricEffectGeometry();
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
@@ -6714,117 +6151,30 @@ struct TaskbarHost::Impl {
         return groupWidth + kTextPadding * 2.0f;
     }
 
-    struct LayoutMetrics {
-        float w = 0.0f;
-        float h = 0.0f;
-        float leftW = 0.0f;
-        float rightW = 0.0f;
-        float immersiveControlsW = 0.0f;
-    };
 
-    struct VerticalLayout {
-        float w = 0.0f;
-        float h = 0.0f;
-        float coverX = 0.0f;
-        float coverY = 0.0f;
-        float coverSize = 0.0f;
-        float lyricY = 0.0f;
-        float lyricBottom = 0.0f;
-        bool showControls = false;
-        float controlRadius = 0.0f;
-        D2D1_POINT_2F controlCenters[4]{};
-    };
+
+
 
     VerticalLayout verticalLayout() const {
-        VerticalLayout layout;
-        int pxW = 0;
-        int pxH = 0;
-        clientPixelSize(pxW, pxH);
-        layout.w = dip(pxW);
-        layout.h = dip(pxH);
-        if (layout.w <= 0.0f || layout.h <= 0.0f)
-            return layout;
-
-        const float pad = std::min(kVerticalRailPadding, layout.w * 0.18f);
-        const float contentW = std::max(1.0f, layout.w - pad * 2.0f);
-        const bool playbackScene = scene_ != DisplayScene::Idle &&
-                                    scene_ != DisplayScene::NoPlayback;
-        if (albumCoverVisible_ && playbackScene) {
-            layout.coverSize = contentW;
-            layout.coverX = (layout.w - layout.coverSize) * 0.5f;
-            layout.coverY = pad;
-        }
-
-        layout.lyricY = layout.coverSize > 0.0f
-                            ? layout.coverY + layout.coverSize + kVerticalCoverGap
-                            : pad;
-        layout.lyricBottom = std::max(layout.lyricY + 1.0f, layout.h - pad);
-        layout.showControls = mouseOver_ && controlsOnHover_ &&
-                              hoverControlStyle_ == HoverControlStyle::Inline && playbackScene;
-        if (layout.showControls) {
-            layout.controlRadius = std::clamp(layout.w * 0.23f, 6.0f, 9.0f);
-            const float diameter = layout.controlRadius * 2.0f;
-            // 与横向内嵌控件复用同一套视觉节奏：按钮中心间距约为 2.8r。
-            const float transportPitch = layout.controlRadius * 2.8f;
-            const float transportGap = std::max(kVerticalControlsGap, transportPitch - diameter);
-            // 音量是独立的辅助操作，与上一首/播放/下一首之间留出更明显的层级间距。
-            const float volumeGap = transportGap + layout.controlRadius * 0.9f;
-            const float blockH = diameter * 4.0f + transportGap * 2.0f + volumeGap;
-            const float controlsTop = layout.lyricY;
-            const float controlsBottom = layout.h - pad;
-            const float freeSpace = controlsBottom - controlsTop - blockH;
-            const float groupTop = controlsTop + std::max(0.0f, freeSpace) * 0.5f;
-            const float firstY = groupTop + layout.controlRadius;
-            if (freeSpace >= 0.0f && groupTop - kVerticalLyricGap > layout.lyricY) {
-                for (int i = 0; i < 3; ++i)
-                    layout.controlCenters[i] =
-                        D2D1::Point2F(layout.w * 0.5f, firstY + i * transportPitch);
-                layout.controlCenters[3] = D2D1::Point2F(
-                    layout.w * 0.5f, firstY + transportPitch * 2.0f + diameter + volumeGap);
-                layout.lyricBottom = groupTop - kVerticalLyricGap;
-            } else {
-                layout.showControls = false;
-            }
-        }
-        return layout;
+        int width = 0;
+        int height = 0;
+        clientPixelSize(width, height);
+        return taskbar_detail::verticalLayout(dip(width), dip(height), scene_,
+            albumCoverVisible_, mouseOver_ && controlsOnHover_ &&
+                                hoverControlStyle_ == HoverControlStyle::Inline);
     }
 
     LayoutMetrics layoutMetricsForScene(DisplayScene scene, int pxW, int pxH) const {
-        LayoutMetrics m;
-        m.w = dip(pxW);
-        m.h = dip(pxH);
-        const bool immersiveControls = isExpandedView() &&
-                                       !isVerticalTaskbar();
-        m.immersiveControlsW = immersiveControls ? immersiveControlsWidth(m.h) : 0.0f;
-        if (scene == DisplayScene::Idle) {
-            m.leftW = 0.0f;
-            m.rightW = std::max(
-                1.0f, m.w - m.immersiveControlsW - spectrumExtraForScene(scene, m.w));
-            return m;
-        }
-        float effW = m.w - spectrumExtraForScene(scene, m.w);
-        const float immersiveStart = songInfoVisible_ ? kSongInfoLyricGap : kTextPadding;
-        const float contentW = std::max(
-            1.0f, effW - m.immersiveControlsW -
-                      (immersiveControls ? immersiveStart : 0.0f));
-        if (isExpandedView() && songInfoVisible_) {
-            // 沉浸模式的宽度来自整个任务栏，歌曲信息只保留稳定的左侧栏，
-            // 把主要空间留给歌词和右侧频谱，避免 1920px 任务栏出现过宽信息区。
-            const float available = contentW;
-            const float minimum = albumCoverVisible_
-                                      ? kCoverPadding + coverSize() + kTextPadding + 80.0f
-                                      : 140.0f;
-            const float preferred = std::clamp(available * 0.24f, 180.0f, 280.0f);
-            m.leftW = std::min(available, std::max(minimum, preferred));
-        } else if (isExpandedView()) {
-            // 没有歌曲信息时，只有实际显示的封面需要占用左侧安全区。
-            // 这样切换封面不会改变歌词的中心锚点，也不会给控件留下无意义的空洞。
-            m.leftW = albumCoverVisible_ ? coverSlotWidth(m.h) : 0.0f;
-        } else {
-            m.leftW = songInfoVisible_ ? contentW * kLeftRatio : coverSlotWidth(m.h);
-        }
-        m.rightW = std::max(1.0f, m.w - m.leftW - m.immersiveControlsW);
-        return m;
+        const float width = dip(pxW);
+        const float height = dip(pxH);
+        const bool expandedControls = isExpandedView() && !isVerticalTaskbar();
+        return taskbar_detail::horizontalLayout({
+            width, height, scene, isExpandedView(), expandedControls,
+            songInfoVisible_, albumCoverVisible_,
+            expandedControls ? immersiveControlsWidth(height) : 0.0f,
+            spectrumExtraForScene(scene, width),
+            isExpandedView() && songInfoVisible_ && albumCoverVisible_ ? coverSize() : 0.0f,
+            coverSlotWidth(height)});
     }
 
     LayoutMetrics layoutMetrics(int pxW, int pxH) const {
@@ -7780,75 +7130,8 @@ struct TaskbarHost::Impl {
     // 必须在画刷透明度被修改之前调用，缓存内容始终是自然透明度。
     ID2D1Bitmap* textFxBitmap(IDWriteTextLayout* layout, float textW, float textH,
                               ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow) {
-        auto* rt = drawTarget();
-        if (!rt || !layout || !brush)
-            return nullptr;
-        constexpr float pad = 3.0f; // 覆盖 2.4 DIP 的光晕外扩和边缘抗锯齿
-        const float wDip = textW + pad * 2.0f;
-        const float hDip = textH + pad * 2.0f;
-        TextFxCacheEntry* entry = nullptr;
-        for (auto& candidate : textFxCaches_) {
-            if (candidate.target && candidate.layout == layout && candidate.brush == brush &&
-                candidate.outline == outline && candidate.glow == glow &&
-                candidate.generation == textFxGen_ && candidate.dpi == dpi_ &&
-                candidate.w == wDip && candidate.h == hDip) {
-                entry = &candidate;
-                break;
-            }
-        }
-        if (!entry) {
-            entry = &textFxCaches_[0];
-            if (textFxCaches_[1].lastUse < entry->lastUse)
-                entry = &textFxCaches_[1];
-            if (entry->target)
-                entry->target->Release();
-            *entry = {};
-            if (FAILED(rt->CreateCompatibleRenderTarget(D2D1::SizeF(wDip, hDip),
-                                                         &entry->target)))
-                return nullptr;
-            entry->target->SetAntialiasMode(rt->GetAntialiasMode());
-            entry->target->SetTextAntialiasMode(rt->GetTextAntialiasMode());
-            static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
-                                                  {0.7071f, 0.7071f},
-                                                  {0.0f, 1.0f},
-                                                  {-0.7071f, 0.7071f},
-                                                  {-1.0f, 0.0f},
-                                                  {-0.7071f, -0.7071f},
-                                                  {0.0f, -1.0f},
-                                                  {0.7071f, -0.7071f}};
-            entry->target->BeginDraw();
-            entry->target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-            if (glow) {
-                for (auto& d : kDirs)
-                    entry->target->DrawTextLayout(
-                        D2D1::Point2F(pad + d[0] * 2.4f, pad + d[1] * 2.4f), layout, glow);
-            }
-            if (outline) {
-                for (auto& d : kDirs)
-                    entry->target->DrawTextLayout(
-                        D2D1::Point2F(pad + d[0] * 1.2f, pad + d[1] * 1.2f), layout, outline);
-            }
-            entry->target->DrawTextLayout(D2D1::Point2F(pad, pad), layout, brush);
-            if (FAILED(entry->target->EndDraw())) {
-                entry->target->Release();
-                *entry = {};
-                return nullptr;
-            }
-            entry->layout = layout;
-            entry->brush = brush;
-            entry->outline = outline;
-            entry->glow = glow;
-            entry->generation = textFxGen_;
-            entry->dpi = dpi_;
-            entry->w = wDip;
-            entry->h = hDip;
-            entry->pad = pad;
-        }
-        entry->lastUse = ++textFxUse_;
-        ID2D1Bitmap* bmp = nullptr;
-        if (FAILED(entry->target->GetBitmap(&bmp)) || !bmp)
-            return nullptr;
-        return bmp;
+        return textEffectsCache_.bitmap(drawTarget(), dpi_, layout, textW, textH,
+                                        brush, outline, glow);
     }
 
     // 滚动文本左缘渐隐画笔：固定两停止点（透明 → 不透明），创建一次终身复用，
@@ -11296,7 +10579,7 @@ struct TaskbarHost::Impl {
             renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
             unregisterAppBar();
             KillTimer(hwnd, kTaskbarAttachTimerId);
-            taskbarEmbedded_ = false;
+            attachment_.reset();
             stopFrameTimer();
             stopPlacementTimer();
             stopProbe();
@@ -11367,24 +10650,6 @@ void TaskbarHost::applyPlaybackPatch(const PlaybackPatch& patch) {
 
 void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
     impl_->applySpectrumPatch(patch);
-}
-
-void TaskbarHost::setMediaInfo(const OverlayMediaInfo& info) {
-    // SMTC 的播放、时间线和属性事件可能连续到达；没有可见状态变化时不再
-    // 额外提交一次整个分层窗口，下一帧定时器会按当前进度正常绘制。
-    const bool popupAvailable = impl_->mediaPopupAvailable(impl_->isSessionVisible());
-    impl_->mediaPopup.beginPresentationUpdate();
-    impl_->mediaPopup.setIdleContent(impl_->idle, popupAvailable);
-    impl_->mediaPopup.setMedia(info, popupAvailable);
-    impl_->mediaPopup.setPresentationMode(
-        impl_->scene_, popupAvailable,
-        impl_->hoverControlStyle_ == HoverControlStyle::Inline);
-    impl_->mediaPopup.setProgress(impl_->positionMs_);
-    impl_->mediaPopup.endPresentationUpdate();
-    if (impl_->updateMediaInfo(info)) {
-        impl_->requestFrame();
-        impl_->flushRenderRequest();
-    }
 }
 
 void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
@@ -11495,48 +10760,6 @@ void TaskbarHost::show() {
 
 void TaskbarHost::hide() {
     impl_->hide();
-}
-
-void TaskbarHost::setLyrics(const std::vector<LyricLine>& lines) {
-    impl_->lines = lines;
-    impl_->scene_ = lines.empty() ? DisplayScene::Message : DisplayScene::Lyrics;
-    impl_->currentLine = -1;
-    impl_->resetLyricTransition();
-    if (impl_->nextLyricLayout_) {
-        impl_->nextLyricLayout_->Release();
-        impl_->nextLyricLayout_ = nullptr;
-    }
-    impl_->nextLyricWidth_ = 0.0f;
-    impl_->nextLyricHeight_ = 0.0f;
-    impl_->requestInvalidation(RenderInvalidation::Text);
-    if (!lines.empty())
-        impl_->statusText.clear();
-    impl_->requestFrame();
-    impl_->flushRenderRequest();
-}
-
-void TaskbarHost::setCurrentLine(int index) {
-    if (index != impl_->currentLine)
-        impl_->onLyricLineTargetChanged(index, impl_->positionMs_, impl_->frameRevision_, true);
-}
-
-void TaskbarHost::setPosition(int64_t positionMs) {
-    impl_->positionMs_ = positionMs;
-}
-
-void TaskbarHost::setStatusText(const std::wstring& text) {
-    impl_->statusText = text;
-    impl_->statusTextOneShot_ = false;
-    impl_->statusTextOneShotStartMs_ = 0;
-    impl_->statusTextOneShotRounds_ = 0;
-    impl_->statusTextCycleCallbackPending_ = false;
-    if (!text.empty() && impl_->lines.empty())
-        impl_->scene_ = DisplayScene::Message;
-    else if (text.empty() && !impl_->lines.empty())
-        impl_->scene_ = DisplayScene::Lyrics;
-    impl_->requestInvalidation(RenderInvalidation::Text);
-    impl_->requestFrame();
-    impl_->flushRenderRequest();
 }
 
 bool TaskbarHost::isTaskbar() const {
@@ -11749,10 +10972,6 @@ bool TaskbarHost::backgroundBlurAvailable() const {
 
 void TaskbarHost::setDockResourceVisibility(const DockResourceVisibility& visibility) {
     impl_->setDockResourceVisibility(visibility);
-}
-
-void TaskbarHost::setSpectrumBands(const std::array<float, kSpectrumBands>& bands) {
-    impl_->setSpectrumBands(bands);
 }
 
 void TaskbarHost::setPositionMode(int mode) {

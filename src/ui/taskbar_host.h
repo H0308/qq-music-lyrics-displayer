@@ -136,7 +136,6 @@ public:
     void applyPresentationFrame(const PresentationFrame& frame) override;
     void applyPlaybackPatch(const PlaybackPatch& patch) override;
     void applySpectrumPatch(const SpectrumPatch& patch) override;
-    void setMediaInfo(const OverlayMediaInfo& info) override;
     void setControlCallback(std::function<void(MediaControl)> cb) override;
     // 沉浸/AppBar 展开视图的退出回调，不受普通内嵌控件设置影响。
     void setImmersiveExitCallback(std::function<void()> cb);
@@ -208,7 +207,7 @@ public:
     // 3 极简（保留正常歌词刷新策略，只关闭附加视觉与弹窗）。
     void setRenderMode(RenderMode mode);
 
-    // 音频频谱（任务栏独有）：on 控制显隐，bands 为兼容入口；正式播放链路使用 SpectrumPatch。
+    // 音频频谱（任务栏独有）：高频数据通过 SpectrumPatch 更新。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;
     void setSpectrumStyle(SpectrumStyle style);
@@ -220,7 +219,6 @@ public:
     void setSpectrumBackground(bool on);
     void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);
-    void setSpectrumBands(const std::array<float, kSpectrumBands>& bands);
 
     // 播放进度背景：从窗口左缘到歌词右缘按播放进度填充专辑主题色；
     // 与背景波浪互斥（背景波浪生效时不绘制）
@@ -254,10 +252,6 @@ public:
     // Explorer 重启后重建/重附着（托盘主窗口收到 TaskbarCreated 广播后调用）；
     // 广播只投递给顶层窗口，作为任务栏子窗口的歌词窗自己收不到
     void onTaskbarCreated();
-    void setLyrics(const std::vector<LyricLine>& lines) override;
-    void setCurrentLine(int index) override;
-    void setPosition(int64_t positionMs) override;
-    void setStatusText(const std::wstring& text) override;
 
 private:
     struct Impl;

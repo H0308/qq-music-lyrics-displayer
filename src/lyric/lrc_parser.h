@@ -1,6 +1,6 @@
 #pragma once
 
-#include "lyric_provider.h"
+#include "lyric_types.h"
 
 #include <string>
 #include <vector>
