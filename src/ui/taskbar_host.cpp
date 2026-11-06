@@ -2967,36 +2967,94 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         return w - immersiveClockZoneW(w) - kImmersiveSpectrumClockGap - kTextPadding;
     }
 
-    bool taskbarDynamicBackgroundVisible() const {
+    taskbar_detail::DynamicBackgroundRegions taskbarDynamicBackgroundRegions(float w,
+                                                                           float h) const {
         if (scene_ == DisplayScene::NoPlayback ||
-            idleQuoteBackground_ == IdleQuoteBackground::None || isMinimalMode())
-            return false;
+            idleQuoteBackground_ == IdleQuoteBackground::None ||
+            idleQuoteBackgroundScope_ == IdleQuoteBackgroundScope::None || isMinimalMode())
+            return {};
+        if (idleQuoteBackgroundScope_ == IdleQuoteBackgroundScope::All)
+            return taskbar_detail::dynamicBackgroundRegions(w, h, idleQuoteBackgroundScope_, {}, {});
 
-        switch (idleQuoteBackgroundScope_) {
-        case IdleQuoteBackgroundScope::DailyQuote:
-            // “每日一言”范围覆盖整个待机内容场景：关闭每日一言后
-            // 显示的默认欢迎语同样属于待机内容，不随开关丢失动态背景。
-            return scene_ == DisplayScene::Idle;
-        case IdleQuoteBackgroundScope::Lyrics:
-            return scene_ == DisplayScene::Lyrics;
-        case IdleQuoteBackgroundScope::All:
-            return scene_ == DisplayScene::Idle || scene_ == DisplayScene::Lyrics;
-        case IdleQuoteBackgroundScope::None:
-        default:
-            return false;
+        std::array<D2D1_RECT_F, 4> playback{};
+        std::array<D2D1_RECT_F, 2> idleRegions{};
+        const bool idleScene = scene_ == DisplayScene::Idle;
+        const bool showQuote = idleScene && idle.showText && idle.showQuote && !statusText.empty();
+        if (isVerticalTaskbar()) {
+            const auto layout = verticalLayout();
+            if (!idleScene && layout.coverSize > 0.0f)
+                playback[0] = D2D1::RectF(0.0f, 0.0f, w, layout.coverY + layout.coverSize);
+            const auto text = D2D1::RectF(0.0f, layout.lyricY, w, layout.lyricBottom);
+            if (scene_ == DisplayScene::Lyrics && !layout.showControls)
+                playback[2] = text;
+            if (showQuote)
+                idleRegions[0] = text;
+        } else {
+            const int pxW = static_cast<int>(std::lround(w * scale()));
+            const int pxH = static_cast<int>(std::lround(h * scale()));
+            const auto layout = layoutMetricsForScene(scene_, pxW, pxH);
+            const auto lyric = lyricAreaForScene(scene_, pxW, pxH);
+            const auto text = D2D1::RectF(lyric.x, 0.0f, lyric.x + lyric.w, h);
+            const bool showControls = mouseOver_ && controlsOnHover_ &&
+                                      hoverControlStyle_ == HoverControlStyle::Inline &&
+                                      !idleScene && !isExpandedView() &&
+                                      !(transition_.kind() == LyricTransitionKind::Scene &&
+                                        isLyricTransitionActive());
+            if (!idleScene && albumCoverVisible_)
+                playback[0] = D2D1::RectF(0.0f, 0.0f, infoStartX(), h);
+            if (!idleScene && songInfoVisible_)
+                playback[1] = D2D1::RectF(infoStartX(), 0.0f, layout.leftW, h);
+            if (scene_ == DisplayScene::Lyrics && !showControls)
+                playback[2] = text;
+            if (!idleScene && spectrumVisible_) {
+                if (backgroundWaveEnabled()) {
+                    playback[3] = D2D1::RectF(infoStartX(), 0.0f, backgroundWaveRight(w), h);
+                } else if (!showControls && integratedSpectrum()) {
+                    playback[3] = text;
+                } else if (!showControls && horizontalImmersiveMode()) {
+                    const auto side = taskbar_detail::expandedSideLayout(
+                        w, isAppBarView(), dockResourceZoneW(w));
+                    playback[3] = D2D1::RectF(side.zoneX, 0.0f, side.spectrumRight, h);
+                } else if (!showControls) {
+                    const float spectrumW = spectrumContentWForScene(scene_, w);
+                    const float right = w - embeddedResourceExtra() - kTextPadding;
+                    playback[3] = D2D1::RectF(right - spectrumW, 0.0f, right, h);
+                }
+            }
+            if (showQuote)
+                idleRegions[0] = text;
+            // 资源区独立于播放场景，播放期间也遵守“待机内容”范围选择。
+            if (resourceMonitoringEnabled()) {
+                const float resourceW = std::min(
+                    resourceZoneWidth(), std::max(1.0f, w - kDockResourceRightPadding));
+                idleRegions[1] = D2D1::RectF(w - resourceW - kDockResourceRightPadding, 0.0f,
+                                            w - kDockResourceRightPadding, h);
+            }
         }
+        return taskbar_detail::dynamicBackgroundRegions(w, h, idleQuoteBackgroundScope_, playback,
+                                                        idleRegions);
+    }
+
+    bool taskbarDynamicBackgroundVisible() const {
+        int pxW = 0;
+        int pxH = 0;
+        if (isVerticalTaskbar())
+            clientPixelSize(pxW, pxH);
+        else
+            logicalClientPixelSize(pxW, pxH);
+        return taskbarDynamicBackgroundRegions(dip(pxW), dip(pxH)).count != 0;
     }
 
     bool taskbarDynamicBackgroundAnimating() const {
         return taskbarDynamicBackgroundVisible() && clientAnimations_;
     }
 
-    void drawIdleQuoteBackground(float w, float h, float contentW) {
+    void drawIdleQuoteBackground(float w, float h, const D2D1_RECT_F& region) {
         auto* rt = renderer.renderTarget();
-        if (!rt || w <= 0.0f || h <= 0.0f || !taskbarDynamicBackgroundVisible())
+        if (!rt || w <= 0.0f || h <= 0.0f)
             return;
 
-        const float effectW = std::clamp(contentW, 1.0f, w);
+        const float effectW = w;
 
         const float time = static_cast<float>(frameNowMs_ % 600000ULL) / 1000.0f;
         auto* warm = brushIdleWarm_.Get() ? brushIdleWarm_.Get() : brushText_.Get();
@@ -3014,8 +3072,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
             brush->SetOpacity(previous);
         };
 
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, effectW, h),
-                                D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        rt->PushAxisAlignedClip(region, D2D1_ANTIALIAS_MODE_ALIASED);
         switch (idleQuoteBackground_) {
         case IdleQuoteBackground::FallingLeaves: {
             struct Leaf {
@@ -5925,8 +5982,14 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         return D2D1_ROUNDED_RECT{D2D1::RectF(0.0f, 0.0f, w, h), radius, radius};
     }
 
+    void drawTaskbarDynamicBackground(float w, float h) {
+        const auto regions = taskbarDynamicBackgroundRegions(w, h);
+        for (size_t i = 0; i < regions.count; ++i)
+            drawIdleQuoteBackground(w, h, regions.rects[i]);
+    }
+
     void drawTaskbarBackground(float w, float h, float progressExtent, bool vertical,
-                               float dynamicBackgroundW, ID2D1Effect* coverBlurChain) {
+                               ID2D1Effect* coverBlurChain) {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
@@ -5945,8 +6008,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         }
         if (isExpandedView()) {
             // 主背景由 Composition 模糊层绘制；动态装饰仍需绘制到透明宿主上。
-            if (taskbarDynamicBackgroundVisible())
-                drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+            drawTaskbarDynamicBackground(w, h);
             return;
         }
 
@@ -5999,8 +6061,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
             }
         }
 
-        if (taskbarDynamicBackgroundVisible())
-            drawIdleQuoteBackground(w, h, dynamicBackgroundW);
+        drawTaskbarDynamicBackground(w, h);
     }
 
     bool finishTaskbarFrame(HRESULT hr) {
@@ -6066,7 +6127,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        drawTaskbarBackground(w, h, h, true, w, coverBlurChain);
+        drawTaskbarBackground(w, h, h, true, coverBlurChain);
 
         const bool playbackScene =
             scene_ != DisplayScene::Idle && scene_ != DisplayScene::NoPlayback;
@@ -6329,13 +6390,8 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        const float dynamicBackgroundW = embeddedResourceOnly() ? w
-                                         : showSpectrum || embeddedResourceVisible()
-                                             ? std::max(1.0f, lyricAreaX + lyricAreaW)
-                                             : w;
         // 背景、进度和动态底图由横竖两种布局共用，避免后续修复只落在一条路径。
-        drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, dynamicBackgroundW,
-                              coverBlurChain);
+        drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, coverBlurChain);
 
         if (backgroundSpectrum) {
             const float waveX = infoStartX();
@@ -6589,8 +6645,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
                 // 合成层创建失败时回到原有 D2D 路径，当前帧仍然完整可见。
                 rt->BeginDraw();
                 rt->SetTransform(D2D1::Matrix3x2F::Identity());
-                drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, dynamicBackgroundW,
-                                      coverBlurChain);
+                drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, coverBlurChain);
                 if (backgroundSpectrum) {
                     const float waveX = infoStartX();
                     const float waveRight = backgroundWaveRight(w);

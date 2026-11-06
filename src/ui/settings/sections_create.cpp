@@ -223,14 +223,14 @@ void SettingsSections::createBackgroundRows() {
               !minimal && state.taskbarBackground == 1);
     addRadio(
         0, kIdIdleQuoteBackground, L"任务栏内容动态背景",
-        L"选择任务栏动态背景效果；作用范围在下方单独设置，独立频谱容器和悬浮卡片不使用此效果，极简模式下暂时关闭。",
+        L"选择任务栏动态背景效果；作用范围在下方单独设置，关闭的内容区域不绘制背景，悬浮卡片不使用此效果，极简模式下暂时关闭。",
         {L"无", L"落叶", L"闪烁星星", L"二进制", L"流光粒子"}, state.idleQuoteBackground, !minimal,
         kIdleQuoteBackgroundRowH);
     addModeGrid(
         0, kIdIdleQuoteBackgroundScope, L"动态背景作用范围",
-        L"选择动态背景显示在待机内容、歌词或两者；待机内容包括每日一言和默认欢迎语，独立频谱容器和悬浮卡片不使用。",
+        L"仅歌词覆盖已显示的封面、歌曲信息、歌词和频谱区域；仅待机内容覆盖每日一言和资源监视区域，各区域关闭后不绘制；都启用时覆盖整个任务栏内容窗口。",
         {L"都不启用", L"仅待机内容启用", L"仅歌词启用", L"都启用"},
-        {L"不显示动态背景", L"只在待机内容时显示", L"只在播放歌词时显示", L"待机内容和歌词都显示"},
+        {L"不显示动态背景", L"每日一言和资源监视区域", L"封面、歌曲信息、歌词和频谱区域", L"整个任务栏内容区域"},
         state.idleQuoteBackgroundScope, !minimal && state.idleQuoteBackground != 0, kModeGridMinH);
 }
 

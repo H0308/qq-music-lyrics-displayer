@@ -2,6 +2,49 @@
 #include <algorithm>
 
 namespace taskbar_detail {
+DynamicBackgroundRegions dynamicBackgroundRegions(
+    float width, float height, IdleQuoteBackgroundScope scope,
+    std::span<const D2D1_RECT_F> playback, std::span<const D2D1_RECT_F> idle) {
+    DynamicBackgroundRegions result;
+    if (width <= 0.0f || height <= 0.0f || scope == IdleQuoteBackgroundScope::None)
+        return result;
+    if (scope == IdleQuoteBackgroundScope::All) {
+        result.rects[result.count++] = D2D1::RectF(0.0f, 0.0f, width, height);
+        return result;
+    }
+    const auto selected = scope == IdleQuoteBackgroundScope::Lyrics ? playback : idle;
+    for (const auto& rect : selected) {
+        const auto clipped = D2D1::RectF(std::clamp(rect.left, 0.0f, width),
+                                        std::clamp(rect.top, 0.0f, height),
+                                        std::clamp(rect.right, 0.0f, width),
+                                        std::clamp(rect.bottom, 0.0f, height));
+        if (clipped.right > clipped.left && clipped.bottom > clipped.top &&
+            result.count < result.rects.size())
+            result.rects[result.count++] = clipped;
+    }
+    // 重叠的背景波浪和歌词区合并为一次绘制；竖向任务栏沿 Y 轴合并。
+    for (size_t i = 0; i < result.count; ++i) {
+        for (size_t j = i + 1; j < result.count;) {
+            auto& a = result.rects[i];
+            const auto& b = result.rects[j];
+            const bool horizontal = a.top == b.top && a.bottom == b.bottom &&
+                                    a.left <= b.right && b.left <= a.right;
+            const bool vertical = a.left == b.left && a.right == b.right &&
+                                  a.top <= b.bottom && b.top <= a.bottom;
+            if (horizontal || vertical) {
+                a = D2D1::RectF(std::min(a.left, b.left), std::min(a.top, b.top),
+                                std::max(a.right, b.right), std::max(a.bottom, b.bottom));
+                result.rects[j] = result.rects[--result.count];
+                // 合并后可能再次碰到已检查的区间。
+                j = i + 1;
+            } else {
+                ++j;
+            }
+        }
+    }
+    return result;
+}
+
 LayoutMetrics horizontalLayout(const HorizontalLayoutInput& input) {
 
     LayoutMetrics m;

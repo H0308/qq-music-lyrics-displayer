@@ -76,7 +76,7 @@ struct DockResourceVisibility {
     bool operator==(const DockResourceVisibility&) const = default;
 };
 
-// 任务栏内容动态背景；绘制在歌词等内容区域下方，不侵入独立频谱容器或悬浮卡片。
+// 任务栏内容动态背景；按作用范围覆盖实际显示的内容区域，不用于悬浮卡片。
 enum class IdleQuoteBackground {
     None,
     FallingLeaves,
@@ -85,7 +85,7 @@ enum class IdleQuoteBackground {
     FloatingParticles,
 };
 
-// 任务栏内容动态背景的作用范围：不启用 / 仅待机内容（每日一言或默认欢迎语）/ 仅歌词 / 两者。
+// 作用范围：不启用 / 每日一言和资源监视 / 封面、歌曲信息、歌词和频谱 / 整体。
 enum class IdleQuoteBackgroundScope {
     None,
     DailyQuote,

@@ -1,6 +1,8 @@
 #pragma once
 #include "ui/lyric_window.h"
 #include <d2d1.h>
+#include <array>
+#include <span>
 
 namespace taskbar_detail {
 inline constexpr float kCoverPadding = 4.0f;
@@ -52,6 +54,17 @@ struct ExpandedSideLayout {
     float clockWidth{}, clockX{};
     float spectrumRight{}, spectrumWidth{};
 };
+
+struct DynamicBackgroundRegions {
+    std::array<D2D1_RECT_F, 6> rects{};
+    size_t count = 0;
+};
+
+// 各区域沿横向或竖向排布；合并相邻区间，保持同一背景时间轴且不重复叠色。
+DynamicBackgroundRegions dynamicBackgroundRegions(
+    float width, float height, IdleQuoteBackgroundScope scope,
+    std::span<const D2D1_RECT_F> playback, std::span<const D2D1_RECT_F> idle);
+
 float expandedSpectrumWidth(float hostWidth);
 float expandedClockWidth(float hostWidth);
 ExpandedSideLayout expandedSideLayout(float hostWidth, bool dock, float resourceWidth);
