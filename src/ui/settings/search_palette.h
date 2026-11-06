@@ -4,7 +4,7 @@
 #include "ui/settings/search_metrics.h"
 #include "ui/fluent_controls.h"
 #include "ui/fluent_dialog_surface.h"
-#include "ui/lyric_renderer.h"
+#include "graphics/composition_renderer.h"
 #include <functional>
 #include <chrono>
 #include <utility>
@@ -76,7 +76,7 @@ private:
     int selectedSearchResult = -1;
     D2D1_RECT_F searchTriggerRect{};
     HWND searchScrimHwnd = nullptr;
-    DCompRenderer searchScrimRenderer;
+    CompositionRenderer searchScrimRenderer;
     uint64_t searchScrimLastDeviceGeneration = 0;
     int searchScrimLastWidth = 0;
     int searchScrimLastHeight = 0;
@@ -85,7 +85,7 @@ private:
     bool searchScrimLastZoomed = false;
     HWND searchPaletteHwnd = nullptr;
     HWND searchAnimationHwnd = nullptr;
-    DCompRenderer searchAnimationRenderer;
+    CompositionRenderer searchAnimationRenderer;
     fluent::FluentDialogSurface searchPaletteSurface;
     bool searchPaletteOpen = false;
     bool closingSearchPalette = false;

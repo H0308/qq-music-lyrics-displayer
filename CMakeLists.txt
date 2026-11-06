@@ -118,7 +118,8 @@ add_executable(QQMusicLyric
     src/lyric/qrc_decoder.cpp
     src/lyric/qrc_des.cpp
     src/lyric/cover_provider.cpp
-    src/ui/lyric_renderer.cpp
+    src/graphics/bitmap_renderer.cpp
+    src/graphics/composition_renderer.cpp
     src/ui/media_control_icons.cpp
     src/ui/dock_pet.cpp
     src/ui/settings_icons.cpp

@@ -149,7 +149,7 @@ struct SettingsDialog::Impl {
     HWND hwnd = nullptr;
     HWND notifyHwnd = nullptr;
     HWND contentWindow = nullptr;
-    DCompRenderer contentRenderer;
+    CompositionRenderer contentRenderer;
     fluent::FluentDialogSurface::TextCache contentTextCache;
     bool contentLayerReady = false;
     bool hintHeightsDirty = true;

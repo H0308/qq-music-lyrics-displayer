@@ -1,7 +1,8 @@
 #pragma once
 
 #include "ui/fluent_theme.h"
-#include "ui/lyric_renderer.h"
+#include "graphics/bitmap_renderer.h"
+#include "graphics/composition_renderer.h"
 
 #include <d2d1.h>
 #include <dwrite.h>
@@ -140,7 +141,7 @@ private:
     TextCache textCache_;
     int textCacheWidth_ = 0;
     int textCacheHeight_ = 0;
-    LyricRenderer renderer_;
+    BitmapRenderer renderer_;
 };
 
 class CompositedScrollView {
@@ -154,7 +155,7 @@ public:
     CompositedScrollView& operator=(const CompositedScrollView&) = delete;
     ~CompositedScrollView();
     bool create(HWND parent, UINT_PTR timer, Changed changed,
-                DCompRenderer* drawingDeviceSource = nullptr);
+                CompositionRenderer* drawingDeviceSource = nullptr);
     void layout(const D2D1_RECT_F& viewport, float contentHeight, UINT dpi,
                 bool showWindow = true);
     void paint(const Draw& draw, bool redraw = true, bool forceRedraw = false);
@@ -198,7 +199,7 @@ private:
     bool animating_ = false;
     std::chrono::steady_clock::time_point started_{};
     Changed changed_;
-    DCompRenderer renderer_;
+    CompositionRenderer renderer_;
 };
 
 } // namespace fluent

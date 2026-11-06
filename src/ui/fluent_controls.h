@@ -1,6 +1,6 @@
 #pragma once
 
-#include "ui/lyric_renderer.h"
+#include "graphics/bitmap_renderer.h"
 #include "ui/fluent_theme.h"
 #include "ui/fluent_dialog_surface.h"
 #include "ui/settings_icons.h"
@@ -53,7 +53,7 @@ protected:
 private:
     static LRESULT CALLBACK dpiChangedProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                                           UINT_PTR subclassId, DWORD_PTR refData);
-    LyricRenderer renderer_;
+    BitmapRenderer renderer_;
     ID2D1SolidColorBrush* brush_ = nullptr;
     IDWriteTextFormat* fmt_ = nullptr;
     float fmtSize_ = 0;

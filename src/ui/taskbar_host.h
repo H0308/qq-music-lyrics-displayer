@@ -53,7 +53,7 @@ public:
     // 沉浸/AppBar 展开视图的退出回调，不受普通内嵌控件设置影响。
     void setImmersiveExitCallback(std::function<void()> cb);
     void setAppVolume(const AppVolumeState& state) override;
-    void setAppVolumeCallback(std::function<void(int percent)> cb) override;
+    void setAppVolumeCallback(std::function<void(AppVolumeRequest)> cb) override;
     void setSourceOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb);
     void setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb);

@@ -107,8 +107,10 @@ void App::onControl(MediaControl c) {
 
 void App::pushAppVolume() {
     AppVolumeState state;
+    state.requestRevision = appVolumeRequestRevision_;
     state.available = appVolume_.query(state.percent, state.muted);
-    if (state.available == appVolumeState_.available &&
+    if (state.requestRevision == appVolumeState_.requestRevision &&
+        state.available == appVolumeState_.available &&
         (!state.available ||
          (state.percent == appVolumeState_.percent && state.muted == appVolumeState_.muted)))
         return;

@@ -492,7 +492,7 @@ LRESULT CALLBACK CompositedScrollView::windowProc(HWND window, UINT message, WPA
 }
 
 bool CompositedScrollView::create(HWND parent, UINT_PTR timer, Changed changed,
-                                  DCompRenderer* drawingDeviceSource) {
+                                  CompositionRenderer* drawingDeviceSource) {
     reset();
     renderer_.setDrawingDeviceSource(drawingDeviceSource);
     const HINSTANCE instance = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent, GWLP_HINSTANCE));

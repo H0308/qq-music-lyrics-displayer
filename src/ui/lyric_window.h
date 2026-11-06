@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model/display_types.h"
+#include "media/app_volume_types.h"
 #include "ui/font_style.h"
 #include "idle/idle_types.h"
 #include "lyric/lyric_types.h"
@@ -18,13 +19,6 @@
 enum class MediaControl { Prev = 0, PlayPause = 1, Next = 2 };
 
 // 悬浮媒体卡片的背景材质
-
-// 当前音乐应用的独立音量状态（对应音量合成器中该应用的一格）
-struct AppVolumeState {
-    bool available = false; // 是否找到该应用的音频会话
-    int percent = 0;        // 0-100
-    bool muted = false;
-};
 
 // 底部控制条显示的媒体信息
 struct OverlayMediaInfo {
@@ -101,9 +95,9 @@ public:
     virtual void applySpectrumPatch(const SpectrumPatch& patch) = 0;
     virtual void setControlCallback(std::function<void(MediaControl)> cb) = 0;
 
-    // 应用音量：state 由宿主缓存展示；cb 在用户拖动音量滑块时回调（percent 0-100）
+    // 应用音量：state 由宿主缓存展示；用户请求携带版本，回写沿用该版本。
     virtual void setAppVolume(const AppVolumeState& state) = 0;
-    virtual void setAppVolumeCallback(std::function<void(int percent)> cb) = 0;
+    virtual void setAppVolumeCallback(std::function<void(AppVolumeRequest)> cb) = 0;
 
     virtual std::vector<LyricLine> lyrics() const = 0;
 

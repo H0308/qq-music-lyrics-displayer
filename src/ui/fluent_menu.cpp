@@ -1,7 +1,7 @@
 #include "fluent_menu.h"
 
 #include "ui/fluent_theme.h"
-#include "ui/lyric_renderer.h"
+#include "graphics/bitmap_renderer.h"
 #include "ui/platform_icon.h"
 #include "logging/runtime_logger.h"
 #include "logging/ui_timing.h"
@@ -50,7 +50,7 @@ struct MenuWnd {
     int parentRow = -1;
     MenuWnd* child = nullptr;
     FluentMenu::Callback cb; // 仅根菜单持有
-    LyricRenderer renderer;
+    BitmapRenderer renderer;
     ID2D1SolidColorBrush* brush = nullptr;
     IDWriteTextFormat* fmt = nullptr;
     std::vector<ID2D1Bitmap*> nativeIconBitmaps;

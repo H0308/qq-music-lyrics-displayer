@@ -1,4 +1,4 @@
-#include "lyric_renderer.h"
+#include "graphics/composition_renderer.h"
 
 #include "logging/runtime_logger.h"
 
@@ -10,13 +10,13 @@
 #include <iterator>
 #include <memory>
 
-struct DCompSharedDevice {
+struct CompositionSharedDevice {
     ID3D11Device* d3d = nullptr;
     IDXGIDevice* dxgi = nullptr;
     std::atomic<bool> invalid{false};
     std::shared_ptr<std::atomic_bool> releasedNormally;
 
-    ~DCompSharedDevice() {
+    ~CompositionSharedDevice() {
         if (releasedNormally && !invalid && d3d && SUCCEEDED(d3d->GetDeviceRemovedReason()))
             releasedNormally->store(true, std::memory_order_relaxed);
         if (dxgi)
@@ -33,10 +33,10 @@ namespace {
 // 期间渲染帧直接跳过，恢复后最晚延迟一个间隔重建。首次创建不受限。
 constexpr auto kDeviceRecreateInterval = std::chrono::seconds(2);
 
-std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
+std::shared_ptr<CompositionSharedDevice> acquireSharedDevice() {
     // 单线程 D2D 工厂只能在各自 UI 线程内共享底层 D3D 设备。
     // 即时上下文的逐调用保护不能隔离不同工厂之间的完整绘制事务。
-    static thread_local std::weak_ptr<DCompSharedDevice> weak;
+    static thread_local std::weak_ptr<CompositionSharedDevice> weak;
     static thread_local std::chrono::steady_clock::time_point lastAttempt;
     static thread_local bool attempted = false;
     static thread_local bool throttleLogged = false;
@@ -61,7 +61,7 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
     lastAttempt = now;
     throttleLogged = false;
 
-    auto shared = std::make_shared<DCompSharedDevice>();
+    auto shared = std::make_shared<CompositionSharedDevice>();
     const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
                                         D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
     HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
@@ -122,234 +122,41 @@ HRESULT configureRectangleClip(IDCompositionRectangleClip* clip, float left, flo
 
 } // namespace
 
-#pragma comment(lib, "msimg32.lib") // AlphaBlend（compositeTo）
-
-LyricRenderer::LyricRenderer() = default;
-
-LyricRenderer::~LyricRenderer() {
-    releaseAll();
-}
-
-bool LyricRenderer::initialize() {
-    return createFactories();
-}
-
-void LyricRenderer::setDpi(UINT dpi) {
-    dpi_ = dpi;
-    if (rt_)
-        rt_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
-}
-
-bool LyricRenderer::createFactories() {
-    // D2D/DWrite 工厂创建昂贵（DWrite 要初始化字体子系统，单个可达数十毫秒），
-    // 对话框里每个分层控件各持一个 LyricRenderer，逐个创建会拖慢窗口打开。
-    // 工厂对象不可变，进程内共享同一份，退出时随系统回收。
-    static ID2D1Factory* sharedD2d = [] {
-        D2D1_FACTORY_OPTIONS opts{};
-        ID2D1Factory* f = nullptr;
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory),
-                                     &opts, reinterpret_cast<void**>(&f))))
-            return static_cast<ID2D1Factory*>(nullptr);
-        return f;
-    }();
-    static IDWriteFactory* sharedDwrite = [] {
-        IDWriteFactory* f = nullptr;
-        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                       reinterpret_cast<IUnknown**>(&f))))
-            return static_cast<IDWriteFactory*>(nullptr);
-        return f;
-    }();
-    if (!sharedD2d || !sharedDwrite)
-        return false;
-    d2d_ = sharedD2d;
-    dwrite_ = sharedDwrite;
-    return true;
-}
-
-bool LyricRenderer::createRenderTarget() {
-    if (rt_)
-        return true;
-    if (!d2d_)
-        return false;
-    // DC 渲染目标必须用软件光栅：DEFAULT（硬件优先）会让 D2D 为窗口所在显示器创建
-    // 内部 D3D 设备，在无渲染硬件的虚拟屏（远程桌面虚拟适配器等）上回退 WARP，
-    // 进程内拉起按核数扩张的线程池和与窗口像素尺寸成正比的软件表面，内存可飙至
-    // 数百 MB。这些界面只有圆角矩形和文字，CPU 光栅足够，还省掉 GPU→CPU 回传。
-    auto props = D2D1::RenderTargetProperties(
-        D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    HRESULT hr = d2d_->CreateDCRenderTarget(&props, &rt_);
-    if (FAILED(hr)) {
-        rt_ = nullptr;
-        return false;
-    }
-    rt_->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
-    rtBound_ = false;
-    return true;
-}
-
-ID2D1DCRenderTarget* LyricRenderer::renderTarget() {
-    if (!createRenderTarget())
-        return nullptr;
-    return rt_;
-}
-
-bool LyricRenderer::bindDC(int width, int height) {
-    if (!createRenderTarget())
-        return false;
-
-    if (width == bmpW_ && height == bmpH_ && memdc_) {
-        if (!rtBound_) {
-            RECT rc{0, 0, width, height};
-            HRESULT hr = rt_->BindDC(memdc_, &rc);
-            if (FAILED(hr)) {
-                discard();
-                return false;
-            }
-            rtBound_ = true;
-        }
-        return true;
-    }
-
-    if (memdc_) {
-        if (oldBmp_)
-            SelectObject(memdc_, oldBmp_);
-        if (dib_)
-            DeleteObject(dib_);
-        DeleteDC(memdc_);
-        memdc_ = nullptr;
-        dib_ = nullptr;
-        oldBmp_ = nullptr;
-    }
-    bmpW_ = 0;
-    bmpH_ = 0;
-
-    HDC screen = GetDC(nullptr);
-    memdc_ = CreateCompatibleDC(screen);
-    BITMAPINFO bmi{};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    dib_ = CreateDIBSection(screen, &bmi, DIB_RGB_COLORS, nullptr, nullptr, 0);
-    ReleaseDC(nullptr, screen);
-    if (!dib_) {
-        DeleteDC(memdc_);
-        memdc_ = nullptr;
-        return false;
-    }
-    oldBmp_ = SelectObject(memdc_, dib_);
-
-    bmpW_ = width;
-    bmpH_ = height;
-
-    RECT rc{0, 0, width, height};
-    HRESULT hr = rt_->BindDC(memdc_, &rc);
-    if (FAILED(hr)) {
-        discard();
-        return false;
-    }
-    rtBound_ = true;
-    return true;
-}
-
-bool LyricRenderer::present(HWND hwnd, BYTE alpha) {
-    if (!hwnd || !memdc_)
-        return false;
-    POINT ptSrc{0, 0};
-    SIZE sz{bmpW_, bmpH_};
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, alpha, AC_SRC_ALPHA};
-    return !!UpdateLayeredWindow(hwnd, nullptr, nullptr, &sz, memdc_, &ptSrc, 0, &blend,
-                                 ULW_ALPHA);
-}
-
-bool LyricRenderer::copyToDC(HDC hdc, int width, int height) {
-    if (!memdc_ || width <= 0 || height <= 0)
-        return false;
-    return !!BitBlt(hdc, 0, 0, width, height, memdc_, 0, 0, SRCCOPY);
-}
-
-bool LyricRenderer::compositeTo(HDC dst, int x, int y) {
-    if (!memdc_ || bmpW_ <= 0 || bmpH_ <= 0)
-        return false;
-    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    return !!AlphaBlend(dst, x, y, bmpW_, bmpH_, memdc_, 0, 0, bmpW_, bmpH_, blend);
-}
-
-void LyricRenderer::discard() {
-    rtBound_ = false;
-    if (rt_) {
-        rt_->Release();
-        rt_ = nullptr;
-    }
-}
-
-void LyricRenderer::releaseAll() {
-    discard();
-    if (memdc_) {
-        if (oldBmp_)
-            SelectObject(memdc_, oldBmp_);
-        if (dib_)
-            DeleteObject(dib_);
-        DeleteDC(memdc_);
-        memdc_ = nullptr;
-        dib_ = nullptr;
-        oldBmp_ = nullptr;
-    }
-    bmpW_ = 0;
-    bmpH_ = 0;
-    // 工厂是进程级共享的，不随实例释放
-    dwrite_ = nullptr;
-    d2d_ = nullptr;
-}
-
-ID2D1Factory* LyricRenderer::d2d() const {
-    return d2d_;
-}
-
-IDWriteFactory* LyricRenderer::dwrite() const {
-    return dwrite_;
-}
-
-// ---------- DCompRenderer ----------
-
-DCompRenderer::DCompRenderer(bool contentAboveChildren)
+CompositionRenderer::CompositionRenderer(bool contentAboveChildren)
     : contentAboveChildren_(contentAboveChildren) {}
 
-DCompRenderer::~DCompRenderer() {
+CompositionRenderer::~CompositionRenderer() {
     releaseAll();
 }
 
-bool DCompRenderer::initialize() {
+bool CompositionRenderer::initialize() {
     return createFactories();
 }
 
-void DCompRenderer::setDrawingDeviceSource(DCompRenderer* source) {
+void CompositionRenderer::setDrawingDeviceSource(CompositionRenderer* source) {
     releaseAll();
     drawingDeviceSource_ = source;
 }
 
-void DCompRenderer::setDpi(UINT dpi) {
+void CompositionRenderer::setDpi(UINT dpi) {
     dpi_ = dpi;
     if (dc_)
         dc_->SetDpi(static_cast<float>(dpi), static_cast<float>(dpi));
 }
 
-ID2D1DeviceContext* DCompRenderer::renderTarget() {
+ID2D1DeviceContext* CompositionRenderer::renderTarget() {
     return dc_;
 }
 
-ID2D1Factory* DCompRenderer::d2d() const {
+ID2D1Factory* CompositionRenderer::d2d() const {
     return d2d1_;
 }
 
-IDWriteFactory* DCompRenderer::dwrite() const {
+IDWriteFactory* CompositionRenderer::dwrite() const {
     return dwrite_;
 }
 
-bool DCompRenderer::createFactories() {
+bool CompositionRenderer::createFactories() {
     if (drawingDeviceSource_) {
         if (!drawingDeviceSource_->createFactories())
             return false;
@@ -377,7 +184,7 @@ bool DCompRenderer::createFactories() {
     return true;
 }
 
-bool DCompRenderer::createDevice() {
+bool CompositionRenderer::createDevice() {
     if (dc_ && sharedDevice_ && !sharedDevice_->invalid &&
         (!drawingDeviceSource_ || (d2dDevice_ == drawingDeviceSource_->d2dDevice_ &&
                                    dcomp_ == drawingDeviceSource_->dcomp_)))
@@ -431,7 +238,7 @@ bool DCompRenderer::createDevice() {
     return true;
 }
 
-bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
+bool CompositionRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
     const auto fail = [this, hwnd, width, height](const wchar_t* stage, HRESULT hr) {
         const HRESULT removed = d3d_ ? d3d_->GetDeviceRemovedReason() : S_OK;
         runtime_log::writef(
@@ -454,7 +261,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
     }
     if (swapchain_ && hwnd != hwnd_) {
         // 窗口重建（Explorer 重启后 createWindow）：DComp 目标绑在原 HWND 上，必须重建
-        releaseLyricTransitionLayers();
+        releaseTransitionLayers();
         if (rootOpacity_) {
             if (visual_)
                 visual_->SetEffect(nullptr);
@@ -556,7 +363,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
     return true;
 }
 
-void DCompRenderer::releaseBackBuffer() {
+void CompositionRenderer::releaseBackBuffer() {
     if (dc_)
         dc_->SetTarget(nullptr);
     if (backBmp_) {
@@ -565,7 +372,7 @@ void DCompRenderer::releaseBackBuffer() {
     }
 }
 
-bool DCompRenderer::bind(HWND hwnd, int width, int height) {
+bool CompositionRenderer::bind(HWND hwnd, int width, int height) {
     if (!createFactories()) {
         runtime_log::writef(L"[dcomp] factory create failed");
         return false;
@@ -580,7 +387,7 @@ bool DCompRenderer::bind(HWND hwnd, int width, int height) {
     return true;
 }
 
-bool DCompRenderer::setWindowContent(HWND source) {
+bool CompositionRenderer::setWindowContent(HWND source) {
     if (!dcomp_ || !visual_ || !source)
         return false;
     IUnknown* content = nullptr;
@@ -592,7 +399,7 @@ bool DCompRenderer::setWindowContent(HWND source) {
     return SUCCEEDED(hr);
 }
 
-bool DCompRenderer::present() {
+bool CompositionRenderer::present() {
     if (!swapchain_)
         return false;
     releaseBackBuffer(); // Present 前解绑后备缓冲
@@ -613,8 +420,8 @@ bool DCompRenderer::present() {
     return true;
 }
 
-void DCompRenderer::releaseLyricTransitionLayers() {
-    auto releaseLayer = [&](LyricLayer& layer) {
+void CompositionRenderer::releaseTransitionLayers() {
+    auto releaseLayer = [&](TransitionLayer& layer) {
         if (visual_ && layer.visual)
             visual_->RemoveVisual(layer.visual);
         if (layer.visual) {
@@ -641,25 +448,25 @@ void DCompRenderer::releaseLyricTransitionLayers() {
     };
 
     releaseLayer(transitionBackdrop_);
-    for (auto& layer : lyricLayers_) {
+    for (auto& layer : transitionLayers_) {
         releaseLayer(layer);
     }
 }
 
-bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+bool CompositionRenderer::ensureTransitionLayers(int width0, int height0, int width1,
                                                  int height1, float cornerRadius) {
-    return ensureLyricTransitionLayers(width0, height0, width1, height1, 0, 0, 0, 0,
+    return ensureTransitionLayers(width0, height0, width1, height1, 0, 0, 0, 0,
                                        cornerRadius);
 }
 
-bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+bool CompositionRenderer::ensureTransitionLayers(int width0, int height0, int width1,
                                                  int height1, int width2, int height2,
                                                  float cornerRadius) {
-    return ensureLyricTransitionLayers(width0, height0, width1, height1, width2, height2,
+    return ensureTransitionLayers(width0, height0, width1, height1, width2, height2,
                                        0, 0, cornerRadius);
 }
 
-bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int width1,
+bool CompositionRenderer::ensureTransitionLayers(int width0, int height0, int width1,
                                                  int height1, int width2, int height2,
                                                  int width3, int height3, float cornerRadius) {
     if (!dcomp_ || !visual_ || width0 <= 0 || height0 <= 0 || width1 <= 0 || height1 <= 0)
@@ -681,18 +488,18 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     bool reusable = true;
     for (int i = 0; i < 4; ++i) {
         if (i < layerCount) {
-            reusable = reusable && lyricLayers_[i].surface &&
-                       lyricLayers_[i].width == widths[i] &&
-                       lyricLayers_[i].height == heights[i];
+            reusable = reusable && transitionLayers_[i].surface &&
+                       transitionLayers_[i].width == widths[i] &&
+                       transitionLayers_[i].height == heights[i];
         } else {
-            reusable = reusable && !lyricLayers_[i].surface;
+            reusable = reusable && !transitionLayers_[i].surface;
         }
     }
     if (reusable) {
         // 复用已有层：裁剪、位移和透明度可能被上一次动画改过，统一恢复到
         // 挂载初始状态，避免新一轮转场首帧继承旧动画的终点。
         for (int i = 0; i < layerCount; ++i) {
-            auto& layer = lyricLayers_[i];
+            auto& layer = transitionLayers_[i];
             if (FAILED(configureRectangleClip(layer.clip, 0.0f, 0.0f,
                                               static_cast<float>(widths[i]),
                                               static_cast<float>(heights[i]), cornerRadius)))
@@ -705,9 +512,9 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
         return true;
     }
 
-    releaseLyricTransitionLayers();
+    releaseTransitionLayers();
     for (int i = 0; i < layerCount; ++i) {
-        auto& layer = lyricLayers_[i];
+        auto& layer = transitionLayers_[i];
         HRESULT hr = dcomp_->CreateVisual(&layer.visual);
         if (SUCCEEDED(hr))
             hr = dcomp_->CreateSurface(static_cast<UINT>(widths[i]),
@@ -737,7 +544,7 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
         if (SUCCEEDED(hr))
             hr = visual_->AddVisual(layer.visual, TRUE, nullptr);
         if (FAILED(hr)) {
-            releaseLyricTransitionLayers();
+            releaseTransitionLayers();
             return false;
         }
         layer.width = widths[i];
@@ -746,9 +553,9 @@ bool DCompRenderer::ensureLyricTransitionLayers(int width0, int height0, int wid
     return true;
 }
 
-bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float offsetY,
+bool CompositionRenderer::ensureTransitionBackdrop(int width, int height, float offsetY,
                                                    float cornerRadius) {
-    if (!dcomp_ || !visual_ || !lyricLayers_[0].visual || !lyricLayers_[1].visual ||
+    if (!dcomp_ || !visual_ || !transitionLayers_[0].visual || !transitionLayers_[1].visual ||
         width <= 0 || height <= 0)
         return false;
 
@@ -822,9 +629,9 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
     // 插到它后面（insertAbove=FALSE），才能只覆盖根交换链、而不盖住转场内容；
     // 以顶部内容层为参考会把背景压在部分内容之上，收尾时就会出现内容弹出。
     if (SUCCEEDED(hr)) {
-        IDCompositionVisual* bottomContent = lyricLayers_[3].visual
-                                                  ? lyricLayers_[3].visual
-                                                  : lyricLayers_[1].visual;
+        IDCompositionVisual* bottomContent = transitionLayers_[3].visual
+                                                  ? transitionLayers_[3].visual
+                                                  : transitionLayers_[1].visual;
         hr = visual_->AddVisual(transitionBackdrop_.visual, FALSE, bottomContent);
     }
     if (FAILED(hr)) {
@@ -836,13 +643,13 @@ bool DCompRenderer::ensureLyricTransitionBackdrop(int width, int height, float o
     return true;
 }
 
-bool DCompRenderer::showLyricTransitionBackdrop() {
+bool CompositionRenderer::showTransitionBackdrop() {
     if (!transitionBackdrop_.opacity)
         return false;
     return SUCCEEDED(transitionBackdrop_.opacity->SetOpacity(1.0f));
 }
 
-ID2D1DeviceContext* DCompRenderer::beginLyricTransitionBackdropDraw() {
+ID2D1DeviceContext* CompositionRenderer::beginTransitionBackdropDraw() {
     if (!transitionBackdrop_.surface)
         return nullptr;
     POINT offset{};
@@ -862,7 +669,7 @@ ID2D1DeviceContext* DCompRenderer::beginLyricTransitionBackdropDraw() {
     return dc;
 }
 
-bool DCompRenderer::endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc) {
+bool CompositionRenderer::endTransitionBackdropDraw(ID2D1DeviceContext* dc) {
     if (!transitionBackdrop_.surface || !dc)
         return false;
     HRESULT hr = transitionBackdrop_.surface->EndDraw();
@@ -870,12 +677,12 @@ bool DCompRenderer::endLyricTransitionBackdropDraw(ID2D1DeviceContext* dc) {
     return SUCCEEDED(hr);
 }
 
-ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
-    if (index < 0 || index >= 4 || !lyricLayers_[index].surface)
+ID2D1DeviceContext* CompositionRenderer::beginTransitionLayerDraw(int index) {
+    if (index < 0 || index >= 4 || !transitionLayers_[index].surface)
         return nullptr;
     POINT offset{};
     ID2D1DeviceContext* dc = nullptr;
-    HRESULT hr = lyricLayers_[index].surface->BeginDraw(
+    HRESULT hr = transitionLayers_[index].surface->BeginDraw(
         nullptr, __uuidof(ID2D1DeviceContext), reinterpret_cast<void**>(&dc), &offset);
     if (FAILED(hr) || !dc) {
         if (dc)
@@ -890,15 +697,15 @@ ID2D1DeviceContext* DCompRenderer::beginLyricLayerDraw(int index) {
     return dc;
 }
 
-bool DCompRenderer::endLyricLayerDraw(int index, ID2D1DeviceContext* dc) {
-    if (index < 0 || index >= 4 || !lyricLayers_[index].surface || !dc)
+bool CompositionRenderer::endTransitionLayerDraw(int index, ID2D1DeviceContext* dc) {
+    if (index < 0 || index >= 4 || !transitionLayers_[index].surface || !dc)
         return false;
-    HRESULT hr = lyricLayers_[index].surface->EndDraw();
+    HRESULT hr = transitionLayers_[index].surface->EndDraw();
     dc->Release();
     return SUCCEEDED(hr);
 }
 
-bool DCompRenderer::addSmoothStep(IDCompositionAnimation* animation, double begin, double end,
+bool CompositionRenderer::addSmoothStep(IDCompositionAnimation* animation, double begin, double end,
                                   float from, float to) {
     if (!animation || end <= begin)
         return false;
@@ -918,10 +725,10 @@ bool DCompRenderer::addSmoothStep(IDCompositionAnimation* animation, double begi
                                          static_cast<float>(cubic)));
 }
 
-bool DCompRenderer::animateLyricLayer(int index, float fromY, float toY, float fromOpacity,
+bool CompositionRenderer::animateTransitionLayer(int index, float fromY, float toY, float fromOpacity,
                                       float toOpacity, float durationSec) {
-    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
-        !lyricLayers_[index].opacity || durationSec <= 0.0f)
+    if (index < 0 || index >= 4 || !dcomp_ || !transitionLayers_[index].visual ||
+        !transitionLayers_[index].opacity || durationSec <= 0.0f)
         return false;
 
     const double duration = static_cast<double>(durationSec);
@@ -951,11 +758,11 @@ bool DCompRenderer::animateLyricLayer(int index, float fromY, float toY, float f
     if (SUCCEEDED(hr))
         hr = opacityAnim->End(duration, toOpacity);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].visual->SetOffsetX(0.0f);
+        hr = transitionLayers_[index].visual->SetOffsetX(0.0f);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].visual->SetOffsetY(offsetAnim);
+        hr = transitionLayers_[index].visual->SetOffsetY(offsetAnim);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].opacity->SetOpacity(opacityAnim);
+        hr = transitionLayers_[index].opacity->SetOpacity(opacityAnim);
 
     if (offsetAnim)
         offsetAnim->Release();
@@ -964,15 +771,15 @@ bool DCompRenderer::animateLyricLayer(int index, float fromY, float toY, float f
     return SUCCEEDED(hr);
 }
 
-void DCompRenderer::clearLyricTransitionLayers() {
-    releaseLyricTransitionLayers();
+void CompositionRenderer::clearTransitionLayers() {
+    releaseTransitionLayers();
 }
 
-bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float baseY,
+bool CompositionRenderer::animateTransitionLayerX(int index, float fromX, float toX, float baseY,
                                        float fromOpacity, float toOpacity,
                                        float durationSec, float fixedClipRight) {
-    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
-        !lyricLayers_[index].opacity || durationSec <= 0.0f)
+    if (index < 0 || index >= 4 || !dcomp_ || !transitionLayers_[index].visual ||
+        !transitionLayers_[index].opacity || durationSec <= 0.0f)
         return false;
 
     const double duration = static_cast<double>(durationSec);
@@ -993,11 +800,11 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
     if (SUCCEEDED(hr))
         hr = opacityAnim->End(duration, toOpacity);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].visual->SetOffsetX(offsetAnim);
+        hr = transitionLayers_[index].visual->SetOffsetX(offsetAnim);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].visual->SetOffsetY(baseY);
+        hr = transitionLayers_[index].visual->SetOffsetY(baseY);
     if (SUCCEEDED(hr))
-        hr = lyricLayers_[index].opacity->SetOpacity(opacityAnim);
+        hr = transitionLayers_[index].opacity->SetOpacity(opacityAnim);
 
     if (SUCCEEDED(hr) && fixedClipRight > 0.0f) {
         hr = dcomp_->CreateAnimation(&clipRightAnim);
@@ -1007,7 +814,7 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
         if (SUCCEEDED(hr))
             hr = clipRightAnim->End(duration, fixedClipRight - toX);
         if (SUCCEEDED(hr))
-            hr = lyricLayers_[index].clip->SetRight(clipRightAnim);
+            hr = transitionLayers_[index].clip->SetRight(clipRightAnim);
     }
 
     if (offsetAnim)
@@ -1019,15 +826,15 @@ bool DCompRenderer::animateLyricLayerX(int index, float fromX, float toX, float 
     return SUCCEEDED(hr);
 }
 
-bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float fromY,
+bool CompositionRenderer::animateTransitionLayerClipSlide(int index, float offsetX, float fromY,
                                                float toY, float clipFromBottom,
                                                float clipToBottom, float durationSec,
                                                float fromOpacity, float toOpacity) {
-    if (index < 0 || index >= 4 || !dcomp_ || !lyricLayers_[index].visual ||
-        !lyricLayers_[index].opacity || !lyricLayers_[index].clip || durationSec <= 0.0f)
+    if (index < 0 || index >= 4 || !dcomp_ || !transitionLayers_[index].visual ||
+        !transitionLayers_[index].opacity || !transitionLayers_[index].clip || durationSec <= 0.0f)
         return false;
 
-    auto& layer = lyricLayers_[index];
+    auto& layer = transitionLayers_[index];
     const double duration = static_cast<double>(durationSec);
     IDCompositionAnimation* opacityAnim = nullptr;
     // 显式写入动画起点。尤其是收起时，层通常刚从隐藏的挂载状态进入动画，
@@ -1098,7 +905,7 @@ bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float f
     return SUCCEEDED(hr);
 }
 
-bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
+bool CompositionRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
                                 float fromOpacity, float toOpacity, float durationSec,
                                 RootAnimationCurve curve) {
     if (!dcomp_ || !visual_ || !rootOpacity_ || durationSec <= 0.0f)
@@ -1151,7 +958,7 @@ bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
     return SUCCEEDED(hr);
 }
 
-void DCompRenderer::resetRoot() {
+void CompositionRenderer::resetRoot() {
     if (!visual_)
         return;
     visual_->SetOffsetX(0.0f);
@@ -1160,17 +967,17 @@ void DCompRenderer::resetRoot() {
         rootOpacity_->SetOpacity(1.0f);
 }
 
-void DCompRenderer::setRootOpacity(float opacity) {
+void CompositionRenderer::setRootOpacity(float opacity) {
     if (rootOpacity_)
         rootOpacity_->SetOpacity(std::clamp(opacity, 0.0f, 1.0f));
 }
 
-void DCompRenderer::setRootOffsetY(float offset) {
+void CompositionRenderer::setRootOffsetY(float offset) {
     if (visual_)
         visual_->SetOffsetY(offset);
 }
 
-bool DCompRenderer::animateRootScroll(float from, float to, float velocity, float frequency) {
+bool CompositionRenderer::animateRootScroll(float from, float to, float velocity, float frequency) {
     if (!dcomp_ || !visual_ || frequency <= 0.0f)
         return false;
     IDCompositionAnimation* animation = nullptr;
@@ -1210,17 +1017,17 @@ bool DCompRenderer::animateRootScroll(float from, float to, float velocity, floa
     return SUCCEEDED(hr);
 }
 
-void DCompRenderer::commit() {
+void CompositionRenderer::commit() {
     if (dcomp_)
         dcomp_->Commit();
 }
 
-void DCompRenderer::waitForCommitCompletion() {
+void CompositionRenderer::waitForCommitCompletion() {
     if (dcomp_)
         dcomp_->WaitForCommitCompletion();
 }
 
-bool DCompRenderer::setRootRoundedClip(float top, float bottom, float cornerRadius) {
+bool CompositionRenderer::setRootRoundedClip(float top, float bottom, float cornerRadius) {
     if (!dcomp_ || !visual_ || width_ <= 0 || height_ <= 0)
         return false;
     if (!rootClip_ && FAILED(dcomp_->CreateRectangleClip(&rootClip_)))
@@ -1231,7 +1038,7 @@ bool DCompRenderer::setRootRoundedClip(float top, float bottom, float cornerRadi
     return SUCCEEDED(visual_->SetClip(rootClip_));
 }
 
-void DCompRenderer::discard() {
+void CompositionRenderer::discard() {
     // EndDraw 也可能先于 Present 报设备丢失；此时不能再次借回旧 D3D 设备。
     if (sharedDevice_ && d3d_) {
         const HRESULT reason = d3d_->GetDeviceRemovedReason();
@@ -1242,7 +1049,7 @@ void DCompRenderer::discard() {
         }
     }
     releaseBackBuffer();
-    releaseLyricTransitionLayers();
+    releaseTransitionLayers();
     auto release = [](auto*& p) {
         if (p) {
             p->Release();
@@ -1269,7 +1076,7 @@ void DCompRenderer::discard() {
     height_ = 0;
 }
 
-void DCompRenderer::releaseAll() {
+void CompositionRenderer::releaseAll() {
     discard();
     if (dwrite_) {
         dwrite_->Release();

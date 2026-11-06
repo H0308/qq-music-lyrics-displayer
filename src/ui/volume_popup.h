@@ -1,5 +1,7 @@
 #pragma once
 
+#include "media/app_volume_types.h"
+
 #include <functional>
 #include <memory>
 
@@ -18,9 +20,9 @@ public:
     bool create(HINSTANCE inst);
     void destroy();
 
-    void setVolume(int percent, bool muted, bool available);
+    void setVolume(const AppVolumeState& state);
     // 拖动/滚轮调整音量（percent 0-100）
-    void setCallback(std::function<void(int percent)> cb);
+    void setCallback(std::function<void(AppVolumeRequest)> cb);
 
     // 横向任务栏显示在锚点上方/下方；侧边任务栏贴着任务栏左右显示，并按锚点垂直居中
     void showNear(const RECT& anchorRect, bool verticalTaskbar, bool popupOnRight);

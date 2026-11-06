@@ -319,9 +319,12 @@ void App::configureTaskbarHostCallbacks(TaskbarHost* host, bool primary) {
         logSettingInt(L"taskbar-position-drag", settings_.taskbarPosition_);
         saveSettings();
     });
-    host->setAppVolumeCallback([this](int percent) {
-        const bool ok = appVolume_.setVolumePercent(percent);
-        runtime_log::writef(L"[action][volume] set percent=%d result=%s", percent,
+    host->setAppVolumeCallback([this](AppVolumeRequest request) {
+        if (request.revision <= appVolumeRequestRevision_)
+            return;
+        appVolumeRequestRevision_ = request.revision;
+        const bool ok = appVolume_.setVolumePercent(request.percent);
+        runtime_log::writef(L"[action][volume] set percent=%d result=%s", request.percent,
                             ok ? L"ok" : L"unavailable");
         pushAppVolume();
     });

@@ -1,7 +1,7 @@
 #include "volume_popup.h"
 
 #include "fluent_theme.h"
-#include "lyric_renderer.h"
+#include "graphics/bitmap_renderer.h"
 #include "media_control_icons.h"
 #include "logging/runtime_logger.h"
 #include "util/com_release.h"
@@ -46,9 +46,10 @@ struct VolumePopup::Impl {
     int percent = 0;
     bool muted = false;
     bool available = false;
-    std::function<void(int)> onChange;
+    uint64_t requestRevision = 0;
+    std::function<void(AppVolumeRequest)> onChange;
 
-    LyricRenderer renderer;
+    BitmapRenderer renderer;
     ID2D1SolidColorBrush* brushBg = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;
     ID2D1SolidColorBrush* brushText = nullptr;
@@ -122,9 +123,11 @@ struct VolumePopup::Impl {
             return;
         percent = next;
         muted = false; // 调整音量即解除静音（控制器侧同样处理）
+        const auto request = AppVolumeRequest::create(percent);
+        requestRevision = request.revision;
         render();
         if (onChange)
-            onChange(percent);
+            onChange(request);
     }
 
     bool render() {
@@ -206,7 +209,7 @@ struct VolumePopup::Impl {
     }
 
     void scheduleHide() {
-        if (!hwnd || !visible || anchorHover || popupHover)
+        if (!hwnd || !visible || anchorHover || popupHover || dragging)
             return;
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
     }
@@ -277,6 +280,8 @@ struct VolumePopup::Impl {
             ShowWindow(hwnd, SW_HIDE);
             runtime_log::writef(L"[action][volume-popup] hidden");
         }
+        if (GetCapture() == hwnd)
+            ReleaseCapture();
     }
 
     void trackMouseLeave() {
@@ -293,9 +298,14 @@ struct VolumePopup::Impl {
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
         case WM_MOUSEMOVE: {
-            popupHover = true;
-            KillTimer(hwnd, kHideTimer);
-            trackMouseLeave();
+            const POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            popupHover = PtInRect(&client, point) != FALSE;
+            if (popupHover || dragging)
+                KillTimer(hwnd, kHideTimer);
+            if (popupHover)
+                trackMouseLeave();
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
             if (dragging) {
@@ -319,6 +329,7 @@ struct VolumePopup::Impl {
             const float x = dip(GET_X_LPARAM(lp));
             const float y = dip(GET_Y_LPARAM(lp));
             if (hitSlider(x, y)) {
+                KillTimer(hwnd, kHideTimer);
                 dragging = true;
                 SetCapture(hwnd);
                 applyPercent(percentAt(x));
@@ -327,13 +338,16 @@ struct VolumePopup::Impl {
         }
         case WM_LBUTTONUP:
             if (dragging) {
+                applyPercent(percentAt(dip(GET_X_LPARAM(lp))));
                 dragging = false;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
+                scheduleHide();
             }
             return 0;
         case WM_CAPTURECHANGED:
             dragging = false;
+            scheduleHide();
             return 0;
         case WM_MOUSEWHEEL: {
             if (!available)
@@ -346,7 +360,7 @@ struct VolumePopup::Impl {
         case WM_TIMER:
             if (wp == kHideTimer) {
                 KillTimer(hwnd, kHideTimer);
-                if (!anchorHover && !popupHover)
+                if (!anchorHover && !popupHover && !dragging)
                     hide();
             }
             return 0;
@@ -440,17 +454,25 @@ void VolumePopup::destroy() {
     impl_->renderer.releaseAll();
 }
 
-void VolumePopup::setVolume(int percent, bool muted, bool available) {
-    const bool changed = percent != impl_->percent || muted != impl_->muted ||
-                         available != impl_->available;
-    impl_->percent = std::clamp(percent, 0, 100);
-    impl_->muted = muted;
-    impl_->available = available;
+void VolumePopup::setVolume(const AppVolumeState& state) {
+    if (state.available && state.requestRevision < impl_->requestRevision)
+        return;
+    const bool changed = state.percent != impl_->percent || state.muted != impl_->muted ||
+                         state.available != impl_->available;
+    impl_->percent = std::clamp(state.percent, 0, 100);
+    impl_->muted = state.muted;
+    impl_->available = state.available;
+    impl_->requestRevision = state.requestRevision;
+    if (!state.available) {
+        impl_->dragging = false;
+        if (impl_->hwnd && GetCapture() == impl_->hwnd)
+            ReleaseCapture();
+    }
     if (changed && impl_->visible)
         impl_->render();
 }
 
-void VolumePopup::setCallback(std::function<void(int)> cb) {
+void VolumePopup::setCallback(std::function<void(AppVolumeRequest)> cb) {
     impl_->onChange = std::move(cb);
 }
 

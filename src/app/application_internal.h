@@ -203,6 +203,7 @@ private:
         [this] { return taskbarVertical_; }};
     AppVolumeController appVolume_;           // 当前音乐应用的独立音量（音量合成器中该应用的一格）
     AppVolumeState appVolumeState_;           // 最近推送给宿主的音量状态（去重用）
+    uint64_t appVolumeRequestRevision_ = 0;    // 主线程最近处理的音量请求版本
     std::unique_ptr<TaskbarHost> taskbarHost; // 具体类型：歌词描边光晕是任务栏独有接口
     std::vector<std::unique_ptr<TaskbarHost>> additionalTaskbarHosts_;
     std::vector<std::wstring> activeTaskbarDisplayIds_;

@@ -55,7 +55,7 @@ using taskbar_detail::VerticalLayout;
 #include "ui/app_icon.h"
 #include "fluent_theme.h"
 #include "dock_pet.h"
-#include "lyric_renderer.h"
+#include "graphics/composition_renderer.h"
 #include "lyric_star.h"
 #include "media_control_icons.h"
 #include "media_popup.h"
@@ -87,6 +87,7 @@ using taskbar_detail::VerticalLayout;
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -519,7 +520,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
     // 应用音量（内嵌控件音量图标 + 悬停滑块浮窗）
     AppVolumeState appVolume_;
     VolumePopup volumePopup_;
-    std::function<void(int)> onAppVolume;
+    std::function<void(AppVolumeRequest)> onAppVolume;
     bool volumeHover_ = false;
 
     KaraokeTracker karaoke_;
@@ -547,7 +548,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
 
     // 渲染
 
-    DCompRenderer renderer;
+    CompositionRenderer renderer;
     uint64_t deviceGeneration_ = 0;
     // 沉浸模式切歌时，歌曲内容会先绘制到独立的 DirectComposition 表面。
     // 绘制辅助函数统一从这里取目标，普通帧保持使用交换链上下文。
@@ -1507,7 +1508,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         setSongTransitionPending(false);
         renderer.resetRoot();
         clearImmersiveSongContentTransition();
-        renderer.clearLyricTransitionLayers();
+        renderer.clearTransitionLayers();
         clearLyricDCompState();
         mouseOver_ = false;
         trackingLeave_ = false;
@@ -4580,7 +4581,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         return viewMode_ == TaskbarViewMode::Immersive && hwnd && taskbar_ && isWindowVisible();
     }
 
-    // 与 DCompRenderer::animateRoot 的 smoothstep 曲线一致，用于中途反向时取当前透明度。
+    // 与 CompositionRenderer::animateRoot 的 smoothstep 曲线一致，用于中途反向时取当前透明度。
     float immersivePresenceOpacity(ULONGLONG now) const { return presence_.opacity(now); }
 
     // 内容（DComp 根视觉）与模糊背景（Windows.UI.Composition 层）同步淡入淡出。
@@ -4891,7 +4892,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
 
     void clearImmersiveSongContentTransition() {
         if (songContentTransition_ && songContentTransition_->compositorLayer)
-            renderer.clearLyricTransitionLayers();
+            renderer.clearTransitionLayers();
         songContentTransition_.reset();
     }
 
@@ -4903,7 +4904,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
             now - songContentTransition_->startMs <
                 static_cast<ULONGLONG>(std::ceil(kSongTransitionMs)))
             return;
-        renderer.clearLyricTransitionLayers();
+        renderer.clearTransitionLayers();
         songContentTransition_.reset();
         // 下一帧恢复到交换链绘制最新歌曲内容，并与合成层的结束点衔接。
         requestFrame();
@@ -5107,7 +5108,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         clearLyricEffectGeometry();
         syncLyricEffectClock(positionMs_, media.playing, true);
         if (isLyricDCompActive()) {
-            renderer.clearLyricTransitionLayers();
+            renderer.clearTransitionLayers();
             clearLyricDCompState();
         }
         clearImmersiveSongContentTransition();
@@ -5728,19 +5729,19 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
             !isLyricTransitionActive() || !typesetter_.resources().outgoingLyricLayout_.Get() ||
             !typesetter_.resources().lyricLayout_.Get() || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
-        if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_, lastPxW_, lastPxH_))
+        if (!renderer.ensureTransitionLayers(lastPxW_, lastPxH_, lastPxW_, lastPxH_))
             return false;
 
-        if (ID2D1DeviceContext* dc = renderer.beginLyricLayerDraw(0)) {
+        if (ID2D1DeviceContext* dc = renderer.beginTransitionLayerDraw(0)) {
             drawLyricBlockSnapshot(dc, true, lyricAreaX, lyricAreaW, h);
-            if (!renderer.endLyricLayerDraw(0, dc))
+            if (!renderer.endTransitionLayerDraw(0, dc))
                 return false;
         } else {
             return false;
         }
-        if (ID2D1DeviceContext* dc = renderer.beginLyricLayerDraw(1)) {
+        if (ID2D1DeviceContext* dc = renderer.beginTransitionLayerDraw(1)) {
             drawLyricBlockSnapshot(dc, false, lyricAreaX, lyricAreaW, h);
-            if (!renderer.endLyricLayerDraw(1, dc))
+            if (!renderer.endTransitionLayerDraw(1, dc))
                 return false;
         } else {
             return false;
@@ -5752,9 +5753,9 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         const float travel = std::max(lyricBlockH, outgoingBlockH) * scale();
         const float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
         const float durationSec = kLyricTransitionMs / 1000.0f;
-        if (!renderer.animateLyricLayer(0, 0.0f, -direction * travel, 1.0f, 0.0f, durationSec))
+        if (!renderer.animateTransitionLayer(0, 0.0f, -direction * travel, 1.0f, 0.0f, durationSec))
             return false;
-        if (!renderer.animateLyricLayer(1, direction * travel, 0.0f, 0.0f, 1.0f, durationSec))
+        if (!renderer.animateTransitionLayer(1, direction * travel, 0.0f, 0.0f, 1.0f, durationSec))
             return false;
         // 不在此单独 Commit：图层上线随 render() 末尾 present() 的 Commit 与底层新帧
         // 同批生效，避免「图层已上屏、底层旧歌词未撤」的双画帧。动画以提交时刻为起点，
@@ -5768,12 +5769,12 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         // 图层增删不单独 Commit：改动挂起到 render() 末尾 present() 的 Commit，与承载
         // 歌词的底层新帧同批上屏，避免「图层已撤、底层新帧未上屏」的空窗闪烁。
         // 沉浸切歌期间整组歌曲内容占用同一套合成层；歌词行转场不能再抢占
-        // lyricLayers_，否则会把正在滑入的歌曲快照替换掉。
+        // transitionLayers_，否则会把正在滑入的歌曲快照替换掉。
         if (songContentTransition_ && songContentTransition_->compositorLayer)
             return;
         if ((isVerticalTaskbar() && isLyricDCompActive()) || isLyricDCompEndRequested() ||
             (showControls && isLyricDCompActive()) || (isLyricDCompActive() && karaokeLine())) {
-            renderer.clearLyricTransitionLayers();
+            renderer.clearTransitionLayers();
             clearLyricDCompState();
         }
         if (showControls)
@@ -5786,7 +5787,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
             typesetter_.resources().outgoingLyricLayout_.Get() &&
             typesetter_.resources().lyricLayout_.Get()) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
-                renderer.clearLyricTransitionLayers();
+                renderer.clearTransitionLayers();
                 clearLyricDCompState();
             }
         }
@@ -6316,7 +6317,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
                 isInvalidated(RenderInvalidation::SongInfo))
                 buildTextLayouts(0.0f, 0.0f);
             if (isLyricDCompActive() || isLyricDCompEndRequested()) {
-                renderer.clearLyricTransitionLayers();
+                renderer.clearTransitionLayers();
                 clearLyricDCompState();
             }
             ID2D1Effect* coverBlurChain =
@@ -6378,11 +6379,11 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         bool compositorSongContentPending = false;
         if (usesSongContentTransition() && songContentTransition_ &&
             !songContentTransition_->compositorLayer) {
-            // 歌词行转场也使用 lyricLayers_。整首歌切换时先交给歌曲内容层，
+            // 歌词行转场也使用 transitionLayers_。整首歌切换时先交给歌曲内容层，
             // 保证封面、歌曲信息和歌词成为同一张快照，避免两套合成层互相抢占。
-            renderer.clearLyricTransitionLayers();
+            renderer.clearTransitionLayers();
             clearLyricDCompState();
-            if (renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_, 1, 1)) {
+            if (renderer.ensureTransitionLayers(lastPxW_, lastPxH_, 1, 1)) {
                 compositorSongContent = true;
                 compositorSongContentPending = true;
             }
@@ -6612,25 +6613,25 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         // 合成器继续负责转场位移，只刷新其中的动态歌词内容，不重启动画。
         if (SUCCEEDED(frameHr) && compositorSongContent && !compositorSongContentPending &&
             lyricEffectsAnimating()) {
-            if (auto* layerRt = renderer.beginLyricLayerDraw(0)) {
+            if (auto* layerRt = renderer.beginTransitionLayerDraw(0)) {
                 drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW, lyricBlockH,
                                           primaryBrush, idleScene, lyricEffectsEnabled,
                                           showControls, showSpectrum);
-                if (!renderer.endLyricLayerDraw(0, layerRt))
+                if (!renderer.endTransitionLayerDraw(0, layerRt))
                     clearImmersiveSongContentTransition();
             }
         }
         if (SUCCEEDED(frameHr) && compositorSongContentPending) {
             bool layerReady = false;
-            if (ID2D1DeviceContext* layerRt = renderer.beginLyricLayerDraw(0)) {
+            if (ID2D1DeviceContext* layerRt = renderer.beginTransitionLayerDraw(0)) {
                 drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW, lyricBlockH,
                                           primaryBrush, idleScene, lyricEffectsEnabled,
                                           showControls, showSpectrum);
-                layerReady = renderer.endLyricLayerDraw(0, layerRt);
+                layerReady = renderer.endTransitionLayerDraw(0, layerRt);
             }
             if (layerReady) {
                 const float travelPx = kSongTransitionTravelDip * scale();
-                layerReady = renderer.animateLyricLayerX(
+                layerReady = renderer.animateTransitionLayerX(
                     0, travelPx, 0.0f, 0.0f, 1.0f, 1.0f, kSongTransitionMs / 1000.0f,
                     clipSongContent ? songContentRight * scale() : 0.0f);
             }
@@ -6640,7 +6641,7 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
                 // 不能沿用创建转场时的时间，否则动画会被提前收尾。
                 songContentTransition_->startMs = monotonicNowMs();
             } else {
-                renderer.clearLyricTransitionLayers();
+                renderer.clearTransitionLayers();
                 clearLyricDCompState();
                 // 合成层创建失败时回到原有 D2D 路径，当前帧仍然完整可见。
                 rt->BeginDraw();
@@ -7212,8 +7213,17 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
                     : hitVolumeButton(static_cast<float>(pt.x), static_cast<float>(pt.y));
             if (appVolume_.available && onAppVolume && volumeHit) {
                 const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
-                if (steps != 0)
-                    onAppVolume(std::clamp(appVolume_.percent + steps * 2, 0, 100));
+                if (steps != 0) {
+                    const auto request = AppVolumeRequest::create(
+                        std::clamp(appVolume_.percent + steps * 2, 0, 100));
+                    appVolume_.percent = request.percent;
+                    appVolume_.muted = false;
+                    appVolume_.requestRevision = request.revision;
+                    volumePopup_.setVolume(appVolume_);
+                    mediaPopup.setAppVolume(appVolume_);
+                    requestFrameAndFlush();
+                    onAppVolume(request);
+                }
                 return 0;
             }
             if (dockResourceExtrasVisible() &&
@@ -7499,11 +7509,13 @@ void TaskbarHost::setImmersiveExitCallback(std::function<void()> cb) {
 
 void TaskbarHost::setAppVolume(const AppVolumeState& state) {
     thread_->invoke([=, this]() mutable {
+        if (state.available && state.requestRevision < impl_->appVolume_.requestRevision)
+            return;
         const bool changed = state.available != impl_->appVolume_.available ||
                              state.percent != impl_->appVolume_.percent ||
                              state.muted != impl_->appVolume_.muted;
         impl_->appVolume_ = state;
-        impl_->volumePopup_.setVolume(state.percent, state.muted, state.available);
+        impl_->volumePopup_.setVolume(state);
         impl_->mediaPopup.setAppVolume(state);
         if (!state.available)
             impl_->volumePopup_.hide();
@@ -7514,8 +7526,31 @@ void TaskbarHost::setAppVolume(const AppVolumeState& state) {
     });
 }
 
-void TaskbarHost::setAppVolumeCallback(std::function<void(int)> cb) {
-    cb = callbacks_->callback(std::move(cb));
+void TaskbarHost::setAppVolumeCallback(std::function<void(AppVolumeRequest)> cb) {
+    if (cb) {
+        struct PendingVolume {
+            std::mutex mutex;
+            std::optional<AppVolumeRequest> request;
+        };
+        auto pending = std::make_shared<PendingVolume>();
+        auto dispatch = callbacks_->onceCallback([pending, function = std::move(cb)] {
+            std::optional<AppVolumeRequest> request;
+            {
+                std::lock_guard<std::mutex> lock(pending->mutex);
+                request = std::exchange(pending->request, std::nullopt);
+            }
+            if (request)
+                function(*request);
+        });
+        cb = [pending, dispatch = std::move(dispatch)](AppVolumeRequest request) {
+            {
+                std::lock_guard<std::mutex> lock(pending->mutex);
+                if (!pending->request || request.revision > pending->request->revision)
+                    pending->request = request;
+            }
+            dispatch();
+        };
+    }
     thread_->invoke([=, this]() mutable {
         impl_->onAppVolume = cb;
         impl_->volumePopup_.setCallback(cb);

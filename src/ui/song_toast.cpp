@@ -5,7 +5,7 @@
 
 #include "fluent_theme.h"
 #include "logging/runtime_logger.h"
-#include "lyric_renderer.h"
+#include "graphics/composition_renderer.h"
 #include "platform_icon.h"
 
 #include <d2d1effects.h>
@@ -97,7 +97,7 @@ struct SongToast::Impl {
     ULONGLONG contentStartMs = 0;
     ULONGLONG scrollReadyMs = 0;
 
-    DCompRenderer renderer;
+    CompositionRenderer renderer;
     uint64_t deviceGeneration = 0;
     ID2D1SolidColorBrush* brushBackground = nullptr;
     ID2D1SolidColorBrush* brushStroke = nullptr;

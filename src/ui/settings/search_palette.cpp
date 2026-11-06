@@ -198,8 +198,8 @@ bool SettingsSearchPalette::startSearchPaletteAnimation() {
     const float toY = margin + (1.0f - searchPaletteAnimTarget) * slide;
     const float duration = searchPaletteAnimDurationMs / 1000.0f;
     const auto curve = searchPaletteAnimTarget > 0.5f
-                           ? DCompRenderer::RootAnimationCurve::EaseOutCubic
-                           : DCompRenderer::RootAnimationCurve::EaseOutQuadratic;
+                           ? CompositionRenderer::RootAnimationCurve::EaseOutCubic
+                           : CompositionRenderer::RootAnimationCurve::EaseOutQuadratic;
     if (!searchAnimationRenderer.animateRoot(0.0f, 0.0f, fromY, toY,
                                              searchPaletteAnimFrom, searchPaletteAnimTarget, duration, curve) ||
         !searchScrimRenderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f,

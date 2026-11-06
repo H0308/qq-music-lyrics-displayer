@@ -10,7 +10,7 @@
 #include "dock_pet.h"
 #include "fluent_theme.h"
 #include "fluent_dialog_surface.h"
-#include "lyric_renderer.h"
+#include "graphics/composition_renderer.h"
 #include "media_control_icons.h"
 #include "platform_icon.h"
 #include "logging/runtime_logger.h"
@@ -170,7 +170,7 @@ struct MediaPopup::Impl {
     bool volumeDragging = false;
     bool hoverVolume = false;
     bool pressedVolume = false;
-    std::function<void(int)> onAppVolume;
+    std::function<void(AppVolumeRequest)> onAppVolume;
     D2D1_RECT_F volumeIconRect{};
     D2D1_RECT_F volumeSliderRect{}; // 滑块轨道矩形（目标值；命中测试自行外扩余量）
     D2D1_RECT_F pageArrowRect{};     // 屏幕客户区坐标，供完整按钮区域命中
@@ -205,7 +205,7 @@ struct MediaPopup::Impl {
     bool idleIconsDirty = true;
     std::vector<ID2D1Bitmap*> idleIconBitmaps;
 
-    DCompRenderer renderer{false};
+    CompositionRenderer renderer{false};
     fluent::CompositedScrollView idleScrollView;
     uint64_t deviceGeneration = 0;
     DockPet pet;
@@ -627,7 +627,7 @@ struct MediaPopup::Impl {
         transition.reset();
         deferredPositionMs = -1;
         if (hadLayers) {
-            renderer.clearLyricTransitionLayers();
+            renderer.clearTransitionLayers();
         }
         if (hwnd)
             KillTimer(hwnd, timer);
@@ -1950,17 +1950,17 @@ struct MediaPopup::Impl {
     // 最新画笔和内容绘制。失败返回 false，调用方直接呈现最终页。
     bool startCategoryLayerTransition(float w) {
         if (!hwnd || cardWidthPx <= 0 || cardHeightPx <= 0 ||
-            !renderer.ensureLyricTransitionLayers(cardWidthPx, cardHeightPx, cardWidthPx,
+            !renderer.ensureTransitionLayers(cardWidthPx, cardHeightPx, cardWidthPx,
                                                   cardHeightPx, kPopupCornerDip * scale()))
             return false;
 
         const float baseY = cardOriginDip * scale();
-        if (!renderer.ensureLyricTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
+        if (!renderer.ensureTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
                                                     kPopupCornerDip * scale()))
             return false;
-        if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
+        if (auto* dc = renderer.beginTransitionBackdropDraw()) {
             drawCardBackground(dc, w, popupHeightDip(), categorySnapshot.from, false);
-            if (!renderer.endLyricTransitionBackdropDraw(dc))
+            if (!renderer.endTransitionBackdropDraw(dc))
                 return false;
         } else {
             return false;
@@ -1976,11 +1976,11 @@ struct MediaPopup::Impl {
             {1, currentPage(), false},
         };
         for (const auto& job : jobs) {
-            auto* dc = renderer.beginLyricLayerDraw(job.index);
+            auto* dc = renderer.beginTransitionLayerDraw(job.index);
             if (!dc)
                 return false;
             drawCategoryContentLayer(dc, w, job.page, job.oldLayer);
-            if (!renderer.endLyricLayerDraw(job.index, dc))
+            if (!renderer.endTransitionLayerDraw(job.index, dc))
                 return false;
         }
 
@@ -1993,10 +1993,10 @@ struct MediaPopup::Impl {
         const float travel = kCategoryTransitionTravelDip * scale();
         const float dir = static_cast<float>(categorySnapshot.direction);
         const float durationSec = kCategoryTransitionMs / 1000.0f;
-        if (!renderer.showLyricTransitionBackdrop() ||
-            !renderer.animateLyricLayerX(0, 0.0f, -dir * travel, baseY, 1.0f, 0.0f,
+        if (!renderer.showTransitionBackdrop() ||
+            !renderer.animateTransitionLayerX(0, 0.0f, -dir * travel, baseY, 1.0f, 0.0f,
                                          durationSec) ||
-            !renderer.animateLyricLayerX(1, dir * travel, 0.0f, baseY, 0.0f, 1.0f,
+            !renderer.animateTransitionLayerX(1, dir * travel, 0.0f, baseY, 0.0f, 1.0f,
                                          durationSec))
             return false;
         categoryTransition.markComposited();
@@ -2059,19 +2059,19 @@ struct MediaPopup::Impl {
         const int layer2H = static_cast<int>(std::lround(32.0f * s)) + 1;
         const int layer3W = cardWidthPx;
         const int layer3H = static_cast<int>(std::lround(expandedListHeight * s)) + 1;
-        if (!renderer.ensureLyricTransitionLayers(layer0W, layer0H, layer1W, layer1H,
+        if (!renderer.ensureTransitionLayers(layer0W, layer0H, layer1W, layer1H,
                                                   layer2W, layer2H, layer3W, layer3H))
             return false;
         const float baseY = cardOriginDip * s;
-        if (!renderer.ensureLyricTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
+        if (!renderer.ensureTransitionBackdrop(cardWidthPx, cardHeightPx, baseY,
                                                     kPopupCornerDip * s))
             return false;
-        if (auto* dc = renderer.beginLyricTransitionBackdropDraw()) {
+        if (auto* dc = renderer.beginTransitionBackdropDraw()) {
             drawCardBackground(dc, w, popupHeightDip(), PopupPage::Idle, false);
             // 固定背景层位于交换链之上，因此把快速展开期间仍需可见的页面
             // 返回箭头一并画进稳定层，避免它被整卡片背景覆盖。
             drawPageArrow(dc, w, PopupPage::Idle, false);
-            if (!renderer.endLyricTransitionBackdropDraw(dc))
+            if (!renderer.endTransitionBackdropDraw(dc))
                 return false;
         } else {
             return false;
@@ -2079,7 +2079,7 @@ struct MediaPopup::Impl {
 
         // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
         // 被隐藏/显露。当前交换链后备缓冲已经绘制成无内容基准帧，不会与旧内容重影。
-        if (auto* dc = renderer.beginLyricLayerDraw(0)) {
+        if (auto* dc = renderer.beginTransitionLayerDraw(0)) {
             if (idle.showText) {
                 drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
                          D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
@@ -2094,7 +2094,7 @@ struct MediaPopup::Impl {
                         brushProgressTrack);
                 }
             }
-            if (!renderer.endLyricLayerDraw(0, dc))
+            if (!renderer.endTransitionLayerDraw(0, dc))
                 return false;
         } else {
             return false;
@@ -2103,7 +2103,7 @@ struct MediaPopup::Impl {
         // 层 1：快速打开区的标题和 Tab，按展开态绘制。展开时上移并淡入，
         // 收起时下移并淡出；列表主体单独放在层 3，避免图标跟随整层透明度
         // 在转场首尾闪烁。
-        if (auto* dc = renderer.beginLyricLayerDraw(1)) {
+        if (auto* dc = renderer.beginTransitionLayerDraw(1)) {
             const bool savedExpanded = quickExpansion.expanded;
             const float savedT = quickExpansion.progress;
             quickExpansion.expanded = true;
@@ -2117,7 +2117,7 @@ struct MediaPopup::Impl {
             drawIdleQuickTabs(dc, w, expandedTabTop, 1.0f, idle, false);
             quickExpansion.expanded = savedExpanded;
             quickExpansion.progress = savedT;
-            if (!renderer.endLyricLayerDraw(1, dc))
+            if (!renderer.endTransitionLayerDraw(1, dc))
                 return false;
         } else {
             return false;
@@ -2125,7 +2125,7 @@ struct MediaPopup::Impl {
 
         // 层 2：收起态标题/按钮。它与层 1 使用相同的垂直轨迹，但反向交叉淡入，
         // 使收起动画的最后一帧已经包含最终静态态的标题和按钮，避免撤层时补画闪烁。
-        if (auto* dc = renderer.beginLyricLayerDraw(2)) {
+        if (auto* dc = renderer.beginTransitionLayerDraw(2)) {
             const bool savedExpanded = quickExpansion.expanded;
             const float savedT = quickExpansion.progress;
             quickExpansion.expanded = false;
@@ -2137,7 +2137,7 @@ struct MediaPopup::Impl {
             drawIdleQuickHeader(dc, w, collapsedHeaderTop, idle, false);
             quickExpansion.expanded = savedExpanded;
             quickExpansion.progress = savedT;
-            if (!renderer.endLyricLayerDraw(2, dc))
+            if (!renderer.endTransitionLayerDraw(2, dc))
                 return false;
         } else {
             return false;
@@ -2146,7 +2146,7 @@ struct MediaPopup::Impl {
         // 层 3：列表主体（应用图标/任务行）。只绘制展开态主体，但把它的局部
         // 原点放在列表顶部，因此视觉层可以从收起态列表顶平滑移动到展开态列表顶，
         // 且整个过程保持不透明，避免图标在交换链清空或层淡出时短暂消失。
-        if (auto* dc = renderer.beginLyricLayerDraw(3)) {
+        if (auto* dc = renderer.beginTransitionLayerDraw(3)) {
             const bool savedExpanded = quickExpansion.expanded;
             const float savedT = quickExpansion.progress;
             const D2D1_RECT_F savedListRect = idleListRect;
@@ -2169,7 +2169,7 @@ struct MediaPopup::Impl {
             idleScrollThumbRect = savedScrollThumbRect;
             idleScrollMax = savedScrollMax;
             idleScrollOffset = savedScrollOffset;
-            if (!renderer.endLyricLayerDraw(3, dc))
+            if (!renderer.endTransitionLayerDraw(3, dc))
                 return false;
         } else {
             return false;
@@ -2179,7 +2179,7 @@ struct MediaPopup::Impl {
         // 这样下面交换链的基准帧无论何时 Present，背景都已经由固定层覆盖。
         renderer.commit();
         renderer.waitForCommitCompletion();
-        if (!renderer.showLyricTransitionBackdrop())
+        if (!renderer.showTransitionBackdrop())
             return false;
 
         const float quoteBaseY = baseY;
@@ -2190,25 +2190,25 @@ struct MediaPopup::Impl {
         const float expandedBodyY = (cardOriginDip + expandedListTop) * s;
         const float travelPx = delta * s;
         const float durationSec = kIdleQuickExpandMs / 1000.0f;
-        if (!renderer.animateLyricLayerClipSlide(
+        if (!renderer.animateTransitionLayerClipSlide(
                 0, 0.0f, quoteBaseY, quoteBaseY,
                 (opening ? collapsedButtonTop : expandedButtonTop) * s,
                 (opening ? expandedButtonTop : collapsedButtonTop) * s, durationSec))
             return false;
-        if (!renderer.animateLyricLayerClipSlide(
+        if (!renderer.animateTransitionLayerClipSlide(
                 1, 0.0f, opening ? quickBaseY + travelPx : quickBaseY,
                 opening ? quickBaseY : quickBaseY + travelPx,
                 (opening ? clipBottomCollapsed : clipBottomExpanded) * s,
                 (opening ? clipBottomExpanded : clipBottomCollapsed) * s, durationSec,
                 opening ? 0.0f : 1.0f, opening ? 1.0f : 0.0f))
             return false;
-        if (!renderer.animateLyricLayerClipSlide(
+        if (!renderer.animateTransitionLayerClipSlide(
                 2, 0.0f, opening ? collapsedHeaderY : expandedHeaderY,
                 opening ? expandedHeaderY : collapsedHeaderY, static_cast<float>(layer2H),
                 static_cast<float>(layer2H), durationSec, opening ? 1.0f : 0.0f,
                 opening ? 0.0f : 1.0f))
             return false;
-        if (!renderer.animateLyricLayerClipSlide(
+        if (!renderer.animateTransitionLayerClipSlide(
                 3, 0.0f, opening ? collapsedBodyY : expandedBodyY,
                 opening ? expandedBodyY : collapsedBodyY,
                 (opening ? collapsedListHeight : expandedListHeight) * s,
@@ -2855,9 +2855,11 @@ struct MediaPopup::Impl {
             return;
         volume.percent = next;
         volume.muted = false; // 调整音量即解除静音（控制器侧同样处理）
+        const auto request = AppVolumeRequest::create(next);
+        volume.requestRevision = request.revision;
         renderOrDefer();
         if (onAppVolume)
-            onAppVolume(next);
+            onAppVolume(request);
     }
 
     // 点击音量图标切换滑块；动画关闭时直接到位
@@ -2965,7 +2967,7 @@ struct MediaPopup::Impl {
 
     void scheduleHide() {
         if (!hwnd || !visibility.visible() || anchorHover || popupHover ||
-            categoryTransition.active() || quickExpandTransition.active())
+            volumeDragging || categoryTransition.active() || quickExpandTransition.active())
             return;
         KillTimer(hwnd, kShowTimer);
         SetTimer(hwnd, kHideTimer, kHideDelayMs, nullptr);
@@ -3429,9 +3431,12 @@ struct MediaPopup::Impl {
                 return 0;
             }
             if (volumeDragging) {
+                applyVolumeAt(x);
                 volumeDragging = false;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
+                popupHover = cursorInsidePopupCard();
+                scheduleHide();
                 return 0;
             }
             if (pressedVolume) {
@@ -3482,18 +3487,24 @@ struct MediaPopup::Impl {
                 if (steps != 0) {
                     volume.percent = std::clamp(volume.percent + steps * 2, 0, 100);
                     volume.muted = false;
+                    const auto request = AppVolumeRequest::create(volume.percent);
+                    volume.requestRevision = request.revision;
                     renderOrDefer();
-                    onAppVolume(volume.percent);
+                    onAppVolume(request);
                 }
             }
             return 0;
         }
         case WM_CAPTURECHANGED:
+            if (volumeDragging) {
+                volumeDragging = false;
+                popupHover = cursorInsidePopupCard();
+                scheduleHide();
+            }
             pressedButton = -1;
             pressedSource = false;
             pressedSourceAppUserModelId.clear();
             pressedVolume = false;
-            volumeDragging = false;
             pressedIdleApp = -1;
             pressedIdleTask = -1;
             pressedIdleTaskCheckbox = -1;
@@ -3526,7 +3537,7 @@ struct MediaPopup::Impl {
                     showPopup();
             } else if (wp == kHideTimer) {
                 KillTimer(hwnd, kHideTimer);
-                if (categoryTransition.active() || quickExpandTransition.active())
+                if (volumeDragging || categoryTransition.active() || quickExpandTransition.active())
                     return 0;
                 if (categoryHoverEnvelopeActive) {
                     if (cursorInsidePopupCard()) {
@@ -3724,6 +3735,8 @@ void MediaPopup::setControlCallback(std::function<void(MediaControl)> cb) {
 
 void MediaPopup::setAppVolume(const AppVolumeState& state) {
     enqueue([=, this]() mutable {
+        if (state.available && state.requestRevision < impl_->volume.requestRevision)
+            return;
         const bool changed = state.available != impl_->volume.available ||
                              state.percent != impl_->volume.percent ||
                              state.muted != impl_->volume.muted;
@@ -3732,7 +3745,10 @@ void MediaPopup::setAppVolume(const AppVolumeState& state) {
             // 会话消失：直接收起滑块，不走过渡动画
             impl_->volumeSliderOn = false;
             impl_->volumeSliderT = 0.0f;
+            const bool wasVolumeDragging = impl_->volumeDragging;
             impl_->volumeDragging = false;
+            if (wasVolumeDragging && impl_->hwnd && GetCapture() == impl_->hwnd)
+                ReleaseCapture();
             if (impl_->hwnd)
                 KillTimer(impl_->hwnd, kVolumeTimer);
         }
@@ -3741,7 +3757,7 @@ void MediaPopup::setAppVolume(const AppVolumeState& state) {
     });
 }
 
-void MediaPopup::setAppVolumeCallback(std::function<void(int)> cb) {
+void MediaPopup::setAppVolumeCallback(std::function<void(AppVolumeRequest)> cb) {
     enqueue([=, this]() mutable {
         impl_->onAppVolume = std::move(cb);
     });
