@@ -48,26 +48,6 @@ constexpr int kHitCoverToggle = 4;
 
 const std::array<int, 4> kRetentionDays{0, 7, 30, 90};
 
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-
-GdiplusInit g_gdiplusInit;
 
 ID2D1Bitmap* decodeCoverBitmap(
     ID2D1RenderTarget* target, const std::shared_ptr<const std::vector<uint8_t>>& image,

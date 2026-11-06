@@ -13,26 +13,6 @@
 
 namespace {
 
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-
-GdiplusInit g_gdiplusInit;
 
 std::wstring findProcessImagePath(const std::wstring& processName) {
     if (processName.empty())

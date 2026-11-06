@@ -79,7 +79,7 @@ void drawMediaSnapshot(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     // 旧层只需要一次静态快照，不参与新的布局和滚动状态。
     if (!snapshot.sourceAppUserModelId.empty()) {
         drawSourceIcon(context, rt, snapshot.sourceAppUserModelId);
-        drawText(context, rt, sourceLabel(snapshot.sourceAppUserModelId), fmtSource,
+        drawText(rt, sourceLabel(snapshot.sourceAppUserModelId), fmtSource,
                  context.geometry.mediaLayout_.source, brushText);
     }
     drawCover(context, rt, useCachedLayers);
@@ -89,9 +89,9 @@ void drawMediaSnapshot(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     float snapshotTitleHeight = 0.0f;
     float snapshotArtistWidth = 0.0f;
     float snapshotArtistHeight = 0.0f;
-    createMeasuredTextLayout(context, snapshot.title, fmtTitle, 40.0f, &snapshotTitleLayout,
+    createMeasuredTextLayout(context.factory, snapshot.title, fmtTitle, 40.0f, &snapshotTitleLayout,
                              snapshotTitleWidth, snapshotTitleHeight);
-    createMeasuredTextLayout(context, snapshot.artist, fmtArtist, 40.0f, &snapshotArtistLayout,
+    createMeasuredTextLayout(context.factory, snapshot.artist, fmtArtist, 40.0f, &snapshotArtistLayout,
                              snapshotArtistWidth, snapshotArtistHeight);
     drawMediaTitles(context, rt, w, snapshotTitleLayout, snapshotTitleWidth, snapshotTitleHeight,
                     categorySnapshot.titleScrollOffset, snapshotArtistLayout, snapshotArtistWidth,
@@ -117,7 +117,7 @@ void drawSourceIcon(const PagePaintContext& context, ID2D1DeviceContext* rt,
         rt->DrawBitmap(sourceIconBmp, iconRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else {
         rt->FillRoundedRectangle(D2D1::RoundedRect(iconRect, 5.0f, 5.0f), brushAccent);
-        drawText(context, rt, L"♪", fmtIcon, iconRect, brushTextOnAccent);
+        drawText(rt, L"♪", fmtIcon, iconRect, brushTextOnAccent);
     }
 }
 
@@ -127,7 +127,7 @@ void drawSource(const PagePaintContext& context, ID2D1DeviceContext* rt) {
     auto& fmtSource = context.resources.fmtSource;
 
     drawSourceIcon(context, rt, media.sourceAppUserModelId);
-    drawText(context, rt, sourceLabel(media.sourceAppUserModelId), fmtSource,
+    drawText(rt, sourceLabel(media.sourceAppUserModelId), fmtSource,
              context.geometry.mediaLayout_.source, brushText);
 }
 
@@ -162,9 +162,9 @@ void drawProgress(const PagePaintContext& context, ID2D1DeviceContext* rt, float
                 brushAccent);
     }
 
-    drawText(context, rt, formatPlaybackTime(displayPositionMs), fmtSource,
+    drawText(rt, formatPlaybackTime(displayPositionMs), fmtSource,
              context.geometry.mediaLayout_.timeLeft, brushSecondary);
-    drawText(context, rt, formatPlaybackDuration(content.durationMs), fmtTimeRight,
+    drawText(rt, formatPlaybackDuration(content.durationMs), fmtTimeRight,
              context.geometry.mediaLayout_.timeRight, brushSecondary);
 }
 
@@ -239,7 +239,7 @@ void drawCover(const PagePaintContext& context, ID2D1DeviceContext* rt, bool use
     }
     if (temporaryLayer)
         temporaryLayer->Release();
-    drawText(context, rt, L"♪", fmtIcon, rect, brushSecondary);
+    drawText(rt, L"♪", fmtIcon, rect, brushSecondary);
 }
 
 } // namespace media_popup_paint

@@ -59,16 +59,8 @@ public:
     void setRevision(uint64_t value) { lyricTransitionRevision_ = value; }
     int direction() const { return lyricTransitionDirection_; }
     void setDirection(int value) { lyricTransitionDirection_ = value; }
-    DisplayScene outgoingScene() const { return outgoingScene_; }
-    void setOutgoingScene(DisplayScene value) { outgoingScene_ = value; }
     bool outgoingDoubleLine() const { return outgoingDoubleLine_; }
     void setOutgoingDoubleLine(bool value) { outgoingDoubleLine_ = value; }
-    bool needsRelayout() const { return sceneTransitionNeedsRelayout_; }
-    void setNeedsRelayout(bool value) { sceneTransitionNeedsRelayout_ = value; }
-    int fromWidth() const { return sceneTransitionFromPxW_; }
-    void setFromWidth(int value) { sceneTransitionFromPxW_ = value; }
-    int fromHeight() const { return sceneTransitionFromPxH_; }
-    void setFromHeight(int value) { sceneTransitionFromPxH_ = value; }
     const std::optional<LyricTransitionTarget>& target() const { return target_; }
     const std::optional<LyricTransitionTarget>& pending() const { return pending_; }
     void setTarget(std::optional<LyricTransitionTarget> target) { target_ = std::move(target); }
@@ -82,11 +74,7 @@ private:
     ULONGLONG lyricTransitionStartMs_ = 0;
     uint64_t lyricTransitionRevision_ = 0;
     int lyricTransitionDirection_ = 1;
-    DisplayScene outgoingScene_ = DisplayScene::NoPlayback;
     bool outgoingDoubleLine_ = false;
-    bool sceneTransitionNeedsRelayout_ = false;
-    int sceneTransitionFromPxW_ = 0;
-    int sceneTransitionFromPxH_ = 0;
     std::optional<LyricTransitionTarget> target_;
     std::optional<LyricTransitionTarget> pending_;
 };

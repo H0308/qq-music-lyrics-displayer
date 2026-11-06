@@ -6,13 +6,14 @@
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <array>
+#include <span>
 
 namespace media_popup_paint {
 using PopupPage = media_popup_detail::Page;
 using namespace media_popup_detail;
 // 本次绘制所借用的页面数据与公共资源；不保存窗口或拥有者指针。
 struct PagePaintResources {
-    std::vector<ID2D1Bitmap*> idleIconBitmaps;
+    std::span<ID2D1Bitmap* const> idleIconBitmaps;
     DockPet& pet;
     ID2D1SolidColorBrush* brushStroke;
     ID2D1SolidColorBrush* brushText;
@@ -131,16 +132,16 @@ bool idleReturnArrowVisible(const IdlePresentation& content, bool playbackScene,
                             bool manual);
 float idleUnitHeight(const IdlePresentation& content, bool current, const IdlePresentation& idle,
                      IDWriteTextLayout* layout, float height);
-void drawText(const PagePaintContext& context, ID2D1DeviceContext* rt, const std::wstring& text,
-              IDWriteTextFormat* format, const D2D1_RECT_F& rect, ID2D1Brush* brush);
+void drawText(ID2D1DeviceContext* rt, const std::wstring& text, IDWriteTextFormat* format,
+              const D2D1_RECT_F& rect, ID2D1Brush* brush);
 void drawScrollingText(const PagePaintContext& context, ID2D1DeviceContext* rt,
                        IDWriteTextLayout* layout, float textWidth, float textHeight,
                        const D2D1_RECT_F& rect, float offset, ID2D1Brush* brush,
                        ID2D1Brush* edgeFadeBrush);
-void drawChevron(const PagePaintContext& context, ID2D1DeviceContext* rt, D2D1_POINT_2F center,
-                 float size, ID2D1Brush* brush, bool right = true);
-void drawVerticalChevron(const PagePaintContext& context, ID2D1DeviceContext* rt,
-                         D2D1_POINT_2F center, float size, ID2D1Brush* brush, bool up);
+void drawChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
+                 ID2D1Brush* brush, bool right = true);
+void drawVerticalChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
+                         ID2D1Brush* brush, bool up);
 bool usesBlackTextForControls(const PagePaintContext& context, PopupPage page);
 D2D1_COLOR_F adaptiveControlFill(const PagePaintContext& context, bool pressed, PopupPage page);
 D2D1_COLOR_F staticControlFill(const PagePaintContext& context, bool pressed, PopupPage page);
@@ -188,7 +189,7 @@ void drawProgress(const PagePaintContext& context, ID2D1DeviceContext* rt, float
 void drawButton(const PagePaintContext& context, ID2D1DeviceContext* rt, int index,
                 const OverlayMediaInfo& content);
 void drawCover(const PagePaintContext& context, ID2D1DeviceContext* rt, bool useCachedLayer);
-bool createMeasuredTextLayout(const PagePaintContext& context, const std::wstring& text,
+bool createMeasuredTextLayout(IDWriteFactory* factory, const std::wstring& text,
                               IDWriteTextFormat* format, float layoutHeight,
                               IDWriteTextLayout** out, float& width, float& height);
 

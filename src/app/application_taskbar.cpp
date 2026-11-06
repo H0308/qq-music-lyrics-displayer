@@ -1,4 +1,5 @@
 #include "app/application_internal.h"
+#include "settings/display_rules.h"
 namespace lyrics_app {
 std::vector<TaskbarDisplayInfo> App::desiredTaskbarDisplays(const SmtcSnapshot& snap) const {
     auto displays = enumerateTaskbarDisplays();
@@ -194,7 +195,8 @@ void App::syncTaskbarView(const SmtcSnapshot& snap) {
 }
 
 void App::syncSpectrumWithMode() {
-    const bool active = settings_.spectrumOn_ && !taskbarVertical_ && isNormalRenderMode() &&
+    const bool active = display_rules::spectrumRequested(
+                            settings_, static_cast<RenderMode>(renderMode_), taskbarVertical_) &&
                         taskbarHost != nullptr && !taskbarSpectrumSuppressedForNoSpace_;
     if (active) {
         SmtcSnapshot snap = monitor.snapshot();
@@ -203,7 +205,8 @@ void App::syncSpectrumWithMode() {
             spectrum_.setTargetProcessName(std::wstring(processName));
         spectrum_.start();
         forEachHost([&](TaskbarHost* host) {
-            host->setSpectrumVisible(settings_.spectrumOn_ && !host->isVerticalTaskbar());
+            host->setSpectrumVisible(display_rules::spectrumRequested(
+                settings_, static_cast<RenderMode>(renderMode_), host->isVerticalTaskbar()));
         });
     } else {
         spectrum_.stop();
@@ -213,7 +216,8 @@ void App::syncSpectrumWithMode() {
 
 void App::tryRestoreSpectrumAfterNoSpace() {
     if (!taskbarSpectrumSuppressedForNoSpace_ || taskbarSpectrumRestoring_ ||
-        !settings_.spectrumOn_ || taskbarVertical_ || !isNormalRenderMode() || !taskbarHost)
+        !display_rules::spectrumRequested(settings_, static_cast<RenderMode>(renderMode_),
+                                          taskbarVertical_) || !taskbarHost)
         return;
 
     // 频谱本身会扩大任务栏歌词窗口；恢复空间时先试着恢复用户设置，
@@ -555,7 +559,8 @@ void App::onTaskbarPlacementStatus(TaskbarPlacementStatus status) {
             taskbarAutoClosedForNoSpace_ = false;
             if (!taskbarSpectrumRestoring_) {
                 if (taskbarSpectrumSuppressedForNoSpace_) {
-                    if (settings_.spectrumOn_ && !taskbarVertical_ && isNormalRenderMode())
+                    if (display_rules::spectrumRequested(
+                            settings_, static_cast<RenderMode>(renderMode_), taskbarVertical_))
                         tryRestoreSpectrumAfterNoSpace();
                     else
                         // 频谱因用户设置、竖向任务栏或性能模式关闭时，

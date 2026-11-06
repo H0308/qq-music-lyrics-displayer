@@ -1,6 +1,7 @@
 #include "media/smtc/smtc_common.h"
 
 #include "logging/runtime_logger.h"
+#include "graphics/gdiplus_runtime.h"
 
 #include <windows.h>
 #include <objidl.h>
@@ -23,16 +24,8 @@ bool isDecodableImage(const std::vector<uint8_t>& data, const wchar_t*& stage,
         return false;
     }
 
-    struct GdiPlusSession {
-        ULONG_PTR token = 0;
-        ~GdiPlusSession() {
-            if (token)
-                Gdiplus::GdiplusShutdown(token);
-        }
-    } session;
     stage = L"gdiplus-startup";
-    Gdiplus::GdiplusStartupInput input;
-    status = Gdiplus::GdiplusStartup(&session.token, &input, nullptr);
+    status = graphics::gdiplusStatus();
     if (status != Gdiplus::Ok) {
         result = E_FAIL;
         return false;

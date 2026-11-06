@@ -15,7 +15,7 @@ void drawIdleQuickHeader(const PagePaintContext& context, ID2D1DeviceContext* rt
         layoutFor(context, content).idleQuickExpandLocalRect(w, headerTop, content);
     const float headerRight =
         content.quickStartEnabled && content.showText ? expandButton.left - 8.0f : w - 16.0f;
-    drawText(context, rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
+    drawText(rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
              fmtIdleHeader,
              D2D1::RectF(16.0f, headerTop, headerRight, headerTop + kIdleQuickHeaderHeightDip),
              brushSecondary);
@@ -57,12 +57,12 @@ void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, 
         drawScrollingText(context, rt, layout, textWidth, textHeight, quoteRect, scrollOffset,
                           brushText, brushIdleTextEdgeFade);
     } else if (!content.sentence.empty()) {
-        drawText(context, rt, content.sentence, fmtIdleQuote, quoteRect,
+        drawText(rt, content.sentence, fmtIdleQuote, quoteRect,
                  content.loading ? brushSecondary : brushText);
     } else if (content.loading) {
-        drawText(context, rt, L"正在获取每日一言…", fmtIdleQuote, quoteRect, brushSecondary);
+        drawText(rt, L"正在获取每日一言…", fmtIdleQuote, quoteRect, brushSecondary);
     } else if (content.showQuote) {
-        drawText(context, rt, L"暂时无法获取每日一言", fmtIdleQuote, quoteRect, brushDisabled);
+        drawText(rt, L"暂时无法获取每日一言", fmtIdleQuote, quoteRect, brushDisabled);
     }
 
     const float sourceTop = quoteTop + quoteHeight + kIdleQuoteSourceGapDip;
@@ -71,7 +71,7 @@ void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, 
         drawScrollingText(context, rt, sourceLayout, sourceWidth, sourceHeight, sourceRect,
                           sourceScrollOffset, brushSecondary, brushIdleTextEdgeFade);
     } else if (!content.source.empty()) {
-        drawText(context, rt, content.source, fmtIdleSource, sourceRect, brushSecondary);
+        drawText(rt, content.source, fmtIdleSource, sourceRect, brushSecondary);
     }
 }
 
@@ -148,7 +148,7 @@ void drawIdleCopyButton(const PagePaintContext& context, ID2D1DeviceContext* rt,
             rt->DrawRoundedRectangle(D2D1::RoundedRect(tooltip, 8.0f, 8.0f), brushStroke, 0.8f);
             brushStroke->SetOpacity(1.0f);
         }
-        drawText(context, rt, L"复制每日一言", fmtIdleSource,
+        drawText(rt, L"复制每日一言", fmtIdleSource,
                  D2D1::RectF(tooltip.left + 8.0f, tooltip.top + 7.0f, tooltip.right - 8.0f,
                              tooltip.bottom - 5.0f),
                  brushText);
@@ -194,7 +194,7 @@ void drawIdleQuickExpandButton(const PagePaintContext& context, ID2D1DeviceConte
 
     // 收起状态提示向上展开，展开状态提示向下收起。
     drawVerticalChevron(
-        context, rt,
+        rt,
         D2D1::Point2F((local.left + local.right) * 0.5f, (local.top + local.bottom) * 0.5f), 6.5f,
         brushSecondary, !quickExpansion.expanded);
 }
@@ -262,7 +262,7 @@ void drawIdleQuickTabs(const PagePaintContext& context, ID2D1DeviceContext* rt, 
         if (textBrush) {
             const float previousOpacity = textBrush->GetOpacity();
             textBrush->SetOpacity(previousOpacity * opacity);
-            drawText(context, rt, labels[i], fmtIdleApp, tabs[i], textBrush);
+            drawText(rt, labels[i], fmtIdleApp, tabs[i], textBrush);
             textBrush->SetOpacity(previousOpacity);
         }
     }
@@ -299,7 +299,7 @@ void drawIdleTodayTasks(const PagePaintContext& context, ID2D1DeviceContext* rt,
                                      : !content.todayTasksStatus.empty() ? content.todayTasksStatus
                                      : !content.todayTasksConnected      ? L"请在设置中连接滴答清单"
                                                                          : L"今天没有待办任务";
-        drawText(context, rt, message, fmtIdleApp, idleListRect,
+        drawText(rt, message, fmtIdleApp, idleListRect,
                  content.todayTasksLoading ? brushSecondary : brushDisabled);
         return;
     }
@@ -383,11 +383,11 @@ void drawIdleTodayTasks(const PagePaintContext& context, ID2D1DeviceContext* rt,
                                : task.overdue ? brushAccent
                                               : brushSecondary;
         drawText(
-            context, rt, task.title, fmtSource,
+            rt, task.title, fmtSource,
             D2D1::RectF(row.left + 38.0f, row.top + 3.0f, row.right - 96.0f, row.bottom - 3.0f),
             titleBrush);
         drawText(
-            context, rt, task.dueText, fmtTimeRight,
+            rt, task.dueText, fmtTimeRight,
             D2D1::RectF(row.right - 92.0f, row.top + 3.0f, row.right - 8.0f, row.bottom - 3.0f),
             dueBrush);
     }
@@ -425,7 +425,7 @@ void drawIdleQuickListContent(const PagePaintContext& context, ID2D1DeviceContex
     if (content.todayTasksEnabled && idleQuickTab == IdleQuickTab::TodayTasks) {
         drawIdleTodayTasks(context, rt, content, paintBounds);
     } else if (content.apps.empty()) {
-        drawText(context, rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
+        drawText(rt, L"请在设置中添加应用", fmtIdleApp, idleListRect, brushDisabled);
     } else {
         const float columnGap = kIdleQuickCellGapDip;
         const float gridLeft =
@@ -469,7 +469,7 @@ void drawIdleQuickListContent(const PagePaintContext& context, ID2D1DeviceContex
                 const D2D1_RECT_F textRect =
                     D2D1::RectF(cell.left + 4.0f, cell.bottom - kIdleQuickNamedTextTopInsetDip,
                                 cell.right - 4.0f, cell.bottom - kIdleQuickNamedTextBottomInsetDip);
-                drawText(context, rt,
+                drawText(rt,
                          content.apps[i].name.empty() ? L"未命名应用" : content.apps[i].name,
                          fmtIdleApp, textRect, valid ? brushText : brushDisabled);
             }

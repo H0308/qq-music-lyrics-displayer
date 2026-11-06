@@ -10,10 +10,10 @@
 
 namespace settings_ui {
 struct SearchPaletteOwner {
-    HWND& hwnd;
-    HINSTANCE& inst;
+    const HWND& hwnd;
+    const HINSTANCE& inst;
     fluent::FluentDialogSurface& surface;
-    SettingsSections& sections;
+    const SettingsSections& sections;
     const std::array<std::wstring, kSettingsPageCount>& pageTitles;
     bool& focusVisible;
 };
@@ -23,9 +23,11 @@ public:
                           std::function<void(const SettingsSearchResult&)> onSelect)
         : owner_(owner), beforeOpen_(std::move(beforeOpen)), onSelect_(std::move(onSelect)) {}
     ~SettingsSearchPalette() { destroy(); }
+    SettingsSearchPalette(const SettingsSearchPalette&) = delete;
+    SettingsSearchPalette& operator=(const SettingsSearchPalette&) = delete;
     bool isOpen() const { return searchPaletteOpen; }
     bool animating() const { return searchPaletteAnimating; }
-    D2D1_RECT_F& triggerRect() { return searchTriggerRect; }
+    void setTriggerRect(const D2D1_RECT_F& rect) { searchTriggerRect = rect; }
     const D2D1_RECT_F& triggerRect() const { return searchTriggerRect; }
     bool consumeTriggerSuppression() {
         return std::exchange(suppressNextSearchTriggerPress, false);
@@ -38,6 +40,12 @@ public:
     }
     bool searching() const;
     void refreshSearch();
+    void advanceSearchPaletteAnimation();
+    void layoutSearchPalette();
+    void openSearchPalette();
+    void closeSearchPalette(bool restoreOwnerFocus, bool immediate = false);
+
+private:
     void selectSearchResult(int direction);
     void openSearchResult(int index);
     static LRESULT CALLBACK searchEditProc(HWND edit, UINT msg, WPARAM wp, LPARAM lp,
@@ -48,9 +56,7 @@ public:
     int searchPaletteOffsetYPx(float scale) const;
     void applySearchPaletteAnimationVisuals();
     void finalizeSearchPaletteClosed();
-    void advanceSearchPaletteAnimation();
     float searchPaletteDesiredHeightDip() const;
-    void layoutSearchPalette();
     void renderSearchScrim(int widthPx, int heightPx, UINT dpi);
     static LRESULT CALLBACK searchScrimWndProc(HWND window, UINT message, WPARAM wp, LPARAM lp);
     bool ensureSearchScrimWindow();
@@ -59,10 +65,6 @@ public:
                             float heightDip);
     static LRESULT CALLBACK searchPaletteWndProc(HWND window, UINT message, WPARAM wp, LPARAM lp);
     bool ensureSearchPaletteWindow();
-    void openSearchPalette();
-    void closeSearchPalette(bool restoreOwnerFocus, bool immediate = false);
-
-private:
     SearchPaletteOwner owner_;
     std::function<void()> beforeOpen_;
     std::function<void(const SettingsSearchResult&)> onSelect_;

@@ -1,6 +1,7 @@
 #include "song_toast.h"
 
 #include "util/com_release.h"
+#include "graphics/pixel_luminance.h"
 
 #include "fluent_theme.h"
 #include "logging/runtime_logger.h"
@@ -19,6 +20,7 @@
 #include <vector>
 
 namespace {
+using graphics::backdropLuminance;
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricSongToast";
 constexpr UINT_PTR kEnterTimer = 1;
@@ -60,55 +62,6 @@ constexpr float kArtistFontSize = 11.5f;
 // d2d1effects.h 只声明这个 GUID；与 media_popup.cpp 相同，这里保留内部定义。
 constexpr CLSID kGaussianBlurClsid = {
     0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
-
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-
-GdiplusInit g_gdiplusInit;
-
-float srgbChannelToLinear(BYTE value) {
-    const float channel = static_cast<float>(value) / 255.0f;
-    return channel <= 0.04045f
-               ? channel / 12.92f
-               : std::pow((channel + 0.055f) / 1.055f, 2.4f);
-}
-
-float backdropLuminance(const void* pixels, int width, int height) {
-    if (!pixels || width <= 0 || height <= 0)
-        return 0.0f;
-
-    const auto* bytes = static_cast<const BYTE*>(pixels);
-    const int step = std::max(1, std::min(width, height) / 96);
-    double total = 0.0;
-    int samples = 0;
-    for (int y = 0; y < height; y += step) {
-        for (int x = 0; x < width; x += step) {
-            const BYTE* pixel = bytes + (static_cast<size_t>(y) * width + x) * 4;
-            const float blue = srgbChannelToLinear(pixel[0]);
-            const float green = srgbChannelToLinear(pixel[1]);
-            const float red = srgbChannelToLinear(pixel[2]);
-            total += 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-            ++samples;
-        }
-    }
-    return samples > 0 ? static_cast<float>(total / samples) : 0.0f;
-}
 
 } // namespace
 

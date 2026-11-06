@@ -1,5 +1,6 @@
 #include "app/application_internal.h"
 #include "app/application.h"
+#include "graphics/gdiplus_runtime.h"
 namespace lyrics_app {
 void App::restartApplication() {
     if (shutdownRequested_)
@@ -288,6 +289,7 @@ int runApplication() {
         ~TimerResolution() { timeEndPeriod(1); }
     } timerResolution;
     winrt::init_apartment();
+    graphics::gdiplusStatus();
 
     App app;
     if (!app.initialize(GetModuleHandleW(nullptr), options.wantTaskbar))

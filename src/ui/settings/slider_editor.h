@@ -3,11 +3,12 @@
 #include <windows.h>
 #include <array>
 #include <functional>
+#include <utility>
 
 namespace settings_ui {
 inline constexpr UINT_PTR kSliderCaretTimer = 5;
 struct SliderEditorOwner {
-    HWND& hwnd;
+    const HWND& hwnd;
     int& focusedId;
     const D2D1_RECT_F& viewport;
     std::function<Row*(int)> findRow;

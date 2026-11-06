@@ -1,10 +1,13 @@
 #include "model/taskbar_appearance.h"
 #include "settings/app_settings.h"
+#include "settings/display_rules.h"
 
 TaskbarAppearance resolveTaskbarAppearance(const AppSettings& settings,
                                            const AppearanceContext& context) {
-    const bool vertical = context.vertical && settings.taskbarViewMode_ != TaskbarViewMode::AppBar;
-    const bool minimal = context.renderMode == RenderMode::Minimal;
+    const auto constraints =
+        display_rules::resolveConstraints(settings, context.renderMode, context.vertical);
+    const bool vertical = constraints.vertical;
+    const bool minimal = constraints.minimal;
     TaskbarAppearance result;
     result.secondaryLyricMode = {
         vertical ? false : (settings.secondaryLyricEnabled_ && !settings.preferRomanization_),

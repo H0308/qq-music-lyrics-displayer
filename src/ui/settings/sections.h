@@ -13,16 +13,29 @@ public:
     SettingsActions actions;
     std::array<std::vector<Row>, kSettingsPageCount> rows;
     Row* findRow(int id);
+    const Row* findRow(int id) const;
     bool minimalModeActive() const;
-    Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
-                float controlW, float height);
-    Row& addToggle(int page, int id, const wchar_t* text, bool checked);
-    void updateFloatingCardRowsEnabled();
     bool backgroundWaveActive() const;
     bool spectrumBackgroundAvailable() const;
+    int idleTextMode() const;
+    bool embeddedResourceOnlyAvailable() const;
+    void create();
+    void update(const SettingsState& s);
+    void onCommand(int id, int option = -1);
+    void updateFloatingCardRowsEnabled();
     void updateProgressBackgroundRowsEnabled();
     void updateBackgroundAdjustmentPresentation();
     void updateImmersiveRowsEnabled();
+    void updateIdleAppsRowHeight();
+    void updateTickTickRows();
+    void updateIdleQuoteSourceRow();
+    void updateIdleRowsEnabled();
+    void updateCompactLyricRows();
+
+private:
+    Row& addRow(int page, int id, ControlKind kind, const wchar_t* text, const wchar_t* hint,
+                float controlW, float height);
+    Row& addToggle(int page, int id, const wchar_t* text, bool checked);
     Row& addRadio(int page, int id, const wchar_t* text, const wchar_t* hint,
                   std::vector<std::wstring> options, int selected, bool enabled, float height);
     Row& addModeGrid(int page, int id, const wchar_t* text, const wchar_t* hint,
@@ -32,12 +45,6 @@ public:
                    const wchar_t* hint = nullptr, float height = kRowH);
     Row& addButton(int page, int id, const wchar_t* text, const wchar_t* hint,
                    const wchar_t* controlText, float height = kRowH);
-    void updateIdleAppsRowHeight();
-    void updateTickTickRows();
-    void updateIdleQuoteSourceRow();
-    int idleTextMode() const;
-    bool embeddedResourceOnlyAvailable() const;
-    void updateIdleRowsEnabled();
     Row& addHeader(int page, const wchar_t* text);
     void createDisplayRows();
     void createTaskbarModeRows();
@@ -47,13 +54,10 @@ public:
     void createFloatingCardRows();
     void createSongToastRows();
     void createPerformanceRows();
-    void create();
     bool onIdleCommand(int id, Row* row, int option);
     bool onSpectrumCommand(int id, Row* row);
     bool onFloatingCardCommand(int id, Row* row);
     bool onSongToastCommand(int id, Row* row);
-    void onCommand(int id, int option = -1);
-    void updateCompactLyricRows();
     void syncIdleRows(const SettingsState& s);
     void syncDisplayRows(const SettingsState& s);
     void syncTaskbarModeRows(const SettingsState& s);
@@ -62,7 +66,5 @@ public:
     void syncFloatingCardRows(const SettingsState& s);
     void syncSongToastRows(const SettingsState& s);
     void syncThemeFontRows(const SettingsState& s);
-    void update(const SettingsState& s);
-    const Row* findRow(int id) const;
 };
 } // namespace settings_ui

@@ -1013,8 +1013,7 @@ SettingsState App::currentSettingsState() const {
     st.platformIconVisible = settings_.platformIconVisible_;
     st.coverEffectVinyl = settings_.albumCoverEffect_ == AlbumCoverEffect::Vinyl;
     st.spectrumOn = vertical ? false : settings_.spectrumOn_;
-    st.spectrumStyle =
-        spectrumStyleIndex(vertical ? SpectrumStyle::Default : settings_.spectrumStyle_);
+    st.spectrumStyle = spectrumStyleIndex(view.spectrumStyle);
     st.spectrumColor = settings_.spectrumColor_;
     st.spectrumCustomColor = view.spectrumColor.customized;
     st.spectrumFollowAlbum = view.spectrumColor.followAlbum;

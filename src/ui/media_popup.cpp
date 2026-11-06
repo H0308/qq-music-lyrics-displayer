@@ -5,6 +5,7 @@
 #include "ui/media_popup/page_painter.h"
 
 #include "util/com_release.h"
+#include "graphics/pixel_luminance.h"
 
 #include "dock_pet.h"
 #include "fluent_theme.h"
@@ -33,6 +34,7 @@ using namespace media_popup_detail;
 using media_popup_paint::sourceLabel;
 
 namespace {
+using graphics::backdropLuminance;
 
 constexpr wchar_t kWndClassName[] = L"QQMusicLyricMediaPopup";
 constexpr UINT_PTR kShowTimer = 1;
@@ -72,65 +74,14 @@ constexpr float kVolumeSliderMs = 140.0f;
 constexpr CLSID kGaussianBlurClsid = {
     0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
 
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-
-GdiplusInit g_gdiplusInit;
 
 bool contains(const D2D1_RECT_F& rect, float x, float y) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-
-
-
 D2D1_COLOR_F colorFromRef(COLORREF color, float alpha) {
     return D2D1::ColorF(GetRValue(color) / 255.0f, GetGValue(color) / 255.0f,
                         GetBValue(color) / 255.0f, alpha);
-}
-
-float srgbChannelToLinear(BYTE value) {
-    const float channel = static_cast<float>(value) / 255.0f;
-    return channel <= 0.04045f
-               ? channel / 12.92f
-               : std::pow((channel + 0.055f) / 1.055f, 2.4f);
-}
-
-float backdropLuminance(const void* pixels, int width, int height) {
-    if (!pixels || width <= 0 || height <= 0)
-        return 0.0f;
-
-    const auto* bytes = static_cast<const BYTE*>(pixels);
-    const int step = std::max(1, std::min(width, height) / 96);
-    double total = 0.0;
-    int samples = 0;
-    for (int y = 0; y < height; y += step) {
-        for (int x = 0; x < width; x += step) {
-            const BYTE* pixel = bytes + (static_cast<size_t>(y) * width + x) * 4;
-            const float blue = srgbChannelToLinear(pixel[0]);
-            const float green = srgbChannelToLinear(pixel[1]);
-            const float red = srgbChannelToLinear(pixel[2]);
-            total += 0.2126 * red + 0.7152 * green + 0.0722 * blue;
-            ++samples;
-        }
-    }
-    return samples > 0 ? static_cast<float>(total / samples) : 0.0f;
 }
 
 } // namespace
@@ -1143,7 +1094,7 @@ struct MediaPopup::Impl {
     bool createMeasuredTextLayout(const std::wstring& text, IDWriteTextFormat* format,
                                   float layoutHeight, IDWriteTextLayout** out, float& width,
                                   float& height) {
-        return media_popup_paint::createMeasuredTextLayout(pagePaintContext(), text, format,
+        return media_popup_paint::createMeasuredTextLayout(renderer.dwrite(), text, format,
                                                            layoutHeight, out, width, height);
     }
 
@@ -1425,7 +1376,7 @@ struct MediaPopup::Impl {
 
     void drawText(ID2D1DeviceContext* rt, const std::wstring& text, IDWriteTextFormat* format,
                   const D2D1_RECT_F& rect, ID2D1Brush* brush) {
-        media_popup_paint::drawText(pagePaintContext(), rt, text, format, rect, brush);
+        media_popup_paint::drawText(rt, text, format, rect, brush);
     }
 
     void drawScrollingText(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textWidth,
@@ -1437,12 +1388,12 @@ struct MediaPopup::Impl {
 
     void drawChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
                      ID2D1Brush* brush, bool right = true) {
-        media_popup_paint::drawChevron(pagePaintContext(), rt, center, size, brush, right);
+        media_popup_paint::drawChevron(rt, center, size, brush, right);
     }
 
     void drawVerticalChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
                              ID2D1Brush* brush, bool up) {
-        media_popup_paint::drawVerticalChevron(pagePaintContext(), rt, center, size, brush, up);
+        media_popup_paint::drawVerticalChevron(rt, center, size, brush, up);
     }
 
     bool usesBlackTextForControls(PopupPage page) {

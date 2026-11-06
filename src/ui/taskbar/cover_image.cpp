@@ -14,25 +14,6 @@ constexpr CLSID kGaussianBlurClsid = {
 constexpr CLSID kScaleClsid = {
     0x9daf9369, 0x3846, 0x4d0e, {0xa4, 0x4e, 0x0c, 0x60, 0x79, 0x34, 0xa5, 0xd7}};
 
-// GDI+ 一次性初始化（封面解码）
-class GdiplusInit {
-public:
-    GdiplusInit() {
-        Gdiplus::GdiplusStartupInput input;
-        Gdiplus::GdiplusStartupOutput output;
-        ULONG_PTR token = 0;
-        Gdiplus::GdiplusStartup(&token, &input, &output);
-        token_ = token;
-    }
-    ~GdiplusInit() {
-        if (token_)
-            Gdiplus::GdiplusShutdown(token_);
-    }
-
-private:
-    ULONG_PTR token_ = 0;
-};
-GdiplusInit g_gdiplusInit;
 
 } // namespace
 void CoverImage::decode(ID2D1DeviceContext* rt, const std::vector<uint8_t>* bytes, UINT dpi,

@@ -58,8 +58,8 @@ IdlePageLayout layoutFor(const PagePaintContext& context, const IdlePresentation
                                    context.state.idlePanelManual) ||
                 context.state.categoryTransition.active()};
 }
-void drawText(const PagePaintContext& context, ID2D1DeviceContext* rt, const std::wstring& text,
-              IDWriteTextFormat* format, const D2D1_RECT_F& rect, ID2D1Brush* brush) {
+void drawText(ID2D1DeviceContext* rt, const std::wstring& text, IDWriteTextFormat* format,
+              const D2D1_RECT_F& rect, ID2D1Brush* brush) {
 
     if (text.empty() || !format || !brush)
         return;
@@ -99,8 +99,8 @@ void drawScrollingText(const PagePaintContext& context, ID2D1DeviceContext* rt,
         rt->PopLayer();
 }
 
-void drawChevron(const PagePaintContext& context, ID2D1DeviceContext* rt, D2D1_POINT_2F center,
-                 float size, ID2D1Brush* brush, bool right) {
+void drawChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
+                 ID2D1Brush* brush, bool right) {
 
     if (!rt || !brush)
         return;
@@ -114,8 +114,8 @@ void drawChevron(const PagePaintContext& context, ID2D1DeviceContext* rt, D2D1_P
     rt->DrawLine(middle, bottom, brush, 1.35f);
 }
 
-void drawVerticalChevron(const PagePaintContext& context, ID2D1DeviceContext* rt,
-                         D2D1_POINT_2F center, float size, ID2D1Brush* brush, bool up) {
+void drawVerticalChevron(ID2D1DeviceContext* rt, D2D1_POINT_2F center, float size,
+                         ID2D1Brush* brush, bool up) {
 
     if (!rt || !brush)
         return;
@@ -241,7 +241,7 @@ void drawCopyButton(const PagePaintContext& context, ID2D1DeviceContext* rt,
     }
 }
 
-bool createMeasuredTextLayout(const PagePaintContext& context, const std::wstring& text,
+bool createMeasuredTextLayout(IDWriteFactory* factory, const std::wstring& text,
                               IDWriteTextFormat* format, float layoutHeight,
                               IDWriteTextLayout** out, float& width, float& height) {
 
@@ -250,10 +250,10 @@ bool createMeasuredTextLayout(const PagePaintContext& context, const std::wstrin
     if (!out)
         return false;
     *out = nullptr;
-    if (!context.factory || !format || text.empty())
+    if (!factory || !format || text.empty())
         return false;
-    if (FAILED(context.factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
-                                                 format, 100000.0f, layoutHeight, out)) ||
+    if (FAILED(factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+                                         format, 100000.0f, layoutHeight, out)) ||
         !*out)
         return false;
 

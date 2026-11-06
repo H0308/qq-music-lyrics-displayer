@@ -54,6 +54,8 @@ set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/resource.rc
 
 add_executable(QQMusicLyric
     src/main.cpp
+    src/graphics/gdiplus_runtime.cpp
+    src/graphics/pixel_luminance.cpp
     src/settings/taskbar_appearance.cpp
     src/settings/display_rules.cpp
     src/ui/taskbar/resource_panel.cpp
@@ -64,6 +66,7 @@ add_executable(QQMusicLyric
     src/ui/taskbar/text_scroll.cpp
     src/ui/taskbar/lyric_text_renderer.cpp
     src/ui/taskbar/interaction.cpp
+    src/ui/taskbar/scene_transition.cpp
     src/ui/settings/sections_create.cpp
     src/ui/settings/sections_state.cpp
     src/ui/settings/sections_commands.cpp

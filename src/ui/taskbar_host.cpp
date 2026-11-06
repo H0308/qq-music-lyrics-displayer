@@ -1,6 +1,7 @@
 #include "taskbar_host.h"
 #include "ui/taskbar/vinyl_animation.h"
 #include "ui/taskbar/lyric_transition.h"
+#include "ui/taskbar/scene_transition.h"
 #include "ui/taskbar/lyric_typesetter.h"
 #include "ui/taskbar/karaoke_tracker.h"
 #include "ui/taskbar/text_scroll.h"
@@ -129,7 +130,7 @@ constexpr float kVerticalMinLengthDip = 220.0f;
 constexpr float kVerticalMaxLengthDip = 320.0f;
 
 constexpr float kLyricTransitionMs = 280.0f;         // 相邻歌词上下切换时长
-constexpr float kSceneTransitionMs = 240.0f;         // 每日一言与歌词内容块上下翻页时长
+constexpr float kSceneTransitionMs = taskbar_detail::SceneTransition::kDurationMs;
 constexpr float kSongTransitionMs = 220.0f;          // 切歌时新内容滑入时长
 constexpr float kSongTransitionTravelDip = 24.0f;    // 切歌时新内容的水平入场距离
 constexpr float kLyricPreviewGap = 3.0f;             // 普通双行模式的核心行与下一行间距
@@ -264,16 +265,57 @@ struct TaskbarHost::Impl {
     VinylAnimation vinyl_;
     RenderState renderState_;
     std::optional<TaskbarAppearance> appearance_;
-    bool applyingAppearance_ = false;
-    bool appearancePositionPending_ = false;
-    bool appearanceBrushesPending_ = false;
-    bool appearanceFormatsPending_ = false;
-    bool appearancePaintPending_ = false;
+    unsigned updateDepth_ = 0;
+    bool committingUpdates_ = false;
+    bool rendering_ = false;
+    bool positionPending_ = false;
+    bool brushesPending_ = false;
+    bool formatsPending_ = false;
+    bool paintPending_ = false;
+
+    // 完整状态写入期间只收集副作用，最外层提交统一执行资源、定位和绘制。
+    class UpdateScope {
+    public:
+        explicit UpdateScope(Impl& owner) : owner_(owner) { ++owner_.updateDepth_; }
+        ~UpdateScope() {
+            if (--owner_.updateDepth_ == 0 && !owner_.committingUpdates_)
+                owner_.commitPendingUpdates();
+        }
+        UpdateScope(const UpdateScope&) = delete;
+        UpdateScope& operator=(const UpdateScope&) = delete;
+    private:
+        Impl& owner_;
+    };
+
+    void commitPendingUpdates() {
+        committingUpdates_ = true;
+        // 定位产生的同步窗口消息可能追加设置更新；先处理完资源与位置，再画一帧。
+        while (formatsPending_ || brushesPending_ || positionPending_) {
+            if (std::exchange(formatsPending_, false))
+                recreateFormats();
+            if (std::exchange(brushesPending_, false))
+                createLyricBrushes();
+            if (std::exchange(positionPending_, false))
+                adjustPosition();
+        }
+        committingUpdates_ = false;
+        if (std::exchange(paintPending_, false))
+            flushRenderRequest();
+    }
 
     void applyAppearance(const TaskbarAppearance& value) {
         if (appearance_ && *appearance_ == value)
             return;
-        applyingAppearance_ = true;
+        const UpdateScope update(*this);
+        applyTextAppearance(value);
+        applyPopupAppearance(value);
+        applyPlaybackVisualAppearance(value);
+        applyBackgroundAppearance(value);
+        applyCoverAndFontAppearance(value);
+        appearance_ = value;
+    }
+
+    void applyTextAppearance(const TaskbarAppearance& value) {
         if (!appearance_ || appearance_->secondaryLyricMode != value.secondaryLyricMode)
             setSecondaryLyricMode(value.secondaryLyricMode.translation,
                                   value.secondaryLyricMode.romanization);
@@ -287,6 +329,9 @@ struct TaskbarHost::Impl {
             setIdleQuoteAlignment(value.idleQuoteAlignment);
         if (!appearance_ || appearance_->songInfoVisible != value.songInfoVisible)
             setSongInfoVisible(value.songInfoVisible);
+    }
+
+    void applyPopupAppearance(const TaskbarAppearance& value) {
         if (!appearance_ || appearance_->controlsOnHover != value.controlsOnHover)
             setControlsOnHover(value.controlsOnHover);
         if (!appearance_ || appearance_->hoverControlStyle != value.hoverControlStyle)
@@ -308,6 +353,9 @@ struct TaskbarHost::Impl {
         if (!appearance_ ||
             appearance_->floatingCardAutoTextContrast != value.floatingCardAutoTextContrast)
             setFloatingCardAutoTextContrast(value.floatingCardAutoTextContrast);
+    }
+
+    void applyPlaybackVisualAppearance(const TaskbarAppearance& value) {
         if (!appearance_ || appearance_->albumCoverEffect != value.albumCoverEffect)
             setAlbumCoverEffect(value.albumCoverEffect);
         if (!appearance_ || appearance_->spectrumStyle != value.spectrumStyle)
@@ -331,6 +379,9 @@ struct TaskbarHost::Impl {
         if (!appearance_ ||
             appearance_->progressBackgroundOpacity != value.progressBackgroundOpacity)
             setProgressBackgroundOpacity(value.progressBackgroundOpacity);
+    }
+
+    void applyBackgroundAppearance(const TaskbarAppearance& value) {
         if (!appearance_ || appearance_->background != value.background)
             setBackground(value.background);
         if (!appearance_ || appearance_->coverBackgroundOpacity != value.coverBackgroundOpacity)
@@ -346,6 +397,9 @@ struct TaskbarHost::Impl {
             setDockBackgroundBlur(value.dockBackgroundBlur);
         if (!appearance_ || appearance_->dockResourceVisibility != value.dockResourceVisibility)
             setDockResourceVisibility(value.dockResourceVisibility);
+    }
+
+    void applyCoverAndFontAppearance(const TaskbarAppearance& value) {
         if (!appearance_ || appearance_->albumCoverVisible != value.albumCoverVisible)
             setAlbumCoverVisible(value.albumCoverVisible);
         if (!appearance_ || appearance_->platformIconVisible != value.platformIconVisible)
@@ -361,20 +415,6 @@ struct TaskbarHost::Impl {
             setFontOutline(value.fontOutline);
         if (!appearance_ || appearance_->fontGlowColors != value.fontGlowColors)
             setFontGlowColors(value.fontGlowColors.glow, value.fontGlowColors.outline);
-        appearance_ = value;
-        applyingAppearance_ = false;
-        const bool formats = std::exchange(appearanceFormatsPending_, false);
-        const bool brushes = std::exchange(appearanceBrushesPending_, false);
-        const bool position = std::exchange(appearancePositionPending_, false);
-        const bool paint = std::exchange(appearancePaintPending_, false);
-        if (formats)
-            recreateFormats();
-        if (brushes)
-            createLyricBrushes();
-        if (position)
-            adjustPosition();
-        if (paint)
-            flushRenderRequest();
     }
 
     HINSTANCE inst = nullptr;
@@ -618,13 +658,7 @@ struct TaskbarHost::Impl {
     // 歌曲信息与歌词之间的悬浮分隔线，使用上下渐隐的主题色画刷
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> songInfoDividerBrush_;
     media_control::Geometry controlGeometry;
-    struct SceneResizeAnimation {
-        WindowPlacement from{};
-        WindowPlacement to{};
-        WindowPlacement lastApplied{};
-        ULONGLONG startMs = 0;
-    };
-    std::optional<SceneResizeAnimation> sceneResize_;
+    taskbar_detail::SceneTransition sceneTransition_;
     struct SongContentTransition {
         ULONGLONG startMs = 0;
         bool compositorLayer = false;
@@ -698,7 +732,7 @@ struct TaskbarHost::Impl {
         return songContentTransition_ && songContentTransition_->compositorLayer;
     }
 
-    bool isSceneResizeActive() const { return sceneResize_.has_value(); }
+    bool isSceneResizeActive() const { return sceneTransition_.resizing(); }
 
     void requestInvalidation(RenderInvalidation value) { renderState_.requestInvalidation(value); }
 
@@ -711,8 +745,12 @@ struct TaskbarHost::Impl {
     void requestFrame() { requestInvalidation(RenderInvalidation::Paint); }
 
     void flushRenderRequest() {
-        if (applyingAppearance_) {
-            appearancePaintPending_ = true;
+        if (updateDepth_ != 0 || committingUpdates_) {
+            paintPending_ = true;
+            return;
+        }
+        if (rendering_) {
+            requestFrame();
             return;
         }
         if (isWindowVisible() && hwnd)
@@ -1342,8 +1380,8 @@ struct TaskbarHost::Impl {
     }
 
     void adjustPosition() {
-        if (applyingAppearance_) {
-            appearancePositionPending_ = true;
+        if (updateDepth_ != 0) {
+            positionPending_ = true;
             return;
         }
         if (drag_.dragging())
@@ -1357,11 +1395,9 @@ struct TaskbarHost::Impl {
         WindowPlacement placement;
         const TaskbarPlacementStatus status = calculateWindowPlacement(placement);
         // 探测到的按钮变化未影响最终位置时，继续场景尺寸动画，避免中途跳到终点。
-        if (sceneResize_ && status != TaskbarPlacementStatus::Unavailable &&
+        if (status != TaskbarPlacementStatus::Unavailable &&
             status != TaskbarPlacementStatus::NoSpace &&
-            placement.x == sceneResize_->to.x && placement.y == sceneResize_->to.y &&
-            placement.width == sceneResize_->to.width &&
-            placement.height == sceneResize_->to.height)
+            sceneTransition_.targets(placement))
             return;
         cancelSceneWindowResize();
         if (status != TaskbarPlacementStatus::Unavailable &&
@@ -1678,8 +1714,8 @@ struct TaskbarHost::Impl {
 
     // 歌词与黑胶画刷：随用户颜色重建，与主题画刷解耦
     void createLyricBrushes() {
-        if (applyingAppearance_) {
-            appearanceBrushesPending_ = true;
+        if (updateDepth_ != 0) {
+            brushesPending_ = true;
             return;
         }
         auto* rt = renderer.renderTarget();
@@ -1824,13 +1860,11 @@ struct TaskbarHost::Impl {
     }
 
     static bool isTaskbarMediaScene(DisplayScene scene) {
-        return scene == DisplayScene::Searching || scene == DisplayScene::Lyrics ||
-               scene == DisplayScene::Spectrum || scene == DisplayScene::Message;
+        return taskbar_detail::SceneTransition::isMediaScene(scene);
     }
 
     static bool isTaskbarSceneTransition(DisplayScene from, DisplayScene to) {
-        return (from == DisplayScene::Idle && isTaskbarMediaScene(to)) ||
-               (isTaskbarMediaScene(from) && to == DisplayScene::Idle);
+        return taskbar_detail::SceneTransition::switchesPage(from, to);
     }
 
     bool mediaPopupEnabledForScene() const {
@@ -2383,7 +2417,7 @@ struct TaskbarHost::Impl {
             // 场景翻页期间不重排目标层，先记下最新歌词行，待翻页完成后
             // 统一提交，避免目标层重建把上下翻页打断成瞬移。
             currentLine = patch.currentLine;
-            transition_.setNeedsRelayout(true);
+            sceneTransition_.setNeedsRelayout(true);
             transition_.setRevision(frameRevision_);
             return;
         }
@@ -2404,6 +2438,7 @@ struct TaskbarHost::Impl {
              frame.trackKey != trackKey_))
             return;
 
+        const UpdateScope update(*this);
         const bool trackChanged = frame.trackKey != trackKey_;
         syncLyricEffectClock(frame.actualPositionMs, frame.media.playing, trackChanged);
         if (trackChanged)
@@ -2466,15 +2501,13 @@ struct TaskbarHost::Impl {
             if (continueSceneTransition) {
                 // Searching/Spectrum/Message 都属于播放侧内容。歌词加载完成时
                 // 继续同一页翻转，不能把中间场景当成一次新的类别切换。
-                transition_.setNeedsRelayout(true);
+                sceneTransition_.setNeedsRelayout(true);
                 transition_.setRevision(frame.frameRevision);
             } else {
                 resetLyricTransition();
                 if (shouldAnimateScene) {
-                    transition_.setOutgoingScene(scene_);
+                    sceneTransition_.beginContent(scene_, lastLogicalPxW_, lastLogicalPxH_);
                     transition_.setOutgoingDoubleLine(lyricLayoutDoubleLine_);
-                    transition_.setFromWidth(lastLogicalPxW_);
-                    transition_.setFromHeight(lastLogicalPxH_);
                     transition_.setKind(LyricTransitionKind::Scene);
                     transition_.setDirection(frame.scene == DisplayScene::Lyrics ? 1 : -1);
                     setLyricTransitionPending();
@@ -2532,13 +2565,13 @@ struct TaskbarHost::Impl {
                 nextLyricHeight_ = 0.0f;
                 requestInvalidation(RenderInvalidation::Text);
             } else if (!sceneChanged || continueSceneTransition) {
-                transition_.setNeedsRelayout(true);
+                sceneTransition_.setNeedsRelayout(true);
                 transition_.setRevision(frame.frameRevision);
             }
         } else if (lineChanged) {
             if (sceneTransitionInProgress) {
                 currentLine = frame.currentLine;
-                transition_.setNeedsRelayout(true);
+                sceneTransition_.setNeedsRelayout(true);
                 transition_.setRevision(frame.frameRevision);
             } else {
                 onLyricLineTargetChanged(frame.currentLine, frame.actualPositionMs,
@@ -2550,7 +2583,7 @@ struct TaskbarHost::Impl {
         }
         if (statusChanged || statusOneShotChanged || sceneChanged) {
             if (sceneTransitionInProgress && (!sceneChanged || continueSceneTransition)) {
-                transition_.setNeedsRelayout(true);
+                sceneTransition_.setNeedsRelayout(true);
                 transition_.setRevision(frame.frameRevision);
             } else {
                 requestInvalidation(RenderInvalidation::Text);
@@ -2681,7 +2714,7 @@ struct TaskbarHost::Impl {
                spectrumExtraForScene(from) != spectrumExtraForScene(to);
     }
 
-    void cancelSceneWindowResize() { sceneResize_.reset(); }
+    void cancelSceneWindowResize() { sceneTransition_.cancelResize(); }
 
     bool beginSceneWindowResize() {
         if (isExpandedView())
@@ -2694,47 +2727,14 @@ struct TaskbarHost::Impl {
         if (placementStatus == TaskbarPlacementStatus::Unavailable ||
             placementStatus == TaskbarPlacementStatus::NoSpace)
             return false;
-        if (from.x == to.x && from.y == to.y && from.width == to.width &&
-            from.height == to.height) {
-            cancelSceneWindowResize();
-            return false;
-        }
-
-        sceneResize_ = SceneResizeAnimation{from, to, from, monotonicNowMs()};
-        return true;
+        return sceneTransition_.beginResize(from, to, monotonicNowMs());
     }
 
     bool updateSceneWindowResize(ULONGLONG now) {
-        if (!sceneResize_)
+        if (!isSceneResizeActive())
             return false;
-        SceneResizeAnimation& resize = *sceneResize_;
-        if (now < resize.startMs)
-            now = resize.startMs;
-
-        const float progress =
-            std::clamp(static_cast<float>(now - resize.startMs) / kSceneTransitionMs, 0.0f, 1.0f);
-        const float t = smoothStep(progress);
-        WindowPlacement placement;
-        placement.x =
-            static_cast<int>(std::lround(resize.from.x + (resize.to.x - resize.from.x) * t));
-        placement.y =
-            static_cast<int>(std::lround(resize.from.y + (resize.to.y - resize.from.y) * t));
-        placement.width = static_cast<int>(
-            std::lround(resize.from.width + (resize.to.width - resize.from.width) * t));
-        placement.height = static_cast<int>(
-            std::lround(resize.from.height + (resize.to.height - resize.from.height) * t));
-
-        const bool changed = placement.x != resize.lastApplied.x ||
-                             placement.y != resize.lastApplied.y ||
-                             placement.width != resize.lastApplied.width ||
-                             placement.height != resize.lastApplied.height;
-        if (changed) {
-            applyWindowPlacement(placement, false, true);
-            resize.lastApplied = placement;
-        }
-        if (progress >= 1.0f) {
-            sceneResize_.reset();
-        }
+        if (const auto placement = sceneTransition_.advanceResize(now))
+            applyWindowPlacement(*placement, false, true);
         return true;
     }
 
@@ -3446,8 +3446,8 @@ struct TaskbarHost::Impl {
     }
 
     void recreateFormats() {
-        if (applyingAppearance_) {
-            appearanceFormatsPending_ = true;
+        if (updateDepth_ != 0) {
+            formatsPending_ = true;
             return;
         }
         recreateResourceFormat();
@@ -3762,9 +3762,8 @@ struct TaskbarHost::Impl {
         }
         clearLyricTransitionPhase();
         transition_.setKind(LyricTransitionKind::None);
-        transition_.setOutgoingScene(DisplayScene::NoPlayback);
+        sceneTransition_.resetContent();
         transition_.setOutgoingDoubleLine(false);
-        transition_.setNeedsRelayout(false);
         transition_.setStartMs(0);
         transition_.setRevision(0);
         transition_.clearTarget();
@@ -3792,7 +3791,7 @@ struct TaskbarHost::Impl {
     // 自然转场中的新行保留逐字追赶过程，避免收尾时又跳到真实位置。
     void finalizeLyricTransition(ULONGLONG now) {
         const bool sceneTransition = transition_.kind() == LyricTransitionKind::Scene;
-        const bool sceneNeedsRelayout = transition_.needsRelayout();
+        const bool sceneNeedsRelayout = sceneTransition_.needsRelayout();
         requestLyricDCompEnd();
         releaseOutgoingLyricLayouts();
         clearLyricTransitionPhase();
@@ -3802,9 +3801,8 @@ struct TaskbarHost::Impl {
             // 类别转场不消费歌词行的 pendingTarget；场景稳定后用最新完整帧
             // 再做一次排版，避免把转场期间收到的歌词行状态写回旧布局。
             transition_.setKind(LyricTransitionKind::None);
-            transition_.setOutgoingScene(DisplayScene::NoPlayback);
+            sceneTransition_.resetContent();
             transition_.setOutgoingDoubleLine(false);
-            transition_.setNeedsRelayout(false);
             transition_.clearTarget();
             transition_.clearPending();
             transition_.setRevision(0);
@@ -3828,7 +3826,7 @@ struct TaskbarHost::Impl {
                                   positionMs_, karaokeLine() != nullptr, now);
         clearLyricTransitionPhase();
         transition_.setKind(LyricTransitionKind::None);
-        transition_.setOutgoingScene(DisplayScene::NoPlayback);
+        sceneTransition_.resetContent();
         transition_.setOutgoingDoubleLine(false);
     }
 
@@ -3966,7 +3964,10 @@ struct TaskbarHost::Impl {
         if (preparedTransition) {
             if (typesetter_.resources().lyricLayout_.Get()) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
-                transition_.setStartMs(monotonicNowMs());
+                const auto startMs = monotonicNowMs();
+                transition_.setStartMs(startMs);
+                if (transition_.kind() == LyricTransitionKind::Scene)
+                    sceneTransition_.synchronizeResizeStart(startMs);
                 setLyricTransitionActive();
                 transition_.setRevision(frameRevision_);
             } else {
@@ -5122,7 +5123,7 @@ struct TaskbarHost::Impl {
             idleScene ? static_cast<ID2D1Brush*>(brushText_.Get())
                       : static_cast<ID2D1Brush*>(brushLyric_.Get() ? brushLyric_.Get()
                                                                    : brushText_.Get());
-        const bool outgoingIdleScene = transition_.outgoingScene() == DisplayScene::Idle;
+        const bool outgoingIdleScene = sceneTransition_.outgoingScene() == DisplayScene::Idle;
         ID2D1Brush* outgoingBrush =
             outgoingIdleScene ? static_cast<ID2D1Brush*>(brushText_.Get()) : primaryBrush;
         ID2D1Brush* effectOutline = !idleScene && lyricOutline_
@@ -5405,11 +5406,11 @@ struct TaskbarHost::Impl {
             return;
 
         const int outgoingPxW =
-            transition_.fromWidth() > 0 ? transition_.fromWidth() : lastLogicalPxW_;
+            sceneTransition_.fromWidth() > 0 ? sceneTransition_.fromWidth() : lastLogicalPxW_;
         const int outgoingPxH =
-            transition_.fromHeight() > 0 ? transition_.fromHeight() : lastLogicalPxH_;
+            sceneTransition_.fromHeight() > 0 ? sceneTransition_.fromHeight() : lastLogicalPxH_;
         const LyricArea outgoingArea =
-            lyricAreaForScene(transition_.outgoingScene(), outgoingPxW, outgoingPxH);
+            lyricAreaForScene(sceneTransition_.outgoingScene(), outgoingPxW, outgoingPxH);
         const LyricTransitionSample transition = lyricTransitionSample();
         const float movementT = transition.movement;
         const float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
@@ -5439,9 +5440,9 @@ struct TaskbarHost::Impl {
             return brushLyric_.Get() ? static_cast<ID2D1Brush*>(brushLyric_.Get())
                                      : static_cast<ID2D1Brush*>(brushText_.Get());
         };
-        const bool outgoingEffects = transition_.outgoingScene() != DisplayScene::Idle;
+        const bool outgoingEffects = sceneTransition_.outgoingScene() != DisplayScene::Idle;
         const bool incomingEffects = scene_ != DisplayScene::Idle;
-        ID2D1Brush* outgoingBrush = primaryBrushForScene(transition_.outgoingScene());
+        ID2D1Brush* outgoingBrush = primaryBrushForScene(sceneTransition_.outgoingScene());
         ID2D1Brush* incomingBrush = primaryBrushForScene(scene_);
         ID2D1Brush* outgoingOutline =
             outgoingEffects && lyricOutline_ ? brushLyricOutline_.Get() : nullptr;
@@ -5461,7 +5462,7 @@ struct TaskbarHost::Impl {
             typesetter_.resources().outgoingLyricLayout_.Get(), outgoingLyricWidth_,
             outgoingLyricHeight_, outgoingArea.w, outgoingArea.x, outgoingY + oldShift,
             outgoingLyricScrollOffset_, outgoingBrush, outgoingOutline, outgoingGlow, nullptr, 0.0f,
-            1.0f - transition.fadeOut, lyricAlignmentForScene(transition_.outgoingScene()));
+            1.0f - transition.fadeOut, lyricAlignmentForScene(sceneTransition_.outgoingScene()));
         if (transition_.outgoingDoubleLine() &&
             typesetter_.resources().outgoingNextLyricLayout_.Get()) {
             ID2D1Brush* previewBrush = brushLyricDim_.Get()
@@ -5472,14 +5473,14 @@ struct TaskbarHost::Impl {
                 outgoingNextLyricHeight_, outgoingArea.w, outgoingArea.x,
                 outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f, previewBrush,
                 nullptr, nullptr, nullptr, 0.0f, kLyricPreviewOpacity * (1.0f - transition.fadeOut),
-                lyricAlignmentForScene(transition_.outgoingScene()), true);
+                lyricAlignmentForScene(sceneTransition_.outgoingScene()), true);
         } else if (typesetter_.resources().outgoingSecondaryLayout_.Get()) {
             drawLyricScrollingTextAligned(
                 typesetter_.resources().outgoingSecondaryLayout_.Get(), outgoingSecondaryWidth_,
                 outgoingSecondaryHeight_, outgoingArea.w, outgoingArea.x,
                 outgoingY + outgoingLyricHeight_ + 1.0f + oldShift, outgoingSecondaryScrollOffset_,
                 brushDim_.Get(), nullptr, nullptr, nullptr, 0.0f, 1.0f - transition.fadeOut,
-                lyricAlignmentForScene(transition_.outgoingScene()));
+                lyricAlignmentForScene(sceneTransition_.outgoingScene()));
         }
 
         drawLyricScrollingTextAligned(
@@ -6101,12 +6102,23 @@ struct TaskbarHost::Impl {
     }
 
     void render() {
-        if (applyingAppearance_) {
-            appearancePaintPending_ = true;
+        if (updateDepth_ != 0) {
+            requestFrame();
+            paintPending_ = true;
+            return;
+        }
+        if (rendering_) {
+            requestFrame();
             return;
         }
         if (!isWindowVisible() || !hwnd)
             return;
+
+        struct RenderScope {
+            bool& active;
+            explicit RenderScope(bool& value) : active(value) { active = true; }
+            ~RenderScope() { active = false; }
+        } renderScope(rendering_);
 
         int currentWidth = 0;
         int currentHeight = 0;
@@ -6116,7 +6128,7 @@ struct TaskbarHost::Impl {
 
         if (isExpandedView() && isSceneResizeActive())
             cancelSceneWindowResize();
-        if (isSceneResizeActive())
+        if (isSceneResizeActive() && !isLyricTransitionPending())
             updateSceneWindowResize(monotonicNowMs());
 
         // 先调整窗口，再读取客户区并绑定位图，避免用旧尺寸的位图提交后
@@ -6850,13 +6862,16 @@ struct TaskbarHost::Impl {
     }
 
     void processPlacementProbe() {
-        updateDisplayRefresh();
         const bool probeWasReady = probeReady_;
-        bool changed = detectChanges();
-        if (pickProbeResult())
-            changed = true;
-        if (changed)
-            adjustPosition();
+        {
+            const UpdateScope update(*this);
+            updateDisplayRefresh();
+            bool changed = detectChanges();
+            if (pickProbeResult())
+                changed = true;
+            if (changed)
+                adjustPosition();
+        }
         if (!probeWasReady && probeReady_) {
             // 首次真实探测结果到达后再决定是否显示；否则创建期间可能先按
             // 空占用区显示一帧，随后被 UIA/窗口探测结果立即隐藏而产生闪烁。

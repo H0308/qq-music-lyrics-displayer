@@ -859,7 +859,7 @@ struct SettingsDialog::Impl {
         const float w = std::max(0.0f, static_cast<float>(rc.right - rc.left) / s);
         const float h = std::max(0.0f, static_cast<float>(rc.bottom - rc.top) / s);
 
-        search_.triggerRect() = D2D1::RectF(16.0f, 14.0f, 12.0f + kNavW - 4.0f, 48.0f);
+        search_.setTriggerRect(D2D1::RectF(16.0f, 14.0f, 12.0f + kNavW - 4.0f, 48.0f));
         navRect = D2D1::RectF(12.0f, 58.0f, 12.0f + kNavW, std::max(58.0f, h - 12.0f));
         for (int i = 0; i < kSettingsPageCount; ++i) {
             navItemRects[i] = D2D1::RectF(navRect.left, navRect.top + i * kNavItemH,
