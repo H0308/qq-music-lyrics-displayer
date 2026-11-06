@@ -1,33 +1,52 @@
 #include "taskbar_host.h"
+#include "ui/taskbar/vinyl_animation.h"
+#include "ui/taskbar/marquee.h"
+#include "ui/taskbar/lyric_transition.h"
+#include "ui/taskbar/lyric_typesetter.h"
+#include "ui/taskbar/lyric_effects_renderer.h"
+#include "ui/taskbar/appbar_registration.h"
+#include "ui/taskbar/placement.h"
+#include "ui/taskbar/placement_probe.h"
+using taskbar_detail::WindowPlacement;
+#include "ui/taskbar/spectrum_renderer.h"
+#include "ui/taskbar/animation_clock.h"
+using taskbar_detail::kImmersiveSpectrumBarCount;
+using taskbar_detail::kImmersiveSpectrumWideBarCount;
+using taskbar_detail::kImmersiveSpectrumWideZoneThreshold;
+using taskbar_detail::kSpectrumBarRadius;
+using taskbar_detail::kSpectrumBarW;
+using taskbar_detail::kSpectrumBottomPadding;
+using taskbar_detail::kSpectrumGap;
+using taskbar_detail::monotonicNowMs;
 #include "ui/taskbar/render_state.h"
 #include "ui/taskbar/platform.h"
 #include "ui/taskbar/window_attachment.h"
 #include "ui/taskbar/text_effects_cache.h"
 #include "ui/taskbar/layout.h"
 
-using taskbar_detail::RenderInvalidation;
-using taskbar_detail::RenderInvalidationMask;
-using taskbar_detail::toMask;
-using taskbar_detail::RenderState;
+using taskbar_detail::findTrafficMonitorWnd;
 using taskbar_detail::InvalidationSnapshot;
-using taskbar_detail::LayoutMetrics;
-using taskbar_detail::VerticalLayout;
-using taskbar_detail::kCoverPadding;
-using taskbar_detail::kTextPadding;
-using taskbar_detail::kSongInfoLyricGap;
-using taskbar_detail::kLeftRatio;
-using taskbar_detail::kVerticalRailPadding;
-using taskbar_detail::kVerticalCoverGap;
-using taskbar_detail::kVerticalControlsGap;
-using taskbar_detail::kVerticalLyricGap;
 using taskbar_detail::isTaskbarCenterAlign;
 using taskbar_detail::isValidTaskbarEdge;
-using taskbar_detail::queryTaskbarEdge;
 using taskbar_detail::isVerticalTaskbarEdge;
-using taskbar_detail::taskbarCrossPixels;
+using taskbar_detail::kCoverPadding;
+using taskbar_detail::kLeftRatio;
+using taskbar_detail::kSongInfoLyricGap;
+using taskbar_detail::kTextPadding;
+using taskbar_detail::kVerticalControlsGap;
+using taskbar_detail::kVerticalCoverGap;
+using taskbar_detail::kVerticalLyricGap;
+using taskbar_detail::kVerticalRailPadding;
+using taskbar_detail::LayoutMetrics;
 using taskbar_detail::queryKugouTaskbarWindows;
 using taskbar_detail::queryTaskbarButtonsUia;
-using taskbar_detail::findTrafficMonitorWnd;
+using taskbar_detail::queryTaskbarEdge;
+using taskbar_detail::RenderInvalidation;
+using taskbar_detail::RenderInvalidationMask;
+using taskbar_detail::RenderState;
+using taskbar_detail::taskbarCrossPixels;
+using taskbar_detail::toMask;
+using taskbar_detail::VerticalLayout;
 #include "logging/runtime_logger.h"
 #include "ui/app_icon.h"
 #include "fluent_theme.h"
@@ -52,6 +71,8 @@ using taskbar_detail::findTrafficMonitorWnd;
 #include <windowsx.h>
 
 #include <algorithm>
+#include <utility>
+#include <wrl/client.h>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -71,18 +92,18 @@ namespace {
 
 constexpr UINT_PTR kTimerId = 2;
 constexpr UINT_PTR kTaskbarAttachTimerId = 3;
-constexpr UINT kTimerMs = 16;         // 活动帧最大间隔：60Hz 基准
-constexpr UINT kTimerMinMs = 8;       // 活动帧最小间隔：高刷封顶 ~125Hz，避免过度唤醒
-constexpr UINT kTimerPausedMs = 33;   // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
+constexpr UINT kTimerMs = 16;       // 活动帧最大间隔：60Hz 基准
+constexpr UINT kTimerMinMs = 8;     // 活动帧最小间隔：高刷封顶 ~125Hz，避免过度唤醒
+constexpr UINT kTimerPausedMs = 33; // 暂停时 ~30fps：超长文本继续滚动，任务栏合成开销减半
 constexpr UINT kTaskbarAttachRetryMs = 250;
 constexpr UINT_PTR kPlacementTimerId = 4;
 // 沉浸模式让出任务栏：悬停确认（单次）与显隐过渡/离开检测（轮询）。
 constexpr UINT_PTR kImmersiveYieldTimerId = 5;
 constexpr UINT_PTR kImmersivePresenceTimerId = 6;
-constexpr UINT kImmersiveYieldDelayMs = 100;    // 悬停非控件区多久后让出任务栏
-constexpr UINT kImmersiveHideMs = 100;          // 淡出时长
-constexpr UINT kImmersiveShowMs = 140;          // 淡入时长
-constexpr UINT kImmersiveRestoreDelayMs = 180;  // 鼠标离开任务栏多久后恢复沉浸条
+constexpr UINT kImmersiveYieldDelayMs = 100;   // 悬停非控件区多久后让出任务栏
+constexpr UINT kImmersiveHideMs = 100;         // 淡出时长
+constexpr UINT kImmersiveShowMs = 140;         // 淡入时长
+constexpr UINT kImmersiveRestoreDelayMs = 180; // 鼠标离开任务栏多久后恢复沉浸条
 constexpr UINT kImmersivePresencePollMs = 20;
 constexpr UINT kAppBarCallbackMessage = WM_APP + 40;
 constexpr UINT kPlacementTimerMs = 500; // 隐藏时只拾取避让结果，不运行完整渲染帧
@@ -99,24 +120,24 @@ constexpr wchar_t kDragPreviewText[] = L"松手固定到这里";
 constexpr float kLyricDragThresholdDip = 6.0f;
 // 滚动文本左缘（滚出侧）的渐隐宽度
 constexpr float kLyricEdgeFadeDip = 18.0f;
- // 歌曲信息与歌词之间的分隔间距
+// 歌曲信息与歌词之间的分隔间距
 constexpr float kSongInfoDividerWidth = 1.0f;
 constexpr float kSongInfoDividerInset = 5.0f;
 constexpr float kCornerRadius = 8.0f;
 constexpr float kVerticalMinLengthDip = 220.0f;
 constexpr float kVerticalMaxLengthDip = 320.0f;
 
-constexpr float kInfoScrollSpeed = 10.0f;  // 歌名/歌手滚动速度（DIP/s）
-constexpr float kLyricScrollSpeed = 15.0f; // 歌词滚动速度（DIP/s）
+constexpr float kInfoScrollSpeed = 10.0f;            // 歌名/歌手滚动速度（DIP/s）
+constexpr float kLyricScrollSpeed = 15.0f;           // 歌词滚动速度（DIP/s）
 constexpr ULONGLONG kOneShotStatusTextHoldMs = 5000; // 不足以滚动时保留完整文案的时长
-constexpr int kOneShotStatusTextRounds = 3; // 启动任务概览超长文案完整滚动三轮后结束
-constexpr float kLyricTransitionMs = 280.0f; // 相邻歌词上下切换时长
-constexpr float kSceneTransitionMs = 240.0f; // 每日一言与歌词内容块上下翻页时长
-constexpr float kSongTransitionMs = 220.0f; // 切歌时新内容滑入时长
-constexpr float kSongTransitionTravelDip = 24.0f; // 切歌时新内容的水平入场距离
-constexpr float kLyricPreviewGap = 3.0f; // 普通双行模式的核心行与下一行间距
-constexpr float kLyricPreviewOpacity = 0.90f; // 下一行预览透明度
-constexpr float kKaraokeScrollFollowMs = 100.0f; // 逐字歌词横向跟随时间常数
+constexpr int kOneShotStatusTextRounds = 3;          // 启动任务概览超长文案完整滚动三轮后结束
+constexpr float kLyricTransitionMs = 280.0f;         // 相邻歌词上下切换时长
+constexpr float kSceneTransitionMs = 240.0f;         // 每日一言与歌词内容块上下翻页时长
+constexpr float kSongTransitionMs = 220.0f;          // 切歌时新内容滑入时长
+constexpr float kSongTransitionTravelDip = 24.0f;    // 切歌时新内容的水平入场距离
+constexpr float kLyricPreviewGap = 3.0f;             // 普通双行模式的核心行与下一行间距
+constexpr float kLyricPreviewOpacity = 0.90f;        // 下一行预览透明度
+constexpr float kKaraokeScrollFollowMs = 100.0f;     // 逐字歌词横向跟随时间常数
 constexpr int kImmersiveControlPrevious = 0;
 constexpr int kImmersiveControlPlayPause = 1;
 constexpr int kImmersiveControlNext = 2;
@@ -140,16 +161,11 @@ constexpr float kMinFont = 9.0f;
 constexpr float kMaxFont = 18.0f;
 constexpr float kBaseFontSize = 12.0f;
 constexpr float kCompactTaskbarHeightDip = 36.0f;
-constexpr float kSpectrumBarW = 5.0f;  // 频谱柱宽
-constexpr float kSpectrumGap = 3.0f;   // 频谱柱间隙
-constexpr float kSpectrumBottomPadding = 1.0f;
-constexpr float kSpectrumBarRadius = 2.0f; // 轻微圆角，保持柱状感
-constexpr int kImmersiveSpectrumBarCount = 24;
-constexpr int kImmersiveSpectrumWideBarCount = 32;
+
 constexpr float kImmersiveSpectrumZoneRatio = 0.22f;
 constexpr float kImmersiveSpectrumZoneMinW = 220.0f;
 constexpr float kImmersiveSpectrumZoneMaxW = 440.0f;
-constexpr float kImmersiveSpectrumWideZoneThreshold = 340.0f;
+
 constexpr float kImmersiveClockZoneRatio = 0.045f;
 constexpr float kImmersiveClockZoneMinW = 80.0f;
 constexpr float kImmersiveClockZoneMaxW = 96.0f;
@@ -169,7 +185,8 @@ constexpr ULONGLONG kVinylArmDurationMs = 240;
 constexpr float kVinylHaloWidth = 0.5f;
 constexpr float kVinylOuterRatio = 0.40f; // 唱片直径约为底座边长的 80%，四边各留约 10%
 constexpr float kVinylInnerRatio = 0.25f; // 圆形专辑封面半径 / 封面槽边长
-constexpr float kCoverBlurStdDev = 6.0f;  // 封面模糊背景的高斯模糊强度（封面按显示尺寸解码，拉伸后等效更强）
+constexpr float kCoverBlurStdDev =
+    6.0f; // 封面模糊背景的高斯模糊强度（封面按显示尺寸解码，拉伸后等效更强）
 
 // d2d1effects.h 只声明这些 GUID；当前工程的链接配置不提供其外部定义，
 // 这里保留 Direct2D 标准 Gaussian Blur / Scale CLSID 的内部定义（与 media_popup.cpp 一致）。
@@ -177,20 +194,6 @@ constexpr CLSID kGaussianBlurClsid = {
     0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
 constexpr CLSID kScaleClsid = {
     0x9daf9369, 0x3846, 0x4d0e, {0xa4, 0x4e, 0x0c, 0x60, 0x79, 0x34, 0xa5, 0xd7}};
-
-ULONGLONG monotonicNowMs() {
-    static const LARGE_INTEGER frequency = [] {
-        LARGE_INTEGER value{};
-        QueryPerformanceFrequency(&value);
-        return value;
-    }();
-    LARGE_INTEGER counter{};
-    QueryPerformanceCounter(&counter);
-    const LONGLONG wholeMs = counter.QuadPart / frequency.QuadPart * 1000;
-    const LONGLONG remainderMs =
-        (counter.QuadPart % frequency.QuadPart) * 1000 / frequency.QuadPart;
-    return static_cast<ULONGLONG>(wholeMs + remainderMs);
-}
 
 // GDI+ 一次性初始化（封面解码）
 class GdiplusInit {
@@ -242,15 +245,180 @@ bool sameLyrics(const std::vector<LyricLine>& a, const std::vector<LyricLine>& b
 } // namespace
 
 struct TaskbarHost::Impl {
-    struct WindowPlacement {
-        int x = 0;
-        int y = 0;
-        int width = 0;
-        int height = 0;
-        int availableMajor = 0;
-    };
 
+    mutable SpectrumRenderer spectrum_;
+    SpectrumContext spectrumContext(ID2D1DeviceContext* target = nullptr) const {
+        SpectrumContext context;
+        context.target = target;
+        context.visible = spectrumVisible_;
+        context.animations = clientAnimations_;
+        context.scene = scene_;
+        context.nowMs = frameNowMs_;
+        context.style = spectrumStyle_;
+        context.customColor = spectrumCustomColor_;
+        context.color = spectrumColor_;
+        context.followAlbum = spectrumFollowAlbum_;
+        context.albumColor = spectrumAlbumColor_;
+        context.hasAlbumColor = spectrumAlbumColorAvailable_;
+        context.gradient = spectrumGradient_;
+        context.effects = spectrumEffects_;
+        context.background = spectrumBackground_;
+        context.opacity = spectrumOpacityPct_;
+        context.playedColor = lyricColor_;
+        context.compactHeight = compactTaskbarHeight_;
+        context.playing = media.playing;
+        context.minimal = isMinimalMode();
+        context.stopped = isStoppedMode();
+        context.horizontalImmersive = horizontalImmersiveMode();
+        return context;
+    }
+    mutable LyricEffectsRenderer lyricEffectsRenderer_;
+    LyricEffectsContext lyricEffectsContext(ID2D1DeviceContext* target = nullptr) const {
+        LyricEffectsContext context;
+        context.target = target;
+        context.lines = &lines;
+        context.effects = lyricEffects_;
+        context.animations = clientAnimations_;
+        context.scene = scene_;
+        context.currentLine = lyricEffectLayoutLine_;
+        context.outgoingLine = outgoingLyricEffectLine_;
+        context.currentLayout = typesetter_.resources().lyricLayout_.Get();
+        context.outgoingLayout = typesetter_.resources().outgoingLyricLayout_.Get();
+        context.width = lyricWidth_;
+        context.outgoingWidth = outgoingLyricWidth_;
+        context.positionMs = positionMs_;
+        context.outgoingDoubleLine = transition_.outgoingDoubleLine();
+        context.compactHeight = compactTaskbarHeight_;
+        context.doubleLineEnabled = doubleLineLyricsEnabled_;
+        context.color = lyricColor_;
+        context.glow = lyricGlow_;
+        context.outline = lyricOutline_;
+        context.fontSize = fontSize_;
+        context.outlineBrush = brushLyricOutline_.Get();
+        context.playing = media.playing;
+        context.minimal = isMinimalMode();
+        context.stopped = isStoppedMode();
+        context.vertical = isVerticalTaskbar();
+        context.currentDoubleLine = useDoubleLineLyrics();
+        return context;
+    }
+    LyricTypesetter typesetter_;
+    LyricTransition transition_;
+    VinylAnimation vinyl_;
     RenderState renderState_;
+    std::optional<TaskbarAppearance> appearance_;
+    bool applyingAppearance_ = false;
+    bool appearancePositionPending_ = false;
+    bool appearanceBrushesPending_ = false;
+    bool appearanceFormatsPending_ = false;
+    bool appearancePaintPending_ = false;
+
+    void applyAppearance(const TaskbarAppearance& value) {
+        if (appearance_ && *appearance_ == value)
+            return;
+        applyingAppearance_ = true;
+        if (!appearance_ || appearance_->secondaryLyricMode != value.secondaryLyricMode)
+            setSecondaryLyricMode(value.secondaryLyricMode.translation,
+                                  value.secondaryLyricMode.romanization);
+        if (!appearance_ || appearance_->doubleLineLyrics != value.doubleLineLyrics)
+            setDoubleLineLyrics(value.doubleLineLyrics);
+        if (!appearance_ || appearance_->lyricEffects != value.lyricEffects)
+            setLyricEffects(value.lyricEffects);
+        if (!appearance_ || appearance_->lyricAlignment != value.lyricAlignment)
+            setLyricAlignment(value.lyricAlignment);
+        if (!appearance_ || appearance_->idleQuoteAlignment != value.idleQuoteAlignment)
+            setIdleQuoteAlignment(value.idleQuoteAlignment);
+        if (!appearance_ || appearance_->songInfoVisible != value.songInfoVisible)
+            setSongInfoVisible(value.songInfoVisible);
+        if (!appearance_ || appearance_->controlsOnHover != value.controlsOnHover)
+            setControlsOnHover(value.controlsOnHover);
+        if (!appearance_ || appearance_->hoverControlStyle != value.hoverControlStyle)
+            setHoverControlStyle(value.hoverControlStyle);
+        if (!appearance_ || appearance_->floatingCardTrigger != value.floatingCardTrigger)
+            setFloatingCardTrigger(value.floatingCardTrigger);
+        if (!appearance_ || appearance_->floatingCardBackground != value.floatingCardBackground)
+            setFloatingCardBackground(value.floatingCardBackground);
+        if (!appearance_ ||
+            appearance_->floatingCardBackgroundColor != value.floatingCardBackgroundColor)
+            setFloatingCardBackgroundColor(value.floatingCardBackgroundColor.color,
+                                           value.floatingCardBackgroundColor.customized);
+        if (!appearance_ || appearance_->idleQuoteBackground != value.idleQuoteBackground)
+            setIdleQuoteBackground(value.idleQuoteBackground);
+        if (!appearance_ || appearance_->idleQuoteBackgroundScope != value.idleQuoteBackgroundScope)
+            setIdleQuoteBackgroundScope(value.idleQuoteBackgroundScope);
+        if (!appearance_ || appearance_->floatingCardFollowAlbum != value.floatingCardFollowAlbum)
+            setFloatingCardFollowAlbum(value.floatingCardFollowAlbum);
+        if (!appearance_ ||
+            appearance_->floatingCardAutoTextContrast != value.floatingCardAutoTextContrast)
+            setFloatingCardAutoTextContrast(value.floatingCardAutoTextContrast);
+        if (!appearance_ || appearance_->albumCoverEffect != value.albumCoverEffect)
+            setAlbumCoverEffect(value.albumCoverEffect);
+        if (!appearance_ || appearance_->spectrumStyle != value.spectrumStyle)
+            setSpectrumStyle(value.spectrumStyle);
+        if (!appearance_ || appearance_->spectrumColor != value.spectrumColor)
+            setSpectrumColor(value.spectrumColor.color, value.spectrumColor.customized,
+                             value.spectrumColor.followAlbum);
+        if (!appearance_ || appearance_->spectrumAlbumColor != value.spectrumAlbumColor)
+            setSpectrumAlbumColor(value.spectrumAlbumColor.color,
+                                  value.spectrumAlbumColor.available);
+        if (!appearance_ || appearance_->spectrumGradient != value.spectrumGradient)
+            setSpectrumGradient(value.spectrumGradient);
+        if (!appearance_ || appearance_->spectrumEffects != value.spectrumEffects)
+            setSpectrumEffects(value.spectrumEffects);
+        if (!appearance_ || appearance_->spectrumBackground != value.spectrumBackground)
+            setSpectrumBackground(value.spectrumBackground);
+        if (!appearance_ || appearance_->spectrumOpacity != value.spectrumOpacity)
+            setSpectrumOpacity(value.spectrumOpacity);
+        if (!appearance_ || appearance_->progressBackground != value.progressBackground)
+            setProgressBackground(value.progressBackground);
+        if (!appearance_ ||
+            appearance_->progressBackgroundOpacity != value.progressBackgroundOpacity)
+            setProgressBackgroundOpacity(value.progressBackgroundOpacity);
+        if (!appearance_ || appearance_->background != value.background)
+            setBackground(value.background);
+        if (!appearance_ || appearance_->coverBackgroundOpacity != value.coverBackgroundOpacity)
+            setCoverBackgroundOpacity(value.coverBackgroundOpacity);
+        if (!appearance_ ||
+            appearance_->immersiveBackgroundAdjustment != value.immersiveBackgroundAdjustment)
+            setImmersiveBackgroundAdjustment(value.immersiveBackgroundAdjustment);
+        if (!appearance_ || appearance_->dockBackgroundAdjustment != value.dockBackgroundAdjustment)
+            setDockBackgroundAdjustment(value.dockBackgroundAdjustment);
+        if (!appearance_ || appearance_->immersiveBackgroundBlur != value.immersiveBackgroundBlur)
+            setImmersiveBackgroundBlur(value.immersiveBackgroundBlur);
+        if (!appearance_ || appearance_->dockBackgroundBlur != value.dockBackgroundBlur)
+            setDockBackgroundBlur(value.dockBackgroundBlur);
+        if (!appearance_ || appearance_->dockResourceVisibility != value.dockResourceVisibility)
+            setDockResourceVisibility(value.dockResourceVisibility);
+        if (!appearance_ || appearance_->albumCoverVisible != value.albumCoverVisible)
+            setAlbumCoverVisible(value.albumCoverVisible);
+        if (!appearance_ || appearance_->platformIconVisible != value.platformIconVisible)
+            setPlatformIconVisible(value.platformIconVisible);
+        if (!appearance_ || appearance_->contextMenuEnabled != value.contextMenuEnabled)
+            contextMenuEnabled_ = value.contextMenuEnabled;
+        if (!appearance_ || appearance_->fontColors != value.fontColors)
+            setFontColors(value.fontColors.played, value.fontColors.unplayed,
+                          value.fontColors.unplayedAlphaPct);
+        if (!appearance_ || appearance_->fontGlow != value.fontGlow)
+            setFontGlow(value.fontGlow);
+        if (!appearance_ || appearance_->fontOutline != value.fontOutline)
+            setFontOutline(value.fontOutline);
+        if (!appearance_ || appearance_->fontGlowColors != value.fontGlowColors)
+            setFontGlowColors(value.fontGlowColors.glow, value.fontGlowColors.outline);
+        appearance_ = value;
+        applyingAppearance_ = false;
+        const bool formats = std::exchange(appearanceFormatsPending_, false);
+        const bool brushes = std::exchange(appearanceBrushesPending_, false);
+        const bool position = std::exchange(appearancePositionPending_, false);
+        const bool paint = std::exchange(appearancePaintPending_, false);
+        if (formats)
+            recreateFormats();
+        if (brushes)
+            createLyricBrushes();
+        if (position)
+            adjustPosition();
+        if (paint)
+            flushRenderRequest();
+    }
 
     HINSTANCE inst = nullptr;
     HWND hwnd = nullptr;
@@ -268,17 +436,16 @@ struct TaskbarHost::Impl {
     HMONITOR targetMonitor_ = nullptr;
     std::wstring targetMonitorDeviceName_;
     TaskbarWindowAttachment attachment_;
-    bool appBarRegistered_ = false;
-    bool appBarFullscreenOpen_ = false;
+    AppBarRegistration appBar_;
     AppBarEdge appBarEdge_ = AppBarEdge::Top;
     HWND notify_ = nullptr;
     HWND start_ = nullptr;
-    RECT rcTaskbar_{};   // 任务栏屏幕坐标（缓存）
-    RECT rcNotify_{};    // 通知区屏幕坐标（缓存）
-    RECT rcStart_{};     // 开始按钮屏幕坐标（缓存，找不到时为空）
+    RECT rcTaskbar_{};        // 任务栏屏幕坐标（缓存）
+    RECT rcNotify_{};         // 通知区屏幕坐标（缓存）
+    RECT rcStart_{};          // 开始按钮屏幕坐标（缓存，找不到时为空）
     RECT rcTrafficMonitor_{}; // TrafficMonitor 屏幕坐标（缓存，未运行时为 empty）
     // 任务栏 XAML 按钮（开始/搜索/任务视图/小组件/应用图标）包围矩形缓存（屏幕坐标）。
-    // 以上探测数据由工作线程产出、UI 线程拾取（见 probeState_->out）
+    // 以上探测数据由工作线程产出、UI 线程拾取（由 PlacementProbe 交付）
     std::vector<RECT> uiaButtons_;
     // 酷狗进程中与任务栏相交的可见窗口（屏幕坐标）。
     std::vector<RECT> kugouTaskbarWindows_;
@@ -290,21 +457,7 @@ struct TaskbarHost::Impl {
 
     // 工作线程只持有独立状态，不持有 Impl；窗口销毁只发停止信号，不能 join。
     // 最后一个持有者负责回收尚未拾取的结果，允许跨进程调用晚于窗口销毁返回。
-    struct ProbeResult {
-        RECT rcTm{};
-        std::vector<RECT> buttons;
-        std::vector<RECT> kugouWindows;
-    };
-    struct ProbeState {
-        std::atomic<bool> stop{false};
-        std::atomic<bool> fast{false};
-        std::atomic<ProbeResult*> out{nullptr};
-        std::atomic<HWND> taskbar{nullptr};
-
-        ~ProbeState() { delete out.exchange(nullptr); }
-    };
-    std::shared_ptr<ProbeState> probeState_ = std::make_shared<ProbeState>();
-    bool probeRunning_ = false;
+    PlacementProbe placementProbe_;
 
     // 歌词状态
     std::vector<LyricLine> lines;
@@ -330,8 +483,8 @@ struct TaskbarHost::Impl {
     // 媒体信息
     OverlayMediaInfo media;
     IdlePresentation idle;
-    ID2D1Bitmap* coverBmp = nullptr;
-    ID2D1Bitmap* platformIconBmp = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> coverBmp;
+    Microsoft::WRL::ComPtr<ID2D1Bitmap> platformIconBmp;
 
     // 交互
     std::function<void()> tick;
@@ -384,11 +537,11 @@ struct TaskbarHost::Impl {
     // 逐字填充进度（布局像素坐标）：目标值 + 平滑值。
     // SMTC 进度是锚点插值的，每次锚点校正都会阶跃一次；平滑值按当前字时长
     // 决定的时间常数指数趋近目标，消除阶跃闪烁且同步误差有界
-    float karaokeProgX_ = 0.0f;      // 本帧实际使用的填充进度（平滑后）
-    float karaokeSmoothX_ = 0.0f;    // 平滑状态
-    int karaokeSmoothLine_ = -1;     // 平滑状态所属行号
+    float karaokeProgX_ = 0.0f;        // 本帧实际使用的填充进度（平滑后）
+    float karaokeSmoothX_ = 0.0f;      // 平滑状态
+    int karaokeSmoothLine_ = -1;       // 平滑状态所属行号
     bool karaokeEnteringLine_ = false; // 自然转场中的新行从首字平滑追赶真实位置
-    ULONGLONG karaokeTick_ = 0;      // 上次平滑步进的时刻
+    ULONGLONG karaokeTick_ = 0;        // 上次平滑步进的时刻
 
     struct KaraokeSpan {
         int64_t startMs = 0;
@@ -410,7 +563,8 @@ struct TaskbarHost::Impl {
     float lyricWidth_ = 0.0f;
     float lyricHeight_ = 0.0f;
     float lyricScrollOffset_ = 0.0f;
-    float lyricScrollSpeed_ = kLyricScrollSpeed; // 动态速度：随当前行时长变化，最慢 kLyricScrollSpeed
+    float lyricScrollSpeed_ =
+        kLyricScrollSpeed; // 动态速度：随当前行时长变化，最慢 kLyricScrollSpeed
     float secondaryWidth_ = 0.0f;
     float secondaryHeight_ = 0.0f;
     float secondaryScrollOffset_ = 0.0f;
@@ -443,95 +597,26 @@ struct TaskbarHost::Impl {
     int slowTick_ = 0; // 慢速分支计数器
 
     // 渲染
-    struct VerticalLyricPart {
-        IDWriteTextLayout* layout = nullptr;
-        float width = 0.0f;
-        float height = 0.0f;
-        bool rotated = false;
-    };
 
     DCompRenderer renderer;
     uint64_t deviceGeneration_ = 0;
     // 沉浸模式切歌时，歌曲内容会先绘制到独立的 DirectComposition 表面。
     // 绘制辅助函数统一从这里取目标，普通帧保持使用交换链上下文。
     ID2D1DeviceContext* drawTargetOverride_ = nullptr;
-    IDWriteTextFormat* fmtTitle_ = nullptr;
-    IDWriteTextFormat* fmtArtist_ = nullptr;
-    IDWriteTextFormat* fmtLyric_ = nullptr;
-    IDWriteTextFormat* fmtNextLyric_ = nullptr;
-    IDWriteTextFormat* fmtSecondary_ = nullptr;
-    IDWriteTextFormat* fmtDragPreview_ = nullptr;
-    IDWriteTextFormat* fmtClockTime_ = nullptr;
-    IDWriteTextFormat* fmtClockDate_ = nullptr;
-    IDWriteTextFormat* fmtResource_ = nullptr;
-    IDWriteTextLayout* titleLayout_ = nullptr;
-    IDWriteTextLayout* artistLayout_ = nullptr;
-    IDWriteTextLayout* lyricLayout_ = nullptr;
     int lyricEffectLayoutLine_ = -1;
     int outgoingLyricEffectLine_ = -1;
     uint32_t lyricEffects_ = 0;
-    ID2D1SolidColorBrush* brushLyricFx_ = nullptr;
-    int64_t lyricFxEmitFromMs_ = 0;
-    int64_t lyricFxLastPositionMs_ = -1;
-    ULONGLONG lyricFxLastClockMs_ = 0;
-    ULONGLONG lyricFxPauseMs_ = 0;
-    bool lyricFxPlaying_ = false;
     bool lyricFxWasAnimating_ = false;
-    struct LyricFxToken {
-        int64_t startMs = 0;
-        int64_t endMs = 0;
-        float first = 0.0f;
-        float last = 0.0f;
-        bool visible = false;
-    };
-    struct LyricFxSource {
-        const IDWriteTextLayout* layout = nullptr;
-        int line = -1;
-        std::vector<LyricFxToken> tokens;
-    };
-    struct LyricFxPoint {
-        D2D1_POINT_2F center{};
-        D2D1_POINT_2F edge{};
-        bool valid = false;
-    };
-    struct LyricFxGeometry {
-        int line = -1;
-        float width = 0;
-        float height = 0;
-        float rangeStart = 0;
-        float rangeSize = 1;
-        bool vertical = false;
-        std::vector<LyricFxPoint> tokens;
-        LyricFxPoint starAnchor{};
-        ID2D1Bitmap* glyphMask = nullptr;
-        ID2D1BitmapRenderTarget* glyphTarget = nullptr;
-        ~LyricFxGeometry() {
-            if (glyphMask) glyphMask->Release();
-            if (glyphTarget) glyphTarget->Release();
-        }
-    };
-    std::array<LyricFxSource, 2> lyricFxSources_{};
-    std::unordered_map<const IDWriteTextLayout*, std::unique_ptr<LyricFxGeometry>> lyricFxGeometry_;
-    ID2D1LinearGradientBrush* brushLyricFollow_ = nullptr;
-    LyricStarShape lyricStar_;
+
     // 侧边任务栏使用独立的竖排布局；中文/符号逐字排列，连续英文片段整组旋转。
     // 横向布局仍保留给上下任务栏和逐字时间轴计算，避免两种排版互相改变测量结果。
-    IDWriteTextLayout* verticalLyricLayout_ = nullptr;
-    std::vector<VerticalLyricPart> verticalLyricParts_;
-    IDWriteTextLayout* nextLyricLayout_ = nullptr;
-    IDWriteTextLayout* secondaryLayout_ = nullptr;
     // 行切换动画保留上一帧的布局，避免新行直接替换导致文字瞬移。
-    IDWriteTextLayout* outgoingLyricLayout_ = nullptr;
-    IDWriteTextLayout* outgoingVerticalLyricLayout_ = nullptr;
-    IDWriteTextLayout* outgoingSecondaryLayout_ = nullptr;
-    IDWriteTextLayout* outgoingNextLyricLayout_ = nullptr;
     bool lyricLayoutDoubleLine_ = false;
     float outgoingLyricWidth_ = 0.0f;
     float outgoingLyricHeight_ = 0.0f;
     float verticalLyricWidth_ = 0.0f;
     float verticalLyricHeight_ = 0.0f;
     bool verticalLyricRotated_ = false;
-    std::vector<VerticalLyricPart> outgoingVerticalLyricParts_;
     float outgoingVerticalLyricWidth_ = 0.0f;
     float outgoingVerticalLyricHeight_ = 0.0f;
     bool outgoingVerticalLyricRotated_ = false;
@@ -544,53 +629,33 @@ struct TaskbarHost::Impl {
     float outgoingNextLyricHeight_ = 0.0f;
     float nextLyricWidth_ = 0.0f;
     float nextLyricHeight_ = 0.0f;
-    enum class LyricTransitionKind {
-        None,
-        Line,
-        Scene,
-    };
-    LyricTransitionKind lyricTransitionKind_ = LyricTransitionKind::None;
-    DisplayScene outgoingScene_ = DisplayScene::NoPlayback;
-    bool outgoingDoubleLine_ = false;
-    bool sceneTransitionNeedsRelayout_ = false;
-    int sceneTransitionFromPxW_ = 0;
-    int sceneTransitionFromPxH_ = 0;
-    ULONGLONG lyricTransitionStartMs_ = 0;
-    int lyricTransitionDirection_ = 1; // 1: 新行从下方进入，-1: 从上方进入
-    uint64_t lyricTransitionRevision_ = 0;
-    // 行过渡目标：currentLine 是逻辑当前行；transitionTarget_ 是本次动画要进入的行，
-    // pendingTarget_ 是动画期间收到的最新目标（latest-frame-wins，只覆盖不累积），
+
+    // 行过渡目标：currentLine 是逻辑当前行；transition_.target() 是本次动画要进入的行，
+    // transition_.pending() 是动画期间收到的最新目标（latest-frame-wins，只覆盖不累积），
     // 动画结束收尾时统一消费，不让旧的结束逻辑覆盖新行。
-    struct LyricTransitionTarget {
-        int lineIndex = -1;
-        int64_t actualPositionMs = 0;
-        int direction = 1;
-        uint64_t frameRevision = 0;
-    };
-    std::optional<LyricTransitionTarget> transitionTarget_;
-    std::optional<LyricTransitionTarget> pendingTarget_;
+
     ULONGLONG frameNowMs_ = 0;
-    ID2D1SolidColorBrush* brushBg_ = nullptr;
-    ID2D1SolidColorBrush* brushHover_ = nullptr;
-    ID2D1SolidColorBrush* brushText_ = nullptr;
-    ID2D1SolidColorBrush* brushDim_ = nullptr;
-    ID2D1SolidColorBrush* brushBtn_ = nullptr;
-    ID2D1SolidColorBrush* brushBtnDisabled_ = nullptr;
-    ID2D1SolidColorBrush* brushLyric_ = nullptr;        // 已播放歌词颜色（用户可配）
-    ID2D1SolidColorBrush* brushLyricDim_ = nullptr;     // 逐字歌词未唱部分（独立颜色+不透明度）
-    ID2D1SolidColorBrush* brushLyricGlow_ = nullptr;    // 歌词光晕（主色低透明度）
-    ID2D1SolidColorBrush* brushLyricOutline_ = nullptr; // 歌词深色描边
-    ID2D1SolidColorBrush* brushVinylBase_ = nullptr;    // 黑胶唱片底色
-    ID2D1SolidColorBrush* brushVinylGroove_ = nullptr;  // 黑胶纹理线
-    ID2D1LinearGradientBrush* brushVinylSurface_ = nullptr; // 固定光照下的盘面反光
-    ID2D1SolidColorBrush* brushTurntable_ = nullptr;    // 固定底座与唱臂
-    COLORREF lyricColor_ = RGB(49, 194, 124);           // 已播放颜色，默认 QQ 绿
-    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124);   // 逐字未播放颜色
-    int lyricUnplayedAlphaPct_ = 45;                    // 逐字未播放不透明度（%）
-    COLORREF lyricGlowColor_ = RGB(49, 194, 124);       // 光晕颜色
-    COLORREF lyricOutlineColor_ = RGB(0, 0, 0);         // 描边颜色
-    bool lyricGlow_ = false;                            // 光晕开关
-    bool lyricOutline_ = false;                         // 描边开关
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBg_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushHover_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushText_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushDim_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBtn_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBtnDisabled_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLyric_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLyricDim_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLyricGlow_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLyricOutline_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushVinylBase_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushVinylGroove_;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brushVinylSurface_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushTurntable_;
+    COLORREF lyricColor_ = RGB(49, 194, 124);         // 已播放颜色，默认 QQ 绿
+    COLORREF lyricUnplayedColor_ = RGB(49, 194, 124); // 逐字未播放颜色
+    int lyricUnplayedAlphaPct_ = 45;                  // 逐字未播放不透明度（%）
+    COLORREF lyricGlowColor_ = RGB(49, 194, 124);     // 光晕颜色
+    COLORREF lyricOutlineColor_ = RGB(0, 0, 0);       // 描边颜色
+    bool lyricGlow_ = false;                          // 光晕开关
+    bool lyricOutline_ = false;                       // 描边开关
     bool translationEnabled_ = true;
     bool romanizationEnabled_ = false;
     bool doubleLineLyricsEnabled_ = false;
@@ -606,16 +671,8 @@ struct TaskbarHost::Impl {
     // 渲染模式：0 正常；1 低渲染（播放中也固定 ~30fps）；2 完全停止（窗口隐藏、
     // 帧定时器停止、GPU 设备释放，数据状态保留在内存）；3 极简（保留歌词刷新率，
     // 仅关闭附加视觉、媒体卡片和切歌弹窗）
-    float vinylAngleDeg_ = 0.0f;
-    ULONGLONG vinylTickMs_ = 0;
-    float vinylArmAngleDeg_ = kVinylArmParkedAngle;
-    float vinylArmFromDeg_ = kVinylArmParkedAngle;
-    float vinylArmTargetDeg_ = kVinylArmParkedAngle;
-    ULONGLONG vinylArmStartMs_ = 0;
     // 频谱：基色可跟随已播放色、专辑主题色或自定义色（createLyricBrushes），
     // bands 由 UI 线程每帧写入
-    ID2D1SolidColorBrush* brushSpectrum_ = nullptr;
-    ID2D1LinearGradientBrush* brushSpectrumBarGradient_ = nullptr;
     SpectrumStyle spectrumStyle_ = SpectrumStyle::Default;
     COLORREF spectrumColor_ = RGB(49, 194, 124);
     bool spectrumCustomColor_ = false;
@@ -629,12 +686,12 @@ struct TaskbarHost::Impl {
     // 播放进度背景：与背景波浪互斥，颜色取专辑主色（无封面时回退系统强调色）
     bool progressBackground_ = false;
     int progressBackgroundOpacityPct_ = 25;
-    ID2D1SolidColorBrush* brushProgressBg_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushProgressBg_;
     // 任务栏歌词背景：封面模糊（GaussianBlur → Scale 效果链 + 主题遮罩）或纯色；
     // 画在最底层，可与进度背景、背景波浪叠加
     TaskbarBackground background_ = TaskbarBackground::None;
     int coverBackgroundOpacityPct_ = 60;
-    ID2D1SolidColorBrush* brushBackground_ = nullptr; // 纯色填充与模糊遮罩共用（每帧 SetColor）
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushBackground_;
     // 沉浸模式使用完整任务栏客户区；AppBar 使用独立的 Shell 工作区协议。
     TaskbarViewMode viewMode_ = TaskbarViewMode::Embedded;
     int immersiveBackgroundBlurPct_ = 88;
@@ -643,51 +700,29 @@ struct TaskbarHost::Impl {
     int dockBackgroundAdjustment_ = 0;
     bool backgroundBlurSupported_ = true;
     DockBackdrop dockBackdrop_;
-    ID2D1SolidColorBrush* brushIdleWarm_ = nullptr;
-    ID2D1SolidColorBrush* brushIdleCool_ = nullptr;
-    ID2D1SolidColorBrush* brushIdleAccent_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushIdleWarm_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushIdleCool_;
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushIdleAccent_;
     DockPet dockPet_;
     // 伴听宠物已见到的曲目（title|artist），用于检测"播放中切歌"并触发雀跃。
     std::wstring dockPetTrack_;
-    ID2D1StrokeStyle* dragPreviewStroke_ = nullptr;
-    ID2D1Effect* coverBlurFx_ = nullptr;
-    ID2D1Effect* coverScaleFx_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1StrokeStyle> dragPreviewStroke_;
+    Microsoft::WRL::ComPtr<ID2D1Effect> coverBlurFx_;
+    Microsoft::WRL::ComPtr<ID2D1Effect> coverScaleFx_;
     ID2D1Bitmap* coverBlurInput_ = nullptr; // 模糊链当前绑定的封面（不持有引用，仅用于比较）
     bool spectrumVisible_ = false;
-    std::array<float, TaskbarHost::kSpectrumBands> spectrumBands_{};
-    std::array<float, TaskbarHost::kSpectrumBands> spectrumPeaks_{};
-    std::array<ULONGLONG, TaskbarHost::kSpectrumBands> spectrumPeakHoldUntil_{};
-    ULONGLONG spectrumVisualTickMs_ = 0;
-    ID2D1DeviceContext* spectrumFxContext_ = nullptr;
-    ID2D1Bitmap1* spectrumFxFrame_ = nullptr;
-    std::array<ID2D1Bitmap1*, 4> spectrumFxHistory_{};
-    std::array<ULONGLONG, 4> spectrumFxHistoryMs_{};
-    size_t spectrumFxHistoryNext_ = 0;
-    ULONGLONG spectrumFxCaptureMs_ = 0;
-    ID2D1Effect* spectrumGlowFx_ = nullptr;
-    ID2D1LinearGradientBrush* spectrumSheenBrush_ = nullptr;
-    struct SpectrumSpark {
-        ULONGLONG bornMs = 0;
-        float level = 0.0f;
-        int band = 0;
-        float drift = 0.0f;
-    };
-    std::array<SpectrumSpark, 24> spectrumSparks_{};
-    std::array<float, TaskbarHost::kSpectrumBands> spectrumPreviousLevels_{};
-    std::array<ULONGLONG, TaskbarHost::kSpectrumBands> spectrumLastSparkMs_{};
-    size_t spectrumSparkNext_ = 0;
-    ID2D1RoundedRectangleGeometry* coverClip_ = nullptr;
-    ID2D1EllipseGeometry* vinylCoverClip_ = nullptr;
-    ID2D1Layer* coverLayer_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1RoundedRectangleGeometry> coverClip_;
+    Microsoft::WRL::ComPtr<ID2D1EllipseGeometry> vinylCoverClip_;
+    Microsoft::WRL::ComPtr<ID2D1Layer> coverLayer_;
     // 滚动歌词左缘渐隐：固定两停止点，渐变轴每帧按滚动偏移更新
-    ID2D1LinearGradientBrush* lyricEdgeFadeBrush_ = nullptr;
-    ID2D1Layer* lyricEdgeFadeLayer_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> lyricEdgeFadeBrush_;
+    Microsoft::WRL::ComPtr<ID2D1Layer> lyricEdgeFadeLayer_;
     // 右缘渐隐带：完全位于歌词区右缘之外的留白（到频谱/窗口边缘的间隙），
     // 不遮挡可读区域内的文字
-    ID2D1LinearGradientBrush* lyricRightFadeBrush_ = nullptr;
-    ID2D1Layer* lyricRightFadeLayer_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> lyricRightFadeBrush_;
+    Microsoft::WRL::ComPtr<ID2D1Layer> lyricRightFadeLayer_;
     // 歌曲信息与歌词之间的悬浮分隔线，使用上下渐隐的主题色画刷
-    ID2D1LinearGradientBrush* songInfoDividerBrush_ = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> songInfoDividerBrush_;
     media_control::Geometry controlGeometry;
     struct SceneResizeAnimation {
         WindowPlacement from{};
@@ -726,35 +761,25 @@ struct TaskbarHost::Impl {
     bool isStoppedMode() const { return isRenderMode(RenderMode::Stopped); }
 
     bool isLyricTransitionPending() const {
-        return renderState_.lyricTransitionPhase() ==
-               RenderState::LyricTransitionPhase::Pending;
+        return transition_.phase() == LyricTransition::Phase::Pending;
     }
 
     bool isLyricTransitionActive() const {
-        return renderState_.lyricTransitionPhase() ==
-               RenderState::LyricTransitionPhase::Running;
+        return transition_.phase() == LyricTransition::Phase::Running;
     }
 
     bool isLyricTransitionInProgress() const {
-        return renderState_.lyricTransitionPhase() !=
-               RenderState::LyricTransitionPhase::Idle;
+        return transition_.phase() != LyricTransition::Phase::Idle;
     }
 
-    void setLyricTransitionPending() {
-        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Pending);
-    }
+    void setLyricTransitionPending() { transition_.setPhase(LyricTransition::Phase::Pending); }
 
-    void setLyricTransitionActive() {
-        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Running);
-    }
+    void setLyricTransitionActive() { transition_.setPhase(LyricTransition::Phase::Running); }
 
-    void clearLyricTransitionPhase() {
-        renderState_.setLyricTransitionPhase(RenderState::LyricTransitionPhase::Idle);
-    }
+    void clearLyricTransitionPhase() { transition_.setPhase(LyricTransition::Phase::Idle); }
 
     bool isLyricDCompActive() const {
-        return renderState_.dcompTransitionPhase() ==
-               RenderState::DCompTransitionPhase::Active;
+        return renderState_.dcompTransitionPhase() == RenderState::DCompTransitionPhase::Active;
     }
 
     bool isLyricDCompEndRequested() const {
@@ -764,48 +789,42 @@ struct TaskbarHost::Impl {
 
     void requestLyricDCompEnd() {
         if (isLyricDCompActive())
-            renderState_.setDCompTransitionPhase(
-                RenderState::DCompTransitionPhase::EndRequested);
+            renderState_.setDCompTransitionPhase(RenderState::DCompTransitionPhase::EndRequested);
     }
 
     void clearLyricDCompState() {
         renderState_.setDCompTransitionPhase(RenderState::DCompTransitionPhase::Inactive);
     }
 
-    bool isSongTransitionPending() const {
-        return renderState_.songTransitionPending();
-    }
+    bool isSongTransitionPending() const { return renderState_.songTransitionPending(); }
 
-    void setSongTransitionPending(bool pending) {
-        renderState_.setSongTransitionPending(pending);
-    }
+    void setSongTransitionPending(bool pending) { renderState_.setSongTransitionPending(pending); }
 
     bool usesSongContentTransition() const {
         return isExpandedView() || (!isVerticalTaskbar() && embeddedResourceVisible());
     }
 
     bool immersiveSongContentLayerActive() const {
-        return songContentTransition_ &&
-               songContentTransition_->compositorLayer;
+        return songContentTransition_ && songContentTransition_->compositorLayer;
     }
 
     bool isSceneResizeActive() const { return sceneResize_.has_value(); }
 
-    void requestInvalidation(RenderInvalidation value) {
-        renderState_.requestInvalidation(value);
-    }
+    void requestInvalidation(RenderInvalidation value) { renderState_.requestInvalidation(value); }
 
     void requestInvalidation(RenderInvalidationMask mask) {
         renderState_.requestInvalidation(mask);
     }
 
-    bool isInvalidated(RenderInvalidation value) const {
-        return renderState_.isInvalidated(value);
-    }
+    bool isInvalidated(RenderInvalidation value) const { return renderState_.isInvalidated(value); }
 
     void requestFrame() { requestInvalidation(RenderInvalidation::Paint); }
 
     void flushRenderRequest() {
+        if (applyingAppearance_) {
+            appearancePaintPending_ = true;
+            return;
+        }
         if (isWindowVisible() && hwnd)
             render();
     }
@@ -816,8 +835,7 @@ struct TaskbarHost::Impl {
     }
 
     bool isExpandedView() const {
-        return viewMode_ == TaskbarViewMode::Immersive ||
-               viewMode_ == TaskbarViewMode::AppBar;
+        return viewMode_ == TaskbarViewMode::Immersive || viewMode_ == TaskbarViewMode::AppBar;
     }
 
     bool isAppBarView() const { return viewMode_ == TaskbarViewMode::AppBar; }
@@ -828,8 +846,8 @@ struct TaskbarHost::Impl {
     }
 
     bool embeddedResourceVisible() const {
-        return viewMode_ == TaskbarViewMode::Embedded &&
-               dockResourceVisibility_.embeddedEnabled && !isVerticalTaskbar();
+        return viewMode_ == TaskbarViewMode::Embedded && dockResourceVisibility_.embeddedEnabled &&
+               !isVerticalTaskbar();
     }
 
     bool embeddedResourceOnly() const {
@@ -864,15 +882,13 @@ struct TaskbarHost::Impl {
 
     bool expandedControlVisible(int index) const {
         if (!isAppBarView())
-            return index >= 0 && index < kExpandedControlCount &&
-                   index != kDockControlQuickApps;
+            return index >= 0 && index < kExpandedControlCount && index != kDockControlQuickApps;
         return (index >= kImmersiveControlPrevious && index <= kDockControlQuickApps) ||
                index == kImmersiveControlMenu;
     }
 
     bool shouldShowWindow() const {
-        if (!hwnd || isStoppedMode() || !isSessionVisible() ||
-            renderState_.visibilitySuppressed())
+        if (!hwnd || isStoppedMode() || !isSessionVisible() || renderState_.visibilitySuppressed())
             return false;
         if (immersivePresence_ == ImmersivePresence::Hidden)
             return false;
@@ -886,7 +902,7 @@ struct TaskbarHost::Impl {
         const bool wantVisible = shouldShowWindow();
         const bool nativeVisible = hwnd && IsWindowVisible(hwnd);
         const bool appBarRegistrationMismatch =
-            isAppBarView() && (wantVisible != appBarRegistered_);
+            isAppBarView() && (wantVisible != appBar_.registered());
         if (wantVisible == isWindowVisible() && wantVisible == nativeVisible &&
             !appBarRegistrationMismatch)
             return false;
@@ -941,12 +957,9 @@ struct TaskbarHost::Impl {
         }
     }
 
-    void logicalClientPixelSize(int& width, int& height) const {
-        clientPixelSize(width, height);
-    }
+    void logicalClientPixelSize(int& width, int& height) const { clientPixelSize(width, height); }
 
-    void clientPointToLogicalDip(float clientX, float clientY, float& xDip,
-                                 float& yDip) const {
+    void clientPointToLogicalDip(float clientX, float clientY, float& xDip, float& yDip) const {
         xDip = clientX / scale();
         yDip = clientY / scale();
     }
@@ -974,15 +987,15 @@ struct TaskbarHost::Impl {
         if (platformChanged)
             requestInvalidation(RenderInvalidation::PlatformIcon);
         if (thumbChanged || textChanged)
-            vinylAngleDeg_ = 0.0f;
+            vinyl_.resetDisc();
         if (textChanged)
             requestInvalidation(RenderInvalidation::SongInfo);
         if (thumbChanged || textChanged || playingChanged)
-            vinylTickMs_ = monotonicNowMs();
+            vinyl_.resetClock(monotonicNowMs());
         if (playingChanged)
             updateVinylRotation();
-        return thumbChanged || textChanged || controlsChanged || playingChanged || platformChanged ||
-               dominantColorChanged || durationChanged;
+        return thumbChanged || textChanged || controlsChanged || playingChanged ||
+               platformChanged || dominantColorChanged || durationChanged;
     }
 
     // ---------- 窗口创建与定位 ----------
@@ -990,13 +1003,11 @@ struct TaskbarHost::Impl {
     bool findTaskbar() {
         const auto displays = enumerateTaskbarDisplays();
         auto display = std::find_if(displays.begin(), displays.end(), [this](const auto& item) {
-            return !targetMonitorDeviceName_.empty() &&
-                   item.deviceName == targetMonitorDeviceName_;
+            return !targetMonitorDeviceName_.empty() && item.deviceName == targetMonitorDeviceName_;
         });
         if (display == displays.end())
-            display = std::find_if(displays.begin(), displays.end(), [](const auto& item) {
-                return item.primary;
-            });
+            display = std::find_if(displays.begin(), displays.end(),
+                                   [](const auto& item) { return item.primary; });
         if (display == displays.end() && !displays.empty())
             display = displays.begin();
         if (display == displays.end())
@@ -1004,7 +1015,7 @@ struct TaskbarHost::Impl {
 
         targetMonitor_ = display->monitor;
         taskbar_ = display->taskbarWindow;
-        probeState_->taskbar = taskbar_; // 同步给探测工作线程
+        placementProbe_.setTaskbar(taskbar_); // 同步给探测工作线程
         if (!taskbar_ && !isAppBarView())
             return false;
         notify_ = taskbar_ ? FindWindowExW(taskbar_, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
@@ -1041,9 +1052,7 @@ struct TaskbarHost::Impl {
             KillTimer(hwnd, kTaskbarAttachTimerId);
     }
 
-    bool attachToTaskbar(HWND window) {
-        return attachment_.attach(window, taskbar_);
-    }
+    bool attachToTaskbar(HWND window) { return attachment_.attach(window, taskbar_); }
 
     bool detachFromTaskbar() {
         cancelTaskbarAttachRetry();
@@ -1060,17 +1069,10 @@ struct TaskbarHost::Impl {
         return MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
     }
 
-    void updateAppBarZOrder() {
-        if (!hwnd || !appBarRegistered_)
-            return;
-        // Shell 只会通过 ABN_FULLSCREENAPP 报告真正的全屏打开/关闭；最大化窗口
-        // 不进入该状态。全屏期间按 AppBar 规范降到 Z 序底部，退出后恢复置顶。
-        SetWindowPos(hwnd, appBarFullscreenOpen_ ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-    }
+    void updateAppBarZOrder() { appBar_.updateZOrder(hwnd); }
 
     bool updateAppBarPosition() {
-        if (!hwnd || !appBarRegistered_)
+        if (!hwnd || !appBar_.registered())
             return false;
         MONITORINFO monitor{};
         monitor.cbSize = sizeof(monitor);
@@ -1090,31 +1092,10 @@ struct TaskbarHost::Impl {
                                 toMask(RenderInvalidation::Cover));
         }
 
-        APPBARDATA data{};
-        data.cbSize = sizeof(data);
-        data.hWnd = hwnd;
-        data.uEdge = appBarEdge_ == AppBarEdge::Top ? ABE_TOP : ABE_BOTTOM;
-        data.rc = monitor.rcMonitor;
-        const LONG height = std::max<LONG>(1, static_cast<LONG>(std::lround(
-                                                   kAppBarHeightDip * dpi_ / 96.0f)));
-        if (data.uEdge == ABE_TOP)
-            data.rc.bottom = data.rc.top + height;
-        else
-            data.rc.top = data.rc.bottom - height;
-        SHAppBarMessage(ABM_QUERYPOS, &data);
-
-        if (data.uEdge == ABE_TOP)
-            data.rc.bottom = data.rc.top + height;
-        else
-            data.rc.top = data.rc.bottom - height;
-        SHAppBarMessage(ABM_SETPOS, &data);
-        if (data.rc.right <= data.rc.left || data.rc.bottom <= data.rc.top)
+        const LONG height =
+            std::max<LONG>(1, static_cast<LONG>(std::lround(kAppBarHeightDip * dpi_ / 96.0f)));
+        if (!appBar_.positionWindow(hwnd, appBarMonitor(), appBarEdge_, height))
             return false;
-
-        SetWindowPos(hwnd, appBarFullscreenOpen_ ? HWND_BOTTOM : HWND_TOPMOST,
-                     data.rc.left, data.rc.top,
-                     data.rc.right - data.rc.left, data.rc.bottom - data.rc.top,
-                     SWP_NOACTIVATE | SWP_FRAMECHANGED);
         mediaPopup.setAnchor(hwnd);
         setPlacementStatus(TaskbarPlacementStatus::Safe);
         return true;
@@ -1123,19 +1104,14 @@ struct TaskbarHost::Impl {
     bool registerAppBar() {
         if (!isAppBarView() || !hwnd)
             return false;
-        if (appBarRegistered_)
+        if (appBar_.registered())
             return updateAppBarPosition();
         if (!detachFromTaskbar())
             return false;
-        APPBARDATA data{};
-        data.cbSize = sizeof(data);
-        data.hWnd = hwnd;
-        data.uCallbackMessage = kAppBarCallbackMessage;
-        if (!SHAppBarMessage(ABM_NEW, &data)) {
+        if (!appBar_.registerWindow(hwnd, kAppBarCallbackMessage)) {
             runtime_log::writef(L"[appbar] ABM_NEW failed");
             return false;
         }
-        appBarRegistered_ = true;
         if (!updateAppBarPosition()) {
             unregisterAppBar();
             return false;
@@ -1145,16 +1121,7 @@ struct TaskbarHost::Impl {
         return true;
     }
 
-    void unregisterAppBar() {
-        if (!appBarRegistered_ || !hwnd)
-            return;
-        appBarRegistered_ = false;
-        APPBARDATA data{};
-        data.cbSize = sizeof(data);
-        data.hWnd = hwnd;
-        SHAppBarMessage(ABM_REMOVE, &data);
-        runtime_log::writef(L"[appbar] unregistered");
-    }
+    void unregisterAppBar() { appBar_.unregisterWindow(hwnd); }
 
     void retryTaskbarAttach() {
         if (!hwnd)
@@ -1213,8 +1180,7 @@ struct TaskbarHost::Impl {
 
         hwnd = h;
         app_icon::applyTaskbarIcon(hwnd);
-        const bool immersiveBackdropPrepared =
-            viewMode_ == TaskbarViewMode::Immersive;
+        const bool immersiveBackdropPrepared = viewMode_ == TaskbarViewMode::Immersive;
         if (immersiveBackdropPrepared)
             initializeBackdropForCurrentViewMode();
         if (isAppBarView()) {
@@ -1245,37 +1211,13 @@ struct TaskbarHost::Impl {
     // 开始按钮的 HWND 矩形与 UIA StartButton 重复，合并后无害，留着可在 UIA
     // 不可用时兜底。
     std::vector<std::pair<int, int>> occupiedIntervals() const {
-        std::vector<std::pair<int, int>> v;
-        const bool vertical = isVerticalTaskbar();
-        auto add = [&v, vertical](const RECT& r) {
-            const int start = vertical ? r.top : r.left;
-            const int end = vertical ? r.bottom : r.right;
-            if (end > start)
-                v.emplace_back(start, end);
-        };
-        for (const RECT& r : uiaButtons_)
-            add(r);
-        if (notify_)
-            add(rcNotify_);
-        if (start_)
-            add(rcStart_);
-        add(rcTrafficMonitor_);
-        for (const RECT& r : kugouTaskbarWindows_)
-            add(r);
-        std::sort(v.begin(), v.end());
-        std::vector<std::pair<int, int>> merged;
-        for (const auto& p : v) {
-            if (!merged.empty() && p.first <= merged.back().second)
-                merged.back().second = std::max(merged.back().second, p.second);
-            else
-                merged.push_back(p);
-        }
-        return merged;
+        return taskbar_detail::occupiedIntervals(
+            {isVerticalTaskbar(), notify_ != nullptr, start_ != nullptr, rcNotify_, rcStart_,
+             rcTrafficMonitor_, uiaButtons_, kugouTaskbarWindows_});
     }
 
     void startPlacementTimer() {
-        if (placementTimerRunning_ || !hwnd ||
-            isStoppedMode())
+        if (placementTimerRunning_ || !hwnd || isStoppedMode())
             return;
         if (SetTimer(hwnd, kPlacementTimerId, kPlacementTimerMs, nullptr))
             placementTimerRunning_ = true;
@@ -1294,7 +1236,7 @@ struct TaskbarHost::Impl {
             return;
 
         renderState_.setVisibilitySuppressed(false);
-        probeState_->fast = false;
+        placementProbe_.setFast(false);
         stopPlacementTimer();
         if (isSessionVisible() && !isStoppedMode()) {
             // 隐藏期间不运行完整帧定时器；恢复前补一次播放进度/当前行，
@@ -1316,7 +1258,7 @@ struct TaskbarHost::Impl {
         placementStatus_ = status;
         if (status == TaskbarPlacementStatus::NoSpace ||
             status == TaskbarPlacementStatus::Unavailable) {
-            probeState_->fast = status == TaskbarPlacementStatus::NoSpace;
+            placementProbe_.setFast(status == TaskbarPlacementStatus::NoSpace);
             startPlacementTimer();
             reconcileWindowVisibility();
             stopFrameTimer();
@@ -1337,7 +1279,7 @@ struct TaskbarHost::Impl {
             // 首次真实探测已经完成：解除“等待首次结果”的抑制，但仍保持隐藏，
             // 后续由低频避让计时器等待空间恢复。
             renderState_.setVisibilitySuppressed(false);
-            probeState_->fast = true;
+            placementProbe_.setFast(true);
             startPlacementTimer();
             return;
         }
@@ -1377,7 +1319,7 @@ struct TaskbarHost::Impl {
             return;
         if (allowOverlap_) {
             renderState_.setVisibilitySuppressed(false);
-            probeState_->fast = false;
+            placementProbe_.setFast(false);
             stopPlacementTimer();
         }
         renderState_.setSessionVisible(true);
@@ -1395,8 +1337,8 @@ struct TaskbarHost::Impl {
     }
 
     TaskbarPlacementStatus calculateWindowPlacement(WindowPlacement& placement,
-                                                     int positionMode = -1,
-                                                     bool updateStatus = true) {
+                                                    int positionMode = -1,
+                                                    bool updateStatus = true) {
         auto finishStatus = [&](TaskbarPlacementStatus status) {
             return updateStatus ? setPlacementStatus(status) : status;
         };
@@ -1461,106 +1403,20 @@ struct TaskbarHost::Impl {
             maxW += extra;
         }
 
-        // 空闲区间 = 任务栏主轴减去占用区间
-        struct Span {
-            int l, r;
-        };
-        std::vector<Span> spans;
-        const int majorStart = vertical ? rcTaskbar_.top : rcTaskbar_.left;
-        const int majorEnd = vertical ? rcTaskbar_.bottom : rcTaskbar_.right;
-        int cursor = majorStart;
-        const auto occupied = occupiedIntervals();
-        for (const auto& o : occupied) {
-            if (o.first > cursor)
-                spans.push_back({cursor, std::min(o.first, majorEnd)});
-            cursor = std::max(cursor, std::min(o.second, majorEnd));
-        }
-        if (cursor < majorEnd)
-            spans.push_back({cursor, majorEnd});
-        // 只有确实没有探测到任何占用区间时，才把整条任务栏视为可用；
-        // 如果占用区间已经覆盖整个主轴，必须保留“无空闲位置”的结果。
-        if (spans.empty() && occupied.empty())
-            spans.push_back({majorStart, majorEnd});
-
-        auto usableMajor = [gap](const Span& s) { return s.r - s.l - gap * 2; };
-
-        int pxMajor = 0;
-        int availableMajor = 0;
-        int x = 0;
-        int y = 0;
-        auto place = [&](const Span& s, int w) {
-            availableMajor = std::max(1, usableMajor(s));
-            pxMajor = std::min(w, std::max(1, majorEnd - majorStart));
-            int major = effectivePositionMode == 1 ? s.l + gap : s.r - gap - pxMajor;
-            if (pxMajor <= majorEnd - majorStart)
-                major = std::clamp(major, majorStart, majorEnd - pxMajor);
-            else
-                major = majorStart;
-            if (vertical) {
-                x = taskbarEdge_ == ABE_LEFT ? rcTaskbar_.left + crossMargin
-                                             : rcTaskbar_.right - crossMargin - crossPx;
-                y = major;
-            } else {
-                x = major;
-                y = rcTaskbar_.top + crossMargin;
-            }
-        };
-        TaskbarPlacementStatus result = TaskbarPlacementStatus::Unavailable;
-        if (spans.empty()) {
-            if (!allowOverlap_)
-                return finishStatus(TaskbarPlacementStatus::NoSpace);
-            const Span full{majorStart, majorEnd};
-            // 用户明确选择继续开启时，也沿用压缩后的最小主轴尺寸，
-            // 不再恢复为标准最小尺寸，尽量降低对任务栏的遮挡。
-            place(full, compressedMinW);
-            result = TaskbarPlacementStatus::ForcedOverlap;
-        } else {
-            // 原位优先：模式 0 锚定通知区域之前的主轴末端空闲区，模式 1 锚定
-            // 任务栏起始端空闲区。横向对应右/左，纵向对应下/上。
-            const Span& pref = effectivePositionMode == 1 ? spans.front() : spans.back();
-            if (usableMajor(pref) >= compressedMinW) {
-                place(pref, std::min(usableMajor(pref), maxW)); // 原位优先：被挤压先收缩长度
-                result = usableMajor(pref) < minW ? TaskbarPlacementStatus::Compressed
-                                                  : TaskbarPlacementStatus::Safe;
-            } else {
-                // 原位压到安全最小长度仍放不下：换到容得下的最大空闲区。
-                const Span* best = nullptr;
-                for (const auto& s : spans) {
-                    if (usableMajor(s) >= compressedMinW &&
-                        (!best || s.r - s.l > best->r - best->l))
-                        best = &s;
-                }
-                if (best) {
-                    place(*best, std::min(usableMajor(*best), maxW));
-                    result = TaskbarPlacementStatus::Relocated;
-                } else if (allowOverlap_) {
-                    // 用户已明确允许重叠时，仍把窗口限制在任务栏主轴范围内，
-                    // 只允许与已探测到的控件相交，不让窗口越出任务栏；尺寸使用
-                    // 压缩后的最小值，避免强制开启时又恢复为标准尺寸。
-                    place(pref, compressedMinW);
-                    result = TaskbarPlacementStatus::ForcedOverlap;
-                } else {
-                    return finishStatus(TaskbarPlacementStatus::NoSpace);
-                }
-            }
-        }
-        if (vertical) {
-            if (y < rcTaskbar_.top)
-                y = rcTaskbar_.top;
-            if (pxMajor <= majorEnd - majorStart && y + pxMajor > rcTaskbar_.bottom)
-                y = rcTaskbar_.bottom - pxMajor;
-        } else if (x < rcTaskbar_.left) {
-            x = rcTaskbar_.left;
-        }
-
-        placement.x = x;
-        placement.y = y;
-        placement.width = vertical ? crossPx : pxMajor;
-        placement.height = vertical ? pxMajor : crossPx;
-        placement.availableMajor = availableMajor;
-        if (placement.width <= 0 || placement.height <= 0)
-            return finishStatus(TaskbarPlacementStatus::Unavailable);
-        return finishStatus(result);
+        taskbar_detail::PlacementInput input;
+        input.taskbar = rcTaskbar_;
+        input.edge = taskbarEdge_;
+        input.vertical = vertical;
+        input.allowOverlap = allowOverlap_;
+        input.positionMode = effectivePositionMode;
+        input.gap = gap;
+        input.minMajor = minW;
+        input.compressedMinMajor = compressedMinW;
+        input.maxMajor = maxW;
+        input.crossPixels = crossPx;
+        input.crossMargin = crossMargin;
+        input.occupied = occupiedIntervals();
+        return finishStatus(taskbar_detail::calculatePlacement(input, placement));
     }
 
     void applyWindowPlacement(const WindowPlacement& placement, bool bringToFront = true,
@@ -1598,11 +1454,15 @@ struct TaskbarHost::Impl {
     }
 
     void adjustPosition() {
+        if (applyingAppearance_) {
+            appearancePositionPending_ = true;
+            return;
+        }
         if (lyricDragging_)
             return;
         cancelSceneWindowResize();
         if (isAppBarView()) {
-            if (appBarRegistered_)
+            if (appBar_.registered())
                 updateAppBarPosition();
             return;
         }
@@ -1637,29 +1497,8 @@ struct TaskbarHost::Impl {
                status != TaskbarPlacementStatus::NoSpace;
     }
 
-    int dragPreviewMajorPixels(const WindowPlacement& anchor) const {
-        const int anchorMajor = anchor.availableMajor > 0
-                                    ? anchor.availableMajor
-                                    : (isVerticalTaskbar() ? anchor.height : anchor.width);
-        const int currentMajor = dragPreviewMajorPx_ > 0
-                                     ? dragPreviewMajorPx_
-                                     : (isVerticalTaskbar() ? anchor.height : anchor.width);
-        return std::clamp(currentMajor, 1, std::max(1, anchorMajor));
-    }
-
     WindowPlacement dragPreviewFromAnchor(const WindowPlacement& anchor, int mode) const {
-        WindowPlacement preview = anchor;
-        const int previewMajor = dragPreviewMajorPixels(anchor);
-        if (isVerticalTaskbar()) {
-            preview.height = previewMajor;
-            if (mode == 0)
-                preview.y = anchor.y + anchor.height - preview.height;
-        } else {
-            preview.width = previewMajor;
-            if (mode == 0)
-                preview.x = anchor.x + anchor.width - preview.width;
-        }
-        return preview;
+        return taskbar_detail::dragPreview(anchor, mode, isVerticalTaskbar(), dragPreviewMajorPx_);
     }
 
     bool dragPreviewPlacementAt(POINT cursorScreen, WindowPlacement& placement, int& mode) {
@@ -1782,10 +1621,8 @@ struct TaskbarHost::Impl {
 
         // TrafficMonitor / 酷狗 / UIA 按钮矩形由探测工作线程提供（pickProbeResult），
         // 这里只做非阻塞检查，UI 线程不允许出现阻塞型跨进程调用
-        bool changed = dpi != dpi_ || center != centerAlign_ || edgeChanged ||
-                       themeChanged ||
-                       !EqualRect(&rcTaskbar, &rcTaskbar_) ||
-                       !EqualRect(&rcNotify, &rcNotify_) ||
+        bool changed = dpi != dpi_ || center != centerAlign_ || edgeChanged || themeChanged ||
+                       !EqualRect(&rcTaskbar, &rcTaskbar_) || !EqualRect(&rcNotify, &rcNotify_) ||
                        !EqualRect(&rcStart, &rcStart_);
         if (changed) {
             // 封面位图按显示尺寸解码（decodeCover），DPI/任务栏厚度或方向变化时按新尺寸重解码
@@ -1820,7 +1657,7 @@ struct TaskbarHost::Impl {
     // ---------- 资源 ----------
 
     void createDeviceResources() {
-        if (brushBg_) {
+        if (brushBg_.Get()) {
             renderState_.setDeviceResourcePhase(RenderState::DeviceResourcePhase::Ready);
             return;
         }
@@ -1833,57 +1670,73 @@ struct TaskbarHost::Impl {
         // 根据任务栏深浅主题选择配色，贴近 Windows 11 原生媒体控件
         // 背景使用极低的 alpha，视觉上透明但保证分层窗口命中测试覆盖整个区域
         if (lightTheme_) {
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.01f), &brushBg_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.09f), &brushHover_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.08f, 0.08f, 0.95f), &brushText_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.30f, 0.30f, 0.75f), &brushDim_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.90f), &brushBtn_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.30f), &brushBtnDisabled_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.96f, 0.96f, 0.96f, 0.01f),
+                                      brushBg_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.09f),
+                                      brushHover_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.08f, 0.08f, 0.95f),
+                                      brushText_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.30f, 0.30f, 0.30f, 0.75f),
+                                      brushDim_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.90f),
+                                      brushBtn_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.10f, 0.10f, 0.30f),
+                                      brushBtnDisabled_.ReleaseAndGetAddressOf());
         } else {
-            rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.01f), &brushBg_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f), &brushHover_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.95f), &brushText_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.65f), &brushDim_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f), &brushBtn_);
-            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.35f), &brushBtnDisabled_);
+            rt->CreateSolidColorBrush(D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.01f),
+                                      brushBg_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f),
+                                      brushHover_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.95f),
+                                      brushText_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.65f),
+                                      brushDim_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.90f),
+                                      brushBtn_.ReleaseAndGetAddressOf());
+            rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 1.00f, 1.00f, 0.35f),
+                                      brushBtnDisabled_.ReleaseAndGetAddressOf());
         }
         // 歌词画刷与主题无关，单独创建（用户可换色，换色时只重建这四个）
         createLyricBrushes();
         // 进度背景颜色每帧经 SetColor 写入，这里只建空画刷
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brushProgressBg_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f),
+                                  brushProgressBg_.ReleaseAndGetAddressOf());
         // 纯色背景/封面模糊遮罩同样每帧 SetColor
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f), &brushBackground_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f),
+                                  brushBackground_.ReleaseAndGetAddressOf());
         if (lightTheme_) {
             rt->CreateSolidColorBrush(D2D1::ColorF(0.78f, 0.32f, 0.15f, 1.0f),
-                                      &brushIdleWarm_);
+                                      brushIdleWarm_.ReleaseAndGetAddressOf());
             rt->CreateSolidColorBrush(D2D1::ColorF(0.10f, 0.40f, 0.64f, 1.0f),
-                                      &brushIdleCool_);
+                                      brushIdleCool_.ReleaseAndGetAddressOf());
             rt->CreateSolidColorBrush(D2D1::ColorF(0.08f, 0.47f, 0.34f, 1.0f),
-                                      &brushIdleAccent_);
+                                      brushIdleAccent_.ReleaseAndGetAddressOf());
         } else {
             rt->CreateSolidColorBrush(D2D1::ColorF(1.00f, 0.56f, 0.24f, 1.0f),
-                                      &brushIdleWarm_);
+                                      brushIdleWarm_.ReleaseAndGetAddressOf());
             rt->CreateSolidColorBrush(D2D1::ColorF(0.56f, 0.80f, 1.00f, 1.0f),
-                                      &brushIdleCool_);
+                                      brushIdleCool_.ReleaseAndGetAddressOf());
             rt->CreateSolidColorBrush(D2D1::ColorF(0.38f, 0.95f, 0.70f, 1.0f),
-                                      &brushIdleAccent_);
+                                      brushIdleAccent_.ReleaseAndGetAddressOf());
         }
-        rt->CreateLayer(&coverLayer_);
-        rt->CreateLayer(&lyricEdgeFadeLayer_);
-        rt->CreateLayer(&lyricRightFadeLayer_);
+        rt->CreateLayer(coverLayer_.ReleaseAndGetAddressOf());
+        rt->CreateLayer(lyricEdgeFadeLayer_.ReleaseAndGetAddressOf());
+        rt->CreateLayer(lyricRightFadeLayer_.ReleaseAndGetAddressOf());
         recreateFormats();
         if (auto* dwrite = renderer.dwrite()) {
             dwrite->CreateTextFormat(
                 fluent::uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 11.0f, L"zh-cn",
-                &fmtDragPreview_);
-            if (fmtDragPreview_) {
-                fmtDragPreview_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                fmtDragPreview_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                fmtDragPreview_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                fluent::applyUiFontFallback(fmtDragPreview_);
+                typesetter_.resources().fmtDragPreview_.ReleaseAndGetAddressOf());
+            if (typesetter_.resources().fmtDragPreview_.Get()) {
+                typesetter_.resources().fmtDragPreview_->SetTextAlignment(
+                    DWRITE_TEXT_ALIGNMENT_CENTER);
+                typesetter_.resources().fmtDragPreview_->SetParagraphAlignment(
+                    DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                typesetter_.resources().fmtDragPreview_->SetWordWrapping(
+                    DWRITE_WORD_WRAPPING_NO_WRAP);
+                fluent::applyUiFontFallback(typesetter_.resources().fmtDragPreview_.Get());
             }
-
         }
         if (auto* factory = renderer.d2d()) {
             D2D1_STROKE_STYLE_PROPERTIES props{};
@@ -1894,11 +1747,12 @@ struct TaskbarHost::Impl {
             props.miterLimit = 10.0f;
             props.dashStyle = D2D1_DASH_STYLE_DASH;
             props.dashOffset = 0.0f;
-            factory->CreateStrokeStyle(props, nullptr, 0, &dragPreviewStroke_);
+            factory->CreateStrokeStyle(props, nullptr, 0,
+                                       dragPreviewStroke_.ReleaseAndGetAddressOf());
         }
-        renderState_.setDeviceResourcePhase(
-            brushBg_ ? RenderState::DeviceResourcePhase::Ready
-                     : RenderState::DeviceResourcePhase::Uninitialized);
+        renderState_.setDeviceResourcePhase(brushBg_.Get()
+                                                ? RenderState::DeviceResourcePhase::Ready
+                                                : RenderState::DeviceResourcePhase::Uninitialized);
     }
 
     // 盘面底色在绘制时跟随专辑，反光以半透明黑白叠加，保留专辑色相。
@@ -1906,19 +1760,14 @@ struct TaskbarHost::Impl {
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
-        auto release = [](auto*& p) {
-            if (p) {
-                p->Release();
-                p = nullptr;
-            }
-        };
-        release(brushVinylBase_);
-        release(brushVinylGroove_);
-        release(brushVinylSurface_);
-        release(brushTurntable_);
+        brushVinylBase_.Reset();
+        brushVinylGroove_.Reset();
+        brushVinylSurface_.Reset();
+        brushTurntable_.Reset();
         rt->CreateSolidColorBrush(D2D1::ColorF(0.055f, 0.060f, 0.068f),
-                                  &brushVinylBase_);
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f), &brushVinylGroove_);
+                                  brushVinylBase_.ReleaseAndGetAddressOf());
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f),
+                                  brushVinylGroove_.ReleaseAndGetAddressOf());
         const D2D1_GRADIENT_STOP stops[] = {
             {0.00f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.20f)},
             {0.22f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.26f)},
@@ -1928,128 +1777,68 @@ struct TaskbarHost::Impl {
             {1.00f, D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.15f)},
         };
         ID2D1GradientStopCollection* collection = nullptr;
-        if (SUCCEEDED(rt->CreateGradientStopCollection(stops, _countof(stops),
-                D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &collection))) {
-            rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
-                                                    D2D1::Point2F(1.0f, 1.0f)),
-                collection, &brushVinylSurface_);
+        if (SUCCEEDED(rt->CreateGradientStopCollection(stops, _countof(stops), D2D1_GAMMA_2_2,
+                                                       D2D1_EXTEND_MODE_CLAMP, &collection))) {
+            rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                                              D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(1.0f, 1.0f)),
+                                          collection, brushVinylSurface_.ReleaseAndGetAddressOf());
             collection->Release();
         }
-        rt->CreateSolidColorBrush(D2D1::ColorF(0.07f, 0.08f, 0.09f), &brushTurntable_);
+        rt->CreateSolidColorBrush(D2D1::ColorF(0.07f, 0.08f, 0.09f),
+                                  brushTurntable_.ReleaseAndGetAddressOf());
     }
 
     void releaseAlbumCoverEffectResources() {
-        auto release = [](auto*& p) {
-            if (p) {
-                p->Release();
-                p = nullptr;
-            }
-        };
-        release(brushVinylBase_);
-        release(brushVinylGroove_);
-        release(brushVinylSurface_);
-        release(brushTurntable_);
-        release(vinylCoverClip_);
+        brushVinylBase_.Reset();
+        brushVinylGroove_.Reset();
+        brushVinylSurface_.Reset();
+        brushTurntable_.Reset();
+        vinylCoverClip_.Reset();
     }
 
     // 歌词与黑胶画刷：随用户颜色重建，与主题画刷解耦
     void createLyricBrushes() {
+        if (applyingAppearance_) {
+            appearanceBrushesPending_ = true;
+            return;
+        }
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
         textEffectsCache_.invalidate(); // 颜色变化使离屏缓存失效
-        if (brushLyric_) {
-            brushLyric_->Release();
-            brushLyric_ = nullptr;
+        if (brushLyric_.Get()) {
+            brushLyric_.Reset();
+            brushLyric_.Reset();
         }
-        if (brushLyricFx_) {
-            brushLyricFx_->Release();
-            brushLyricFx_ = nullptr;
+        if (brushLyricDim_.Get()) {
+            brushLyricDim_.Reset();
+            brushLyricDim_.Reset();
         }
-        if (brushLyricFollow_) {
-            brushLyricFollow_->Release();
-            brushLyricFollow_ = nullptr;
+        if (brushLyricGlow_.Get()) {
+            brushLyricGlow_.Reset();
+            brushLyricGlow_.Reset();
         }
-        if (brushLyricDim_) {
-            brushLyricDim_->Release();
-            brushLyricDim_ = nullptr;
-        }
-        if (brushLyricGlow_) {
-            brushLyricGlow_->Release();
-            brushLyricGlow_ = nullptr;
-        }
-        if (brushLyricOutline_) {
-            brushLyricOutline_->Release();
-            brushLyricOutline_ = nullptr;
-        }
-        if (brushSpectrum_) {
-            brushSpectrum_->Release();
-            brushSpectrum_ = nullptr;
-        }
-        if (brushSpectrumBarGradient_) {
-            brushSpectrumBarGradient_->Release();
-            brushSpectrumBarGradient_ = nullptr;
+        if (brushLyricOutline_.Get()) {
+            brushLyricOutline_.Reset();
+            brushLyricOutline_.Reset();
         }
         auto rgb = [](COLORREF c, float a) {
-            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f,
-                                GetBValue(c) / 255.0f, a);
+            return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f,
+                                a);
         };
-        rt->CreateSolidColorBrush(rgb(lyricColor_, 1.00f), &brushLyric_);
-        rt->CreateSolidColorBrush(rgb(lyricColor_, 1.00f), &brushLyricFx_);
-        const auto base = rgb(lyricColor_, 1.0f);
-        const auto dark = D2D1::ColorF(base.r * 0.30f, base.g * 0.30f, base.b * 0.30f, 0.85f);
-        const auto bright = D2D1::ColorF(base.r + (1 - base.r) * 0.85f,
-            base.g + (1 - base.g) * 0.85f, base.b + (1 - base.b) * 0.85f, 1.0f);
-        const D2D1_GRADIENT_STOP followStops[] = {
-            {0.0f, D2D1::ColorF(base.r, base.g, base.b, 0)},
-            {0.25f, dark}, {0.5f, bright}, {0.75f, dark},
-            {1.0f, D2D1::ColorF(base.r, base.g, base.b, 0)}};
-        ID2D1GradientStopCollection* followCollection = nullptr;
-        if (SUCCEEDED(rt->CreateGradientStopCollection(followStops, _countof(followStops),
-                                                       &followCollection))) {
-            rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
-                D2D1::Point2F(0, 0), D2D1::Point2F(1, 0)), followCollection, &brushLyricFollow_);
-            followCollection->Release();
-        }
+        rt->CreateSolidColorBrush(rgb(lyricColor_, 1.00f), brushLyric_.ReleaseAndGetAddressOf());
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(rt));
+        lyricEffectsRenderer_.createBrushes();
         rt->CreateSolidColorBrush(rgb(lyricUnplayedColor_, lyricUnplayedAlphaPct_ / 100.0f),
-                                  &brushLyricDim_);
-        rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f), &brushLyricGlow_);
-        rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f), &brushLyricOutline_);
+                                  brushLyricDim_.ReleaseAndGetAddressOf());
+        rt->CreateSolidColorBrush(rgb(lyricGlowColor_, 0.28f),
+                                  brushLyricGlow_.ReleaseAndGetAddressOf());
+        rt->CreateSolidColorBrush(rgb(lyricOutlineColor_, 0.50f),
+                                  brushLyricOutline_.ReleaseAndGetAddressOf());
         // 频谱颜色模式独立于歌词颜色设置：默认跟随已播放色，也可跟随专辑主题色或使用自定义色。
         // 尚未提取到当前专辑主色时，专辑模式沿用歌词模式的当前有效已播放色。
-        const COLORREF spectrumBaseColor =
-            spectrumCustomColor_
-                ? spectrumColor_
-                : spectrumFollowAlbum_ && spectrumAlbumColorAvailable_ ? spectrumAlbumColor_
-                                                                         : lyricColor_;
-        const D2D1_COLOR_F spectrumBase = rgb(spectrumBaseColor, 0.60f);
-        rt->CreateSolidColorBrush(spectrumBase, &brushSpectrum_);
-
-        // 每根柱子由底部深色连续过渡到顶部浅色，不插入分层色带。
-        const D2D1_COLOR_F spectrumDark = D2D1::ColorF(
-            spectrumBase.r * kSpectrumBarGradientDarkFactor,
-            spectrumBase.g * kSpectrumBarGradientDarkFactor,
-            spectrumBase.b * kSpectrumBarGradientDarkFactor, spectrumBase.a);
-        const D2D1_COLOR_F spectrumLight = D2D1::ColorF(
-            spectrumBase.r + (1.0f - spectrumBase.r) * kSpectrumBarGradientLightMix,
-            spectrumBase.g + (1.0f - spectrumBase.g) * kSpectrumBarGradientLightMix,
-            spectrumBase.b + (1.0f - spectrumBase.b) * kSpectrumBarGradientLightMix,
-            spectrumBase.a);
-        const D2D1_GRADIENT_STOP barGradientStops[] = {
-            {0.0f, spectrumDark},
-            {1.0f, spectrumLight},
-        };
-        ID2D1GradientStopCollection* barGradientStopCollection = nullptr;
-        if (SUCCEEDED(rt->CreateGradientStopCollection(
-                barGradientStops, _countof(barGradientStops), &barGradientStopCollection)) &&
-            barGradientStopCollection) {
-            rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 1.0f),
-                                                     D2D1::Point2F(0.0f, 0.0f)),
-                barGradientStopCollection, &brushSpectrumBarGradient_);
-            barGradientStopCollection->Release();
-        }
+        spectrum_.setContext(spectrumContext(rt));
+        spectrum_.createBrushes();
         if (albumCoverEffect_ == AlbumCoverEffect::Vinyl)
             createAlbumCoverBrushes();
         else
@@ -2152,9 +1941,7 @@ struct TaskbarHost::Impl {
         requestFrameAndFlush();
     }
 
-    bool isMinimalMode() const {
-        return isRenderMode(RenderMode::Minimal);
-    }
+    bool isMinimalMode() const { return isRenderMode(RenderMode::Minimal); }
 
     bool mediaPopupAvailable(bool sessionVisible) const {
         return sessionVisible && !isStoppedMode() && !isMinimalMode();
@@ -2192,14 +1979,14 @@ struct TaskbarHost::Impl {
             mediaPopup.beginPresentationUpdate();
             mediaPopup.setIdleContent(idle, available);
             mediaPopup.setPresentationMode(scene_, available,
-                                            hoverControlStyle_ == HoverControlStyle::Inline);
+                                           hoverControlStyle_ == HoverControlStyle::Inline);
             mediaPopup.setMedia(media, available);
             mediaPopup.endPresentationUpdate();
         } else if (enabled) {
             const bool available = mediaPopupAvailable(isSessionVisible());
             mediaPopup.beginPresentationUpdate();
             mediaPopup.setPresentationMode(scene_, available,
-                                            hoverControlStyle_ == HoverControlStyle::Inline);
+                                           hoverControlStyle_ == HoverControlStyle::Inline);
             mediaPopup.endPresentationUpdate();
         }
         mediaPopup.setTriggerOnHover(floatingCardTrigger_ == MediaPopupTrigger::Hover);
@@ -2208,13 +1995,13 @@ struct TaskbarHost::Impl {
     }
 
     void releaseCoverBackgroundResources() {
-        if (coverBlurFx_) {
-            coverBlurFx_->Release();
-            coverBlurFx_ = nullptr;
+        if (coverBlurFx_.Get()) {
+            coverBlurFx_.Reset();
+            coverBlurFx_.Reset();
         }
-        if (coverScaleFx_) {
-            coverScaleFx_->Release();
-            coverScaleFx_ = nullptr;
+        if (coverScaleFx_.Get()) {
+            coverScaleFx_.Reset();
+            coverScaleFx_.Reset();
         }
         coverBlurInput_ = nullptr;
     }
@@ -2254,59 +2041,39 @@ struct TaskbarHost::Impl {
         mediaPopup.setBackgroundColor(color, customized);
     }
 
-    void setFloatingCardFollowAlbum(bool on) {
-        mediaPopup.setFollowAlbumBackground(on);
-    }
+    void setFloatingCardFollowAlbum(bool on) { mediaPopup.setFollowAlbumBackground(on); }
 
-    void setFloatingCardAutoTextContrast(bool on) {
-        mediaPopup.setAutoTextContrast(on);
-    }
+    void setFloatingCardAutoTextContrast(bool on) { mediaPopup.setAutoTextContrast(on); }
 
     bool backgroundWaveEnabled() const {
-        return spectrumBackground_ && spectrumStyle_ == SpectrumStyle::DreamyWave;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.backgroundWaveEnabled();
     }
 
     bool integratedSpectrum() const {
-        return spectrumStyle_ == SpectrumStyle::BottomBand;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.integratedSpectrum();
     }
 
     void resetSpectrumVisuals() {
-        spectrumPeaks_.fill(0.0f);
-        spectrumPeakHoldUntil_.fill(0);
-        spectrumVisualTickMs_ = 0;
-        resetSpectrumEffectHistory();
-    }
-
-    bool spectrumEffectEnabled(SpectrumEffect effect) const {
-        return (spectrumEffects_ & spectrumEffectBit(effect)) != 0;
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.resetSpectrumVisuals();
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     void resetSpectrumEffectHistory() {
-        spectrumFxHistoryMs_.fill(0);
-        spectrumFxHistoryNext_ = 0;
-        spectrumFxCaptureMs_ = 0;
-        spectrumSparks_.fill({});
-        spectrumPreviousLevels_.fill(0.0f);
-        spectrumLastSparkMs_.fill(0);
-        spectrumSparkNext_ = 0;
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.resetSpectrumEffectHistory();
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     void releaseSpectrumEffectResources() {
-        auto release = [](auto*& resource) {
-            if (resource) {
-                resource->Release();
-                resource = nullptr;
-            }
-        };
-        if (spectrumFxContext_)
-            spectrumFxContext_->SetTarget(nullptr);
-        release(spectrumGlowFx_);
-        release(spectrumSheenBrush_);
-        release(spectrumFxFrame_);
-        for (auto*& bitmap : spectrumFxHistory_)
-            release(bitmap);
-        release(spectrumFxContext_);
-        resetSpectrumEffectHistory();
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.releaseSpectrumEffectResources();
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     void setSpectrumEffects(uint32_t effects) {
@@ -2319,99 +2086,32 @@ struct TaskbarHost::Impl {
     }
 
     bool spectrumEffectsAnimating() const {
-        if (!spectrumVisible_ || !clientAnimations_ || scene_ == DisplayScene::Idle ||
-            isMinimalMode() || isStoppedMode())
-            return false;
-        const ULONGLONG now = frameNowMs_;
-        for (const auto& spark : spectrumSparks_)
-            if (spark.bornMs != 0 && now - spark.bornMs < 420)
-                return true;
-        for (ULONGLONG captured : spectrumFxHistoryMs_)
-            if (captured != 0 && now - captured < 220)
-                return true;
-        if (spectrumEffectEnabled(SpectrumEffect::Sheen) && media.playing) {
-            for (float level : spectrumBands_)
-                if (level > 0.01f)
-                    return true;
-        }
-        return false;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.spectrumEffectsAnimating();
     }
 
     void updateSpectrumEffects(ULONGLONG now) {
-        if (!spectrumVisible_ || !clientAnimations_ || scene_ == DisplayScene::Idle ||
-            isMinimalMode() || isStoppedMode()) {
-            resetSpectrumEffectHistory();
-            return;
-        }
-        bool expired = false;
-        for (auto& spark : spectrumSparks_) {
-            if (spark.bornMs != 0 && now - spark.bornMs >= 420) {
-                spark.bornMs = 0;
-                expired = true;
-            }
-        }
-        for (auto& captured : spectrumFxHistoryMs_) {
-            if (captured != 0 && now - captured >= 220) {
-                captured = 0;
-                expired = true;
-            }
-        }
-        for (int band = 0; band < TaskbarHost::kSpectrumBands; ++band) {
-            const float level = spectrumLevel(band);
-            if (spectrumEffectEnabled(SpectrumEffect::Sparks) && media.playing &&
-                level > 0.35f && level - spectrumPreviousLevels_[band] > 0.12f &&
-                now - spectrumLastSparkMs_[band] >= 90) {
-                spectrumLastSparkMs_[band] = now;
-                for (int i = 0; i < 2; ++i) {
-                    spectrumSparks_[spectrumSparkNext_] = {
-                        now, level, band, i == 0 ? -1.0f : 1.0f};
-                    spectrumSparkNext_ = (spectrumSparkNext_ + 1) % spectrumSparks_.size();
-                }
-            }
-            spectrumPreviousLevels_[band] = level;
-        }
-        if (expired || spectrumEffectsAnimating())
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.updateSpectrumEffects(now);
+        if (spectrum_.consumeRedraw())
             requestFrame();
     }
 
     bool spectrumVisualsAnimating() const {
-        if (!spectrumVisible_ || spectrumStyle_ != SpectrumStyle::Segmented)
-            return false;
-        for (int i = 0; i < TaskbarHost::kSpectrumBands; ++i) {
-            if (spectrumPeaks_[i] > 0.01f)
-                return true;
-        }
-        return false;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.spectrumVisualsAnimating();
     }
 
     void updateSpectrumVisuals(ULONGLONG now) {
-        if (!spectrumVisible_ || spectrumStyle_ != SpectrumStyle::Segmented)
-            return;
-        const float dt = spectrumVisualTickMs_ == 0 ? 0.0f
-            : static_cast<float>(now - spectrumVisualTickMs_) / 1000.0f;
-        spectrumVisualTickMs_ = now;
-        bool changed = false;
-        for (int i = 0; i < TaskbarHost::kSpectrumBands; ++i) {
-            const float level = spectrumLevel(i);
-            const float previous = spectrumPeaks_[i];
-            if (!clientAnimations_ || level >= previous) {
-                spectrumPeaks_[i] = level;
-                spectrumPeakHoldUntil_[i] = now + 180;
-            } else if (now > spectrumPeakHoldUntil_[i]) {
-                const float decaySeconds = std::min(dt,
-                    static_cast<float>(now - spectrumPeakHoldUntil_[i]) / 1000.0f);
-                spectrumPeaks_[i] = std::max(level, previous - decaySeconds * 0.9f);
-            }
-            changed = changed || spectrumPeaks_[i] != previous;
-        }
-        if (changed)
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.updateSpectrumVisuals(now);
+        if (spectrum_.consumeRedraw())
             requestFrame();
     }
 
     bool backgroundWaveAnimating() const {
-        // 波浪的相位独立于播放状态和音频电平，暂停后仍需要连续刷新。
-        return clientAnimations_ && spectrumVisible_ && backgroundWaveEnabled() &&
-               scene_ != DisplayScene::Idle && !isMinimalMode() && !isStoppedMode();
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.backgroundWaveAnimating();
     }
 
     void setSpectrumStyle(SpectrumStyle style) {
@@ -2574,8 +2274,7 @@ struct TaskbarHost::Impl {
             stopPlacementTimer();
         else if (mode != TaskbarViewMode::AppBar && !isStoppedMode())
             startPlacementTimer();
-        requestInvalidation(toMask(RenderInvalidation::Layout) |
-                            toMask(RenderInvalidation::Paint) |
+        requestInvalidation(toMask(RenderInvalidation::Layout) | toMask(RenderInvalidation::Paint) |
                             toMask(RenderInvalidation::Text));
         adjustPosition();
         reconcileWindowVisibility();
@@ -2586,7 +2285,7 @@ struct TaskbarHost::Impl {
         if (appBarEdge_ == edge)
             return;
         appBarEdge_ = edge;
-        if (isAppBarView() && appBarRegistered_)
+        if (isAppBarView() && appBar_.registered())
             updateAppBarPosition();
         requestInvalidation(RenderInvalidation::Layout);
         requestFrameAndFlush();
@@ -2651,8 +2350,8 @@ struct TaskbarHost::Impl {
     void updateBackdropSolidColor() {
         if (viewMode_ == TaskbarViewMode::Embedded)
             return;
-        const COLORREF color = fluent::isWindowsAppDarkMode() ? RGB(32, 32, 32)
-                                                              : RGB(243, 243, 243);
+        const COLORREF color =
+            fluent::isWindowsAppDarkMode() ? RGB(32, 32, 32) : RGB(243, 243, 243);
         dockBackdrop_.setSolidColor(color);
         if (!dockBackdrop_.available())
             backgroundBlurSupported_ = false;
@@ -2667,9 +2366,9 @@ struct TaskbarHost::Impl {
 
         if (dockBackdrop_.available()) {
             backgroundBlurSupported_ = true;
-            runtime_log::writef(
-                L"[dock-backdrop] init result=reused view=%s hwnd=%p",
-                viewMode_ == TaskbarViewMode::Immersive ? L"immersive" : L"dock", hwnd);
+            runtime_log::writef(L"[dock-backdrop] init result=reused view=%s hwnd=%p",
+                                viewMode_ == TaskbarViewMode::Immersive ? L"immersive" : L"dock",
+                                hwnd);
         } else {
             backgroundBlurSupported_ = dockBackdrop_.initialize(hwnd);
         }
@@ -2703,8 +2402,7 @@ struct TaskbarHost::Impl {
                 stopResourceMonitoring();
         }
         dockResourcePage_ = 0;
-        requestInvalidation(toMask(RenderInvalidation::Layout) |
-                            toMask(RenderInvalidation::Paint) |
+        requestInvalidation(toMask(RenderInvalidation::Layout) | toMask(RenderInvalidation::Paint) |
                             toMask(RenderInvalidation::Text));
         if (isAppBarView() || viewMode_ == TaskbarViewMode::Embedded)
             adjustPosition();
@@ -2714,13 +2412,13 @@ struct TaskbarHost::Impl {
     void setSpectrumVisible(bool on) {
         if (spectrumVisible_ == on) {
             if (!on)
-                spectrumBands_.fill(0.0f);
+                spectrum_.clearBands();
             return;
         }
         spectrumVisible_ = on;
         resetSpectrumVisuals();
         if (!on)
-            spectrumBands_.fill(0.0f);
+            spectrum_.clearBands();
         // 先改窗口宽度再渲染：若在 render 内经 Layout 失效改大小，
         // render 结尾的 present 会用旧尺寸位图把窗口尺寸拽回去（与 setPositionMode 同序）
         adjustPosition();
@@ -2744,9 +2442,9 @@ struct TaskbarHost::Impl {
         albumCoverVisible_ = on;
         if (!on) {
             requestInvalidation(RenderInvalidation::PlatformIcon);
-            if (platformIconBmp) {
-                platformIconBmp->Release();
-                platformIconBmp = nullptr;
+            if (platformIconBmp.Get()) {
+                platformIconBmp.Reset();
+                platformIconBmp.Reset();
             }
         } else if (platformIconVisible_) {
             requestInvalidation(RenderInvalidation::PlatformIcon);
@@ -2768,8 +2466,8 @@ struct TaskbarHost::Impl {
         if (albumCoverEffect_ == effect)
             return;
         albumCoverEffect_ = effect;
-        vinylAngleDeg_ = 0.0f;
-        vinylTickMs_ = monotonicNowMs();
+        vinyl_.resetDisc();
+        vinyl_.resetClock(monotonicNowMs());
         requestInvalidation(RenderInvalidation::Geometry);
         if (effect == AlbumCoverEffect::Vinyl)
             createAlbumCoverBrushes();
@@ -2780,13 +2478,12 @@ struct TaskbarHost::Impl {
     }
 
     void setSpectrumBands(const std::array<float, TaskbarHost::kSpectrumBands>& bands) {
-        spectrumBands_ = bands;
+        spectrum_.setBands(bands);
     }
 
     void applyPlaybackPatch(const PlaybackPatch& patch) {
         // 高频补丁必须属于当前已经应用的完整帧；旧曲目或旧帧的位置不能回写。
-        if (patch.frameRevision != frameRevision_ ||
-            patch.requestGeneration != requestGeneration_)
+        if (patch.frameRevision != frameRevision_ || patch.requestGeneration != requestGeneration_)
             return;
 
         syncLyricEffectClock(patch.actualPositionMs, patch.playing);
@@ -2800,12 +2497,11 @@ struct TaskbarHost::Impl {
         const bool playingChanged = media.playing != patch.playing;
         if (playingChanged) {
             media.playing = patch.playing;
-            vinylTickMs_ = monotonicNowMs();
+            vinyl_.resetClock(monotonicNowMs());
             updateVinylRotation();
             mediaPopup.setMedia(media, mediaPopupAvailable(isSessionVisible()));
-            mediaPopup.setPresentationMode(
-                scene_, mediaPopupAvailable(isSessionVisible()),
-                hoverControlStyle_ == HoverControlStyle::Inline);
+            mediaPopup.setPresentationMode(scene_, mediaPopupAvailable(isSessionVisible()),
+                                           hoverControlStyle_ == HoverControlStyle::Inline);
         }
         mediaPopup.endPresentationUpdate();
         if (playingChanged) {
@@ -2818,25 +2514,22 @@ struct TaskbarHost::Impl {
         if (patch.currentLine == currentLine)
             return;
 
-        if (lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            isLyricTransitionInProgress()) {
+        if (transition_.kind() == LyricTransitionKind::Scene && isLyricTransitionInProgress()) {
             // 场景翻页期间不重排目标层，先记下最新歌词行，待翻页完成后
             // 统一提交，避免目标层重建把上下翻页打断成瞬移。
             currentLine = patch.currentLine;
-            sceneTransitionNeedsRelayout_ = true;
-            lyricTransitionRevision_ = frameRevision_;
+            transition_.setNeedsRelayout(true);
+            transition_.setRevision(frameRevision_);
             return;
         }
 
-        onLyricLineTargetChanged(patch.currentLine, patch.actualPositionMs, frameRevision_,
-                                 true);
+        onLyricLineTargetChanged(patch.currentLine, patch.actualPositionMs, frameRevision_, true);
     }
 
     void applySpectrumPatch(const SpectrumPatch& patch) {
-        if (patch.frameRevision != frameRevision_ ||
-            patch.requestGeneration != requestGeneration_)
+        if (patch.frameRevision != frameRevision_ || patch.requestGeneration != requestGeneration_)
             return;
-        spectrumBands_ = patch.bands;
+        spectrum_.setBands(patch.bands);
     }
 
     void applyPresentationFrame(const PresentationFrame& frame) {
@@ -2859,34 +2552,30 @@ struct TaskbarHost::Impl {
         if (sceneChanged)
             resetSpectrumEffectHistory();
         const bool sceneWidthChanged = sceneWidthPolicyDiffers(scene_, frame.scene);
-        const bool idleChanged = frame.idle.sentence != idle.sentence ||
-                                 frame.idle.source != idle.source ||
-                                 frame.idle.loading != idle.loading ||
-                                 frame.idle.showText != idle.showText ||
-                                 frame.idle.showQuote != idle.showQuote ||
-                                 frame.idle.copyEnabled != idle.copyEnabled ||
-                                 frame.idle.quickStartEnabled != idle.quickStartEnabled ||
-                                 frame.idle.apps.size() != idle.apps.size();
+        const bool idleChanged =
+            frame.idle.sentence != idle.sentence || frame.idle.source != idle.source ||
+            frame.idle.loading != idle.loading || frame.idle.showText != idle.showText ||
+            frame.idle.showQuote != idle.showQuote || frame.idle.copyEnabled != idle.copyEnabled ||
+            frame.idle.quickStartEnabled != idle.quickStartEnabled ||
+            frame.idle.apps.size() != idle.apps.size();
         const bool wasVisible = isWindowVisible();
-        const bool shouldAnimateScene =
-            isWindowVisible() && frame.visible && clientAnimations_ && !isMinimalMode() &&
-            !isStoppedMode() &&
-            isTaskbarSceneTransition(scene_, frame.scene) && lyricLayout_;
+        const bool shouldAnimateScene = isWindowVisible() && frame.visible && clientAnimations_ &&
+                                        !isMinimalMode() && !isStoppedMode() &&
+                                        isTaskbarSceneTransition(scene_, frame.scene) &&
+                                        typesetter_.resources().lyricLayout_.Get();
         const bool continueSceneTransition =
-            sceneChanged && lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            isLyricTransitionInProgress() &&
-            isTaskbarMediaScene(scene_) && isTaskbarMediaScene(frame.scene);
+            sceneChanged && transition_.kind() == LyricTransitionKind::Scene &&
+            isLyricTransitionInProgress() && isTaskbarMediaScene(scene_) &&
+            isTaskbarMediaScene(frame.scene);
         const bool mediaIdentityChanged =
             frame.media.title != media.title || frame.media.artist != media.artist ||
             frame.media.sourceAppUserModelId != media.sourceAppUserModelId ||
             frame.media.thumbnail != media.thumbnail;
         // QQ 的 trackKey 包含时长；同一首歌从未知时长补齐到有效时长时，
         // 即使封面、专辑字段也在同一批事件中更新，也不能启动整卡切歌动画。
-        const bool durationOnlyMediaUpdate =
-            trackChanged && frame.durationOnlyUpdate && media.durationMs <= 0 &&
-            frame.media.durationMs > 0;
-        const bool confirmedDurationChange = media.durationMs > 0 &&
-                                             frame.media.durationMs > 0 &&
+        const bool durationOnlyMediaUpdate = trackChanged && frame.durationOnlyUpdate &&
+                                             media.durationMs <= 0 && frame.media.durationMs > 0;
+        const bool confirmedDurationChange = media.durationMs > 0 && frame.media.durationMs > 0 &&
                                              media.durationMs != frame.media.durationMs;
         const bool songChanged = trackChanged && !trackKey_.empty() && !frame.trackKey.empty() &&
                                  !durationOnlyMediaUpdate &&
@@ -2912,19 +2601,19 @@ struct TaskbarHost::Impl {
             if (continueSceneTransition) {
                 // Searching/Spectrum/Message 都属于播放侧内容。歌词加载完成时
                 // 继续同一页翻转，不能把中间场景当成一次新的类别切换。
-                sceneTransitionNeedsRelayout_ = true;
-                lyricTransitionRevision_ = frame.frameRevision;
+                transition_.setNeedsRelayout(true);
+                transition_.setRevision(frame.frameRevision);
             } else {
                 resetLyricTransition();
                 if (shouldAnimateScene) {
-                    outgoingScene_ = scene_;
-                    outgoingDoubleLine_ = lyricLayoutDoubleLine_;
-                    sceneTransitionFromPxW_ = lastLogicalPxW_;
-                    sceneTransitionFromPxH_ = lastLogicalPxH_;
-                    lyricTransitionKind_ = LyricTransitionKind::Scene;
-                    lyricTransitionDirection_ = frame.scene == DisplayScene::Lyrics ? 1 : -1;
+                    transition_.setOutgoingScene(scene_);
+                    transition_.setOutgoingDoubleLine(lyricLayoutDoubleLine_);
+                    transition_.setFromWidth(lastLogicalPxW_);
+                    transition_.setFromHeight(lastLogicalPxH_);
+                    transition_.setKind(LyricTransitionKind::Scene);
+                    transition_.setDirection(frame.scene == DisplayScene::Lyrics ? 1 : -1);
                     setLyricTransitionPending();
-                    lyricTransitionRevision_ = frame.frameRevision;
+                    transition_.setRevision(frame.frameRevision);
                 }
             }
         }
@@ -2968,41 +2657,40 @@ struct TaskbarHost::Impl {
                                  !isStoppedMode() && clientAnimations_);
 
         const bool sceneTransitionInProgress =
-            lyricTransitionKind_ == LyricTransitionKind::Scene &&
-            isLyricTransitionInProgress();
+            transition_.kind() == LyricTransitionKind::Scene && isLyricTransitionInProgress();
         if (trackChanged || lyricsChanged) {
             lines = frame.lyrics;
             currentLine = frame.currentLine;
             if (!sceneTransitionInProgress) {
                 resetLyricTransition();
-                if (nextLyricLayout_) {
-                    nextLyricLayout_->Release();
-                    nextLyricLayout_ = nullptr;
+                if (typesetter_.resources().nextLyricLayout_.Get()) {
+                    typesetter_.resources().nextLyricLayout_.Reset();
+                    typesetter_.resources().nextLyricLayout_.Reset();
                 }
                 nextLyricWidth_ = 0.0f;
                 nextLyricHeight_ = 0.0f;
                 requestInvalidation(RenderInvalidation::Text);
             } else if (!sceneChanged || continueSceneTransition) {
-                sceneTransitionNeedsRelayout_ = true;
-                lyricTransitionRevision_ = frame.frameRevision;
+                transition_.setNeedsRelayout(true);
+                transition_.setRevision(frame.frameRevision);
             }
         } else if (lineChanged) {
             if (sceneTransitionInProgress) {
                 currentLine = frame.currentLine;
-                sceneTransitionNeedsRelayout_ = true;
-                lyricTransitionRevision_ = frame.frameRevision;
+                transition_.setNeedsRelayout(true);
+                transition_.setRevision(frame.frameRevision);
             } else {
                 onLyricLineTargetChanged(frame.currentLine, frame.actualPositionMs,
                                          frame.frameRevision, frame.animateTransition);
             }
         } else if (isLyricTransitionInProgress()) {
             // 同一目标行的低频媒体/场景更新不应打断动画，但动画版本要跟随最新完整帧。
-            lyricTransitionRevision_ = frame.frameRevision;
+            transition_.setRevision(frame.frameRevision);
         }
         if (statusChanged || statusOneShotChanged || sceneChanged) {
             if (sceneTransitionInProgress && (!sceneChanged || continueSceneTransition)) {
-                sceneTransitionNeedsRelayout_ = true;
-                lyricTransitionRevision_ = frame.frameRevision;
+                transition_.setNeedsRelayout(true);
+                transition_.setRevision(frame.frameRevision);
             } else {
                 requestInvalidation(RenderInvalidation::Text);
             }
@@ -3016,49 +2704,45 @@ struct TaskbarHost::Impl {
         reconcileWindowVisibility();
         syncMediaPopupEnabled();
 
-        if (isWindowVisible() && (wasVisible != isWindowVisible() || trackChanged || mediaChanged || lyricsChanged ||
-                        lineChanged || statusChanged || statusOneShotChanged || sceneChanged ||
-                        idleChanged))
+        if (isWindowVisible() &&
+            (wasVisible != isWindowVisible() || trackChanged || mediaChanged || lyricsChanged ||
+             lineChanged || statusChanged || statusOneShotChanged || sceneChanged || idleChanged))
             requestFrameAndFlush();
     }
 
     // 频谱簇总宽（含柱间间隙）
     float spectrumClusterW() const {
-        return TaskbarHost::kSpectrumBands * kSpectrumBarW +
-               (TaskbarHost::kSpectrumBands - 1) * kSpectrumGap;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.spectrumClusterW();
     }
 
     float spectrumVisualClusterW(int barCount) const {
-        const int count = std::max(1, barCount);
-        return count * kSpectrumBarW + (count - 1) * kSpectrumGap;
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.spectrumVisualClusterW(barCount);
     }
 
-    bool horizontalImmersiveMode() const {
-        return isExpandedView() && !isVerticalTaskbar();
-    }
+    bool horizontalImmersiveMode() const { return isExpandedView() && !isVerticalTaskbar(); }
 
     // 沉浸模式把频谱提升为右侧固定视觉区，长任务栏自动给它更多空间。
     float immersiveSpectrumZoneW(float hostW) const {
         if (!horizontalImmersiveMode() || hostW <= 0.0f)
             return 0.0f;
-        return std::clamp(hostW * kImmersiveSpectrumZoneRatio,
-                          kImmersiveSpectrumZoneMinW, kImmersiveSpectrumZoneMaxW);
+        return std::clamp(hostW * kImmersiveSpectrumZoneRatio, kImmersiveSpectrumZoneMinW,
+                          kImmersiveSpectrumZoneMaxW);
     }
 
     float immersiveClockZoneW(float hostW) const {
         if (!horizontalImmersiveMode() || hostW <= 0.0f)
             return 0.0f;
-        return std::clamp(hostW * kImmersiveClockZoneRatio,
-                          kImmersiveClockZoneMinW, kImmersiveClockZoneMaxW);
+        return std::clamp(hostW * kImmersiveClockZoneRatio, kImmersiveClockZoneMinW,
+                          kImmersiveClockZoneMaxW);
     }
 
-    bool dockResourceExtrasVisible() const {
-        return dockResourcePageCount() > 1;
-    }
+    bool dockResourceExtrasVisible() const { return dockResourcePageCount() > 1; }
 
     std::vector<DockResourceRow> dockResourceRows() const {
         std::vector<std::wstring> cells{L"CPU: " + resourceCpuText_,
-                                       L"内存: " + resourceMemoryText_};
+                                        L"内存: " + resourceMemoryText_};
         if (dockResourceVisibility_.download)
             cells.push_back(L"下行: " + resourceDownloadText_);
         if (dockResourceVisibility_.upload)
@@ -3090,8 +2774,7 @@ struct TaskbarHost::Impl {
     float dockResourceZoneW(float hostW) const {
         if (!isAppBarView() || hostW <= 0.0f)
             return 0.0f;
-        return std::min(resourceZoneWidth(),
-                        std::max(1.0f, hostW - kDockResourceRightPadding));
+        return std::min(resourceZoneWidth(), std::max(1.0f, hostW - kDockResourceRightPadding));
     }
 
     bool hitDockResourceArea(float clientX, float clientY) const {
@@ -3108,12 +2791,10 @@ struct TaskbarHost::Impl {
         const float height = dip(pxH);
         const float resourceW =
             embeddedResourceVisible()
-                ? std::min(resourceZoneWidth(),
-                           std::max(1.0f, width - kDockResourceRightPadding))
+                ? std::min(resourceZoneWidth(), std::max(1.0f, width - kDockResourceRightPadding))
                 : dockResourceZoneW(width);
         const float resourceX = width - resourceW - kDockResourceRightPadding;
-        return x >= resourceX && x <= width - kDockResourceRightPadding && y >= 0.0f &&
-               y <= height;
+        return x >= resourceX && x <= width - kDockResourceRightPadding && y >= 0.0f && y <= height;
     }
 
     void advanceDockResourcePage(int steps) {
@@ -3127,19 +2808,13 @@ struct TaskbarHost::Impl {
         if (next < 0)
             next += count;
         dockResourcePage_ = static_cast<size_t>(next);
-        requestInvalidation(toMask(RenderInvalidation::Paint) |
-                            toMask(RenderInvalidation::Text));
+        requestInvalidation(toMask(RenderInvalidation::Paint) | toMask(RenderInvalidation::Text));
         requestFrameAndFlush();
     }
 
     int immersiveSpectrumBarCount(float visualW) const {
-        const int target = visualW >= kImmersiveSpectrumWideZoneThreshold
-                               ? kImmersiveSpectrumWideBarCount
-                               : kImmersiveSpectrumBarCount;
-        const int capacity = std::max(
-            1, static_cast<int>(std::floor((visualW + kSpectrumGap) /
-                                           (kSpectrumBarW + kSpectrumGap))));
-        return std::min(target, capacity);
+        spectrum_.setContext(spectrumContext());
+        return spectrum_.immersiveSpectrumBarCount(visualW);
     }
 
     float spectrumContentWForScene(DisplayScene scene, float hostW) const {
@@ -3184,9 +2859,7 @@ struct TaskbarHost::Impl {
                spectrumExtraForScene(from) != spectrumExtraForScene(to);
     }
 
-    void cancelSceneWindowResize() {
-        sceneResize_.reset();
-    }
+    void cancelSceneWindowResize() { sceneResize_.reset(); }
 
     bool beginSceneWindowResize() {
         if (isExpandedView())
@@ -3216,19 +2889,18 @@ struct TaskbarHost::Impl {
         if (now < resize.startMs)
             now = resize.startMs;
 
-        const float progress = std::clamp(
-            static_cast<float>(now - resize.startMs) / kSceneTransitionMs, 0.0f,
-            1.0f);
+        const float progress =
+            std::clamp(static_cast<float>(now - resize.startMs) / kSceneTransitionMs, 0.0f, 1.0f);
         const float t = smoothStep(progress);
         WindowPlacement placement;
-        placement.x = static_cast<int>(std::lround(
-            resize.from.x + (resize.to.x - resize.from.x) * t));
-        placement.y = static_cast<int>(std::lround(
-            resize.from.y + (resize.to.y - resize.from.y) * t));
-        placement.width = static_cast<int>(std::lround(
-            resize.from.width + (resize.to.width - resize.from.width) * t));
-        placement.height = static_cast<int>(std::lround(
-            resize.from.height + (resize.to.height - resize.from.height) * t));
+        placement.x =
+            static_cast<int>(std::lround(resize.from.x + (resize.to.x - resize.from.x) * t));
+        placement.y =
+            static_cast<int>(std::lround(resize.from.y + (resize.to.y - resize.from.y) * t));
+        placement.width = static_cast<int>(
+            std::lround(resize.from.width + (resize.to.width - resize.from.width) * t));
+        placement.height = static_cast<int>(
+            std::lround(resize.from.height + (resize.to.height - resize.from.height) * t));
 
         const bool changed = placement.x != resize.lastApplied.x ||
                              placement.y != resize.lastApplied.y ||
@@ -3244,597 +2916,31 @@ struct TaskbarHost::Impl {
         return true;
     }
 
-    float spectrumLevel(int index) const {
-        return std::clamp(spectrumBands_[index], 0.0f, 1.0f);
-    }
-
-    void fillSpectrumBar(ID2D1RenderTarget* rt, const D2D1_ROUNDED_RECT& bar) {
-        if (!rt || !brushSpectrum_)
-            return;
-        if (spectrumGradient_ && brushSpectrumBarGradient_) {
-            const float centerX = (bar.rect.left + bar.rect.right) * 0.5f;
-            brushSpectrumBarGradient_->SetStartPoint(
-                D2D1::Point2F(centerX, bar.rect.bottom));
-            brushSpectrumBarGradient_->SetEndPoint(D2D1::Point2F(centerX, bar.rect.top));
-            rt->FillRoundedRectangle(bar, brushSpectrumBarGradient_);
-            return;
-        }
-        rt->FillRoundedRectangle(bar, brushSpectrum_);
-    }
-
-    D2D1_COLOR_F spectrumColorForLevel(float level, float alphaScale = 1.0f) const {
-        const D2D1_COLOR_F base = brushSpectrum_->GetColor();
-        if (!spectrumGradient_)
-            return D2D1::ColorF(base.r, base.g, base.b, base.a * alphaScale);
-
-        // 只在当前频谱基色的基础上向白色轻微提亮，波动越高提亮越多，保持同色系关系。
-        const float lift = std::clamp(level, 0.0f, 1.0f) * 0.30f;
-        return D2D1::ColorF(base.r + (1.0f - base.r) * lift,
-                            base.g + (1.0f - base.g) * lift,
-                            base.b + (1.0f - base.b) * lift,
-                            base.a * alphaScale);
-    }
-
-    float spectrumVisualLevel(int index, int visualCount) const {
-        if (visualCount <= 1)
-            return spectrumLevel(0);
-        const float position = static_cast<float>(index) /
-                               static_cast<float>(visualCount - 1) *
-                               static_cast<float>(TaskbarHost::kSpectrumBands - 1);
-        const int leftBand = std::min(TaskbarHost::kSpectrumBands - 2,
-                                      static_cast<int>(position));
-        const float local = position - static_cast<float>(leftBand);
-        const float smoothLocal = local * local * (3.0f - 2.0f * local);
-        return spectrumLevel(leftBand) +
-               (spectrumLevel(leftBand + 1) - spectrumLevel(leftBand)) * smoothLocal;
-    }
-
-    void drawDefaultSpectrum(float x, float h, int visualCount) {
-        auto* rt = drawTarget();
-        if (!rt || !brushSpectrum_)
-            return;
-        const int n = std::max(1, visualCount);
-        const float cy = h * 0.5f;
-        const float maxH = h * 0.74f;
-        constexpr float minH = 4.0f; // 静音时也保留小柱，不消失
-        for (int i = 0; i < n; ++i) {
-            const float level = spectrumVisualLevel(i, n);
-            const float bh = minH + level * (maxH - minH);
-            D2D1_ROUNDED_RECT rr{
-                D2D1::RectF(x, cy - bh * 0.5f, x + kSpectrumBarW, cy + bh * 0.5f),
-                kSpectrumBarW * 0.5f, kSpectrumBarW * 0.5f};
-            fillSpectrumBar(rt, rr);
-            x += kSpectrumBarW + kSpectrumGap;
-        }
-    }
-
     // 新增样式：普通柱状图，柱底贴近歌词窗口下边缘，电平只向上增长。
-    void drawBarSpectrum(float x, float h, int visualCount) {
-        auto* rt = drawTarget();
-        if (!rt || !brushSpectrum_)
-            return;
-        const int n = std::max(1, visualCount);
-        const float baseY = h - kSpectrumBottomPadding;
-        const float maxH = h * 0.82f;
-        constexpr float minH = 3.0f;
-        for (int i = 0; i < n; ++i) {
-            const float level = spectrumVisualLevel(i, n);
-            const float bh = minH + level * (maxH - minH);
-            const D2D1_ROUNDED_RECT bar{
-                D2D1::RectF(x, baseY - bh, x + kSpectrumBarW, baseY),
-                kSpectrumBarRadius, kSpectrumBarRadius};
-            fillSpectrumBar(rt, bar);
-            x += kSpectrumBarW + kSpectrumGap;
-        }
-    }
-
-    void drawSegmentedSpectrum(float x, float h, int visualCount) {
-        auto* rt = drawTarget();
-        if (!rt || !brushSpectrum_)
-            return;
-        const D2D1_COLOR_F original = brushSpectrum_->GetColor();
-        const float baseY = h - kSpectrumBottomPadding;
-        constexpr float cellH = 2.0f;
-        constexpr float step = 3.5f;
-        const int cells = std::max(1, static_cast<int>(h * 0.78f / step));
-        for (int i = 0; i < visualCount; ++i) {
-            const float level = spectrumVisualLevel(i, visualCount);
-            const int lit = static_cast<int>(std::ceil(level * cells));
-            const float position = visualCount <= 1 ? 0.0f
-                : static_cast<float>(i) / (visualCount - 1) * (TaskbarHost::kSpectrumBands - 1);
-            const int band = std::min(TaskbarHost::kSpectrumBands - 2,
-                                      static_cast<int>(position));
-            const float peak = spectrumPeaks_[band] +
-                (spectrumPeaks_[band + 1] - spectrumPeaks_[band]) * (position - band);
-            for (int cell = 0; cell < cells; ++cell) {
-                brushSpectrum_->SetColor(original);
-                brushSpectrum_->SetColor(spectrumColorForLevel(
-                    static_cast<float>(cell + 1) / cells, cell < lit ? 0.88f : 0.09f));
-                const float y = baseY - cell * step;
-                rt->FillRectangle(D2D1::RectF(x, y - cellH, x + kSpectrumBarW, y),
-                                  brushSpectrum_);
-            }
-            if (peak > 0.01f) {
-                brushSpectrum_->SetColor(original);
-                brushSpectrum_->SetColor(spectrumColorForLevel(peak));
-                const int peakCell = std::clamp(static_cast<int>(std::ceil(peak * cells)) - 1,
-                                                0, cells - 1);
-                const float y = baseY - peakCell * step;
-                rt->FillRectangle(D2D1::RectF(x, y - 1.0f, x + kSpectrumBarW, y),
-                                  brushSpectrum_);
-            }
-            x += kSpectrumBarW + kSpectrumGap;
-        }
-        brushSpectrum_->SetColor(original);
-    }
-
-    bool ensureSpectrumEffectResources(float width, float height) {
-        auto* rt = drawTarget();
-        if (!rt)
-            return false;
-        float dpiX = 96.0f;
-        float dpiY = 96.0f;
-        rt->GetDpi(&dpiX, &dpiY);
-        const auto size = D2D1::SizeU(
-            std::max(1u, static_cast<UINT>(std::ceil(width * dpiX / 96.0f))),
-            std::max(1u, static_cast<UINT>(std::ceil(height * dpiY / 96.0f))));
-        if (spectrumFxFrame_) {
-            const auto previous = spectrumFxFrame_->GetPixelSize();
-            float previousDpiX = 0.0f;
-            float previousDpiY = 0.0f;
-            spectrumFxFrame_->GetDpi(&previousDpiX, &previousDpiY);
-            if (previous.width == size.width && previous.height == size.height &&
-                previousDpiX == dpiX && previousDpiY == dpiY)
-                return true;
-            releaseSpectrumEffectResources();
-        }
-        ID2D1Device* device = nullptr;
-        rt->GetDevice(&device);
-        if (!device)
-            return false;
-        HRESULT hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-                                                  &spectrumFxContext_);
-        device->Release();
-        if (FAILED(hr))
-            return false;
-        spectrumFxContext_->SetDpi(dpiX, dpiY);
-        const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
-            dpiX, dpiY);
-        hr = spectrumFxContext_->CreateBitmap(size, nullptr, 0, &properties, &spectrumFxFrame_);
-        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Trail)) {
-            for (auto*& bitmap : spectrumFxHistory_) {
-                hr = spectrumFxContext_->CreateBitmap(size, nullptr, 0, &properties, &bitmap);
-                if (FAILED(hr))
-                    break;
-            }
-        }
-        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Glow))
-            hr = rt->CreateEffect(CLSID_D2D1GaussianBlur, &spectrumGlowFx_);
-        if (SUCCEEDED(hr) && spectrumEffectEnabled(SpectrumEffect::Sheen)) {
-            const D2D1_GRADIENT_STOP stops[] = {
-                {0.0f, D2D1::ColorF(1, 1, 1, 0)},
-                {0.5f, D2D1::ColorF(1, 1, 1, 0.5f)},
-                {1.0f, D2D1::ColorF(1, 1, 1, 0)}};
-            ID2D1GradientStopCollection* collection = nullptr;
-            hr = rt->CreateGradientStopCollection(stops, 3, &collection);
-            if (SUCCEEDED(hr)) {
-                hr = rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
-                    D2D1::Point2F(0, 0), D2D1::Point2F(1, 0)), collection,
-                    &spectrumSheenBrush_);
-                collection->Release();
-            }
-        }
-        if (FAILED(hr)) {
-            runtime_log::writef(L"[spectrum] effect-resource-failed hr=0x%08X", hr);
-            releaseSpectrumEffectResources();
-            return false;
-        }
-        return true;
-    }
-
-    float spectrumSparkOriginY(const SpectrumSpark& spark, float h) const {
-        const float level = spark.level;
-        switch (spectrumStyle_) {
-        case SpectrumStyle::Default:
-            return h * 0.5f - (4.0f + level * (h * 0.74f - 4.0f)) * 0.5f;
-        case SpectrumStyle::Segmented: {
-            const int cells = std::max(1, static_cast<int>(h * 0.78f / 3.5f));
-            return h - kSpectrumBottomPadding -
-                std::max(0.0f, std::ceil(level * cells) - 1.0f) * 3.5f - 2.0f;
-        }
-        case SpectrumStyle::BottomBand:
-            return h - 1.1f - level * std::min(5.0f, h * 0.12f);
-        case SpectrumStyle::DreamyWave: {
-            const float t = static_cast<float>(spark.band) / (TaskbarHost::kSpectrumBands - 1);
-            const float phase = static_cast<float>(spark.bornMs % 60000ULL) / 1000.0f;
-            const float tide = std::clamp(0.5f + 0.5f *
-                std::sin(6.2831853f * t * 1.24f + phase * 0.46f - 0.55f) +
-                0.08f * std::sin(6.2831853f * t * 0.60f + phase * 0.24f + 0.7f),
-                0.0f, 1.0f);
-            const float profile = std::clamp(0.06f + level * 0.62f + tide * 0.34f, 0.0f, 1.0f);
-            return h - kSpectrumBottomPadding -
-                (2.0f + profile * (std::max(3.0f, h * 0.76f) - 2.0f));
-        }
-        case SpectrumStyle::Bars:
-        default:
-            return h - kSpectrumBottomPadding - (3.0f + level * (h * 0.82f - 3.0f));
-        }
-    }
-
-    template <typename DrawShape>
-    void drawSpectrumWithEffects(float x, float h, float width, DrawShape drawShape) {
-        auto* rt = drawTarget();
-        if (!rt || width <= 0.0f || h <= 0.0f)
-            return;
-        if (spectrumEffects_ == 0 || isMinimalMode() || isStoppedMode()) {
-            drawShape();
-            return;
-        }
-        if (!ensureSpectrumEffectResources(width, h)) {
-            drawShape();
-            return;
-        }
-        // 独立上下文不改动外层歌词和转场的 target、变换与裁剪栈。
-        spectrumFxContext_->SetTarget(spectrumFxFrame_);
-        spectrumFxContext_->SetTransform(D2D1::Matrix3x2F::Translation(-x, 0.0f));
-        spectrumFxContext_->BeginDraw();
-        spectrumFxContext_->Clear(D2D1::ColorF(0, 0, 0, 0));
-        auto* previousTarget = drawTargetOverride_;
-        drawTargetOverride_ = spectrumFxContext_;
-        drawShape();
-        drawTargetOverride_ = previousTarget;
-        const HRESULT hr = spectrumFxContext_->EndDraw();
-        spectrumFxContext_->SetTarget(nullptr);
-        if (FAILED(hr)) {
-            releaseSpectrumEffectResources();
-            requestFrame();
-            return;
-        }
-        const auto destination = D2D1::RectF(x, 0.0f, x + width, h);
-        const auto source = D2D1::RectF(0.0f, 0.0f, width, h);
-        const auto offset = D2D1::Point2F(x, 0.0f);
-        const ULONGLONG now = frameNowMs_ != 0 ? frameNowMs_ : monotonicNowMs();
-        const bool audioActive = std::any_of(spectrumBands_.begin(), spectrumBands_.end(),
-                                            [](float level) { return level > 0.01f; });
-        rt->PushAxisAlignedClip(destination, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        if (clientAnimations_ && spectrumEffectEnabled(SpectrumEffect::Trail)) {
-            for (size_t n = 0; n < spectrumFxHistory_.size(); ++n) {
-                const size_t i = (spectrumFxHistoryNext_ + n) % spectrumFxHistory_.size();
-                const ULONGLONG captured = spectrumFxHistoryMs_[i];
-                if (captured == 0 || now - captured >= 220)
-                    continue;
-                const float age = static_cast<float>(now - captured) / 220.0f;
-                rt->DrawBitmap(spectrumFxHistory_[i], &destination, (1.0f - age) * 0.18f,
-                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
-            }
-        }
-        if (spectrumGlowFx_) {
-            float energy = 0.0f;
-            for (float level : spectrumBands_)
-                energy = std::max(energy, level);
-            spectrumGlowFx_->SetInput(0, spectrumFxFrame_);
-            spectrumGlowFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-                                      1.6f + energy * 1.6f);
-            rt->DrawImage(spectrumGlowFx_, offset, source);
-        }
-        rt->DrawBitmap(spectrumFxFrame_, &destination, 1.0f,
-                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, &source);
-        if (spectrumSheenBrush_ && clientAnimations_ && media.playing && audioActive) {
-            const float phase = static_cast<float>(now % 2600ULL) / 2600.0f;
-            const float bandW = std::clamp(width * 0.18f, 12.0f, 60.0f);
-            const float center = x - bandW + phase * (width + 2.0f * bandW);
-            spectrumSheenBrush_->SetStartPoint(D2D1::Point2F(center - bandW * 0.5f, 0));
-            spectrumSheenBrush_->SetEndPoint(D2D1::Point2F(center + bandW * 0.5f, 0));
-            const auto antialias = rt->GetAntialiasMode();
-            rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-            rt->FillOpacityMask(spectrumFxFrame_, spectrumSheenBrush_, &destination, &source);
-            rt->SetAntialiasMode(antialias);
-        }
-        if (clientAnimations_ && spectrumEffectEnabled(SpectrumEffect::Sparks) && brushSpectrum_) {
-            const auto original = brushSpectrum_->GetColor();
-            const float opacity = backgroundWaveEnabled() ? spectrumOpacityPct_ / 100.0f : 1.0f;
-            for (const auto& spark : spectrumSparks_) {
-                if (spark.bornMs == 0 || now - spark.bornMs >= 420)
-                    continue;
-                const float age = static_cast<float>(now - spark.bornMs) / 420.0f;
-                const float t = static_cast<float>(spark.band) / (TaskbarHost::kSpectrumBands - 1);
-                float originX = t * width;
-                if (spectrumStyle_ == SpectrumStyle::BottomBand) {
-                    const int count = std::max(1, static_cast<int>(width / 4.0f));
-                    const float pitch = width / count;
-                    originX = std::round(t * (count - 1)) * pitch + pitch * 0.3f;
-                } else if (spectrumStyle_ != SpectrumStyle::DreamyWave) {
-                    const int count = std::max(1, static_cast<int>(std::round(
-                        (width + kSpectrumGap) / (kSpectrumBarW + kSpectrumGap))));
-                    originX = kSpectrumBarW * 0.5f + std::round(t * (count - 1)) *
-                              (kSpectrumBarW + kSpectrumGap);
-                }
-                const float px = x + originX + spark.drift * age * 5.0f;
-                const float py = spectrumSparkOriginY(spark, h) - age * 8.0f + age * age * 3.0f;
-                brushSpectrum_->SetColor(original);
-                brushSpectrum_->SetColor(spectrumColorForLevel(spark.level,
-                    (1.0f - age) * 0.85f * opacity));
-                rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(px, py),
-                    0.9f - age * 0.45f, 0.9f - age * 0.45f), brushSpectrum_);
-            }
-            brushSpectrum_->SetColor(original);
-        }
-        rt->PopAxisAlignedClip();
-        // 每 45ms 采一张，最多四张；静音后停止写入，让残影自然衰减。
-        if (clientAnimations_ && media.playing &&
-            spectrumEffectEnabled(SpectrumEffect::Trail) && audioActive &&
-            (spectrumFxCaptureMs_ == 0 || now - spectrumFxCaptureMs_ >= 45)) {
-            auto* bitmap = spectrumFxHistory_[spectrumFxHistoryNext_];
-            if (SUCCEEDED(bitmap->CopyFromBitmap(nullptr, spectrumFxFrame_, nullptr))) {
-                spectrumFxHistoryMs_[spectrumFxHistoryNext_] = now;
-                spectrumFxHistoryNext_ = (spectrumFxHistoryNext_ + 1) % spectrumFxHistory_.size();
-                spectrumFxCaptureMs_ = now;
-            }
-        }
-    }
 
     void drawBottomSpectrum(float x, float h, float width) {
-        drawSpectrumWithEffects(x, h, width, [&] { drawBottomSpectrumShape(x, h, width); });
-    }
-
-    void drawBottomSpectrumShape(float x, float h, float width) {
-        auto* rt = drawTarget();
-        if (!rt || !brushSpectrum_ || width <= 0.0f)
-            return;
-        const D2D1_COLOR_F original = brushSpectrum_->GetColor();
-        const int count = std::max(1, static_cast<int>(width / 4.0f));
-        const float pitch = width / count;
-        const float maxH = std::min(5.0f, h * 0.12f);
-        const float baseY = h - 0.5f;
-        for (int i = 0; i < count; ++i) {
-            const float level = spectrumVisualLevel(i, count);
-            const float t = (i + 0.5f) / count;
-            const float edge = std::min(1.0f, std::min(t, 1.0f - t) * 16.0f);
-            brushSpectrum_->SetColor(original);
-            brushSpectrum_->SetColor(spectrumColorForLevel(level, edge * 0.78f));
-            rt->FillRectangle(D2D1::RectF(x + i * pitch, baseY - 0.6f - level * maxH,
-                                         x + i * pitch + pitch * 0.6f, baseY), brushSpectrum_);
-        }
-        brushSpectrum_->SetColor(original);
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.drawBottomSpectrum(x, h, width);
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     // 填充波浪：以 baseY 为底边，width 可覆盖独立频谱区或歌曲内容背景区。
-    void drawWaveSpectrum(float x, float h, float width, float opacityScale) {
-        auto* rt = drawTarget();
-        if (!rt || !brushSpectrum_)
-            return;
-
-        constexpr int n = TaskbarHost::kSpectrumBands;
-        constexpr int samplesPerBand = 6;
-        constexpr int sampleCount = (n - 1) * samplesPerBand + 1;
-        constexpr float twoPi = 6.28318530718f;
-        const float baseY = h - kSpectrumBottomPadding;
-        const float minH = 2.0f;
-        const float maxH = std::max(minH + 1.0f, h * 0.76f);
-        const float phase = clientAnimations_
-                                ? static_cast<float>(frameNowMs_ % 60000ULL) / 1000.0f
-                                : 0.0f;
-
-        std::array<D2D1_POINT_2F, sampleCount> backWave{};
-        std::array<D2D1_POINT_2F, sampleCount> middleWave{};
-        std::array<D2D1_POINT_2F, sampleCount> frontWave{};
-        for (int i = 0; i < sampleCount; ++i) {
-            const float normalized = static_cast<float>(i) / (sampleCount - 1);
-            const float bandPosition = normalized * static_cast<float>(n - 1);
-            const int leftBand = std::min(n - 2, static_cast<int>(bandPosition));
-            const float local = bandPosition - static_cast<float>(leftBand);
-            const float smoothLocal = local * local * (3.0f - 2.0f * local);
-            const float leftLevel = spectrumLevel(leftBand);
-            const float rightLevel = spectrumLevel(leftBand + 1);
-            const float level = leftLevel + (rightLevel - leftLevel) * smoothLocal;
-
-            // 频段电平控制浪高，低频正弦只负责制造宽阔的海浪峰谷；每层使用
-            // 不同波长和相位，避免三层变成同一条线的缩放副本。
-            const float audio = std::clamp(level, 0.0f, 1.0f);
-            const float backTide = std::clamp(
-                0.5f + 0.5f * std::sin(twoPi * normalized * 0.92f + phase * 0.30f + 1.15f) +
-                    0.12f * std::sin(twoPi * normalized * 0.44f + phase * 0.16f - 0.4f),
-                0.0f, 1.0f);
-            const float middleTide = std::clamp(
-                0.5f + 0.5f * std::sin(twoPi * normalized * 1.08f + phase * 0.38f + 0.35f) +
-                    0.10f * std::sin(twoPi * normalized * 0.52f + phase * 0.20f + 1.0f),
-                0.0f, 1.0f);
-            const float frontTide = std::clamp(
-                0.5f + 0.5f * std::sin(twoPi * normalized * 1.24f + phase * 0.46f - 0.55f) +
-                    0.08f * std::sin(twoPi * normalized * 0.60f + phase * 0.24f + 0.7f),
-                0.0f, 1.0f);
-            const float backProfile = std::clamp(0.16f + audio * 0.34f + backTide * 0.50f,
-                                                 0.0f, 1.0f);
-            const float middleProfile =
-                std::clamp(0.10f + audio * 0.46f + middleTide * 0.42f, 0.0f, 1.0f);
-            const float frontProfile =
-                std::clamp(0.06f + audio * 0.62f + frontTide * 0.34f, 0.0f, 1.0f);
-            const float backAmplitude = minH + backProfile * (maxH * 0.88f - minH);
-            const float middleAmplitude = minH + middleProfile * (maxH * 0.76f - minH);
-            const float frontAmplitude = minH + frontProfile * (maxH - minH);
-            const float pointX = x + width * normalized;
-            backWave[i] = D2D1::Point2F(pointX, baseY - 1.6f - backAmplitude);
-            middleWave[i] = D2D1::Point2F(pointX, baseY - 0.8f - middleAmplitude);
-            frontWave[i] = D2D1::Point2F(pointX, baseY - frontAmplitude);
-        }
-
-        const float originalOpacity = brushSpectrum_->GetOpacity();
-        std::array<D2D1_GRADIENT_STOP, TaskbarHost::kSpectrumBands + 6> fadeStops{};
-        size_t fadeStopCount = 0;
-        auto addFadeStop = [&](float position, float level, float alphaScale) {
-            if (fadeStopCount >= fadeStops.size())
-                return;
-            fadeStops[fadeStopCount++] =
-                {position, spectrumColorForLevel(level, alphaScale)};
-        };
-        auto levelAt = [&](float normalized) {
-            const float bandPosition =
-                std::clamp(normalized, 0.0f, 1.0f) * static_cast<float>(n - 1);
-            const int leftBand = std::min(n - 2, static_cast<int>(bandPosition));
-            const float local = bandPosition - static_cast<float>(leftBand);
-            const float smoothLocal = local * local * (3.0f - 2.0f * local);
-            return spectrumLevel(leftBand) +
-                   (spectrumLevel(leftBand + 1) - spectrumLevel(leftBand)) * smoothLocal;
-        };
-        if (spectrumGradient_) {
-            addFadeStop(0.00f, levelAt(0.0f), 0.00f);
-            addFadeStop(0.017f, levelAt(0.0f), 0.38f);
-            addFadeStop(0.033f, levelAt(0.0f), 0.78f);
-            for (int i = 0; i < n; ++i) {
-                const float position = 0.05f + 0.90f * static_cast<float>(i) /
-                                                         static_cast<float>(n - 1);
-                addFadeStop(position, spectrumLevel(i), 1.0f);
-            }
-            addFadeStop(0.967f, levelAt(1.0f), 0.78f);
-            addFadeStop(0.983f, levelAt(1.0f), 0.38f);
-            addFadeStop(1.00f, levelAt(1.0f), 0.00f);
-        } else {
-            addFadeStop(0.00f, 0.0f, 0.00f);
-            addFadeStop(0.017f, 0.0f, 0.38f);
-            addFadeStop(0.033f, 0.0f, 0.78f);
-            addFadeStop(0.05f, 0.0f, 1.0f);
-            addFadeStop(0.95f, 0.0f, 1.0f);
-            addFadeStop(0.967f, 0.0f, 0.78f);
-            addFadeStop(0.983f, 0.0f, 0.38f);
-            addFadeStop(1.00f, 0.0f, 0.00f);
-        }
-        ID2D1GradientStopCollection* fadeStopCollection = nullptr;
-        ID2D1LinearGradientBrush* fadeBrush = nullptr;
-        if (SUCCEEDED(rt->CreateGradientStopCollection(fadeStops.data(),
-                                                        static_cast<UINT32>(fadeStopCount),
-                                                        &fadeStopCollection)) &&
-            fadeStopCollection) {
-            rt->CreateLinearGradientBrush(
-                D2D1::LinearGradientBrushProperties(D2D1::Point2F(x, 0.0f),
-                                                     D2D1::Point2F(x + width, 0.0f)),
-                fadeStopCollection, &fadeBrush);
-        }
-        if (fadeStopCollection)
-            fadeStopCollection->Release();
-
-        ID2D1Brush* waveBrush = fadeBrush ? static_cast<ID2D1Brush*>(fadeBrush)
-                                          : static_cast<ID2D1Brush*>(brushSpectrum_);
-        auto setWaveOpacity = [&](float opacity) {
-            waveBrush->SetOpacity(originalOpacity * opacityScale * opacity);
-        };
-        auto drawFilledWave = [&](const auto& points, float opacity) {
-            auto* d2d = renderer.d2d();
-            if (!d2d)
-                return;
-
-            ID2D1PathGeometry* geometry = nullptr;
-            if (FAILED(d2d->CreatePathGeometry(&geometry)) || !geometry)
-                return;
-            ID2D1GeometrySink* sink = nullptr;
-            if (FAILED(geometry->Open(&sink)) || !sink) {
-                geometry->Release();
-                return;
-            }
-
-            sink->BeginFigure(points[0], D2D1_FIGURE_BEGIN_FILLED);
-            for (int i = 1; i < sampleCount; ++i)
-                sink->AddLine(points[i]);
-            sink->AddLine(D2D1::Point2F(points[sampleCount - 1].x, baseY));
-            sink->AddLine(D2D1::Point2F(points[0].x, baseY));
-            sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            const HRESULT closeHr = sink->Close();
-            sink->Release();
-            if (SUCCEEDED(closeHr)) {
-                setWaveOpacity(opacity);
-                rt->FillGeometry(geometry, waveBrush);
-            }
-            geometry->Release();
-        };
-        auto drawCurve = [&](const auto& points, float opacity, float strokeWidth) {
-            setWaveOpacity(opacity);
-            for (int i = 1; i < sampleCount; ++i)
-                rt->DrawLine(points[i - 1], points[i], waveBrush, strokeWidth);
-        };
-
-        // 先铺后景到前景的连续波面，避免波峰下方出现大片空白。
-        drawFilledWave(backWave, 0.32f);
-        drawFilledWave(middleWave, 0.46f);
-        drawFilledWave(frontWave, 0.76f);
-
-        // 这条线与柱状图的柱底严格共用 baseY，切换样式时视觉基准不跳动。
-        setWaveOpacity(0.16f);
-        rt->DrawLine(D2D1::Point2F(x, baseY), D2D1::Point2F(x + width, baseY),
-                     waveBrush, 0.8f);
-        drawCurve(frontWave, 0.07f, 3.8f);
-        drawCurve(frontWave, 0.36f, 1.0f);
-        brushSpectrum_->SetOpacity(originalOpacity);
-        if (fadeBrush)
-            fadeBrush->Release();
-    }
-
-    void drawDreamyWaveSpectrum(float x, float h, float width) {
-        drawWaveSpectrum(x, h, width, 1.0f);
-    }
 
     void drawBackgroundWaveSpectrum(float x, float h, float width) {
-        drawSpectrumWithEffects(x, h, width, [&] {
-            drawWaveSpectrum(x, h, width, static_cast<float>(spectrumOpacityPct_) / 100.0f);
-        });
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.drawBackgroundWaveSpectrum(x, h, width);
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     // 默认保留原有的中线对称频谱效果；柱状图样式从窗口下边缘向上增长。
     // 沉浸模式中，柱状频谱在右侧宽频谱区内居中，梦幻波浪则铺满整个区域。
     void drawSpectrum(float x, float h, float width) {
-        auto* rt = drawTarget();
-        if (!rt || width <= 0.0f || h <= 0.0f)
-            return;
-        D2D1_MATRIX_3X2_F previous{};
-        const bool compact = compactTaskbarHeight_ > 0.0f && h > 6.0f;
-        if (compact) {
-            rt->GetTransform(&previous);
-            rt->PushAxisAlignedClip(D2D1::RectF(x, 2.0f, x + width, h - 2.0f),
-                                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            rt->SetTransform(D2D1::Matrix3x2F::Scale(1.0f, (h - 6.0f) / h) *
-                             D2D1::Matrix3x2F::Translation(0.0f, 3.0f) * previous);
-        }
-        drawSpectrumWithEffects(x, h, width, [&] { drawSpectrumShape(x, h, width); });
-        if (compact) {
-            rt->SetTransform(previous);
-            rt->PopAxisAlignedClip();
-        }
-    }
-
-    void drawSpectrumShape(float x, float h, float width) {
-        if (width <= 0.0f)
-            return;
-        switch (spectrumStyle_) {
-        case SpectrumStyle::BottomBand:
-            break; // 与歌曲内容整合的样式不在右侧重复绘制。
-        case SpectrumStyle::Segmented:
-        case SpectrumStyle::Bars:
-        {
-            const int visualCount = horizontalImmersiveMode()
-                                        ? immersiveSpectrumBarCount(width)
-                                        : TaskbarHost::kSpectrumBands;
-            const float clusterW = spectrumVisualClusterW(visualCount);
-            const float clusterX = x + std::max(0.0f, (width - clusterW) * 0.5f);
-            if (spectrumStyle_ == SpectrumStyle::Segmented)
-                drawSegmentedSpectrum(clusterX, h, visualCount);
-            else
-                drawBarSpectrum(clusterX, h, visualCount);
-            break;
-        }
-        case SpectrumStyle::DreamyWave:
-            drawDreamyWaveSpectrum(x, h, width);
-            break;
-        case SpectrumStyle::Default:
-        default:
-        {
-            const int visualCount = horizontalImmersiveMode()
-                                        ? immersiveSpectrumBarCount(width)
-                                        : TaskbarHost::kSpectrumBands;
-            const float clusterW = spectrumVisualClusterW(visualCount);
-            const float clusterX = x + std::max(0.0f, (width - clusterW) * 0.5f);
-            drawDefaultSpectrum(clusterX, h, visualCount);
-            break;
-        }
-        }
+        spectrum_.setContext(spectrumContext(drawTarget()));
+        spectrum_.drawSpectrum(x, h, width);
+        if (spectrum_.consumeRedraw())
+            requestFrame();
     }
 
     bool refreshImmersiveClockText() {
@@ -3843,23 +2949,20 @@ struct TaskbarHost::Impl {
 
         SYSTEMTIME now{};
         GetLocalTime(&now);
-        const uint64_t dateKey =
-            (static_cast<uint64_t>(now.wYear) * 10000ULL) +
-            (static_cast<uint64_t>(now.wMonth) * 100ULL) + now.wDay;
+        const uint64_t dateKey = (static_cast<uint64_t>(now.wYear) * 10000ULL) +
+                                 (static_cast<uint64_t>(now.wMonth) * 100ULL) + now.wDay;
         const uint64_t minuteKey =
-            (dateKey * 10000ULL) + (static_cast<uint64_t>(now.wHour) * 100ULL) +
-            now.wMinute;
-        if (clockMinuteKey_ == minuteKey && !clockTimeText_.empty() &&
-            !clockDateText_.empty())
+            (dateKey * 10000ULL) + (static_cast<uint64_t>(now.wHour) * 100ULL) + now.wMinute;
+        if (clockMinuteKey_ == minuteKey && !clockTimeText_.empty() && !clockDateText_.empty())
             return false;
 
         wchar_t timeText[64]{};
         wchar_t dateText[64]{};
-        if (!GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &now, nullptr,
-                             timeText, static_cast<int>(_countof(timeText))))
+        if (!GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &now, nullptr, timeText,
+                             static_cast<int>(_countof(timeText))))
             swprintf_s(timeText, L"%02u:%02u", now.wHour, now.wMinute);
-        if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &now, nullptr,
-                             dateText, static_cast<int>(_countof(dateText)), nullptr))
+        if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &now, nullptr, dateText,
+                             static_cast<int>(_countof(dateText)), nullptr))
             swprintf_s(dateText, L"%04u/%02u/%02u", now.wYear, now.wMonth, now.wDay);
 
         const bool changed = clockTimeText_ != timeText || clockDateText_ != dateText;
@@ -3933,19 +3036,16 @@ struct TaskbarHost::Impl {
         if (snapshot.revision == resourceSnapshotRevision_)
             return false;
         resourceSnapshotRevision_ = snapshot.revision;
-        resourceCpuText_ = snapshot.cpuAvailable ? formatResourcePercent(snapshot.cpuPercent)
-                                                  : L"—";
-        resourceMemoryText_ = snapshot.memoryAvailable
-                                  ? formatResourcePercent(snapshot.memoryPercent)
-                                  : L"—";
-        resourceDownloadText_ = snapshot.networkAvailable
-                                    ? formatNetworkRate(snapshot.downloadBytesPerSecond)
-                                    : L"—";
-        resourceUploadText_ = snapshot.networkAvailable
-                                  ? formatNetworkRate(snapshot.uploadBytesPerSecond)
-                                  : L"—";
-        resourceGpuText_ = snapshot.gpuAvailable ? formatResourcePercent(snapshot.gpuPercent)
-                                                  : L"—";
+        resourceCpuText_ =
+            snapshot.cpuAvailable ? formatResourcePercent(snapshot.cpuPercent) : L"—";
+        resourceMemoryText_ =
+            snapshot.memoryAvailable ? formatResourcePercent(snapshot.memoryPercent) : L"—";
+        resourceDownloadText_ =
+            snapshot.networkAvailable ? formatNetworkRate(snapshot.downloadBytesPerSecond) : L"—";
+        resourceUploadText_ =
+            snapshot.networkAvailable ? formatNetworkRate(snapshot.uploadBytesPerSecond) : L"—";
+        resourceGpuText_ =
+            snapshot.gpuAvailable ? formatResourcePercent(snapshot.gpuPercent) : L"—";
         resourceCpuFrequencyText_ =
             formatFrequency(snapshot.cpuFrequencyAvailable, snapshot.cpuFrequencyGHz);
         return true;
@@ -3953,26 +3053,27 @@ struct TaskbarHost::Impl {
 
     void drawImmersiveClock(float x, float h, float width) {
         auto* rt = renderer.renderTarget();
-        if (!rt || width <= 0.0f || !fmtClockTime_ || !fmtClockDate_ || !brushText_ ||
-            !brushDim_)
+        if (!rt || width <= 0.0f || !typesetter_.resources().fmtClockTime_.Get() ||
+            !typesetter_.resources().fmtClockDate_.Get() || !brushText_.Get() || !brushDim_.Get())
             return;
-        fmtClockTime_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        typesetter_.resources().fmtClockTime_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
 
         const float blockH = std::min(35.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
         const float timeH = blockH * 0.56f;
         rt->DrawTextW(clockTimeText_.c_str(), static_cast<UINT32>(clockTimeText_.size()),
-                      fmtClockTime_, D2D1::RectF(x, top, x + width, top + timeH), brushText_,
+                      typesetter_.resources().fmtClockTime_.Get(),
+                      D2D1::RectF(x, top, x + width, top + timeH), brushText_.Get(),
                       D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         rt->DrawTextW(clockDateText_.c_str(), static_cast<UINT32>(clockDateText_.size()),
-                      fmtClockDate_, D2D1::RectF(x, top + timeH, x + width, top + blockH),
-                      brushDim_, D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                      DWRITE_MEASURING_MODE_NATURAL);
+                      typesetter_.resources().fmtClockDate_.Get(),
+                      D2D1::RectF(x, top + timeH, x + width, top + blockH), brushDim_.Get(),
+                      D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
     }
 
     void drawDockResourceStatus(float x, float h, float width) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !brushText_ ||
+        if (!rt || !resourceMonitoringEnabled() || width <= 0.0f || !brushText_.Get() ||
             !ensureResourceFormat())
             return;
 
@@ -3991,8 +3092,9 @@ struct TaskbarHost::Impl {
                 const float cellRight = std::min(x + width, cellX + resourceSingleLineWidths_[i]);
                 if (cellRight <= cellX)
                     break;
-                rt->DrawTextW(cells[i]->c_str(), static_cast<UINT32>(cells[i]->size()), fmtResource_,
-                              D2D1::RectF(cellX, 0.0f, cellRight, h), brushText_,
+                rt->DrawTextW(cells[i]->c_str(), static_cast<UINT32>(cells[i]->size()),
+                              typesetter_.resources().fmtResource_.Get(),
+                              D2D1::RectF(cellX, 0.0f, cellRight, h), brushText_.Get(),
                               D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 cellX += resourceSingleLineWidths_[i] + kDockResourceZoneGap;
             }
@@ -4006,21 +3108,21 @@ struct TaskbarHost::Impl {
         const float blockH = std::min(38.0f, std::max(1.0f, h - 2.0f));
         const float top = std::max(0.0f, (h - blockH) * 0.5f);
         const float rowH = blockH * 0.5f;
-        const float leftColumnW = std::min(resourceLeftColumnW_,
-                                           std::max(1.0f, width - kDockResourceZoneGap));
+        const float leftColumnW =
+            std::min(resourceLeftColumnW_, std::max(1.0f, width - kDockResourceZoneGap));
         const float rightColumnX = x + leftColumnW + kDockResourceZoneGap;
-        const float rightColumnW =
-            std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
-        const D2D1_DRAW_TEXT_OPTIONS drawOptions =
-            width + 1.0f >= resourceZoneWidth() ? D2D1_DRAW_TEXT_OPTIONS_NONE
-                                                : D2D1_DRAW_TEXT_OPTIONS_CLIP;
+        const float rightColumnW = std::max(1.0f, width - leftColumnW - kDockResourceZoneGap);
+        const D2D1_DRAW_TEXT_OPTIONS drawOptions = width + 1.0f >= resourceZoneWidth()
+                                                       ? D2D1_DRAW_TEXT_OPTIONS_NONE
+                                                       : D2D1_DRAW_TEXT_OPTIONS_CLIP;
 
         auto drawResourceCell = [&](const std::wstring& text, float left, float rowTop,
                                     float cellW) {
             if (text.empty() || cellW <= 0.0f)
                 return;
-            rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()), fmtResource_,
-                          D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH), brushText_,
+            rt->DrawTextW(text.c_str(), static_cast<UINT32>(text.size()),
+                          typesetter_.resources().fmtResource_.Get(),
+                          D2D1::RectF(left, rowTop, left + cellW, rowTop + rowH), brushText_.Get(),
                           drawOptions, DWRITE_MEASURING_MODE_NATURAL);
         };
         for (size_t row = 0; row < visibleRows.size(); ++row) {
@@ -4036,8 +3138,7 @@ struct TaskbarHost::Impl {
     }
 
     DockPetMode dockPetMode() const {
-        if (!horizontalImmersiveMode() || !isSessionVisible() || isMinimalMode() ||
-            isStoppedMode())
+        if (!horizontalImmersiveMode() || !isSessionVisible() || isMinimalMode() || isStoppedMode())
             return DockPetMode::Hidden;
         if (scene_ == DisplayScene::Idle)
             return DockPetMode::Roaming;
@@ -4054,14 +3155,12 @@ struct TaskbarHost::Impl {
 
         // Dock 右侧为“频谱 + 资源区”，沉浸模式为“频谱 + 时钟”，统一按右侧固定区起点收束。
         const float spectrumX = w - spectrumExtraForScene(scene_, w);
-        const float start = songInfoVisible_ && scene_ != DisplayScene::Idle
-                                ? kSongInfoLyricGap
-                                : kTextPadding;
+        const float start =
+            songInfoVisible_ && scene_ != DisplayScene::Idle ? kSongInfoLyricGap : kTextPadding;
         const float laneLeft = leftW + start + immersiveControlsWidth(h);
         const float laneRight = mode == DockPetMode::Roaming
                                     ? spectrumX - kTextPadding
-                                    : std::min(spectrumX - kTextPadding,
-                                               laneLeft + kDockPetSeatW);
+                                    : std::min(spectrumX - kTextPadding, laneLeft + kDockPetSeatW);
         const float minLaneWidth = mode == DockPetMode::Roaming ? kPetLaneMinWidthDip : 28.0f;
         if (laneRight <= laneLeft + minLaneWidth) {
             dockPet_.setMode(DockPetMode::Hidden, now);
@@ -4091,41 +3190,34 @@ struct TaskbarHost::Impl {
         const float zoneW = immersiveSpectrumZoneW(w);
         const bool dock = isAppBarView();
         const float resourceW = dock ? dockResourceZoneW(w) : 0.0f;
-        const float resourceX = w - resourceW -
-                                (dock ? kDockResourceRightPadding : kTextPadding);
-        const float zoneX = dock ? resourceX - kDockResourceZoneGap - zoneW
-                                 : w - zoneW - kTextPadding;
+        const float resourceX = w - resourceW - (dock ? kDockResourceRightPadding : kTextPadding);
+        const float zoneX =
+            dock ? resourceX - kDockResourceZoneGap - zoneW : w - zoneW - kTextPadding;
         const float clockW = dock ? 0.0f : std::min(zoneW, immersiveClockZoneW(w));
         const float clockX = w - clockW - kTextPadding;
-        const float spectrumRight = dock ? resourceX - kDockResourceZoneGap
-                                         : clockX - kImmersiveSpectrumClockGap;
+        const float spectrumRight =
+            dock ? resourceX - kDockResourceZoneGap : clockX - kImmersiveSpectrumClockGap;
         const float spectrumW = std::max(0.0f, spectrumRight - zoneX);
         if (showSpectrum && spectrumW > 0.0f) {
             if (spectrumStyle_ == SpectrumStyle::DreamyWave) {
                 drawSpectrum(zoneX, h, spectrumW);
             } else {
                 // 先按原始频谱区确定柱数；Dock 贴右对齐，普通沉浸模式仍按原逻辑居中。
-                const int availableCount = std::max(
-                    1, static_cast<int>(std::floor((spectrumW + kSpectrumGap) /
-                                                   (kSpectrumBarW + kSpectrumGap))));
-                const int visualCount =
-                    std::min(immersiveSpectrumBarCount(zoneW), availableCount);
+                const int availableCount =
+                    std::max(1, static_cast<int>(std::floor((spectrumW + kSpectrumGap) /
+                                                            (kSpectrumBarW + kSpectrumGap))));
+                const int visualCount = std::min(immersiveSpectrumBarCount(zoneW), availableCount);
                 const float clusterW = spectrumVisualClusterW(visualCount);
                 const float naturalX = zoneX + std::max(0.0f, (zoneW - clusterW) * 0.5f);
                 // Dock 模式将频谱簇贴到右边界，保证它与资源区之间只保留
                 // kDockResourceZoneGap；普通沉浸模式继续保持原有居中位置。
-                const float clusterX = dock
-                                           ? std::max(zoneX, spectrumRight - clusterW)
-                                           : std::max(zoneX, std::min(naturalX,
-                                                                       spectrumRight - clusterW));
-                drawSpectrumWithEffects(clusterX, h, clusterW, [&] {
-                    if (spectrumStyle_ == SpectrumStyle::Segmented)
-                        drawSegmentedSpectrum(clusterX, h, visualCount);
-                    else if (spectrumStyle_ == SpectrumStyle::Bars)
-                        drawBarSpectrum(clusterX, h, visualCount);
-                    else
-                        drawDefaultSpectrum(clusterX, h, visualCount);
-                });
+                const float clusterX =
+                    dock ? std::max(zoneX, spectrumRight - clusterW)
+                         : std::max(zoneX, std::min(naturalX, spectrumRight - clusterW));
+                spectrum_.setContext(spectrumContext(drawTarget()));
+                spectrum_.drawCluster(clusterX, h, clusterW, visualCount);
+                if (spectrum_.consumeRedraw())
+                    requestFrame();
             }
         }
         if (dock)
@@ -4138,8 +3230,7 @@ struct TaskbarHost::Impl {
         if (!horizontalImmersiveMode())
             return w - kTextPadding - embeddedResourceExtra();
         if (isAppBarView()) {
-            return w - dockResourceZoneW(w) - kDockResourceRightPadding -
-                   kDockResourceZoneGap;
+            return w - dockResourceZoneW(w) - kDockResourceRightPadding - kDockResourceZoneGap;
         }
         return w - immersiveClockZoneW(w) - kImmersiveSpectrumClockGap - kTextPadding;
     }
@@ -4176,14 +3267,13 @@ struct TaskbarHost::Impl {
         const float effectW = std::clamp(contentW, 1.0f, w);
 
         const float time = static_cast<float>(frameNowMs_ % 600000ULL) / 1000.0f;
-        auto* warm = brushIdleWarm_ ? brushIdleWarm_ : brushText_;
-        auto* cool = brushIdleCool_ ? brushIdleCool_ : brushText_;
-        auto* accent = brushIdleAccent_ ? brushIdleAccent_ : brushText_;
+        auto* warm = brushIdleWarm_.Get() ? brushIdleWarm_.Get() : brushText_.Get();
+        auto* cool = brushIdleCool_.Get() ? brushIdleCool_.Get() : brushText_.Get();
+        auto* accent = brushIdleAccent_.Get() ? brushIdleAccent_.Get() : brushText_.Get();
         if (!warm && !cool && !accent)
             return;
 
-        auto drawWithOpacity = [](ID2D1SolidColorBrush* brush, float opacity,
-                                  const auto& draw) {
+        auto drawWithOpacity = [](ID2D1SolidColorBrush* brush, float opacity, const auto& draw) {
             if (!brush)
                 return;
             const float previous = brush->GetOpacity();
@@ -4233,14 +3323,13 @@ struct TaskbarHost::Impl {
                 if (x < 0.0f)
                     x += effectW;
                 const D2D1_POINT_2F center = D2D1::Point2F(x, y);
-                const float angle = leaves[i].angle +
-                                    std::sin(time * 0.88f + leaves[i].phase) * 24.0f;
+                const float angle =
+                    leaves[i].angle + std::sin(time * 0.88f + leaves[i].phase) * 24.0f;
                 drawWithOpacity(warm, 0.22f + (i % 4) * 0.045f, [&] {
                     D2D1_MATRIX_3X2_F previous{};
                     rt->GetTransform(&previous);
                     rt->SetTransform(D2D1::Matrix3x2F::Rotation(angle, center));
-                    rt->FillEllipse(D2D1::Ellipse(center, leaves[i].size,
-                                                   leaves[i].size * 0.46f),
+                    rt->FillEllipse(D2D1::Ellipse(center, leaves[i].size, leaves[i].size * 0.46f),
                                     warm);
                     rt->DrawLine(D2D1::Point2F(x - leaves[i].size * 0.52f, y),
                                  D2D1::Point2F(x + leaves[i].size * 0.52f, y), warm, 0.70f);
@@ -4258,24 +3347,23 @@ struct TaskbarHost::Impl {
                 float speed;
             };
             static constexpr Star stars[] = {
-                {0.03f, 0.18f, 0.92f, 0.2f, 1.25f},  {0.07f, 0.68f, 0.78f, 2.4f, 0.92f},
-                {0.12f, 0.42f, 1.18f, 4.1f, 1.46f},   {0.16f, 0.86f, 0.84f, 1.1f, 0.78f},
-                {0.21f, 0.08f, 0.76f, 3.2f, 1.12f},   {0.25f, 0.56f, 1.06f, 5.0f, 1.36f},
-                {0.30f, 0.30f, 0.88f, 0.6f, 0.86f},   {0.34f, 0.76f, 0.74f, 2.9f, 1.58f},
-                {0.39f, 0.16f, 1.10f, 4.7f, 1.04f},   {0.43f, 0.92f, 0.82f, 1.8f, 1.32f},
-                {0.48f, 0.46f, 0.96f, 3.7f, 0.74f},   {0.52f, 0.12f, 0.76f, 5.6f, 1.18f},
-                {0.56f, 0.70f, 1.24f, 1.5f, 1.42f},   {0.60f, 0.34f, 0.80f, 3.0f, 0.88f},
-                {0.64f, 0.84f, 1.02f, 4.4f, 1.24f},   {0.68f, 0.22f, 0.72f, 0.9f, 1.60f},
-                {0.72f, 0.52f, 1.14f, 2.1f, 1.02f},   {0.76f, 0.06f, 0.86f, 5.2f, 1.38f},
-                {0.80f, 0.76f, 1.00f, 3.4f, 0.80f},   {0.84f, 0.38f, 0.78f, 1.7f, 1.50f},
-                {0.88f, 0.16f, 1.20f, 4.8f, 1.14f},   {0.92f, 0.62f, 0.82f, 2.6f, 0.96f},
-                {0.96f, 0.30f, 1.08f, 0.7f, 1.28f},   {0.985f, 0.90f, 0.74f, 5.8f, 0.72f},
+                {0.03f, 0.18f, 0.92f, 0.2f, 1.25f}, {0.07f, 0.68f, 0.78f, 2.4f, 0.92f},
+                {0.12f, 0.42f, 1.18f, 4.1f, 1.46f}, {0.16f, 0.86f, 0.84f, 1.1f, 0.78f},
+                {0.21f, 0.08f, 0.76f, 3.2f, 1.12f}, {0.25f, 0.56f, 1.06f, 5.0f, 1.36f},
+                {0.30f, 0.30f, 0.88f, 0.6f, 0.86f}, {0.34f, 0.76f, 0.74f, 2.9f, 1.58f},
+                {0.39f, 0.16f, 1.10f, 4.7f, 1.04f}, {0.43f, 0.92f, 0.82f, 1.8f, 1.32f},
+                {0.48f, 0.46f, 0.96f, 3.7f, 0.74f}, {0.52f, 0.12f, 0.76f, 5.6f, 1.18f},
+                {0.56f, 0.70f, 1.24f, 1.5f, 1.42f}, {0.60f, 0.34f, 0.80f, 3.0f, 0.88f},
+                {0.64f, 0.84f, 1.02f, 4.4f, 1.24f}, {0.68f, 0.22f, 0.72f, 0.9f, 1.60f},
+                {0.72f, 0.52f, 1.14f, 2.1f, 1.02f}, {0.76f, 0.06f, 0.86f, 5.2f, 1.38f},
+                {0.80f, 0.76f, 1.00f, 3.4f, 0.80f}, {0.84f, 0.38f, 0.78f, 1.7f, 1.50f},
+                {0.88f, 0.16f, 1.20f, 4.8f, 1.14f}, {0.92f, 0.62f, 0.82f, 2.6f, 0.96f},
+                {0.96f, 0.30f, 1.08f, 0.7f, 1.28f}, {0.985f, 0.90f, 0.74f, 5.8f, 0.72f},
             };
             for (size_t i = 0; i < _countof(stars); ++i) {
                 const float twinkle =
                     0.5f + 0.5f * std::sin(time * stars[i].speed + stars[i].phase);
-                const D2D1_POINT_2F center =
-                    D2D1::Point2F(stars[i].x * effectW, stars[i].y * h);
+                const D2D1_POINT_2F center = D2D1::Point2F(stars[i].x * effectW, stars[i].y * h);
                 const float radius = stars[i].radius * (0.72f + twinkle * 0.52f);
                 drawWithOpacity(cool, 0.14f + twinkle * 0.30f, [&] {
                     rt->FillEllipse(D2D1::Ellipse(center, radius, radius), cool);
@@ -4291,36 +3379,34 @@ struct TaskbarHost::Impl {
             break;
         }
         case IdleQuoteBackground::BinaryRain: {
-            if (fmtSecondary_) {
+            if (typesetter_.resources().fmtSecondary_.Get()) {
                 const int columns = std::clamp(static_cast<int>(effectW / 23.0f), 5, 10);
                 const float columnW = effectW / static_cast<float>(columns);
                 const float rowGap = std::max(9.0f, h / 3.6f);
                 const ULONGLONG bitTick = frameNowMs_ / 190ULL;
                 for (int col = 0; col < columns; ++col) {
-                    const float head = std::fmod(
-                        time * (7.0f + static_cast<float>(col % 3) * 2.0f) +
-                            static_cast<float>(col) * 8.0f,
-                        h + rowGap * 4.0f) - rowGap * 2.0f;
+                    const float head =
+                        std::fmod(time * (7.0f + static_cast<float>(col % 3) * 2.0f) +
+                                      static_cast<float>(col) * 8.0f,
+                                  h + rowGap * 4.0f) -
+                        rowGap * 2.0f;
                     for (int row = -1; row < 5; ++row) {
                         const float y = head + static_cast<float>(row) * rowGap;
                         if (y < -rowGap || y > h)
                             continue;
-                        const bool one = ((bitTick + static_cast<ULONGLONG>(col * 13 +
-                                                                             row * 7 +
-                                                                             col * row * 3)) &
+                        const bool one = ((bitTick + static_cast<ULONGLONG>(col * 13 + row * 7 +
+                                                                            col * row * 3)) &
                                           1ULL) != 0;
                         wchar_t digit[2] = {one ? L'1' : L'0', L'\0'};
-                        const float trail = std::clamp(1.0f - std::fabs(y - head) /
-                                                                 (rowGap * 3.5f),
-                                                       0.0f, 1.0f);
+                        const float trail =
+                            std::clamp(1.0f - std::fabs(y - head) / (rowGap * 3.5f), 0.0f, 1.0f);
                         const float opacity = 0.045f + trail * 0.16f;
                         const D2D1_RECT_F rect = D2D1::RectF(
                             columnW * (static_cast<float>(col) + 0.5f) - 4.0f, y,
-                            columnW * (static_cast<float>(col) + 0.5f) + 4.0f,
-                            y + rowGap + 2.0f);
+                            columnW * (static_cast<float>(col) + 0.5f) + 4.0f, y + rowGap + 2.0f);
                         drawWithOpacity(accent, opacity, [&] {
-                            rt->DrawTextW(digit, 1, fmtSecondary_, rect, accent,
-                                          D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                            rt->DrawTextW(digit, 1, typesetter_.resources().fmtSecondary_.Get(),
+                                          rect, accent, D2D1_DRAW_TEXT_OPTIONS_CLIP,
                                           DWRITE_MEASURING_MODE_NATURAL);
                         });
                     }
@@ -4338,24 +3424,23 @@ struct TaskbarHost::Impl {
                 float phase;
             };
             static constexpr Particle particles[] = {
-                {0.02f, 0.28f, 1.18f, 4.0f, 0.18f, 0.4f},  {0.07f, 0.74f, 0.92f, 5.5f, 0.14f, 2.3f},
-                {0.12f, 0.48f, 1.48f, 2.8f, 0.20f, 4.2f},  {0.17f, 0.12f, 1.00f, 4.8f, 0.13f, 1.2f},
-                {0.22f, 0.86f, 1.26f, 3.3f, 0.17f, 3.5f},  {0.27f, 0.38f, 0.86f, 6.2f, 0.22f, 5.0f},
-                {0.32f, 0.66f, 1.38f, 3.7f, 0.16f, 0.9f},  {0.37f, 0.22f, 0.96f, 5.2f, 0.19f, 2.8f},
-                {0.42f, 0.80f, 1.10f, 3.1f, 0.14f, 4.8f},  {0.47f, 0.52f, 1.56f, 4.6f, 0.18f, 1.7f},
-                {0.52f, 0.08f, 0.90f, 5.8f, 0.21f, 3.9f},  {0.57f, 0.92f, 1.32f, 2.6f, 0.15f, 5.4f},
-                {0.62f, 0.34f, 1.16f, 4.3f, 0.20f, 1.5f},  {0.67f, 0.70f, 0.88f, 6.0f, 0.13f, 3.1f},
-                {0.72f, 0.18f, 1.44f, 3.4f, 0.17f, 4.5f},  {0.77f, 0.84f, 1.02f, 4.9f, 0.22f, 0.7f},
-                {0.82f, 0.44f, 1.30f, 2.9f, 0.16f, 2.0f},  {0.87f, 0.06f, 0.94f, 5.6f, 0.19f, 3.6f},
-                {0.92f, 0.62f, 1.50f, 3.9f, 0.14f, 5.1f},  {0.97f, 0.30f, 1.08f, 4.5f, 0.20f, 1.0f},
+                {0.02f, 0.28f, 1.18f, 4.0f, 0.18f, 0.4f}, {0.07f, 0.74f, 0.92f, 5.5f, 0.14f, 2.3f},
+                {0.12f, 0.48f, 1.48f, 2.8f, 0.20f, 4.2f}, {0.17f, 0.12f, 1.00f, 4.8f, 0.13f, 1.2f},
+                {0.22f, 0.86f, 1.26f, 3.3f, 0.17f, 3.5f}, {0.27f, 0.38f, 0.86f, 6.2f, 0.22f, 5.0f},
+                {0.32f, 0.66f, 1.38f, 3.7f, 0.16f, 0.9f}, {0.37f, 0.22f, 0.96f, 5.2f, 0.19f, 2.8f},
+                {0.42f, 0.80f, 1.10f, 3.1f, 0.14f, 4.8f}, {0.47f, 0.52f, 1.56f, 4.6f, 0.18f, 1.7f},
+                {0.52f, 0.08f, 0.90f, 5.8f, 0.21f, 3.9f}, {0.57f, 0.92f, 1.32f, 2.6f, 0.15f, 5.4f},
+                {0.62f, 0.34f, 1.16f, 4.3f, 0.20f, 1.5f}, {0.67f, 0.70f, 0.88f, 6.0f, 0.13f, 3.1f},
+                {0.72f, 0.18f, 1.44f, 3.4f, 0.17f, 4.5f}, {0.77f, 0.84f, 1.02f, 4.9f, 0.22f, 0.7f},
+                {0.82f, 0.44f, 1.30f, 2.9f, 0.16f, 2.0f}, {0.87f, 0.06f, 0.94f, 5.6f, 0.19f, 3.6f},
+                {0.92f, 0.62f, 1.50f, 3.9f, 0.14f, 5.1f}, {0.97f, 0.30f, 1.08f, 4.5f, 0.20f, 1.0f},
             };
             for (size_t i = 0; i < _countof(particles); ++i) {
                 float x = std::fmod(particles[i].x * effectW + time * particles[i].speed, effectW);
                 if (x < 0.0f)
                     x += effectW;
-                const float y = particles[i].y * h +
-                                std::sin(time * 0.72f + particles[i].phase) *
-                                    particles[i].amplitude * h;
+                const float y = particles[i].y * h + std::sin(time * 0.72f + particles[i].phase) *
+                                                         particles[i].amplitude * h;
                 const float pulse =
                     0.5f + 0.5f * std::sin(time * (1.1f + i * 0.04f) + particles[i].phase);
                 auto* brush = i % 3 == 0 ? accent : cool;
@@ -4383,19 +3468,19 @@ struct TaskbarHost::Impl {
             return;
 
         // 使用任务栏内容主题，与普通设置窗口的主题来源独立。
-        const auto deckFill = lightTheme_ ? D2D1::ColorF(0.97f, 0.975f, 0.98f)
-                                          : D2D1::ColorF(0.07f, 0.08f, 0.09f);
-        const auto deckStroke = lightTheme_ ? D2D1::ColorF(0.77f, 0.79f, 0.81f)
-                                            : D2D1::ColorF(0.27f, 0.28f, 0.30f);
-        const auto platterRim = lightTheme_ ? D2D1::ColorF(0.82f, 0.84f, 0.86f)
-                                            : D2D1::ColorF(0.37f, 0.39f, 0.42f);
+        const auto deckFill =
+            lightTheme_ ? D2D1::ColorF(0.97f, 0.975f, 0.98f) : D2D1::ColorF(0.07f, 0.08f, 0.09f);
+        const auto deckStroke =
+            lightTheme_ ? D2D1::ColorF(0.77f, 0.79f, 0.81f) : D2D1::ColorF(0.27f, 0.28f, 0.30f);
+        const auto platterRim =
+            lightTheme_ ? D2D1::ColorF(0.82f, 0.84f, 0.86f) : D2D1::ColorF(0.37f, 0.39f, 0.42f);
         const auto armShadow = lightTheme_ ? D2D1::ColorF(0.45f, 0.47f, 0.49f, 0.60f)
                                            : D2D1::ColorF(0.02f, 0.025f, 0.03f);
-        const auto metal = lightTheme_ ? D2D1::ColorF(0.86f, 0.88f, 0.90f)
-                                       : D2D1::ColorF(0.65f, 0.67f, 0.69f);
+        const auto metal =
+            lightTheme_ ? D2D1::ColorF(0.86f, 0.88f, 0.90f) : D2D1::ColorF(0.65f, 0.67f, 0.69f);
         const auto pivotFill = lightTheme_ ? D2D1::ColorF(0.99f, 0.99f, 0.99f) : metal;
-        const auto cartridge = lightTheme_ ? D2D1::ColorF(0.95f, 0.96f, 0.97f)
-                                           : D2D1::ColorF(0.12f, 0.13f, 0.15f);
+        const auto cartridge =
+            lightTheme_ ? D2D1::ColorF(0.95f, 0.96f, 0.97f) : D2D1::ColorF(0.12f, 0.13f, 0.15f);
 
         D2D1_POINT_2F center = D2D1::Point2F(coverX + s * 0.5f, coverY + s * 0.5f);
         float outerRadius = std::max(1.0f, s * kVinylOuterRatio);
@@ -4407,93 +3492,91 @@ struct TaskbarHost::Impl {
         D2D1_ELLIPSE inner{center, innerRadius, innerRadius};
 
         // 固定唱机底座始终位于原封面槽内，不随盘面旋转，也不挤占歌曲文字。
-        if (brushTurntable_) {
-            const auto deck = D2D1::RoundedRect(
-                D2D1::RectF(coverX, coverY, coverX + s, coverY + s), 4.0f, 4.0f);
+        if (brushTurntable_.Get()) {
+            const auto deck =
+                D2D1::RoundedRect(D2D1::RectF(coverX, coverY, coverX + s, coverY + s), 4.0f, 4.0f);
             brushTurntable_->SetColor(deckFill);
-            rt->FillRoundedRectangle(deck, brushTurntable_);
+            rt->FillRoundedRectangle(deck, brushTurntable_.Get());
             brushTurntable_->SetColor(deckStroke);
-            rt->DrawRoundedRectangle(deck, brushTurntable_, 0.6f);
+            rt->DrawRoundedRectangle(deck, brushTurntable_.Get(), 0.6f);
         }
 
         // 光照固定在唱机上，盘面和封面在光照下旋转。
         D2D1_MATRIX_3X2_F previous{};
         rt->GetTransform(&previous);
-        if (brushTurntable_) {
+        if (brushTurntable_.Get()) {
             brushTurntable_->SetColor(platterRim);
-            rt->FillEllipse(outer, brushTurntable_);
+            rt->FillEllipse(outer, brushTurntable_.Get());
         }
-        if (brushVinylBase_) {
+        if (brushVinylBase_.Get()) {
             brushVinylBase_->SetColor(media.hasDominantColor
-                ? fluent::toD2D(media.dominantColor)
-                : (lightTheme_ ? D2D1::ColorF(0.72f, 0.73f, 0.74f)
-                                : D2D1::ColorF(0.055f, 0.060f, 0.068f)));
-            rt->FillEllipse(record, brushVinylBase_);
+                                          ? fluent::toD2D(media.dominantColor)
+                                          : (lightTheme_ ? D2D1::ColorF(0.72f, 0.73f, 0.74f)
+                                                         : D2D1::ColorF(0.055f, 0.060f, 0.068f)));
+            rt->FillEllipse(record, brushVinylBase_.Get());
         }
-        if (brushVinylSurface_) {
-            brushVinylSurface_->SetStartPoint(D2D1::Point2F(
-                center.x - recordRadius * 0.8f, center.y - recordRadius * 0.6f));
-            brushVinylSurface_->SetEndPoint(D2D1::Point2F(
-                center.x + recordRadius * 0.8f, center.y + recordRadius * 0.6f));
-            rt->FillEllipse(record, brushVinylSurface_);
+        if (brushVinylSurface_.Get()) {
+            brushVinylSurface_->SetStartPoint(
+                D2D1::Point2F(center.x - recordRadius * 0.8f, center.y - recordRadius * 0.6f));
+            brushVinylSurface_->SetEndPoint(
+                D2D1::Point2F(center.x + recordRadius * 0.8f, center.y + recordRadius * 0.6f));
+            rt->FillEllipse(record, brushVinylSurface_.Get());
         }
-        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylAngleDeg_, center) * previous);
+        rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinyl_.angle(), center) * previous);
 
-        if (brushVinylGroove_) {
-            brushVinylGroove_->SetColor(lightTheme_
-                ? D2D1::ColorF(0.25f, 0.27f, 0.29f, 0.20f)
-                : D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f));
+        if (brushVinylGroove_.Get()) {
+            brushVinylGroove_->SetColor(lightTheme_ ? D2D1::ColorF(0.25f, 0.27f, 0.29f, 0.20f)
+                                                    : D2D1::ColorF(0.70f, 0.72f, 0.75f, 0.16f));
             // 细窄的低对比唱纹，避免小尺寸下粗同心圆看起来像一圈圈边框。
-            for (float radius = innerRadius + 0.9f; radius < recordRadius - 0.4f;
-                 radius += 1.1f) {
-                rt->DrawEllipse(D2D1_ELLIPSE{center, radius, radius}, brushVinylGroove_, 0.35f);
+            for (float radius = innerRadius + 0.9f; radius < recordRadius - 0.4f; radius += 1.1f) {
+                rt->DrawEllipse(D2D1_ELLIPSE{center, radius, radius}, brushVinylGroove_.Get(),
+                                0.35f);
             }
         }
 
         D2D1_RECT_F innerRect = D2D1::RectF(center.x - innerRadius, center.y - innerRadius,
                                             center.x + innerRadius, center.y + innerRadius);
-        if (coverBmp && vinylCoverClip_ && coverLayer_) {
-            rt->PushLayer(D2D1::LayerParameters1(
-                              D2D1::InfiniteRect(), vinylCoverClip_,
-                              D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                              D2D1::Matrix3x2F::Translation(coverX, coverY)),
-                          coverLayer_);
-            rt->DrawBitmap(coverBmp, innerRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+        if (coverBmp.Get() && vinylCoverClip_.Get() && coverLayer_.Get()) {
+            rt->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), vinylCoverClip_.Get(),
+                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                          coverLayer_.Get());
+            rt->DrawBitmap(coverBmp.Get(), innerRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
             rt->PopLayer();
-        } else if (brushDim_) {
-            rt->FillEllipse(inner, brushDim_);
+        } else if (brushDim_.Get()) {
+            rt->FillEllipse(inner, brushDim_.Get());
         }
-        if (brushVinylGroove_)
-            rt->DrawEllipse(inner, brushVinylGroove_, 0.8f);
-        if (brushVinylBase_) {
+        if (brushVinylGroove_.Get())
+            rt->DrawEllipse(inner, brushVinylGroove_.Get(), 0.8f);
+        if (brushVinylBase_.Get()) {
             brushVinylBase_->SetColor(lightTheme_ ? D2D1::ColorF(0.78f, 0.80f, 0.82f)
                                                   : D2D1::ColorF(0.035f, 0.04f, 0.05f));
-            rt->FillEllipse(D2D1_ELLIPSE{center, std::max(0.8f, s * 0.025f),
-                                         std::max(0.8f, s * 0.025f)},
-                            brushVinylBase_);
+            rt->FillEllipse(
+                D2D1_ELLIPSE{center, std::max(0.8f, s * 0.025f), std::max(0.8f, s * 0.025f)},
+                brushVinylBase_.Get());
         }
         rt->SetTransform(previous);
 
         // 唱臂绕固定支点收放，盘面旋转与唱臂动作分别计时。
-        if (brushTurntable_) {
+        if (brushTurntable_.Get()) {
             const auto point = [&](float x, float y) {
                 return D2D1::Point2F(coverX + s * x, coverY + s * y);
             };
             const auto pivot = point(0.85f, 0.17f);
             const auto elbow = point(0.81f, 0.55f);
             const auto stylus = point(0.73f, 0.75f);
-            rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinylArmAngleDeg_, pivot) * previous);
+            rt->SetTransform(D2D1::Matrix3x2F::Rotation(vinyl_.armAngle(), pivot) * previous);
             brushTurntable_->SetColor(armShadow);
-            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.075f, s * 0.075f), brushTurntable_);
-            rt->DrawLine(pivot, elbow, brushTurntable_, std::max(1.2f, s * 0.045f));
-            rt->DrawLine(elbow, stylus, brushTurntable_, std::max(1.2f, s * 0.045f));
+            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.075f, s * 0.075f), brushTurntable_.Get());
+            rt->DrawLine(pivot, elbow, brushTurntable_.Get(), std::max(1.2f, s * 0.045f));
+            rt->DrawLine(elbow, stylus, brushTurntable_.Get(), std::max(1.2f, s * 0.045f));
             brushTurntable_->SetColor(metal);
-            rt->DrawLine(pivot, elbow, brushTurntable_, std::max(0.65f, s * 0.023f));
-            rt->DrawLine(elbow, stylus, brushTurntable_, std::max(0.65f, s * 0.023f));
+            rt->DrawLine(pivot, elbow, brushTurntable_.Get(), std::max(0.65f, s * 0.023f));
+            rt->DrawLine(elbow, stylus, brushTurntable_.Get(), std::max(0.65f, s * 0.023f));
             brushTurntable_->SetColor(pivotFill);
-            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.035f, s * 0.035f), brushTurntable_);
+            rt->FillEllipse(D2D1::Ellipse(pivot, s * 0.035f, s * 0.035f), brushTurntable_.Get());
             brushTurntable_->SetColor(cartridge);
-            rt->DrawLine(point(0.75f, 0.70f), point(0.71f, 0.79f), brushTurntable_,
+            rt->DrawLine(point(0.75f, 0.70f), point(0.71f, 0.79f), brushTurntable_.Get(),
                          std::max(1.5f, s * 0.07f));
             rt->SetTransform(previous);
         }
@@ -4501,16 +3584,16 @@ struct TaskbarHost::Impl {
 
     void drawPlatformIcon(float coverX, float coverY, float s) {
         auto* rt = drawTarget();
-        if (!rt || !albumCoverVisible_ || !platformIconVisible_ || !platformIconBmp ||
+        if (!rt || !albumCoverVisible_ || !platformIconVisible_ || !platformIconBmp.Get() ||
             s <= 0.0f)
             return;
 
         const float iconSize = std::max(1.0f, std::min(s * 0.50f, 13.0f));
         const float inset = std::min(1.5f, s * 0.06f);
-        D2D1_RECT_F iconRect = D2D1::RectF(
-            coverX + s - iconSize - inset, coverY + s - iconSize - inset,
-            coverX + s - inset, coverY + s - inset);
-        rt->DrawBitmap(platformIconBmp, iconRect, 1.0f,
+        D2D1_RECT_F iconRect =
+            D2D1::RectF(coverX + s - iconSize - inset, coverY + s - iconSize - inset,
+                        coverX + s - inset, coverY + s - inset);
+        rt->DrawBitmap(platformIconBmp.Get(), iconRect, 1.0f,
                        D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     }
 
@@ -4528,8 +3611,8 @@ struct TaskbarHost::Impl {
     // 此时只剩野句柄，必须整体重建；若幸存（崩溃非正常退出）则重新附着即可。
     // 歌词/媒体/字体等状态都保存在 Impl 成员里，重建窗口后原样恢复
     void onTaskbarCreated() {
-        runtime_log::writef(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d",
-                            hwnd, (hwnd && IsWindow(hwnd)) ? 1 : 0, isWindowVisible() ? 1 : 0,
+        runtime_log::writef(L"[taskbar] TaskbarCreated: hwnd=%p alive=%d visible=%d timer=%d", hwnd,
+                            (hwnd && IsWindow(hwnd)) ? 1 : 0, isWindowVisible() ? 1 : 0,
                             timerRunning_ ? 1 : 0);
         if (hwnd && IsWindow(hwnd)) {
             if (findTaskbar()) {
@@ -4543,7 +3626,7 @@ struct TaskbarHost::Impl {
                 }
                 if (isAppBarView()) {
                     // Explorer 重启后 Shell 的 AppBar 注册表已丢失，本地标记不再可信。
-                    appBarRegistered_ = false;
+                    appBar_.forget();
                     cancelTaskbarAttachRetry();
                     if (isSessionVisible() && !isStoppedMode())
                         registerAppBar();
@@ -4572,7 +3655,7 @@ struct TaskbarHost::Impl {
         attachment_.reset();
         // Explorer 强制退出时旧窗口可能没有走 WM_DESTROY，Shell 侧与本地的
         // AppBar 注册状态都必须按已失效处理，避免重建窗口跳过 ABM_NEW。
-        appBarRegistered_ = false;
+        appBar_.forget();
         // 旧窗口被系统侧销毁时不一定投递 WM_DESTROY（Explorer 被强杀），
         // timerRunning_ 可能残留为 true，但定时器已随旧窗口消失；重建时同样
         // 等待新任务栏的首个探测结果，避免按旧矩形先显示一帧。
@@ -4581,7 +3664,7 @@ struct TaskbarHost::Impl {
         renderState_.setVisibilitySuppressed(true);
         renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
         probeReady_ = false;
-        delete probeState_->out.exchange(nullptr);
+        placementProbe_.clearResult();
         if (createWindow(inst, targetMonitorDeviceName_, viewMode_)) {
             if (isAppBarView()) {
                 renderState_.setVisibilitySuppressed(false);
@@ -4615,10 +3698,12 @@ struct TaskbarHost::Impl {
             }
         };
         make(fitCompactFontSize(13.5f, (compactTaskbarHeight_ - 2.0f) * 0.56f,
-                               DWRITE_FONT_WEIGHT_SEMI_BOLD),
-             DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtClockTime_);
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD),
+             DWRITE_FONT_WEIGHT_SEMI_BOLD,
+             typesetter_.resources().fmtClockTime_.ReleaseAndGetAddressOf());
         make(fitCompactFontSize(11.0f, (compactTaskbarHeight_ - 2.0f) * 0.44f),
-             DWRITE_FONT_WEIGHT_NORMAL, &fmtClockDate_);
+             DWRITE_FONT_WEIGHT_NORMAL,
+             typesetter_.resources().fmtClockDate_.ReleaseAndGetAddressOf());
     }
 
     static float measureResourceTextWidth(IDWriteFactory* dwrite, IDWriteTextFormat* format,
@@ -4626,8 +3711,8 @@ struct TaskbarHost::Impl {
         if (!dwrite || !format || text.empty())
             return 0.0f;
         IDWriteTextLayout* layout = nullptr;
-        if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
-                                            format, 0.0f, 0.0f, &layout)) ||
+        if (FAILED(dwrite->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()), format,
+                                            0.0f, 0.0f, &layout)) ||
             !layout)
             return 0.0f;
         layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -4643,7 +3728,7 @@ struct TaskbarHost::Impl {
     }
 
     bool ensureResourceFormat() {
-        if (fmtResource_)
+        if (typesetter_.resources().fmtResource_.Get())
             return true;
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite) {
@@ -4653,16 +3738,18 @@ struct TaskbarHost::Impl {
         if (!dwrite)
             return false;
         const DWRITE_FONT_WEIGHT effectiveWeight = dwriteWeightOf(fontStyle_);
-        dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr, effectiveWeight,
-                                 dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL,
-                                 fitCompactFontSize(kResourceFontSize, compactTaskbarHeight_ - 2.0f),
-                                 L"zh-cn", &fmtResource_);
-        if (!fmtResource_)
+        dwrite->CreateTextFormat(
+            fontFamily_.c_str(), nullptr, effectiveWeight, dwriteStyleOf(fontStyle_),
+            DWRITE_FONT_STRETCH_NORMAL,
+            fitCompactFontSize(kResourceFontSize, compactTaskbarHeight_ - 2.0f), L"zh-cn",
+            typesetter_.resources().fmtResource_.ReleaseAndGetAddressOf());
+        if (!typesetter_.resources().fmtResource_.Get())
             return false;
-        fmtResource_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-        fmtResource_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        fmtResource_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        fluent::applyUiFontFallback(fmtResource_);
+        typesetter_.resources().fmtResource_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        typesetter_.resources().fmtResource_->SetParagraphAlignment(
+            DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        typesetter_.resources().fmtResource_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        fluent::applyUiFontFallback(typesetter_.resources().fmtResource_.Get());
         return true;
     }
 
@@ -4676,8 +3763,8 @@ struct TaskbarHost::Impl {
         wchar_t widestDigit = L'8';
         float widestDigitWidth = -1.0f;
         for (wchar_t digit = L'0'; digit <= L'9'; ++digit) {
-            const float digitWidth =
-                measureResourceTextWidth(dwrite, fmtResource_, std::wstring(1, digit));
+            const float digitWidth = measureResourceTextWidth(
+                dwrite, typesetter_.resources().fmtResource_.Get(), std::wstring(1, digit));
             if (digitWidth > widestDigitWidth) {
                 widestDigitWidth = digitWidth;
                 widestDigit = digit;
@@ -4696,9 +3783,11 @@ struct TaskbarHost::Impl {
         auto measureCell = [&](const std::vector<std::wstring>& samples) {
             float& columnWidth = cellIndex % 4 < 2 ? leftMaxWidth : rightMaxWidth;
             for (const auto& sample : samples) {
-                const float measured = measureResourceTextWidth(dwrite, fmtResource_, sample);
+                const float measured = measureResourceTextWidth(
+                    dwrite, typesetter_.resources().fmtResource_.Get(), sample);
                 columnWidth = std::max(columnWidth, measured);
-                singleLineWidths[cellIndex % 2] = std::max(singleLineWidths[cellIndex % 2], measured);
+                singleLineWidths[cellIndex % 2] =
+                    std::max(singleLineWidths[cellIndex % 2], measured);
             }
             ++cellIndex;
         };
@@ -4724,8 +3813,8 @@ struct TaskbarHost::Impl {
 
         const float nextLeftWidth =
             std::max(1.0f, std::ceil(leftMaxWidth) + kResourceCellSafetyPadding);
-        const float nextRightWidth = rightMaxWidth > 0.0f
-            ? std::ceil(rightMaxWidth) + kResourceCellSafetyPadding : 0.0f;
+        const float nextRightWidth =
+            rightMaxWidth > 0.0f ? std::ceil(rightMaxWidth) + kResourceCellSafetyPadding : 0.0f;
         for (float& cellWidth : singleLineWidths)
             if (cellWidth > 0.0f)
                 cellWidth = std::ceil(cellWidth) + kResourceCellSafetyPadding;
@@ -4740,9 +3829,9 @@ struct TaskbarHost::Impl {
     }
 
     void recreateResourceFormat() {
-        if (fmtResource_) {
-            fmtResource_->Release();
-            fmtResource_ = nullptr;
+        if (typesetter_.resources().fmtResource_.Get()) {
+            typesetter_.resources().fmtResource_.Reset();
+            typesetter_.resources().fmtResource_.Reset();
         }
         if (updateResourceColumnWidths())
             requestInvalidation(RenderInvalidation::Layout);
@@ -4757,9 +3846,10 @@ struct TaskbarHost::Impl {
             return requested;
         IDWriteTextFormat* format = nullptr;
         if (FAILED(dwrite->CreateTextFormat(fontFamily_.c_str(), nullptr,
-                isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD : weight,
-                dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL, requested,
-                L"zh-cn", &format)))
+                                            isBoldFontStyle(fontStyle_) ? DWRITE_FONT_WEIGHT_BOLD
+                                                                        : weight,
+                                            dwriteStyleOf(fontStyle_), DWRITE_FONT_STRETCH_NORMAL,
+                                            requested, L"zh-cn", &format)))
             return requested;
         fluent::applyUiFontFallback(format);
         IDWriteTextLayout* sample = nullptr;
@@ -4777,9 +3867,11 @@ struct TaskbarHost::Impl {
     void syncCompactTaskbarLayout(int heightPixels) {
         const float height = dip(heightPixels);
         const float taskbarHeight = dip(rcTaskbar_.bottom - rcTaskbar_.top);
-        const float compactHeight = !isVerticalTaskbar() && !isAppBarView() &&
-            taskbarHeight > 0.0f && taskbarHeight < kCompactTaskbarHeightDip &&
-            height > 0.0f ? height : 0.0f;
+        const float compactHeight =
+            !isVerticalTaskbar() && !isAppBarView() && taskbarHeight > 0.0f &&
+                    taskbarHeight < kCompactTaskbarHeightDip && height > 0.0f
+                ? height
+                : 0.0f;
         if (compactHeight == compactTaskbarHeight_)
             return;
         const bool wasCompact = compactTaskbarHeight_ > 0.0f;
@@ -4793,14 +3885,17 @@ struct TaskbarHost::Impl {
         clearImmersiveSongContentTransition();
         releaseSpectrumEffectResources();
         recreateFormats();
-        requestInvalidation(toMask(RenderInvalidation::Text) |
-                            toMask(RenderInvalidation::SongInfo) |
-                            toMask(RenderInvalidation::Layout) |
-                            toMask(RenderInvalidation::Geometry) |
-                            toMask(RenderInvalidation::Cover));
+        requestInvalidation(
+            toMask(RenderInvalidation::Text) | toMask(RenderInvalidation::SongInfo) |
+            toMask(RenderInvalidation::Layout) | toMask(RenderInvalidation::Geometry) |
+            toMask(RenderInvalidation::Cover));
     }
 
     void recreateFormats() {
+        if (applyingAppearance_) {
+            appearanceFormatsPending_ = true;
+            return;
+        }
         recreateResourceFormat();
         IDWriteFactory* dwrite = renderer.dwrite();
         if (!dwrite)
@@ -4827,32 +3922,29 @@ struct TaskbarHost::Impl {
         };
         // 歌名/歌手固定字号，不随歌词字号调整；只有歌词跟随 fontSize_
         make(fitCompactFontSize(kBaseFontSize * 1.05f,
-                               (compactTaskbarHeight_ - 6.0f) * 1.05f / 1.97f,
-                               DWRITE_FONT_WEIGHT_SEMI_BOLD),
+                                (compactTaskbarHeight_ - 6.0f) * 1.05f / 1.97f,
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD),
              DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             &fmtTitle_);
+             typesetter_.resources().fmtTitle_.ReleaseAndGetAddressOf());
         make(fitCompactFontSize(kBaseFontSize * 0.92f,
-                               (compactTaskbarHeight_ - 6.0f) * 0.92f / 1.97f),
+                                (compactTaskbarHeight_ - 6.0f) * 0.92f / 1.97f),
              DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             &fmtArtist_);
+             typesetter_.resources().fmtArtist_.ReleaseAndGetAddressOf());
         const float lyricPad = lyricGlow_ ? 6.0f : lyricOutline_ ? 4.0f : 2.0f;
         make(fitCompactFontSize(fontSize_ * kLyricMainFontScale, compactTaskbarHeight_ - lyricPad),
-             DWRITE_FONT_WEIGHT_NORMAL,
-             DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             &fmtLyric_);
+             DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
+             typesetter_.resources().fmtLyric_.ReleaseAndGetAddressOf());
         // 双行模式的下一行：比翻译字号（0.78）略大，但明显小于核心歌词（1.18）。
         make(fontSize_ * kLyricPreviewFontScale, DWRITE_FONT_WEIGHT_NORMAL,
              DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             &fmtNextLyric_);
+             typesetter_.resources().fmtNextLyric_.ReleaseAndGetAddressOf());
         make(fontSize_ * 0.78f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_NEAR,
-             &fmtSecondary_);
+             typesetter_.resources().fmtSecondary_.ReleaseAndGetAddressOf());
         requestInvalidation(RenderInvalidation::Text);
         requestInvalidation(RenderInvalidation::SongInfo);
     }
 
-    void changeFont(float delta) {
-        setFont(fontFamily_, fontSize_ + delta, fontStyle_);
-    }
+    void changeFont(float delta) { setFont(fontFamily_, fontSize_ + delta, fontStyle_); }
 
     LyricFontSizeContext fontSizeContext() const {
         LyricFontSizeContext context;
@@ -4862,17 +3954,20 @@ struct TaskbarHost::Impl {
         if (!hwnd || !GetClientRect(hwnd, &client))
             return context;
         const bool vertical = isVerticalTaskbar();
-        const float crossAxis = static_cast<float>(vertical ? client.right - client.left
-                                                            : client.bottom - client.top) / scale();
+        const float crossAxis =
+            static_cast<float>(vertical ? client.right - client.left : client.bottom - client.top) /
+            scale();
         const float effectPad = lyricGlow_ ? 4.8f : lyricOutline_ ? 2.4f : 0.0f;
         context.availableDip = std::max(0.0f, crossAxis - 4.0f - effectPad);
         context.mainScale = kLyricMainFontScale;
-        if (compactTaskbarHeight_ > 0.0f && fmtLyric_ && fontSize_ > 0.0f)
-            context.mainScale = fmtLyric_->GetFontSize() / fontSize_;
+        if (compactTaskbarHeight_ > 0.0f && typesetter_.resources().fmtLyric_.Get() &&
+            fontSize_ > 0.0f)
+            context.mainScale = typesetter_.resources().fmtLyric_->GetFontSize() / fontSize_;
         if (!vertical && compactTaskbarHeight_ <= 0.0f && doubleLineLyricsEnabled_) {
             context.extraScale = kLyricPreviewFontScale;
             context.gapDip = kLyricPreviewGap;
-        } else if (!vertical && compactTaskbarHeight_ <= 0.0f && (translationEnabled_ || romanizationEnabled_)) {
+        } else if (!vertical && compactTaskbarHeight_ <= 0.0f &&
+                   (translationEnabled_ || romanizationEnabled_)) {
             context.extraScale = 0.78f;
             context.gapDip = 1.0f;
         }
@@ -4892,96 +3987,63 @@ struct TaskbarHost::Impl {
     }
 
     void releaseDeviceResources() {
-        lyricStar_.reset();
-        clearLyricEffectGeometry();
-        releaseSpectrumEffectResources();
+        lyricEffectsRenderer_.discardDeviceResources();
+        spectrum_.discardDeviceResources();
         cancelSceneWindowResize();
-        auto r = [](auto*& p) {
-            if (p) {
-                p->Release();
-                p = nullptr;
-            }
-        };
-        r(fmtTitle_);
-        r(fmtArtist_);
-        r(fmtLyric_);
-        r(fmtNextLyric_);
-        r(fmtSecondary_);
-        r(fmtDragPreview_);
-        r(fmtClockTime_);
-        r(fmtClockDate_);
-        r(fmtResource_);
-        r(titleLayout_);
-        r(artistLayout_);
-        r(lyricLayout_);
-        r(verticalLyricLayout_);
-        releaseVerticalLyricParts(verticalLyricParts_);
-        r(nextLyricLayout_);
-        r(secondaryLayout_);
-        r(outgoingLyricLayout_);
-        r(outgoingVerticalLyricLayout_);
-        releaseVerticalLyricParts(outgoingVerticalLyricParts_);
-        r(outgoingSecondaryLayout_);
-        r(outgoingNextLyricLayout_);
-        r(brushBg_);
-        r(brushHover_);
-        r(brushText_);
-        r(brushDim_);
-        r(brushBtn_);
-        r(brushBtnDisabled_);
-        r(brushLyric_);
-        r(brushLyricFx_);
-        r(brushLyricFollow_);
-        r(brushLyricDim_);
-        r(brushLyricGlow_);
-        r(brushLyricOutline_);
-        r(brushVinylBase_);
-        r(brushVinylGroove_);
-        r(brushVinylSurface_);
-        r(brushTurntable_);
-        r(brushSpectrum_);
-        r(brushSpectrumBarGradient_);
-        r(brushProgressBg_);
-        r(brushBackground_);
-        r(brushIdleWarm_);
-        r(brushIdleCool_);
-        r(brushIdleAccent_);
+        typesetter_.discardDeviceResources();
+        brushBg_.Reset();
+        brushHover_.Reset();
+        brushText_.Reset();
+        brushDim_.Reset();
+        brushBtn_.Reset();
+        brushBtnDisabled_.Reset();
+        brushLyric_.Reset();
+        brushLyricDim_.Reset();
+        brushLyricGlow_.Reset();
+        brushLyricOutline_.Reset();
+        brushVinylBase_.Reset();
+        brushVinylGroove_.Reset();
+        brushVinylSurface_.Reset();
+        brushTurntable_.Reset();
+        brushProgressBg_.Reset();
+        brushBackground_.Reset();
+        brushIdleWarm_.Reset();
+        brushIdleCool_.Reset();
+        brushIdleAccent_.Reset();
         dockPet_.discardDeviceResources();
-        r(dragPreviewStroke_);
-        r(coverBlurFx_);
-        r(coverScaleFx_);
+        dragPreviewStroke_.Reset();
+        coverBlurFx_.Reset();
+        coverScaleFx_.Reset();
         coverBlurInput_ = nullptr;
         textEffectsCache_.clear();
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
         karaokeGeometryLayout_ = nullptr;
-        r(coverClip_);
-        r(vinylCoverClip_);
-        r(coverLayer_);
-        r(lyricEdgeFadeBrush_);
-        r(lyricEdgeFadeLayer_);
-        r(lyricRightFadeBrush_);
-        r(lyricRightFadeLayer_);
-        r(songInfoDividerBrush_);
+        coverClip_.Reset();
+        vinylCoverClip_.Reset();
+        coverLayer_.Reset();
+        lyricEdgeFadeBrush_.Reset();
+        lyricEdgeFadeLayer_.Reset();
+        lyricRightFadeBrush_.Reset();
+        lyricRightFadeLayer_.Reset();
+        songInfoDividerBrush_.Reset();
         media_control::release(controlGeometry);
-        if (coverBmp) {
-            coverBmp->Release();
-            coverBmp = nullptr;
+        if (coverBmp.Get()) {
+            coverBmp.Reset();
+            coverBmp.Reset();
         }
-        if (platformIconBmp) {
-            platformIconBmp->Release();
-            platformIconBmp = nullptr;
+        if (platformIconBmp.Get()) {
+            platformIconBmp.Reset();
+            platformIconBmp.Reset();
         }
         drawTargetOverride_ = nullptr;
         renderState_.setDeviceResourcePhase(RenderState::DeviceResourcePhase::Uninitialized);
         songContentTransition_.reset();
         clearLyricDCompState();
-        requestInvalidation(toMask(RenderInvalidation::Text) |
-                            toMask(RenderInvalidation::SongInfo) |
-                            toMask(RenderInvalidation::Geometry) |
-                            toMask(RenderInvalidation::Layout) |
-                            toMask(RenderInvalidation::Cover) |
-                            toMask(RenderInvalidation::PlatformIcon));
+        requestInvalidation(
+            toMask(RenderInvalidation::Text) | toMask(RenderInvalidation::SongInfo) |
+            toMask(RenderInvalidation::Geometry) | toMask(RenderInvalidation::Layout) |
+            toMask(RenderInvalidation::Cover) | toMask(RenderInvalidation::PlatformIcon));
     }
 
     void discardDeviceResources() {
@@ -5009,8 +4071,7 @@ struct TaskbarHost::Impl {
                     const UINT duration = hiding ? kImmersiveHideMs : kImmersiveShowMs;
                     const ULONGLONG elapsed = now - immersivePresenceStartMs_;
                     if (elapsed < duration)
-                        renderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f, opacity,
-                                             hiding ? 0.0f : 1.0f,
+                        renderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f, opacity, hiding ? 0.0f : 1.0f,
                                              static_cast<float>(duration - elapsed) / 1000.0f);
                 }
             }
@@ -5045,66 +4106,14 @@ struct TaskbarHost::Impl {
     // 空间不足隐藏时缩短到 1 秒，尽快发现可恢复空间。UIA 属性查询由 explorer
     // 的 UI 线程执行，不能跟随歌词帧率高频调用。
     // 每次循环都重新发布结果（即使没变化），变化比较在 UI 线程拾取时做
-    static void probeMain(const std::shared_ptr<ProbeState>& state) {
-        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        if (FAILED(initialized))
-            return;
-        IUIAutomation* uia = nullptr;
-        CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                         IID_PPV_ARGS(&uia));
-        while (!state->stop.load()) {
-            if (HWND tb = state->taskbar.load()) {
-                auto p = std::make_unique<ProbeResult>();
-                if (HWND tm = findTrafficMonitorWnd(tb))
-                    GetWindowRect(tm, &p->rcTm);
-                if (state->stop.load())
-                    break;
-                queryTaskbarButtonsUia(uia, tb, p->buttons);
-                if (state->stop.load())
-                    break;
-                queryKugouTaskbarWindows(tb, p->kugouWindows);
-                if (state->stop.load())
-                    break;
-                delete state->out.exchange(p.release()); // 上一份未被拾取则丢弃
-            }
-            int elapsed = 0;
-            while (!state->stop.load()) {
-                const UINT interval = state->fast.load() ? kNoSpaceProbeIntervalMs
-                                                         : kProbeIntervalMs;
-                if (elapsed >= static_cast<int>(interval))
-                    break;
-                Sleep(100);
-                elapsed += 100;
-            }
-        }
-        if (uia)
-            uia->Release();
-        CoUninitialize();
-    }
 
-    void startProbe() {
-        if (probeRunning_)
-            return;
-        if (probeState_->stop.load()) {
-            auto state = std::make_shared<ProbeState>();
-            state->taskbar = probeState_->taskbar.load();
-            state->fast = probeState_->fast.load();
-            probeState_ = std::move(state);
-        }
-        std::thread([state = probeState_] { probeMain(state); }).detach();
-        probeRunning_ = true;
-    }
+    void startProbe() { placementProbe_.start(); }
 
-    void stopProbe() {
-        probeState_->stop = true;
-        probeState_->fast = false;
-        probeRunning_ = false;
-        delete probeState_->out.exchange(nullptr);
-    }
+    void stopProbe() { placementProbe_.stop(); }
 
     // UI 线程慢速分支：拾取探测结果，与缓存比较有变化才更新。返回是否有变化
     bool pickProbeResult() {
-        std::unique_ptr<ProbeResult> p(probeState_->out.exchange(nullptr));
+        auto p = placementProbe_.take();
         if (!p)
             return false;
         const bool firstProbe = !probeReady_;
@@ -5145,9 +4154,9 @@ struct TaskbarHost::Impl {
     // ---------- 封面解码 ----------
 
     void decodeCover() {
-        if (coverBmp) {
-            coverBmp->Release();
-            coverBmp = nullptr;
+        if (coverBmp.Get()) {
+            coverBmp.Reset();
+            coverBmp.Reset();
             // 旧封面可能仍被模糊链引用，强制下帧重新绑定输入
             coverBlurInput_ = nullptr;
         }
@@ -5178,8 +4187,7 @@ struct TaskbarHost::Impl {
         UINT h = bitmap.GetHeight();
         // 只按显示尺寸（封面槽 DIP × DPI 缩放）生成位图：原图常达 500~1000px，
         // 全尺寸 LockBits/CreateBitmap 会把 MB 级像素常驻显存，实际只显示约 30px。
-        const UINT targetPx =
-            std::max(1u, static_cast<UINT>(std::ceil(coverSize() * scale())));
+        const UINT targetPx = std::max(1u, static_cast<UINT>(std::ceil(coverSize() * scale())));
         Gdiplus::Bitmap* pixels = &bitmap;
         Gdiplus::Bitmap scaled(static_cast<INT>(targetPx), static_cast<INT>(targetPx),
                                PixelFormat32bppPARGB);
@@ -5188,10 +4196,11 @@ struct TaskbarHost::Impl {
             g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
             g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
             // 目标为正方形，与绘制时拉伸到方形封面槽的行为一致
-            if (g.DrawImage(&bitmap, Gdiplus::Rect(0, 0, static_cast<INT>(targetPx),
-                                                   static_cast<INT>(targetPx)),
-                            0, 0, static_cast<INT>(w), static_cast<INT>(h),
-                            Gdiplus::UnitPixel) == Gdiplus::Ok) {
+            if (g.DrawImage(
+                    &bitmap,
+                    Gdiplus::Rect(0, 0, static_cast<INT>(targetPx), static_cast<INT>(targetPx)), 0,
+                    0, static_cast<INT>(w), static_cast<INT>(h),
+                    Gdiplus::UnitPixel) == Gdiplus::Ok) {
                 pixels = &scaled;
                 w = targetPx;
                 h = targetPx;
@@ -5211,7 +4220,7 @@ struct TaskbarHost::Impl {
         ID2D1Bitmap1* decoded = nullptr;
         hr = rt->CreateBitmap(D2D1::SizeU(w, h), bitmapData.Scan0, bitmapData.Stride, &props,
                               &decoded);
-        coverBmp = decoded; // ID2D1Bitmap1 派生自 ID2D1Bitmap
+        coverBmp.Attach(decoded); // ID2D1Bitmap1 派生自 ID2D1Bitmap
         pixels->UnlockBits(&bitmapData);
         stream->Release();
     }
@@ -5221,41 +4230,40 @@ struct TaskbarHost::Impl {
     // Scale 参数便宜，直接按帧写入
     ID2D1Effect* ensureCoverBlurChain(float w, float h) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !coverBmp)
+        if (!rt || !coverBmp.Get())
             return nullptr;
-        if (!coverBlurFx_) {
-            if (FAILED(rt->CreateEffect(kGaussianBlurClsid, &coverBlurFx_)))
+        if (!coverBlurFx_.Get()) {
+            if (FAILED(rt->CreateEffect(kGaussianBlurClsid, coverBlurFx_.ReleaseAndGetAddressOf())))
                 return nullptr;
-            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION,
-                                   kCoverBlurStdDev);
+            coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_STANDARD_DEVIATION, kCoverBlurStdDev);
             coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_OPTIMIZATION,
                                    D2D1_GAUSSIANBLUR_OPTIMIZATION_SPEED);
             // SOFT（镜像）避免边缘模糊后透出黑边
             coverBlurFx_->SetValue(D2D1_GAUSSIANBLUR_PROP_BORDER_MODE, D2D1_BORDER_MODE_SOFT);
         }
-        if (!coverScaleFx_) {
-            if (FAILED(rt->CreateEffect(kScaleClsid, &coverScaleFx_)))
+        if (!coverScaleFx_.Get()) {
+            if (FAILED(rt->CreateEffect(kScaleClsid, coverScaleFx_.ReleaseAndGetAddressOf())))
                 return nullptr;
             coverScaleFx_->SetValue(D2D1_SCALE_PROP_INTERPOLATION_MODE,
                                     D2D1_SCALE_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-            coverScaleFx_->SetInputEffect(0, coverBlurFx_);
+            coverScaleFx_->SetInputEffect(0, coverBlurFx_.Get());
         }
-        if (coverBlurInput_ != coverBmp) {
-            coverBlurFx_->SetInput(0, coverBmp);
-            coverBlurInput_ = coverBmp;
+        if (coverBlurInput_ != coverBmp.Get()) {
+            coverBlurFx_->SetInput(0, coverBmp.Get());
+            coverBlurInput_ = coverBmp.Get();
         }
         const D2D1_SIZE_F size = coverBmp->GetSize();
         if (size.width <= 0.0f || size.height <= 0.0f)
             return nullptr;
         coverScaleFx_->SetValue(D2D1_SCALE_PROP_SCALE,
                                 D2D1::Vector2F(w / size.width, h / size.height));
-        return coverScaleFx_;
+        return coverScaleFx_.Get();
     }
 
     void decodePlatformIcon() {
-        if (platformIconBmp) {
-            platformIconBmp->Release();
-            platformIconBmp = nullptr;
+        if (platformIconBmp.Get()) {
+            platformIconBmp.Reset();
+            platformIconBmp.Reset();
         }
         if (!albumCoverVisible_ || !platformIconVisible_ || media.sourceAppUserModelId.empty())
             return;
@@ -5263,8 +4271,7 @@ struct TaskbarHost::Impl {
         std::vector<BYTE> pixels;
         UINT width = 0;
         UINT height = 0;
-        if (!platform_icon::readSourceIconPixels(media.sourceAppUserModelId, pixels, width,
-                                                 height))
+        if (!platform_icon::readSourceIconPixels(media.sourceAppUserModelId, pixels, width, height))
             return;
 
         auto* rt = renderer.renderTarget();
@@ -5275,15 +4282,13 @@ struct TaskbarHost::Impl {
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
             static_cast<float>(dpi_), static_cast<float>(dpi_));
         ID2D1Bitmap1* decoded = nullptr;
-        rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4, &props,
-                         &decoded);
-        platformIconBmp = decoded;
+        rt->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4, &props, &decoded);
+        platformIconBmp.Attach(decoded);
     }
 
     int displayLyricLine() const {
         if (scene_ == DisplayScene::NoPlayback || scene_ == DisplayScene::Idle ||
-            scene_ == DisplayScene::Searching ||
-            scene_ == DisplayScene::Message)
+            scene_ == DisplayScene::Searching || scene_ == DisplayScene::Message)
             return -1;
         if (currentLine >= 0 && (size_t)currentLine < lines.size())
             return currentLine;
@@ -5307,7 +4312,7 @@ struct TaskbarHost::Impl {
     }
 
     bool useDoubleLineLyrics() const {
-        if (isLyricTransitionActive() && lyricLayout_)
+        if (isLyricTransitionActive() && typesetter_.resources().lyricLayout_.Get())
             return lyricLayoutDoubleLine_;
         return useDoubleLineLyricsForLine(displayLyricLine());
     }
@@ -5316,23 +4321,7 @@ struct TaskbarHost::Impl {
 
     void releaseOutgoingLyricLayouts() {
         outgoingLyricEffectLine_ = -1;
-        if (outgoingLyricLayout_) {
-            outgoingLyricLayout_->Release();
-            outgoingLyricLayout_ = nullptr;
-        }
-        if (outgoingVerticalLyricLayout_) {
-            outgoingVerticalLyricLayout_->Release();
-            outgoingVerticalLyricLayout_ = nullptr;
-        }
-        releaseVerticalLyricParts(outgoingVerticalLyricParts_);
-        if (outgoingSecondaryLayout_) {
-            outgoingSecondaryLayout_->Release();
-            outgoingSecondaryLayout_ = nullptr;
-        }
-        if (outgoingNextLyricLayout_) {
-            outgoingNextLyricLayout_->Release();
-            outgoingNextLyricLayout_ = nullptr;
-        }
+        typesetter_.releaseOutgoing();
         outgoingLyricWidth_ = 0.0f;
         outgoingLyricHeight_ = 0.0f;
         outgoingVerticalLyricWidth_ = 0.0f;
@@ -5354,14 +4343,14 @@ struct TaskbarHost::Impl {
             requestInvalidation(RenderInvalidation::Layout);
         }
         clearLyricTransitionPhase();
-        lyricTransitionKind_ = LyricTransitionKind::None;
-        outgoingScene_ = DisplayScene::NoPlayback;
-        outgoingDoubleLine_ = false;
-        sceneTransitionNeedsRelayout_ = false;
-        lyricTransitionStartMs_ = 0;
-        lyricTransitionRevision_ = 0;
-        transitionTarget_.reset();
-        pendingTarget_.reset();
+        transition_.setKind(LyricTransitionKind::None);
+        transition_.setOutgoingScene(DisplayScene::NoPlayback);
+        transition_.setOutgoingDoubleLine(false);
+        transition_.setNeedsRelayout(false);
+        transition_.setStartMs(0);
+        transition_.setRevision(0);
+        transition_.clearTarget();
+        transition_.clearPending();
         requestLyricDCompEnd();
         releaseOutgoingLyricLayouts();
         karaokeEnteringLine_ = false;
@@ -5373,72 +4362,42 @@ struct TaskbarHost::Impl {
                                   bool allowAnimate) {
         const int previous = currentLine;
         currentLine = newLine;
-        if (!allowAnimate || !clientAnimations_ || previous < 0 || newLine < 0) {
+        const auto decision = transition_.request(previous, newLine, actualPositionMs, revision,
+                                                  allowAnimate && clientAnimations_);
+        if (decision == LyricTransition::Decision::Reset)
             resetLyricTransition();
+        if (decision != LyricTransition::Decision::Queued)
             requestInvalidation(RenderInvalidation::Text);
-            return;
-        }
-        // 只有相邻自然换行才做空间转场。seek、快速切行或反向跳转不能把多次
-        // 280ms 动画串起来，否则画面会长期追不上真实歌词。
-        if (std::abs(newLine - previous) > 1) {
-            resetLyricTransition();
-            requestInvalidation(RenderInvalidation::Text);
-            return;
-        }
-        LyricTransitionTarget target{newLine, actualPositionMs,
-                                     newLine > previous ? 1 : -1, revision};
-        if (isLyricTransitionActive()) {
-            if (target.direction != lyricTransitionDirection_) {
-                resetLyricTransition();
-                requestInvalidation(RenderInvalidation::Text);
-                return;
-            }
-            pendingTarget_ = target;
-            // 过渡版本跟随最新帧，避免被 updateScroll 的过期检查丢弃。
-            lyricTransitionRevision_ = revision;
-            return;
-        }
-        transitionTarget_ = target;
-        lyricTransitionKind_ = LyricTransitionKind::Line;
-        lyricTransitionDirection_ = target.direction;
-        setLyricTransitionPending();
-        lyricTransitionRevision_ = revision;
-        requestInvalidation(RenderInvalidation::Text);
     }
 
     // 行过渡收尾：先冻结动画再交换状态。释放旧布局、消费动画期间记录的最新目标；
     // 自然转场中的新行保留逐字追赶过程，避免收尾时又跳到真实位置。
     void finalizeLyricTransition(ULONGLONG now) {
-        const bool sceneTransition = lyricTransitionKind_ == LyricTransitionKind::Scene;
-        const bool sceneNeedsRelayout = sceneTransitionNeedsRelayout_;
+        const bool sceneTransition = transition_.kind() == LyricTransitionKind::Scene;
+        const bool sceneNeedsRelayout = transition_.needsRelayout();
         requestLyricDCompEnd();
         releaseOutgoingLyricLayouts();
         clearLyricTransitionPhase();
-        lyricTransitionStartMs_ = 0;
+        transition_.setStartMs(0);
 
         if (sceneTransition) {
             // 类别转场不消费歌词行的 pendingTarget；场景稳定后用最新完整帧
             // 再做一次排版，避免把转场期间收到的歌词行状态写回旧布局。
-            lyricTransitionKind_ = LyricTransitionKind::None;
-            outgoingScene_ = DisplayScene::NoPlayback;
-            outgoingDoubleLine_ = false;
-            sceneTransitionNeedsRelayout_ = false;
-            transitionTarget_.reset();
-            pendingTarget_.reset();
-            lyricTransitionRevision_ = 0;
+            transition_.setKind(LyricTransitionKind::None);
+            transition_.setOutgoingScene(DisplayScene::NoPlayback);
+            transition_.setOutgoingDoubleLine(false);
+            transition_.setNeedsRelayout(false);
+            transition_.clearTarget();
+            transition_.clearPending();
+            transition_.setRevision(0);
             if (sceneNeedsRelayout)
                 requestInvalidation(RenderInvalidation::Text);
             return;
         }
 
-        if (pendingTarget_) {
+        if (transition_.advancePending(frameRevision_)) {
             // 动画期间收到了更新的目标行：当前布局仍是旧目标，以它为旧行立即
             // 发起向最新目标的过渡，不经过稳定的中间帧。
-            transitionTarget_ = pendingTarget_;
-            pendingTarget_.reset();
-            lyricTransitionDirection_ = transitionTarget_->direction;
-            setLyricTransitionPending();
-            lyricTransitionRevision_ = frameRevision_;
             requestInvalidation(RenderInvalidation::Text);
             // 布局尚未对应新行：解绑逐字平滑状态，排版完成后直接对齐真实目标。
             karaokeSmoothLine_ = -1;
@@ -5447,12 +4406,11 @@ struct TaskbarHost::Impl {
             karaokeEnteringLine_ = false;
             return;
         }
-        transitionTarget_.reset();
-        lyricTransitionRevision_ = 0;
+        transition_.clearTarget();
+        transition_.setRevision(0);
 
         karaokeTick_ = now;
-        const bool preserveKaraokeEntry =
-            karaokeEnteringLine_ && karaokeSmoothLine_ == currentLine;
+        const bool preserveKaraokeEntry = karaokeEnteringLine_ && karaokeSmoothLine_ == currentLine;
         karaokeSmoothLine_ = currentLine;
         if (const LyricLine* line = karaokeLine()) {
             int64_t charDur = 0;
@@ -5473,369 +4431,20 @@ struct TaskbarHost::Impl {
             karaokeEnteringLine_ = false;
         }
         clearLyricTransitionPhase();
-        lyricTransitionKind_ = LyricTransitionKind::None;
-        outgoingScene_ = DisplayScene::NoPlayback;
-        outgoingDoubleLine_ = false;
+        transition_.setKind(LyricTransitionKind::None);
+        transition_.setOutgoingScene(DisplayScene::NoPlayback);
+        transition_.setOutgoingDoubleLine(false);
     }
 
     // ---------- 排版 ----------
 
-    static bool isCjkVerticalCharacter(wchar_t ch) {
-        return (ch >= 0x2E80 && ch <= 0x2FFF) ||
-               (ch >= 0x3000 && ch <= 0x30FF) ||
-               (ch >= 0x3400 && ch <= 0x9FFF) ||
-               (ch >= 0xAC00 && ch <= 0xD7AF);
-    }
-
-    static bool isLatinVerticalCharacter(wchar_t ch) {
-        return (ch >= L'A' && ch <= L'Z') ||
-               (ch >= L'a' && ch <= L'z') ||
-               (ch >= 0x00C0 && ch <= 0x024F) ||
-               (ch >= 0x1E00 && ch <= 0x1EFF) ||
-               (ch >= 0xFF21 && ch <= 0xFF3A) ||
-               (ch >= 0xFF41 && ch <= 0xFF5A);
-    }
-
-    static bool isLatinRunConnector(wchar_t ch) {
-        switch (ch) {
-        case L' ':
-        case L'\t':
-        case L'\'':
-        case L'’':
-        case L'-':
-        case L'‐':
-        case L'‑':
-        case L'_':
-        case L'&':
-        case L'+':
-        case L'/':
-        case L'.':
-        case L',':
-        case L'!':
-        case L'?':
-        case L':':
-        case L';':
-        case L'%':
-        case L'#':
-        case L'@':
-        case L'=':
-        case L'(':
-        case L')':
-        case L'[':
-        case L']':
-        case L'{':
-        case L'}':
-            return true;
-        default:
-            return false;
-        }
-    }
-
-    static bool isLatinRunCharacter(wchar_t ch) {
-        return isLatinVerticalCharacter(ch) || (ch >= L'0' && ch <= L'9') ||
-               (ch >= 0xFF10 && ch <= 0xFF19) || isLatinRunConnector(ch);
-    }
-
-    static bool isLatinRunStartCharacter(wchar_t ch) {
-        return isLatinRunCharacter(ch) && !isLatinRunConnector(ch);
-    }
-
-    static wchar_t verticalPunctuationGlyph(wchar_t ch) {
-        // 普通括号在逐字竖排时会保持“竖着的原字形”，改用 Unicode 竖排字形，
-        // 让括号曲线横向展开。中英文及常见全角/中文成对括号统一处理。
-        switch (ch) {
-        case L'(':
-        case L'（':
-            return L'︵';
-        case L')':
-        case L'）':
-            return L'︶';
-        case L'[':
-        case L'［':
-            return L'﹇';
-        case L']':
-        case L'］':
-            return L'﹈';
-        case L'{':
-        case L'｛':
-            return L'︷';
-        case L'}':
-        case L'｝':
-            return L'︸';
-        case L'<':
-        case L'〈':
-        case L'＜':
-            return L'︿';
-        case L'>':
-        case L'〉':
-        case L'＞':
-            return L'﹀';
-        case L'〔':
-            return L'︹';
-        case L'〕':
-            return L'︺';
-        case L'【':
-            return L'︻';
-        case L'】':
-            return L'︼';
-        case L'《':
-            return L'︽';
-        case L'》':
-            return L'︾';
-        case L'「':
-            return L'﹁';
-        case L'」':
-            return L'﹂';
-        case L'『':
-            return L'﹃';
-        case L'』':
-            return L'﹄';
-        default:
-            return ch;
-        }
-    }
-
     // 把一行歌词拆成逐字换行的布局。中文和符号按 Unicode 码点处理，
     // 常见括号转换为竖排字形；避免 UTF-16 代理项被拆开后出现半个字符。
     // 纯拉丁文本走整句旋转布局。
-    std::wstring makeVerticalLyricText(const std::wstring& text, bool topToBottom) const {
-        std::vector<std::wstring> glyphs;
-        for (size_t i = 0; i < text.size();) {
-            if (text[i] == L'\r' || text[i] == L'\n') {
-                ++i;
-                continue;
-            }
-            size_t units = 1;
-            const wchar_t first = text[i];
-            if (first >= 0xD800 && first <= 0xDBFF && i + 1 < text.size() &&
-                text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
-                units = 2;
-            }
-            std::wstring glyph = text.substr(i, units);
-            if (units == 1)
-                glyph[0] = verticalPunctuationGlyph(glyph[0]);
-            glyphs.emplace_back(std::move(glyph));
-            i += units;
-        }
-        if (!topToBottom)
-            std::reverse(glyphs.begin(), glyphs.end());
-
-        std::wstring result;
-        for (const auto& glyph : glyphs) {
-            if (!result.empty())
-                result.push_back(L'\n');
-            result += glyph;
-        }
-        return result;
-    }
-
-    bool useRotatedVerticalLyric(const std::wstring& text) const {
-        bool hasLatin = false;
-        for (size_t i = 0; i < text.size();) {
-            const wchar_t c = text[i];
-            if (c == L'\r' || c == L'\n') {
-                ++i;
-                continue;
-            }
-            if (c >= 0xD800 && c <= 0xDFFF) {
-                // 代理项和 CJK 之外的复杂文字仍走逐字布局，避免旋转后破坏字形组合。
-                if (c <= 0xDBFF && i + 1 < text.size() &&
-                    text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
-                    i += 2;
-                else
-                    ++i;
-                continue;
-            }
-
-            if (isCjkVerticalCharacter(c))
-                return false;
-            hasLatin = hasLatin || isLatinVerticalCharacter(c);
-            ++i;
-        }
-        return hasLatin;
-    }
-
-    bool createVerticalLyricLayout(const std::wstring& text, float layoutWidth,
-                                   IDWriteTextLayout** out, float& width, float& height,
-                                   bool& rotated) {
-        width = 0.0f;
-        height = 0.0f;
-        rotated = false;
-        if (!out)
-            return false;
-        *out = nullptr;
-        if (!renderer.dwrite() || !fmtLyric_ || text.empty() || layoutWidth <= 0.0f)
-            return false;
-
-        const bool rotateText = useRotatedVerticalLyric(text);
-        // 竖向英文统一使用截图中的顺时针 90° 角度；原文本顺序无需反转，
-        // 这样视觉上仍按原句从上向下阅读。
-        const std::wstring layoutText = rotateText ? text
-                                                   : makeVerticalLyricText(text, true);
-        if (layoutText.empty() ||
-            FAILED(renderer.dwrite()->CreateTextLayout(
-                layoutText.c_str(), static_cast<UINT32>(layoutText.size()), fmtLyric_,
-                rotateText ? 100000.0f : layoutWidth, 100000.0f, out)) ||
-            !*out) {
-            return false;
-        }
-
-        (*out)->SetTextAlignment(rotateText ? DWRITE_TEXT_ALIGNMENT_LEADING
-                                             : DWRITE_TEXT_ALIGNMENT_CENTER);
-        (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-        (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-        DWRITE_TEXT_METRICS metrics{};
-        if (FAILED((*out)->GetMetrics(&metrics))) {
-            (*out)->Release();
-            *out = nullptr;
-            return false;
-        }
-        if (rotateText) {
-            // 横向整句旋转 90° 后，原文本高度成为竖栏宽度，原文本宽度成为滚动长度。
-            width = metrics.height;
-            height = metrics.width;
-            rotated = true;
-        } else {
-            // metrics.width 是字符墨宽，而不是布局槽宽；绘制/命中需要保留完整的
-            // 任务栏横向槽宽，才能让每个字在窄栏中保持居中。
-            width = layoutWidth;
-            height = metrics.height;
-        }
-        return height > 0.0f;
-    }
 
     void releaseVerticalLyricParts(std::vector<VerticalLyricPart>& parts) {
-        for (auto& part : parts) {
-            if (part.layout)
-                part.layout->Release();
-        }
-        parts.clear();
-    }
-
-    bool hasMixedVerticalLyric(const std::wstring& text) const {
-        bool hasLatin = false;
-        bool hasCjk = false;
-        for (size_t i = 0; i < text.size();) {
-            const wchar_t c = text[i];
-            if (c == L'\r' || c == L'\n') {
-                ++i;
-                continue;
-            }
-            if (c >= 0xD800 && c <= 0xDFFF) {
-                if (c <= 0xDBFF && i + 1 < text.size() &&
-                    text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF)
-                    i += 2;
-                else
-                    ++i;
-                continue;
-            }
-            hasLatin = hasLatin || isLatinVerticalCharacter(c);
-            hasCjk = hasCjk || isCjkVerticalCharacter(c);
-            if (hasLatin && hasCjk)
-                return true;
-            ++i;
-        }
-        return false;
-    }
-
-    bool createMixedVerticalLyricLayout(const std::wstring& text, float layoutWidth,
-                                        std::vector<VerticalLyricPart>& parts, float& width,
-                                        float& height) {
-        releaseVerticalLyricParts(parts);
-        width = layoutWidth;
-        height = 0.0f;
-        if (!renderer.dwrite() || !fmtLyric_ || text.empty() || layoutWidth <= 0.0f)
-            return false;
-
-        IDWriteFactory* dwrite = renderer.dwrite();
-        auto appendPart = [&](const std::wstring& partText, bool rotated) {
-            if (partText.empty())
-                return true;
-
-            IDWriteTextLayout* layout = nullptr;
-            const HRESULT hr = dwrite->CreateTextLayout(
-                partText.c_str(), static_cast<UINT32>(partText.size()), fmtLyric_,
-                rotated ? 100000.0f : layoutWidth, 100000.0f, &layout);
-            if (FAILED(hr) || !layout) {
-                if (layout)
-                    layout->Release();
-                return false;
-            }
-            layout->SetTextAlignment(rotated ? DWRITE_TEXT_ALIGNMENT_LEADING
-                                              : DWRITE_TEXT_ALIGNMENT_CENTER);
-            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-
-            DWRITE_TEXT_METRICS metrics{};
-            if (FAILED(layout->GetMetrics(&metrics))) {
-                layout->Release();
-                return false;
-            }
-            const float partWidth = rotated ? metrics.height : layoutWidth;
-            const float partHeight = rotated ? metrics.width : metrics.height;
-            if (partHeight <= 0.0f) {
-                layout->Release();
-                return true;
-            }
-            parts.push_back({layout, partWidth, partHeight, rotated});
-            height += partHeight;
-            return true;
-        };
-
-        bool created = true;
-        for (size_t i = 0; i < text.size();) {
-            if (text[i] == L'\r' || text[i] == L'\n') {
-                ++i;
-                continue;
-            }
-
-            if (isLatinRunStartCharacter(text[i])) {
-                const size_t start = i;
-                size_t end = i;
-                while (end < text.size()) {
-                    if (text[end] == L'\r' || text[end] == L'\n')
-                        break;
-                    if (text[end] >= 0xD800 && text[end] <= 0xDFFF)
-                        break;
-                    if (!isLatinRunCharacter(text[end]))
-                        break;
-                    ++end;
-                }
-                size_t partEnd = end;
-                while (partEnd > start &&
-                       (text[partEnd - 1] == L' ' || text[partEnd - 1] == L'\t'))
-                    --partEnd;
-                if (partEnd > start && !appendPart(text.substr(start, partEnd - start), true)) {
-                    created = false;
-                    break;
-                }
-                i = end;
-                continue;
-            }
-
-            size_t units = 1;
-            const wchar_t first = text[i];
-            if (first >= 0xD800 && first <= 0xDBFF && i + 1 < text.size() &&
-                text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
-                units = 2;
-            }
-            std::wstring glyph = text.substr(i, units);
-            if (units == 1)
-                glyph[0] = verticalPunctuationGlyph(glyph[0]);
-            if (!appendPart(glyph, false)) {
-                created = false;
-                break;
-            }
-            i += units;
-        }
-
-        if (!created || parts.empty() || height <= 0.0f) {
-            releaseVerticalLyricParts(parts);
-            width = 0.0f;
-            height = 0.0f;
-            return false;
-        }
-        return true;
+        typesetter_.setFactory(renderer.dwrite());
+        typesetter_.releaseVerticalLyricParts(parts);
     }
 
     void buildTextLayouts(float leftW, float rightW) {
@@ -5843,40 +4452,45 @@ struct TaskbarHost::Impl {
         (void)leftW;
         (void)rightW;
         IDWriteFactory* dwrite = renderer.dwrite();
-        if (!dwrite || !fmtTitle_ || !fmtArtist_ || !fmtLyric_)
+        if (!dwrite || !typesetter_.resources().fmtTitle_.Get() ||
+            !typesetter_.resources().fmtArtist_.Get() || !typesetter_.resources().fmtLyric_.Get())
             return;
 
         // 歌曲信息（标题/歌手）独立重建：换行只走下面的歌词分支，
         // 歌曲信息变化也不触碰歌词布局与行过渡状态
         if (isInvalidated(RenderInvalidation::SongInfo)) {
-            if (titleLayout_) {
-                titleLayout_->Release();
-                titleLayout_ = nullptr;
+            if (typesetter_.resources().titleLayout_.Get()) {
+                typesetter_.resources().titleLayout_.Reset();
+                typesetter_.resources().titleLayout_.Reset();
             }
-            if (artistLayout_) {
-                artistLayout_->Release();
-                artistLayout_ = nullptr;
+            if (typesetter_.resources().artistLayout_.Get()) {
+                typesetter_.resources().artistLayout_.Reset();
+                typesetter_.resources().artistLayout_.Reset();
             }
             titleWidth_ = 0.0f;
             titleHeight_ = 0.0f;
             artistWidth_ = 0.0f;
             artistHeight_ = 0.0f;
             if (songInfoVisible_ && !media.title.empty()) {
-                dwrite->CreateTextLayout(media.title.c_str(), (UINT32)media.title.size(),
-                                         fmtTitle_, 100000.0f, 40.0f, &titleLayout_);
-                if (titleLayout_) {
+                dwrite->CreateTextLayout(
+                    media.title.c_str(), (UINT32)media.title.size(),
+                    typesetter_.resources().fmtTitle_.Get(), 100000.0f, 40.0f,
+                    typesetter_.resources().titleLayout_.ReleaseAndGetAddressOf());
+                if (typesetter_.resources().titleLayout_.Get()) {
                     DWRITE_TEXT_METRICS m{};
-                    titleLayout_->GetMetrics(&m);
+                    typesetter_.resources().titleLayout_->GetMetrics(&m);
                     titleWidth_ = m.width;
                     titleHeight_ = m.height;
                 }
             }
             if (songInfoVisible_ && !media.artist.empty()) {
-                dwrite->CreateTextLayout(media.artist.c_str(), (UINT32)media.artist.size(),
-                                         fmtArtist_, 100000.0f, 40.0f, &artistLayout_);
-                if (artistLayout_) {
+                dwrite->CreateTextLayout(
+                    media.artist.c_str(), (UINT32)media.artist.size(),
+                    typesetter_.resources().fmtArtist_.Get(), 100000.0f, 40.0f,
+                    typesetter_.resources().artistLayout_.ReleaseAndGetAddressOf());
+                if (typesetter_.resources().artistLayout_.Get()) {
                     DWRITE_TEXT_METRICS m{};
-                    artistLayout_->GetMetrics(&m);
+                    typesetter_.resources().artistLayout_->GetMetrics(&m);
                     artistWidth_ = m.width;
                     artistHeight_ = m.height;
                 }
@@ -5906,84 +4520,53 @@ struct TaskbarHost::Impl {
         // 准备阶段：先把当前布局移交为旧行，目标行布局构建完成后才记录动画起点，
         // 避免“新布局已替换但动画初始位置还没准备好”导致的文字瞬移。
         bool preparedTransition = false;
-        if (isLyricTransitionPending() && lyricLayout_) {
+        if (isLyricTransitionPending() && typesetter_.resources().lyricLayout_.Get()) {
             // 保留旧行离场前的滚动位置。新布局后面会把 lyricScrollOffset_ 重置为 0，
             // 不能让旧的超长歌词因此在转场第一帧跳回开头。
             const float outgoingLyricOffset = lyricScrollOffset_;
             const float outgoingSecondaryOffset = secondaryScrollOffset_;
             const bool outgoingDoubleLine = lyricLayoutDoubleLine_;
-            if (outgoingLyricLayout_)
-                outgoingLyricLayout_->Release();
-            outgoingLyricLayout_ = lyricLayout_;
+            typesetter_.retainCurrentForTransition(outgoingDoubleLine);
             outgoingLyricEffectLine_ = lyricEffectLayoutLine_;
-            lyricLayout_ = nullptr;
             outgoingLyricWidth_ = lyricWidth_;
             outgoingLyricHeight_ = lyricHeight_;
-            if (outgoingVerticalLyricLayout_)
-                outgoingVerticalLyricLayout_->Release();
-            releaseVerticalLyricParts(outgoingVerticalLyricParts_);
-            outgoingVerticalLyricLayout_ = verticalLyricLayout_;
-            verticalLyricLayout_ = nullptr;
-            outgoingVerticalLyricParts_.swap(verticalLyricParts_);
             outgoingVerticalLyricWidth_ = verticalLyricWidth_;
             outgoingVerticalLyricHeight_ = verticalLyricHeight_;
             outgoingVerticalLyricRotated_ = verticalLyricRotated_;
             outgoingLyricScrollOffset_ = outgoingLyricOffset;
-            if (outgoingSecondaryLayout_)
-                outgoingSecondaryLayout_->Release();
-            if (outgoingNextLyricLayout_)
-                outgoingNextLyricLayout_->Release();
-            outgoingSecondaryLayout_ = nullptr;
-            outgoingNextLyricLayout_ = nullptr;
-            outgoingSecondaryWidth_ = 0.0f;
-            outgoingSecondaryHeight_ = 0.0f;
-            outgoingNextLyricWidth_ = 0.0f;
-            outgoingNextLyricHeight_ = 0.0f;
-            outgoingDoubleLine_ = outgoingDoubleLine;
-            if (outgoingDoubleLine) {
-                // 双行模式的旧层需要保留下一句预览，才能在切到辅助歌词时
-                // 继续绘制完整的离场块。
-                outgoingNextLyricLayout_ = nextLyricLayout_;
-                nextLyricLayout_ = nullptr;
-                outgoingNextLyricWidth_ = nextLyricWidth_;
-                outgoingNextLyricHeight_ = nextLyricHeight_;
-                if (secondaryLayout_)
-                    secondaryLayout_->Release();
-                secondaryLayout_ = nullptr;
-            } else {
-                if (nextLyricLayout_)
-                    nextLyricLayout_->Release();
-                nextLyricLayout_ = nullptr;
-                outgoingSecondaryLayout_ = secondaryLayout_;
-                secondaryLayout_ = nullptr;
-                outgoingSecondaryWidth_ = secondaryWidth_;
-                outgoingSecondaryHeight_ = secondaryHeight_;
+            transition_.setOutgoingDoubleLine(outgoingDoubleLine);
+            outgoingSecondaryWidth_ = outgoingDoubleLine ? 0.0f : secondaryWidth_;
+            outgoingSecondaryHeight_ = outgoingDoubleLine ? 0.0f : secondaryHeight_;
+            outgoingNextLyricWidth_ = outgoingDoubleLine ? nextLyricWidth_ : 0.0f;
+            outgoingNextLyricHeight_ = outgoingDoubleLine ? nextLyricHeight_ : 0.0f;
+            if (!outgoingDoubleLine)
                 outgoingSecondaryScrollOffset_ = outgoingSecondaryOffset;
-            }
             const float outgoingPreviewH =
-                outgoingDoubleLine
-                    ? outgoingNextLyricLayout_ ? kLyricPreviewGap + outgoingNextLyricHeight_
-                                                : 0.0f
-                    : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
+                outgoingDoubleLine ? typesetter_.resources().outgoingNextLyricLayout_.Get()
+                                         ? kLyricPreviewGap + outgoingNextLyricHeight_
+                                         : 0.0f
+                : typesetter_.resources().outgoingSecondaryLayout_.Get()
+                    ? 1.0f + outgoingSecondaryHeight_
+                    : 0.0f;
             outgoingLyricBlockHeight_ = outgoingLyricHeight_ + outgoingPreviewH;
             preparedTransition = true;
         } else {
             resetLyricTransition();
-            if (lyricLayout_)
-                lyricLayout_->Release();
-            if (verticalLyricLayout_)
-                verticalLyricLayout_->Release();
-            releaseVerticalLyricParts(verticalLyricParts_);
-            if (secondaryLayout_)
-                secondaryLayout_->Release();
-            lyricLayout_ = nullptr;
-            secondaryLayout_ = nullptr;
+            if (typesetter_.resources().lyricLayout_.Get())
+                typesetter_.resources().lyricLayout_.Reset();
+            if (typesetter_.resources().verticalLyricLayout_.Get())
+                typesetter_.resources().verticalLyricLayout_.Reset();
+            releaseVerticalLyricParts(typesetter_.resources().verticalLyricParts_);
+            if (typesetter_.resources().secondaryLayout_.Get())
+                typesetter_.resources().secondaryLayout_.Reset();
+            typesetter_.resources().lyricLayout_.Reset();
+            typesetter_.resources().secondaryLayout_.Reset();
         }
         // 排版已接管待启动转场；成功构建目标布局后会转换为 Running。
 
-        if (nextLyricLayout_) {
-            nextLyricLayout_->Release();
-            nextLyricLayout_ = nullptr;
+        if (typesetter_.resources().nextLyricLayout_.Get()) {
+            typesetter_.resources().nextLyricLayout_.Reset();
+            typesetter_.resources().nextLyricLayout_.Reset();
         }
         nextLyricWidth_ = 0.0f;
         nextLyricHeight_ = 0.0f;
@@ -5998,69 +4581,30 @@ struct TaskbarHost::Impl {
         } else {
             lyric = statusText;
         }
-        lyricLayout_ = nullptr;
-        lyricWidth_ = 0.0f;
-        lyricHeight_ = 0.0f;
-        verticalLyricLayout_ = nullptr;
-        verticalLyricParts_.clear();
-        verticalLyricWidth_ = 0.0f;
-        verticalLyricHeight_ = 0.0f;
-        verticalLyricRotated_ = false;
-        secondaryWidth_ = 0.0f;
-        secondaryHeight_ = 0.0f;
-        if (!lyric.empty()) {
-            // 用足够大的宽度创建布局以准确测量文本宽度
-            dwrite->CreateTextLayout(lyric.c_str(), (UINT32)lyric.size(), fmtLyric_, 100000.0f,
-                                     100.0f, &lyricLayout_);
-            if (lyricLayout_) {
-                lyricLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                DWRITE_TEXT_METRICS m{};
-                lyricLayout_->GetMetrics(&m);
-                lyricWidth_ = m.width;
-                lyricHeight_ = m.height;
-            }
-
-            if (isVerticalTaskbar()) {
-                int verticalPxW = 0;
-                int verticalPxH = 0;
-                clientPixelSize(verticalPxW, verticalPxH);
-                const float verticalWidth = dip(verticalPxW);
-                if (hasMixedVerticalLyric(lyric)) {
-                    createMixedVerticalLyricLayout(lyric, verticalWidth, verticalLyricParts_,
-                                                   verticalLyricWidth_, verticalLyricHeight_);
-                } else {
-                    createVerticalLyricLayout(lyric, verticalWidth, &verticalLyricLayout_,
-                                              verticalLyricWidth_, verticalLyricHeight_,
-                                              verticalLyricRotated_);
-                }
-            }
+        LyricTextInput input;
+        input.lyric = lyric;
+        input.secondary = secondary;
+        input.doubleLine = doubleLineLyrics;
+        input.vertical = isVerticalTaskbar();
+        if (input.vertical) {
+            int width = 0, height = 0;
+            clientPixelSize(width, height);
+            input.verticalWidth = dip(width);
         }
-        if (!doubleLineLyrics && !secondary.empty() && fmtSecondary_) {
-            dwrite->CreateTextLayout(secondary.c_str(), (UINT32)secondary.size(), fmtSecondary_,
-                                     100000.0f, 100.0f, &secondaryLayout_);
-            if (secondaryLayout_) {
-                secondaryLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                DWRITE_TEXT_METRICS m{};
-                secondaryLayout_->GetMetrics(&m);
-                secondaryWidth_ = m.width;
-                secondaryHeight_ = m.height;
-            }
-        }
-        if (doubleLineLyrics && fmtNextLyric_ && displayLine >= 0 &&
-            static_cast<size_t>(displayLine + 1) < lines.size() &&
-            !lines[(size_t)displayLine + 1].text.empty()) {
-            int nextLine = displayLine + 1;
-            const std::wstring& nextText = lines[(size_t)nextLine].text;
-            dwrite->CreateTextLayout(nextText.c_str(), (UINT32)nextText.size(), fmtNextLyric_,
-                                     100000.0f, 100.0f, &nextLyricLayout_);
-            if (nextLyricLayout_) {
-                nextLyricLayout_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                DWRITE_TEXT_METRICS m{};
-                nextLyricLayout_->GetMetrics(&m);
-                nextLyricWidth_ = m.width;
-                nextLyricHeight_ = m.height;
-            }
-        }
+        if (doubleLineLyrics && displayLine >= 0 &&
+            static_cast<size_t>(displayLine + 1) < lines.size())
+            input.next = lines[static_cast<size_t>(displayLine + 1)].text;
+        typesetter_.setFactory(dwrite);
+        const auto metrics = typesetter_.buildContent(input);
+        lyricWidth_ = metrics.width;
+        lyricHeight_ = metrics.height;
+        verticalLyricWidth_ = metrics.verticalWidth;
+        verticalLyricHeight_ = metrics.verticalHeight;
+        verticalLyricRotated_ = metrics.verticalRotated;
+        secondaryWidth_ = metrics.secondaryWidth;
+        secondaryHeight_ = metrics.secondaryHeight;
+        nextLyricWidth_ = metrics.nextWidth;
+        nextLyricHeight_ = metrics.nextHeight;
         if (isMinimalMode()) {
             // 极简只改变显示策略；歌词行和逐字时间轴仍由上游完整读取，
             // 这里只不创建供逐字绘制使用的几何缓存。
@@ -6072,11 +4616,11 @@ struct TaskbarHost::Impl {
         }
         lyricLayoutDoubleLine_ = doubleLineLyrics;
         if (preparedTransition) {
-            if (lyricLayout_) {
+            if (typesetter_.resources().lyricLayout_.Get()) {
                 // 目标布局就绪后才启动动画计时：准备布局的这一帧不消耗过渡时长。
-                lyricTransitionStartMs_ = monotonicNowMs();
+                transition_.setStartMs(monotonicNowMs());
                 setLyricTransitionActive();
-                lyricTransitionRevision_ = frameRevision_;
+                transition_.setRevision(frameRevision_);
             } else {
                 // 目标行没有可绘制布局：放弃过渡，直接回到稳定状态。
                 resetLyricTransition();
@@ -6086,14 +4630,12 @@ struct TaskbarHost::Impl {
         // 间隔大到算出的速度低于 kLyricScrollSpeed 时保持最慢速度不变
         lyricScrollSpeed_ = kLyricScrollSpeed;
         const float lyricScrollExtent =
-            isVerticalTaskbar() && verticalLyricHeight_ > 0.0f ? verticalLyricHeight_
-                                                               : lyricWidth_;
-        const float lyricScrollLoopGap = isVerticalTaskbar() ? kVerticalLyricGap
-                                                              : kTextPadding * 2.0f;
+            isVerticalTaskbar() && verticalLyricHeight_ > 0.0f ? verticalLyricHeight_ : lyricWidth_;
+        const float lyricScrollLoopGap =
+            isVerticalTaskbar() ? kVerticalLyricGap : kTextPadding * 2.0f;
         if (currentLine >= 0 && (size_t)currentLine + 1 < lines.size() &&
             lyricScrollExtent > 0.0f) {
-            int64_t durMs =
-                lines[(size_t)currentLine + 1].ms - lines[(size_t)currentLine].ms;
+            int64_t durMs = lines[(size_t)currentLine + 1].ms - lines[(size_t)currentLine].ms;
             if (durMs > 0) {
                 float loopW = lyricScrollExtent + lyricScrollLoopGap;
                 lyricScrollSpeed_ =
@@ -6134,13 +4676,12 @@ struct TaskbarHost::Impl {
     }
 
     float lyricStartPadding() const {
-        return songInfoVisible_ && scene_ != DisplayScene::Idle ? kSongInfoLyricGap
-                                                                 : kTextPadding;
+        return songInfoVisible_ && scene_ != DisplayScene::Idle ? kSongInfoLyricGap : kTextPadding;
     }
 
     float immersiveControlRadius(float heightDip) const {
-        return std::clamp(heightDip * kImmersiveControlRadiusFactor,
-                          kImmersiveControlMinRadius, kImmersiveControlMaxRadius);
+        return std::clamp(heightDip * kImmersiveControlRadiusFactor, kImmersiveControlMinRadius,
+                          kImmersiveControlMaxRadius);
     }
 
     float immersiveControlsWidth(float heightDip) const {
@@ -6151,30 +4692,25 @@ struct TaskbarHost::Impl {
         return groupWidth + kTextPadding * 2.0f;
     }
 
-
-
-
-
     VerticalLayout verticalLayout() const {
         int width = 0;
         int height = 0;
         clientPixelSize(width, height);
-        return taskbar_detail::verticalLayout(dip(width), dip(height), scene_,
-            albumCoverVisible_, mouseOver_ && controlsOnHover_ &&
-                                hoverControlStyle_ == HoverControlStyle::Inline);
+        return taskbar_detail::verticalLayout(dip(width), dip(height), scene_, albumCoverVisible_,
+                                              mouseOver_ && controlsOnHover_ &&
+                                                  hoverControlStyle_ == HoverControlStyle::Inline);
     }
 
     LayoutMetrics layoutMetricsForScene(DisplayScene scene, int pxW, int pxH) const {
         const float width = dip(pxW);
         const float height = dip(pxH);
         const bool expandedControls = isExpandedView() && !isVerticalTaskbar();
-        return taskbar_detail::horizontalLayout({
-            width, height, scene, isExpandedView(), expandedControls,
-            songInfoVisible_, albumCoverVisible_,
-            expandedControls ? immersiveControlsWidth(height) : 0.0f,
-            spectrumExtraForScene(scene, width),
-            isExpandedView() && songInfoVisible_ && albumCoverVisible_ ? coverSize() : 0.0f,
-            coverSlotWidth(height)});
+        return taskbar_detail::horizontalLayout(
+            {width, height, scene, isExpandedView(), expandedControls, songInfoVisible_,
+             albumCoverVisible_, expandedControls ? immersiveControlsWidth(height) : 0.0f,
+             spectrumExtraForScene(scene, width),
+             isExpandedView() && songInfoVisible_ && albumCoverVisible_ ? coverSize() : 0.0f,
+             coverSlotWidth(height)});
     }
 
     LayoutMetrics layoutMetrics(int pxW, int pxH) const {
@@ -6188,8 +4724,8 @@ struct TaskbarHost::Impl {
 
     LyricArea lyricAreaForScene(DisplayScene scene, int pxW, int pxH) const {
         const LayoutMetrics layout = layoutMetricsForScene(scene, pxW, pxH);
-        const float start = songInfoVisible_ && scene != DisplayScene::Idle ? kSongInfoLyricGap
-                                                                             : kTextPadding;
+        const float start =
+            songInfoVisible_ && scene != DisplayScene::Idle ? kSongInfoLyricGap : kTextPadding;
         // 这里返回的是“可绘制安全区”，不再把它当作歌词的居中基准。
         // 右边界统一落在频谱之前，左边界统一落在封面/歌曲信息/沉浸控件之后。
         float left = layout.leftW + start + layout.immersiveControlsW;
@@ -6222,7 +4758,8 @@ struct TaskbarHost::Impl {
         if (currentLine < 0 || (size_t)currentLine >= lines.size())
             return nullptr;
         const LyricLine* line = &lines[(size_t)currentLine];
-        if (line->chars.empty() || !lyricLayout_ || line->text != lastLyric_)
+        if (line->chars.empty() || !typesetter_.resources().lyricLayout_.Get() ||
+            line->text != lastLyric_)
             return nullptr;
         return line;
     }
@@ -6231,7 +4768,8 @@ struct TaskbarHost::Impl {
         karaokeSpans_.clear();
         karaokeGeometryLine_ = -1;
         karaokeGeometryLayout_ = nullptr;
-        if (lineIndex < 0 || (size_t)lineIndex >= lines.size() || !lyricLayout_)
+        if (lineIndex < 0 || (size_t)lineIndex >= lines.size() ||
+            !typesetter_.resources().lyricLayout_.Get())
             return;
 
         const LyricLine& line = lines[(size_t)lineIndex];
@@ -6248,21 +4786,21 @@ struct TaskbarHost::Impl {
             DWRITE_HIT_TEST_METRICS metrics{};
             float startX = 0.0f;
             float y = 0.0f;
-            if (FAILED(lyricLayout_->HitTestTextPosition(textOffset, FALSE, &startX, &y,
-                                                          &metrics))) {
+            if (FAILED(typesetter_.resources().lyricLayout_->HitTestTextPosition(
+                    textOffset, FALSE, &startX, &y, &metrics))) {
                 textOffset += textLength;
                 continue;
             }
 
             float endX = startX;
-            if (FAILED(lyricLayout_->HitTestTextPosition(textOffset + textLength - 1, TRUE,
-                                                          &endX, &y, &metrics)))
+            if (FAILED(typesetter_.resources().lyricLayout_->HitTestTextPosition(
+                    textOffset + textLength - 1, TRUE, &endX, &y, &metrics)))
                 endX = startX;
             karaokeSpans_.push_back({c.startMs, c.endMs, startX, endX});
             textOffset += textLength;
         }
         karaokeGeometryLine_ = lineIndex;
-        karaokeGeometryLayout_ = lyricLayout_;
+        karaokeGeometryLayout_ = typesetter_.resources().lyricLayout_.Get();
     }
 
     // 逐字填充目标进度 x（布局像素坐标）：已唱边界 + 当前 token 按时长比例推进；
@@ -6271,7 +4809,8 @@ struct TaskbarHost::Impl {
     float karaokeTargetX(const LyricLine& line, int64_t& durOut) const {
         (void)line;
         durOut = 0;
-        if (karaokeGeometryLine_ != currentLine || karaokeGeometryLayout_ != lyricLayout_ ||
+        if (karaokeGeometryLine_ != currentLine ||
+            karaokeGeometryLayout_ != typesetter_.resources().lyricLayout_.Get() ||
             karaokeSpans_.empty())
             return 0.0f;
 
@@ -6329,8 +4868,8 @@ struct TaskbarHost::Impl {
 
     float vinylInnerRadius(float s) const {
         float outerRadius = std::max(1.0f, s * kVinylOuterRatio);
-        float recordRadius = std::max(0.5f, outerRadius -
-                                                    std::min(kVinylHaloWidth, outerRadius * 0.25f));
+        float recordRadius =
+            std::max(0.5f, outerRadius - std::min(kVinylHaloWidth, outerRadius * 0.25f));
         return std::min(s * kVinylInnerRatio, std::max(1.0f, recordRadius - 1.0f));
     }
 
@@ -6343,23 +4882,23 @@ struct TaskbarHost::Impl {
         if (!d2d)
             return;
 
-        if (coverClip_) {
-            coverClip_->Release();
-            coverClip_ = nullptr;
+        if (coverClip_.Get()) {
+            coverClip_.Reset();
+            coverClip_.Reset();
         }
-        if (vinylCoverClip_) {
-            vinylCoverClip_->Release();
-            vinylCoverClip_ = nullptr;
+        if (vinylCoverClip_.Get()) {
+            vinylCoverClip_.Reset();
+            vinylCoverClip_.Reset();
         }
         media_control::release(controlGeometry);
 
         float s = coverSize();
         D2D1_ROUNDED_RECT rr{D2D1::RectF(0, 0, s, s), 4.0f, 4.0f};
-        d2d->CreateRoundedRectangleGeometry(rr, &coverClip_);
+        d2d->CreateRoundedRectangleGeometry(rr, coverClip_.ReleaseAndGetAddressOf());
         if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
-            D2D1_ELLIPSE coverEllipse{
-                D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s), vinylInnerRadius(s)};
-            d2d->CreateEllipseGeometry(coverEllipse, &vinylCoverClip_);
+            D2D1_ELLIPSE coverEllipse{D2D1::Point2F(s * 0.5f, s * 0.5f), vinylInnerRadius(s),
+                                      vinylInnerRadius(s)};
+            d2d->CreateEllipseGeometry(coverEllipse, vinylCoverClip_.ReleaseAndGetAddressOf());
         }
 
         if (!media_control::create(d2d, controlGeometry))
@@ -6411,15 +4950,13 @@ struct TaskbarHost::Impl {
         if (layout.w <= 0.0f || layout.h <= 0.0f || layout.immersiveControlsW <= 0.0f)
             return false;
 
-        const float start = songInfoVisible_ && scene_ != DisplayScene::Idle
-                                ? kSongInfoLyricGap
-                                : kTextPadding;
+        const float start =
+            songInfoVisible_ && scene_ != DisplayScene::Idle ? kSongInfoLyricGap : kTextPadding;
         r = immersiveControlRadius(layout.h);
         const float pitch = r * kImmersiveControlPitchFactor;
-        const float groupW =
-            pitch * static_cast<float>(expandedControlCount() - 1) + r * 2.0f;
-        const float groupLeft = layout.leftW + start +
-                                std::max(0.0f, (layout.immersiveControlsW - groupW) * 0.5f);
+        const float groupW = pitch * static_cast<float>(expandedControlCount() - 1) + r * 2.0f;
+        const float groupLeft =
+            layout.leftW + start + std::max(0.0f, (layout.immersiveControlsW - groupW) * 0.5f);
         cy = layout.h * 0.5f;
         int visibleIndex = 0;
         for (int i = 0; i < kExpandedControlCount; ++i) {
@@ -6475,7 +5012,7 @@ struct TaskbarHost::Impl {
 
     void drawExitImmersiveButton(const D2D1_POINT_2F& center, float radius) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !brushBtn_)
+        if (!rt || !brushBtn_.Get())
             return;
 
         // 视图边框配合两支向内收起的箭头，明确表达“退出沉浸模式”，
@@ -6486,28 +5023,26 @@ struct TaskbarHost::Impl {
         const float head = radius * 0.22f;
         const float stroke = std::clamp(radius * 0.14f, 1.1f, 1.7f);
 
-        rt->DrawRoundedRectangle(
-            D2D1::RoundedRect(
-                D2D1::RectF(center.x - frame, center.y - frame,
-                            center.x + frame, center.y + frame),
-                radius * 0.15f, radius * 0.15f),
-            brushBtn_, stroke);
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(center.x - frame, center.y - frame,
+                                                               center.x + frame, center.y + frame),
+                                                   radius * 0.15f, radius * 0.15f),
+                                 brushBtn_.Get(), stroke);
 
         const auto topLeftEnd = D2D1::Point2F(center.x - end, center.y - end);
-        rt->DrawLine(D2D1::Point2F(center.x - start, center.y - start),
-                     topLeftEnd, brushBtn_, stroke);
-        rt->DrawLine(topLeftEnd,
-                     D2D1::Point2F(topLeftEnd.x - head, topLeftEnd.y), brushBtn_, stroke);
-        rt->DrawLine(topLeftEnd,
-                     D2D1::Point2F(topLeftEnd.x, topLeftEnd.y - head), brushBtn_, stroke);
+        rt->DrawLine(D2D1::Point2F(center.x - start, center.y - start), topLeftEnd, brushBtn_.Get(),
+                     stroke);
+        rt->DrawLine(topLeftEnd, D2D1::Point2F(topLeftEnd.x - head, topLeftEnd.y), brushBtn_.Get(),
+                     stroke);
+        rt->DrawLine(topLeftEnd, D2D1::Point2F(topLeftEnd.x, topLeftEnd.y - head), brushBtn_.Get(),
+                     stroke);
 
         const auto bottomRightEnd = D2D1::Point2F(center.x + end, center.y + end);
-        rt->DrawLine(D2D1::Point2F(center.x + start, center.y + start),
-                     bottomRightEnd, brushBtn_, stroke);
-        rt->DrawLine(bottomRightEnd,
-                     D2D1::Point2F(bottomRightEnd.x + head, bottomRightEnd.y), brushBtn_, stroke);
-        rt->DrawLine(bottomRightEnd,
-                     D2D1::Point2F(bottomRightEnd.x, bottomRightEnd.y + head), brushBtn_, stroke);
+        rt->DrawLine(D2D1::Point2F(center.x + start, center.y + start), bottomRightEnd,
+                     brushBtn_.Get(), stroke);
+        rt->DrawLine(bottomRightEnd, D2D1::Point2F(bottomRightEnd.x + head, bottomRightEnd.y),
+                     brushBtn_.Get(), stroke);
+        rt->DrawLine(bottomRightEnd, D2D1::Point2F(bottomRightEnd.x, bottomRightEnd.y + head),
+                     brushBtn_.Get(), stroke);
     }
 
     void drawImmersiveControls() {
@@ -6521,7 +5056,7 @@ struct TaskbarHost::Impl {
         if (!immersiveControlsLayout(centers, cy, r))
             return;
 
-        if (brushHover_) {
+        if (brushHover_.Get()) {
             for (int i = 0; i < kExpandedControlCount; ++i) {
                 if (expandedControlVisible(i) && immersiveControlHover_ == i) {
                     const auto color = brushHover_->GetColor();
@@ -6531,10 +5066,11 @@ struct TaskbarHost::Impl {
                     brushHover_->SetColor(fill);
                     const float half = r + 4.0f;
                     const float corner = std::min(6.0f, half * 0.4f);
-                    rt->FillRoundedRectangle(D2D1::RoundedRect(
-                        D2D1::RectF(centers[i].x - half, centers[i].y - half,
-                                    centers[i].x + half, centers[i].y + half),
-                        corner, corner), brushHover_);
+                    rt->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(centers[i].x - half, centers[i].y - half,
+                                                      centers[i].x + half, centers[i].y + half),
+                                          corner, corner),
+                        brushHover_.Get());
                     brushHover_->SetColor(color);
                 }
             }
@@ -6545,33 +5081,31 @@ struct TaskbarHost::Impl {
         drawVolumeButton(centers[kImmersiveControlVolume], r);
         drawExitImmersiveButton(centers[kImmersiveControlExit], r);
         if (expandedControlVisible(kDockControlQuickApps)) {
-            settings_icon::draw(
-                rt, settings_icon::Kind::QuickLaunch,
-                D2D1::RectF(centers[kDockControlQuickApps].x - r * 0.82f,
-                            centers[kDockControlQuickApps].y - r * 0.82f,
-                            centers[kDockControlQuickApps].x + r * 0.82f,
-                            centers[kDockControlQuickApps].y + r * 0.82f),
-                onDockQuickApps ? brushBtn_ : brushBtnDisabled_, 1.45f);
+            settings_icon::draw(rt, settings_icon::Kind::QuickLaunch,
+                                D2D1::RectF(centers[kDockControlQuickApps].x - r * 0.82f,
+                                            centers[kDockControlQuickApps].y - r * 0.82f,
+                                            centers[kDockControlQuickApps].x + r * 0.82f,
+                                            centers[kDockControlQuickApps].y + r * 0.82f),
+                                onDockQuickApps ? brushBtn_.Get() : brushBtnDisabled_.Get(), 1.45f);
         }
-        if (brushBtn_) {
+        if (brushBtn_.Get()) {
             const float dotRadius = std::clamp(r * 0.13f, 1.0f, 1.6f);
             const float dotPitch = r * 0.48f;
             for (int i = -1; i <= 1; ++i) {
                 rt->FillEllipse(
-                    D2D1::Ellipse(
-                        D2D1::Point2F(centers[kImmersiveControlMenu].x + i * dotPitch,
-                                     centers[kImmersiveControlMenu].y),
-                        dotRadius, dotRadius),
-                    brushBtn_);
+                    D2D1::Ellipse(D2D1::Point2F(centers[kImmersiveControlMenu].x + i * dotPitch,
+                                                centers[kImmersiveControlMenu].y),
+                                  dotRadius, dotRadius),
+                    brushBtn_.Get());
             }
         }
     }
 
-    void drawInlineControlBackground(int index, const D2D1_POINT_2F& center,
-                                     float radius, bool enabled) {
+    void drawInlineControlBackground(int index, const D2D1_POINT_2F& center, float radius,
+                                     bool enabled) {
         auto* rt = drawTarget();
-        if (!rt || !brushHover_ || !enabled || isExpandedView() ||
-            !mouseOver_ || inlineControlHover_ != index)
+        if (!rt || !brushHover_.Get() || !enabled || isExpandedView() || !mouseOver_ ||
+            inlineControlHover_ != index)
             return;
         const bool pressed = dragPress_ && !lyricDragging_ && GetCapture() == hwnd;
         const auto color = brushHover_->GetColor();
@@ -6581,9 +5115,10 @@ struct TaskbarHost::Impl {
         brushHover_->SetColor(fill);
         const float half = radius + 2.0f;
         const float corner = std::min(6.0f, half * 0.4f);
-        rt->FillRoundedRectangle(D2D1::RoundedRect(
-            D2D1::RectF(center.x - half, center.y - half,
-                        center.x + half, center.y + half), corner, corner), brushHover_);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(center.x - half, center.y - half,
+                                                               center.x + half, center.y + half),
+                                                   corner, corner),
+                                 brushHover_.Get());
         brushHover_->SetColor(color);
     }
 
@@ -6593,10 +5128,11 @@ struct TaskbarHost::Impl {
             return;
         drawInlineControlBackground(3, c, r, appVolume_.available);
         ID2D1SolidColorBrush* brush =
-            appVolume_.available ? brushBtn_ : brushBtnDisabled_;
-        const int level = !appVolume_.available || appVolume_.muted
-                              ? 0
-                              : appVolume_.percent == 0 ? 1 : appVolume_.percent < 50 ? 2 : 3;
+            appVolume_.available ? brushBtn_.Get() : brushBtnDisabled_.Get();
+        const int level = !appVolume_.available || appVolume_.muted ? 0
+                          : appVolume_.percent == 0                 ? 1
+                          : appVolume_.percent < 50                 ? 2
+                                                                    : 3;
         media_control::drawVolume(rt, c, r * 0.8f, brush, level);
     }
 
@@ -6611,8 +5147,7 @@ struct TaskbarHost::Impl {
             float logicalY = 0.0f;
             clientPointToLogicalDip(x, y, logicalX, logicalY);
             return std::hypot(logicalX - layout.controlCenters[3].x,
-                              logicalY - layout.controlCenters[3].y) <=
-                   layout.controlRadius + 4.0f;
+                              logicalY - layout.controlCenters[3].y) <= layout.controlRadius + 4.0f;
         }
         float centers[4]{};
         float cy = 0.0f;
@@ -6646,8 +5181,8 @@ struct TaskbarHost::Impl {
             const VerticalLayout layout = verticalLayout();
             if (layout.showControls) {
                 const float s = scale();
-                POINT pt = logicalDipToClientPoint(layout.controlCenters[3].x,
-                                                   layout.controlCenters[3].y);
+                POINT pt =
+                    logicalDipToClientPoint(layout.controlCenters[3].x, layout.controlCenters[3].y);
                 ClientToScreen(hwnd, &pt);
                 const int half = static_cast<int>(std::lround((layout.controlRadius + 6.0f) * s));
                 return RECT{pt.x - half, pt.y - half, pt.x + half, pt.y + half};
@@ -6695,8 +5230,7 @@ struct TaskbarHost::Impl {
 
     // ---------- 沉浸模式让出任务栏 ----------
     bool immersiveYieldAvailable() const {
-        return viewMode_ == TaskbarViewMode::Immersive && hwnd && taskbar_ &&
-               isWindowVisible();
+        return viewMode_ == TaskbarViewMode::Immersive && hwnd && taskbar_ && isWindowVisible();
     }
 
     // 与 DCompRenderer::animateRoot 的 smoothstep 曲线一致，用于中途反向时取当前透明度。
@@ -6709,8 +5243,8 @@ struct TaskbarHost::Impl {
             return immersivePresenceFrom_;
         const bool hiding = immersivePresence_ == ImmersivePresence::Hiding;
         const float duration = static_cast<float>(hiding ? kImmersiveHideMs : kImmersiveShowMs);
-        const float t = std::clamp(
-            static_cast<float>(now - immersivePresenceStartMs_) / duration, 0.0f, 1.0f);
+        const float t =
+            std::clamp(static_cast<float>(now - immersivePresenceStartMs_) / duration, 0.0f, 1.0f);
         const float eased = t * t * (3.0f - 2.0f * t);
         const float target = hiding ? 0.0f : 1.0f;
         return immersivePresenceFrom_ + (target - immersivePresenceFrom_) * eased;
@@ -6752,11 +5286,10 @@ struct TaskbarHost::Impl {
     // 鼠标移动时更新让出判定：只有停在播放控件以外的区域才开始计时，
     // 划过控件之间的空隙去点按钮不会误触发。
     void updateImmersiveYield(int hoveredControl) {
-        if (immersiveYieldAvailable() &&
-            (hoveredControl >= 0 || immersiveControlPressed_ >= 0))
+        if (immersiveYieldAvailable() && (hoveredControl >= 0 || immersiveControlPressed_ >= 0))
             cancelImmersiveHide();
-        if (!immersiveYieldAvailable() || !immersiveYieldAllowedState() ||
-            hoveredControl >= 0 || immersiveControlPressed_ >= 0) {
+        if (!immersiveYieldAvailable() || !immersiveYieldAllowedState() || hoveredControl >= 0 ||
+            immersiveControlPressed_ >= 0) {
             cancelImmersiveYield();
             return;
         }
@@ -6777,8 +5310,8 @@ struct TaskbarHost::Impl {
             return;
         POINT client = cursor;
         ScreenToClient(hwnd, &client);
-        if (hitImmersiveControl(static_cast<float>(client.x), static_cast<float>(client.y),
-                                true) >= 0)
+        if (hitImmersiveControl(static_cast<float>(client.x), static_cast<float>(client.y), true) >=
+            0)
             return;
         beginImmersiveHide();
     }
@@ -6928,8 +5461,7 @@ struct TaskbarHost::Impl {
         case kImmersiveControlVolume:
             if (appVolume_.available) {
                 volumePopup_.onAnchorEnter();
-                volumePopup_.showNear(volumeButtonScreenRect(), false,
-                                      taskbarEdge_ == ABE_LEFT);
+                volumePopup_.showNear(volumeButtonScreenRect(), false, taskbarEdge_ == ABE_LEFT);
             }
             break;
         case kImmersiveControlExit:
@@ -6969,7 +5501,7 @@ struct TaskbarHost::Impl {
             return;
         bool enabled = idx == 0 ? media.canPrev : idx == 1 ? media.canPlayPause : media.canNext;
         drawInlineControlBackground(idx, c, r, enabled);
-        ID2D1SolidColorBrush* brush = enabled ? brushBtn_ : brushBtnDisabled_;
+        ID2D1SolidColorBrush* brush = enabled ? brushBtn_.Get() : brushBtnDisabled_.Get();
 
         media_control::draw(rt, controlGeometry, idx, media.playing, c, r, brush);
     }
@@ -6985,12 +5517,12 @@ struct TaskbarHost::Impl {
             float logicalY = 0.0f;
             clientPointToLogicalDip(x, y, logicalX, logicalY);
             for (int i = 0; i < 3; ++i) {
-                const bool enabled = i == 0 ? media.canPrev
-                                            : i == 1 ? media.canPlayPause : media.canNext;
-                if (enabled &&
-                    std::hypot(logicalX - layout.controlCenters[i].x,
-                               logicalY - layout.controlCenters[i].y) <=
-                        layout.controlRadius + 4.0f)
+                const bool enabled = i == 0   ? media.canPrev
+                                     : i == 1 ? media.canPlayPause
+                                              : media.canNext;
+                if (enabled && std::hypot(logicalX - layout.controlCenters[i].x,
+                                          logicalY - layout.controlCenters[i].y) <=
+                                   layout.controlRadius + 4.0f)
                     return i;
             }
             return -1;
@@ -7039,8 +5571,8 @@ struct TaskbarHost::Impl {
     }
 
     void beginImmersiveSongContentTransition() {
-        if (!usesSongContentTransition() || isMinimalMode() ||
-            !isSongTransitionPending() || songContentTransition_)
+        if (!usesSongContentTransition() || isMinimalMode() || !isSongTransitionPending() ||
+            songContentTransition_)
             return;
         songContentTransition_ = SongContentTransition{monotonicNowMs()};
     }
@@ -7076,8 +5608,8 @@ struct TaskbarHost::Impl {
         if (now < songContentTransition_->startMs)
             now = songContentTransition_->startMs;
         const float progress = std::clamp(
-            static_cast<float>(now - songContentTransition_->startMs) / kSongTransitionMs,
-            0.0f, 1.0f);
+            static_cast<float>(now - songContentTransition_->startMs) / kSongTransitionMs, 0.0f,
+            1.0f);
         if (progress >= 1.0f) {
             songContentTransition_.reset();
             return false;
@@ -7095,25 +5627,25 @@ struct TaskbarHost::Impl {
     }
 
     float lyricTransitionDurationMs() const {
-        return lyricTransitionKind_ == LyricTransitionKind::Scene ? kSceneTransitionMs
-                                                                    : kLyricTransitionMs;
+        return transition_.kind() == LyricTransitionKind::Scene ? kSceneTransitionMs
+                                                                : kLyricTransitionMs;
     }
 
     LyricTransitionSample lyricTransitionSample() const {
         LyricTransitionSample sample;
-        if (!isLyricTransitionActive() || lyricTransitionStartMs_ == 0)
+        if (!isLyricTransitionActive() || transition_.startMs() == 0)
             return sample;
 
         // applyPresentationFrame() 可以在定时器之外直接触发 render()。此时
         // frameNowMs_ 仍可能早于刚设置的起点，不能用 ULONGLONG 直接相减。
         ULONGLONG now = frameNowMs_;
-        if (now < lyricTransitionStartMs_)
+        if (now < transition_.startMs())
             now = monotonicNowMs();
-        if (now < lyricTransitionStartMs_)
-            now = lyricTransitionStartMs_;
-        sample.progress = std::clamp(
-            static_cast<float>(now - lyricTransitionStartMs_) / lyricTransitionDurationMs(),
-            0.0f, 1.0f);
+        if (now < transition_.startMs())
+            now = transition_.startMs();
+        sample.progress = std::clamp(static_cast<float>(now - transition_.startMs()) /
+                                         lyricTransitionDurationMs(),
+                                     0.0f, 1.0f);
         sample.movement = smoothStep(sample.progress);
         sample.fadeOut = rangedSmoothStep(sample.progress, 0.08f, 0.90f);
         sample.fadeIn = rangedSmoothStep(sample.progress, 0.14f, 1.0f);
@@ -7130,15 +5662,15 @@ struct TaskbarHost::Impl {
     // 必须在画刷透明度被修改之前调用，缓存内容始终是自然透明度。
     ID2D1Bitmap* textFxBitmap(IDWriteTextLayout* layout, float textW, float textH,
                               ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow) {
-        return textEffectsCache_.bitmap(drawTarget(), dpi_, layout, textW, textH,
-                                        brush, outline, glow);
+        return textEffectsCache_.bitmap(drawTarget(), dpi_, layout, textW, textH, brush, outline,
+                                        glow);
     }
 
     // 滚动文本左缘渐隐画笔：固定两停止点（透明 → 不透明），创建一次终身复用，
     // 几何完全由每帧移动渐变轴实现
     ID2D1LinearGradientBrush* ensureLyricEdgeFadeBrush() {
-        if (lyricEdgeFadeBrush_)
-            return lyricEdgeFadeBrush_;
+        if (lyricEdgeFadeBrush_.Get())
+            return lyricEdgeFadeBrush_.Get();
         auto* rt = drawTarget();
         if (!rt)
             return nullptr;
@@ -7152,22 +5684,22 @@ struct TaskbarHost::Impl {
         const HRESULT hr = rt->CreateLinearGradientBrush(
             D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
                                                 D2D1::Point2F(1.0f, 0.0f)),
-            D2D1::BrushProperties(), stopCollection, &lyricEdgeFadeBrush_);
+            D2D1::BrushProperties(), stopCollection, lyricEdgeFadeBrush_.ReleaseAndGetAddressOf());
         stopCollection->Release();
-        return FAILED(hr) ? nullptr : lyricEdgeFadeBrush_;
+        return FAILED(hr) ? nullptr : lyricEdgeFadeBrush_.Get();
     }
 
     ID2D1LinearGradientBrush* ensureSongInfoDividerBrush() {
-        if (songInfoDividerBrush_)
-            return songInfoDividerBrush_;
+        if (songInfoDividerBrush_.Get())
+            return songInfoDividerBrush_.Get();
         auto* rt = drawTarget();
         if (!rt)
             return nullptr;
 
-        const D2D1_COLOR_F base =
-            brushDim_ ? brushDim_->GetColor()
-                      : (lightTheme_ ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f)
-                                      : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f));
+        const D2D1_COLOR_F base = brushDim_.Get()
+                                      ? brushDim_->GetColor()
+                                      : (lightTheme_ ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.75f)
+                                                     : D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.65f));
         const float peakAlpha = std::clamp(base.a * 0.72f, 0.0f, 1.0f);
         const D2D1_GRADIENT_STOP stops[] = {
             {0.0f, D2D1::ColorF(base.r, base.g, base.b, 0.0f)},
@@ -7177,17 +5709,17 @@ struct TaskbarHost::Impl {
             {1.0f, D2D1::ColorF(base.r, base.g, base.b, 0.0f)},
         };
         ID2D1GradientStopCollection* stopCollection = nullptr;
-        if (FAILED(rt->CreateGradientStopCollection(stops, _countof(stops),
-                                                    &stopCollection)) ||
+        if (FAILED(rt->CreateGradientStopCollection(stops, _countof(stops), &stopCollection)) ||
             !stopCollection)
             return nullptr;
 
-        const HRESULT hr = rt->CreateLinearGradientBrush(
-            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
-                                                D2D1::Point2F(0.0f, 1.0f)),
-            D2D1::BrushProperties(), stopCollection, &songInfoDividerBrush_);
+        const HRESULT hr =
+            rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                                              D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
+                                          D2D1::BrushProperties(), stopCollection,
+                                          songInfoDividerBrush_.ReleaseAndGetAddressOf());
         stopCollection->Release();
-        return FAILED(hr) ? nullptr : songInfoDividerBrush_;
+        return FAILED(hr) ? nullptr : songInfoDividerBrush_.Get();
     }
 
     void drawSongInfoDivider(float leftW, float h) {
@@ -7209,8 +5741,7 @@ struct TaskbarHost::Impl {
         const float x = leftW + (kSongInfoLyricGap - kSongInfoDividerWidth) * 0.5f;
         const D2D1_RECT_F rect = D2D1::RectF(x, top, x + kSongInfoDividerWidth, bottom);
         rt->FillRoundedRectangle(
-            D2D1::RoundedRect(rect, kSongInfoDividerWidth * 0.5f,
-                              kSongInfoDividerWidth * 0.5f),
+            D2D1::RoundedRect(rect, kSongInfoDividerWidth * 0.5f, kSongInfoDividerWidth * 0.5f),
             brush);
     }
 
@@ -7232,8 +5763,8 @@ struct TaskbarHost::Impl {
     // 右缘渐隐带画笔：渐隐带完全位于可视区右缘之外（rightEdge 起 extend 宽），
     // 可读区域内文字始终全不透明，只有越过边界的部分向外渐隐
     ID2D1LinearGradientBrush* ensureLyricRightFadeBrush() {
-        if (lyricRightFadeBrush_)
-            return lyricRightFadeBrush_;
+        if (lyricRightFadeBrush_.Get())
+            return lyricRightFadeBrush_.Get();
         auto* rt = drawTarget();
         if (!rt)
             return nullptr;
@@ -7247,9 +5778,9 @@ struct TaskbarHost::Impl {
         const HRESULT hr = rt->CreateLinearGradientBrush(
             D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
                                                 D2D1::Point2F(1.0f, 0.0f)),
-            D2D1::BrushProperties(), stopCollection, &lyricRightFadeBrush_);
+            D2D1::BrushProperties(), stopCollection, lyricRightFadeBrush_.ReleaseAndGetAddressOf());
         stopCollection->Release();
-        return FAILED(hr) ? nullptr : lyricRightFadeBrush_;
+        return FAILED(hr) ? nullptr : lyricRightFadeBrush_.Get();
     }
 
     ID2D1LinearGradientBrush* lyricRightFadeBrush(float rightEdge, float extend) {
@@ -7267,21 +5798,20 @@ struct TaskbarHost::Impl {
     // 内容确定的无限循环跑马灯恒定保持，避免绕回时渐隐消失再出现），滚入侧借位
     // 到可视区外渐隐，可读区域内文字始终全不透明
     struct VerticalEdgeFades {
-        float outBand = 0.0f;   // 滚出侧区域内渐隐带宽，0 表示不渐隐
-        bool outAtTop = false;  // 滚出侧是否在可视区顶部
-        bool borrow = false;    // 滚入侧是否启用借位渐隐
+        float outBand = 0.0f;     // 滚出侧区域内渐隐带宽，0 表示不渐隐
+        bool outAtTop = false;    // 滚出侧是否在可视区顶部
+        bool borrow = false;      // 滚入侧是否启用借位渐隐
         bool borrowAtTop = false; // 滚入侧是否在可视区顶部
     };
 
-    VerticalEdgeFades verticalEdgeFades(float offset, float contentH, float areaH,
-                                        bool karaoke, bool constantEdgeFade) const {
+    VerticalEdgeFades verticalEdgeFades(float offset, float contentH, float areaH, bool karaoke,
+                                        bool constantEdgeFade) const {
         VerticalEdgeFades fades;
         if (contentH <= areaH || areaH <= 0.0f)
             return fades;
         const float fadeH = std::min(kLyricEdgeFadeDip, areaH * 0.25f);
         fades.outAtTop = offset < 0.0f;
-        fades.outBand =
-            constantEdgeFade ? fadeH : std::min(std::fabs(offset), fadeH);
+        fades.outBand = constantEdgeFade ? fadeH : std::min(std::fabs(offset), fadeH);
         fades.borrow = true;
         fades.borrowAtTop = !karaoke && offset >= 0.0f;
         return fades;
@@ -7310,56 +5840,44 @@ struct TaskbarHost::Impl {
     }
 
     bool lyricEffectEnabled(LyricEffect effect) const {
-        return (lyricEffects_ & lyricEffectBit(effect)) != 0;
+        lyricEffectsRenderer_.setContext(lyricEffectsContext());
+        return lyricEffectsRenderer_.lyricEffectEnabled(effect);
     }
 
     bool lyricStarEnabled(int lineIndex) const {
-        const bool singleLine = lineIndex == outgoingLyricEffectLine_
-            ? !outgoingDoubleLine_ : !useDoubleLineLyrics();
-        return lineIndex >= 0 && static_cast<size_t>(lineIndex) < lines.size() &&
-            !lines[lineIndex].chars.empty() && singleLine && compactTaskbarHeight_ <= 0.0f &&
-            (!doubleLineLyricsEnabled_ || isVerticalTaskbar()) && clientAnimations_ &&
-            !isMinimalMode() && !isStoppedMode() && scene_ == DisplayScene::Lyrics &&
-            lyricEffectEnabled(LyricEffect::Stardust);
+        lyricEffectsRenderer_.setContext(lyricEffectsContext());
+        return lyricEffectsRenderer_.lyricStarEnabled(lineIndex);
     }
 
-    float lyricStarRadius() const {
-        return std::clamp(fontSize_ * 0.40f, 5.5f, 8.5f);
-    }
+    float lyricStarRadius() const { return LyricEffectsRenderer::starRadius(fontSize_); }
 
     float lyricStarTextShift(IDWriteTextLayout* layout) const {
-        const bool outgoing = layout == outgoingLyricLayout_ || layout == outgoingSecondaryLayout_;
-        const bool current = layout == lyricLayout_ || layout == secondaryLayout_;
-        const int line = outgoing ? outgoingLyricEffectLine_ : current ? lyricEffectLayoutLine_ : -1;
+        const bool outgoing = layout == typesetter_.resources().outgoingLyricLayout_.Get() ||
+                              layout == typesetter_.resources().outgoingSecondaryLayout_.Get();
+        const bool current = layout == typesetter_.resources().lyricLayout_.Get() ||
+                             layout == typesetter_.resources().secondaryLayout_.Get();
+        const int line = outgoing  ? outgoingLyricEffectLine_
+                         : current ? lyricEffectLayoutLine_
+                                   : -1;
         if (!lyricStarEnabled(line))
             return 0.0f;
-        const float blockH = outgoing
-            ? outgoingLyricHeight_ + (outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f)
-            : lyricHeight_ + (secondaryLayout_ ? 1.0f + secondaryHeight_ : 0.0f);
+        const float blockH =
+            outgoing
+                ? outgoingLyricHeight_ + (typesetter_.resources().outgoingSecondaryLayout_.Get()
+                                              ? 1.0f + outgoingSecondaryHeight_
+                                              : 0.0f)
+                : lyricHeight_ + (typesetter_.resources().secondaryLayout_.Get()
+                                      ? 1.0f + secondaryHeight_
+                                      : 0.0f);
         const float h = lastPxH_ / scale();
         return std::min(8.0f, std::max(0.0f, (h - blockH) * 0.5f - 2.0f));
     }
 
     void syncLyricEffectClock(int64_t position, bool playing, bool reset = false) {
-        const ULONGLONG now = monotonicNowMs();
-        const int64_t elapsed = lyricFxLastClockMs_ == 0 ? 0
-            : static_cast<int64_t>(now - lyricFxLastClockMs_);
-        const int64_t expected = lyricFxPlaying_ ? elapsed : 0;
-        if (reset || lyricFxLastPositionMs_ < 0 ||
-            std::llabs(position - lyricFxLastPositionMs_ - expected) > 350 ||
-            (!playing && !lyricFxPlaying_ && position != lyricFxLastPositionMs_) ||
-            (playing && !lyricFxPlaying_)) {
-            lyricFxEmitFromMs_ = position;
-            if (lyricEffects_ != 0)
-                requestFrame();
-        }
-        if (!playing && (lyricFxPlaying_ || lyricFxPauseMs_ == 0))
-            lyricFxPauseMs_ = now;
-        if (playing)
-            lyricFxPauseMs_ = 0;
-        lyricFxPlaying_ = playing;
-        lyricFxLastPositionMs_ = position;
-        lyricFxLastClockMs_ = now;
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(drawTarget()));
+        lyricEffectsRenderer_.syncLyricEffectClock(position, playing, reset);
+        if (lyricEffectsRenderer_.consumeRedraw())
+            requestFrame();
     }
 
     void setLyricEffects(uint32_t effects) {
@@ -7378,347 +5896,40 @@ struct TaskbarHost::Impl {
     }
 
     bool lyricEffectsAnimating() const {
-        if (lyricEffects_ == 0 || !clientAnimations_ || isMinimalMode() || isStoppedMode() ||
-            scene_ != DisplayScene::Lyrics || lyricEffectLayoutLine_ < 0)
-            return false;
-        // 暂停后继续画到所有短尾迹消散，末帧由 tick 主动失效刷新。
-        if (!media.playing)
-            return lyricFxPauseMs_ != 0 && monotonicNowMs() - lyricFxPauseMs_ <= 700;
-        if (static_cast<size_t>(lyricEffectLayoutLine_) >= lines.size())
-            return false;
-        const auto& chars = lines[lyricEffectLayoutLine_].chars;
-        if (lyricStarEnabled(lyricEffectLayoutLine_) && !chars.empty() &&
-            positionMs_ >= chars.front().startMs && positionMs_ < chars.back().endMs + 300)
-            return true;
-        for (const auto& token : lines[lyricEffectLayoutLine_].chars)
-            if (positionMs_ >= token.startMs && positionMs_ - token.endMs < 700)
-                return true;
-        return false;
+        lyricEffectsRenderer_.setContext(lyricEffectsContext());
+        return lyricEffectsRenderer_.lyricEffectsAnimating();
     }
 
     void clearLyricEffectGeometry() {
-        lyricFxGeometry_.clear();
-        for (auto& source : lyricFxSources_)
-            source = {};
-    }
-
-    const std::vector<LyricFxToken>& lyricEffectTokens(int lineIndex) {
-        const bool current = lineIndex == lyricEffectLayoutLine_;
-        auto& cache = lyricFxSources_[current ? 0 : 1];
-        IDWriteTextLayout* layout = current ? lyricLayout_
-            : lineIndex == outgoingLyricEffectLine_ ? outgoingLyricLayout_ : nullptr;
-        const float width = current ? lyricWidth_ : outgoingLyricWidth_;
-        if (cache.layout == layout && cache.line == lineIndex)
-            return cache.tokens;
-        cache = {};
-        cache.layout = layout;
-        cache.line = lineIndex;
-        if (!layout || width <= 0 || lineIndex < 0 || static_cast<size_t>(lineIndex) >= lines.size())
-            return cache.tokens;
-        UINT32 offset = 0;
-        cache.tokens.reserve(lines[lineIndex].chars.size());
-        for (const auto& token : lines[lineIndex].chars) {
-            const UINT32 length = static_cast<UINT32>(token.text.size());
-            if (length == 0)
-                continue;
-            DWRITE_HIT_TEST_METRICS hit{};
-            float first = 0, last = 0, y = 0;
-            const bool valid = SUCCEEDED(layout->HitTestTextPosition(offset, FALSE, &first, &y, &hit)) &&
-                SUCCEEDED(layout->HitTestTextPosition(offset + length - 1, TRUE, &last, &y, &hit));
-            const bool visible = valid && token.text.find_first_not_of(L" \t\r\n") != std::wstring::npos;
-            cache.tokens.push_back({token.startMs, token.endMs,
-                std::clamp(first / width, 0.0f, 1.0f), std::clamp(last / width, 0.0f, 1.0f), visible});
-            offset += length;
-        }
-        return cache.tokens;
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(drawTarget()));
+        lyricEffectsRenderer_.clearLyricEffectGeometry();
+        if (lyricEffectsRenderer_.consumeRedraw())
+            requestFrame();
     }
 
     float lyricEffectProgress(int lineIndex) {
-        // 预览、翻译和歌曲信息没有演唱行，不得驱逐旧行的时间轴缓存。
-        if (lineIndex < 0 || static_cast<size_t>(lineIndex) >= lines.size())
-            return 0.0f;
-        const auto& tokens = lyricEffectTokens(lineIndex);
-        auto it = std::upper_bound(tokens.begin(), tokens.end(), positionMs_,
-            [](int64_t time, const LyricFxToken& token) { return time < token.startMs; });
-        if (it == tokens.begin())
-            return 0;
-        --it;
-        const float t = static_cast<float>(std::clamp(static_cast<double>(positionMs_ - it->startMs) /
-            std::max<int64_t>(1, it->endMs - it->startMs), 0.0, 1.0));
-        return it->first + (it->last - it->first) * t;
-    }
-
-    LyricFxGeometry& lyricEffectGeometry(IDWriteTextLayout* layout, int lineIndex,
-                                        float width, float height, bool vertical,
-                                        float rangeStart, float rangeSize) {
-        auto found = lyricFxGeometry_.find(layout);
-        if (found != lyricFxGeometry_.end()) {
-            const auto& value = *found->second;
-            if (value.line == lineIndex && value.width == width && value.height == height &&
-                value.vertical == vertical && value.rangeStart == rangeStart && value.rangeSize == rangeSize)
-                return *found->second;
-            lyricFxGeometry_.erase(found);
-        }
-        auto geometry = std::make_unique<LyricFxGeometry>();
-        geometry->line = lineIndex;
-        geometry->width = width;
-        geometry->height = height;
-        geometry->vertical = vertical;
-        geometry->rangeStart = rangeStart;
-        geometry->rangeSize = rangeSize;
-        auto locate = [&](float u) {
-            LyricFxPoint point{};
-            const float local = (u - rangeStart) / rangeSize;
-            if (local < 0 || local > 1)
-                return point;
-            const float px = vertical ? width * 0.5f : local * width;
-            const float py = vertical ? local * height : height * 0.5f;
-            DWRITE_HIT_TEST_METRICS hit{};
-            BOOL trailing = FALSE, inside = FALSE;
-            if (FAILED(layout->HitTestPoint(px, py, &trailing, &inside, &hit)) ||
-                !hit.isText || hit.isTrimmed || hit.width <= 0 || hit.height <= 0)
-                return point;
-            // 采用最近字框，不用整行高度猜测字心，也不因字体行间留白丢弃定位。
-            point.center = D2D1::Point2F(hit.left + hit.width * 0.5f, hit.top + hit.height * 0.5f);
-            point.edge = vertical
-                ? D2D1::Point2F(hit.left + hit.width, py)
-                : D2D1::Point2F(px, hit.top);
-            point.valid = true;
-            return point;
-        };
-        const auto& tokens = lyricEffectTokens(lineIndex);
-        geometry->tokens.reserve(tokens.size());
-        for (const auto& token : tokens) {
-            const float first = std::max(token.first, rangeStart);
-            const float last = std::min(token.last, rangeStart + rangeSize);
-            const auto point = token.visible && last > first ? locate((first + last) * 0.5f)
-                                                             : LyricFxPoint{};
-            geometry->tokens.push_back(point);
-            // 星星沿整行字形的外缘运动；空格有进度，但不应决定星星是否可见。
-            if (point.valid && (!geometry->starAnchor.valid ||
-                (vertical ? point.edge.x > geometry->starAnchor.edge.x
-                          : point.edge.y < geometry->starAnchor.edge.y)))
-                geometry->starAnchor = point;
-        }
-        auto* result = geometry.get();
-        lyricFxGeometry_.emplace(layout, std::move(geometry));
-        return *result;
-    }
-
-    void ensureLyricGlyphMask(IDWriteTextLayout* layout, LyricFxGeometry& geometry) {
-        if (geometry.glyphMask || !brushLyricFx_)
-            return;
-        ID2D1BitmapRenderTarget* target = nullptr;
-        auto* rt = drawTarget();
-        if (!rt || FAILED(rt->CreateCompatibleRenderTarget(
-                D2D1::SizeF(geometry.width, geometry.height), &target)))
-            return;
-        const auto oldColor = brushLyricFx_->GetColor();
-        brushLyricFx_->SetColor(D2D1::ColorF(1, 1, 1, 1));
-        target->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-        target->BeginDraw();
-        target->Clear(D2D1::ColorF(0, 0, 0, 0));
-        target->DrawTextLayout(D2D1::Point2F(0, 0), layout, brushLyricFx_);
-        if (SUCCEEDED(target->EndDraw()))
-            target->GetBitmap(&geometry.glyphMask);
-        brushLyricFx_->SetColor(oldColor);
-        if (geometry.glyphMask)
-            geometry.glyphTarget = target;
-        else
-            target->Release();
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(drawTarget()));
+        return lyricEffectsRenderer_.lyricEffectProgress(lineIndex);
     }
 
     // 所有坐标均在实际文字布局的局部空间，复用调用方的缩放、旋转和渐隐裁剪。
     // rangeStart/rangeSize 把中英混排竖栏的每一段映射回同一句时间轴。
-    void drawLyricOverlay(IDWriteTextLayout* layout, int lineIndex, float x, float y,
-                          float width, float height, bool vertical, float opacity,
-                          float progress, bool foreground, float rangeStart = 0.0f,
-                          float rangeSize = 1.0f) {
-        auto* rt = drawTarget();
-        if (!foreground || !rt || !layout || !brushLyricFx_ || lyricEffects_ == 0 || !clientAnimations_ ||
-            isMinimalMode() || isStoppedMode() || scene_ != DisplayScene::Lyrics ||
-            lineIndex < 0 || static_cast<size_t>(lineIndex) >= lines.size() ||
-            width <= 0 || height <= 0 || rangeSize <= 0 || opacity <= 0.0f)
-            return;
-        const auto& line = lines[lineIndex];
-        auto& geometry = lyricEffectGeometry(layout, lineIndex, width, height, vertical,
-                                              rangeStart, rangeSize);
-        const auto& tokens = lyricEffectTokens(lineIndex);
-        const bool stardust = lyricStarEnabled(lineIndex);
-        const ULONGLONG now = monotonicNowMs();
-        const float pauseAge = lyricFxPauseMs_ == 0 ? 0.0f
-            : static_cast<float>(now - lyricFxPauseMs_);
-        const float liveAlpha = media.playing ? 1.0f : std::max(0.0f, 1.0f - pauseAge / 300.0f);
-        const auto baseColor = D2D1::ColorF(GetRValue(lyricColor_) / 255.0f,
-                                           GetGValue(lyricColor_) / 255.0f,
-                                           GetBValue(lyricColor_) / 255.0f, 1.0f);
-        auto color = [&](float alpha, bool light = false) {
-            auto value = baseColor;
-            if (light) {
-                value.r += (1.0f - value.r) * 0.60f;
-                value.g += (1.0f - value.g) * 0.60f;
-                value.b += (1.0f - value.b) * 0.60f;
-            }
-            value.a *= std::clamp(alpha * opacity, 0.0f, 1.0f);
-            brushLyricFx_->SetColor(value);
-        };
-        auto upper = std::upper_bound(tokens.begin(), tokens.end(), positionMs_,
-            [](int64_t time, const LyricFxToken& token) { return time < token.startMs; });
-        const float localProgress = std::clamp((progress - rangeStart) / rangeSize, 0.0f, 1.0f);
-        if (stardust && upper != tokens.begin() && liveAlpha > 0.0f &&
-            progress >= rangeStart && progress <= rangeStart + rangeSize) {
-            const auto active = std::prev(upper);
-            const size_t index = static_cast<size_t>(active - tokens.begin());
-            const auto& origin = geometry.starAnchor;
-            if (origin.valid) {
-                const float t = static_cast<float>(std::clamp(
-                    static_cast<double>(positionMs_ - active->startMs) /
-                    static_cast<double>(std::max<int64_t>(1, active->endMs - active->startMs)), 0.0, 1.0));
-                constexpr float pi = 3.14159265358979323846f;
-                const float hop = std::sin(pi * t) * 3.0f;
-                const float radius = lyricStarRadius();
-                const float gap = 1.25f + (lyricGlow_ ? 1.0f : lyricOutline_ ? 0.75f : 0.0f);
-                const float extent = vertical ? height : width;
-                const float inset = std::min(radius, extent * 0.5f);
-                const float along = std::clamp(localProgress * extent, inset, extent - inset);
-                const auto center = vertical
-                    ? D2D1::Point2F(x + origin.edge.x + gap + radius + hop,
-                                    y + along)
-                    : D2D1::Point2F(x + along,
-                                    y + origin.edge.y - gap - radius - hop);
-                // 角度只依赖播放时间：暂停冻结，seek 直接对齐，不积累动画状态。
-                const float angle = static_cast<float>(positionMs_ % 3000) / 3000.0f * 2.0f * pi;
-                const float endAlpha = index + 1 == tokens.size()
-                    ? std::clamp(1.0f - static_cast<float>(positionMs_ - active->endMs) / 300.0f,
-                                 0.0f, 1.0f) : 1.0f;
-                // 每 24ms 沿缓存轨迹发射一粒，最多 18 粒；固定出生时间保证粒子连续漂移。
-                const float rawProgress = active->first + (active->last - active->first) * t;
-                const float rawAlong = std::clamp(
-                    (rawProgress - rangeStart) / rangeSize * extent, inset, extent - inset);
-                const float smoothOffset = along - rawAlong;
-                for (int i = 17; i >= 0; --i) {
-                    const int64_t sampleMs = (positionMs_ / 24 - i) * 24;
-                    if (sampleMs < lyricFxEmitFromMs_)
-                        continue;
-                    auto sample = std::upper_bound(tokens.begin(), tokens.end(), sampleMs,
-                        [](int64_t time, const LyricFxToken& token) { return time < token.startMs; });
-                    if (sample == tokens.begin())
-                        continue;
-                    --sample;
-                    const float sampleT = static_cast<float>(std::clamp(
-                        static_cast<double>(sampleMs - sample->startMs) /
-                        static_cast<double>(std::max<int64_t>(1, sample->endMs - sample->startMs)), 0.0, 1.0));
-                    const float sampleProgress = sample->first + (sample->last - sample->first) * sampleT;
-                    if (sampleProgress < rangeStart || sampleProgress > rangeStart + rangeSize)
-                        continue;
-                    const float sampleAlong = std::clamp(
-                        (sampleProgress - rangeStart) / rangeSize * extent,
-                        inset, extent - inset) + smoothOffset;
-                    const float sampleHop = std::sin(pi * sampleT) * 3.0f;
-                    uint32_t seed = static_cast<uint32_t>(sampleMs / 24) ^
-                        (static_cast<uint32_t>(lineIndex) + 1u) * 0x9e3779b9u;
-                    seed ^= seed >> 16;
-                    seed *= 0x7feb352du;
-                    seed ^= seed >> 15;
-                    const float side = static_cast<float>(seed & 1023u) / 1023.0f;
-                    const float speed = static_cast<float>((seed >> 10) & 1023u) / 1023.0f;
-                    const float age = static_cast<float>(positionMs_ - sampleMs) / 432.0f;
-                    // 越老越向后、向外散开；朝文字的一侧少扩散，保持字形周围留白。
-                    const float lag = age * (radius + 9.0f * speed);
-                    const float scatter = (side * 12.0f - 7.5f) * age;
-                    const auto dot = vertical
-                        ? D2D1::Point2F(x + origin.edge.x + gap + radius + sampleHop - scatter,
-                                       y + sampleAlong - lag)
-                        : D2D1::Point2F(x + sampleAlong - lag,
-                                       y + origin.edge.y - gap - radius - sampleHop + scatter);
-                    const float dx = dot.x - center.x;
-                    const float dy = dot.y - center.y;
-                    if (dx * dx + dy * dy < radius * radius * 0.49f)
-                        continue;
-                    const float fade = 1.0f - age;
-                    const float dotRadius = 0.55f + fade * (0.8f + speed * 0.6f);
-                    color(liveAlpha * endAlpha * fade * fade * 0.85f);
-                    rt->FillEllipse(D2D1::Ellipse(dot, dotRadius, dotRadius), brushLyricFx_);
-                }
-                color(liveAlpha * endAlpha);
-                const float previousOutline = brushLyricOutline_ ? brushLyricOutline_->GetOpacity() : 1.0f;
-                if (lyricOutline_ && brushLyricOutline_)
-                    brushLyricOutline_->SetOpacity(opacity * liveAlpha * endAlpha);
-                lyricStar_.draw(rt, center, radius, angle, brushLyricFx_,
-                                lyricOutline_ ? brushLyricOutline_ : nullptr);
-                if (brushLyricOutline_)
-                    brushLyricOutline_->SetOpacity(previousOutline);
-            }
-        }
-        int checked = 0;
-        for (auto it = upper; lyricEffectEnabled(LyricEffect::Ripple) &&
-             it != tokens.begin() && checked++ < 24;) {
-            --it;
-            const auto& token = *it;
-            if (positionMs_ - token.endMs > 700)
-                break;
-            const size_t tokenIndex = static_cast<size_t>(it - tokens.begin());
-            const auto& origin = geometry.tokens[tokenIndex];
-            if (!origin.valid || token.endMs <= token.startMs)
-                continue;
-            const float elapsed = static_cast<float>(positionMs_ - token.startMs);
-            if (lyricEffectEnabled(LyricEffect::Ripple) &&
-                token.startMs >= lyricFxEmitFromMs_ && elapsed + pauseAge < 420) {
-                const auto center = D2D1::Point2F(x + origin.center.x, y + origin.center.y);
-                const float t = (elapsed + pauseAge) / 420.0f;
-                color((1.0f - t) * 0.78f);
-                const float radius = 2.0f + t * std::min(8.0f, fontSize_ * 0.36f);
-                rt->DrawEllipse(D2D1::Ellipse(center, radius, radius), brushLyricFx_, 1.35f);
-                color((1.0f - t) * 0.32f);
-                rt->DrawEllipse(D2D1::Ellipse(center, radius * 0.64f, radius * 0.64f),
-                                brushLyricFx_, 0.85f);
-            }
-        }
-        const bool hasTiming = !line.chars.empty() && positionMs_ >= line.ms;
-        if (hasTiming && lyricEffectEnabled(LyricEffect::Underline) &&
-            liveAlpha > 0 && localProgress > 0) {
-            for (int i = 0; i < 12; ++i) {
-                const float a = localProgress * i / 12.0f;
-                const float b = localProgress * (i + 1) / 12.0f;
-                color((0.15f + i * 0.055f) * liveAlpha);
-                rt->DrawLine(vertical ? D2D1::Point2F(x + width - 1.2f, y + a * height)
-                                      : D2D1::Point2F(x + a * width, y + height - 1.2f),
-                             vertical ? D2D1::Point2F(x + width - 1.2f, y + b * height)
-                                      : D2D1::Point2F(x + b * width, y + height - 1.2f),
-                             brushLyricFx_, 0.9f);
-            }
-        }
-        if (hasTiming && lyricEffectEnabled(LyricEffect::FollowLight) &&
-            positionMs_ < line.chars.back().endMs &&
-            progress > rangeStart && progress <= rangeStart + rangeSize && liveAlpha > 0 &&
-            brushLyricFollow_) {
-            ensureLyricGlyphMask(layout, geometry);
-            const float axis = vertical ? y + localProgress * height : x + localProgress * width;
-            const float halfWidth = std::clamp(fontSize_ * 0.65f, 7.0f, 18.0f);
-            brushLyricFollow_->SetStartPoint(vertical ? D2D1::Point2F(x, axis - halfWidth)
-                                                      : D2D1::Point2F(axis - halfWidth, y));
-            brushLyricFollow_->SetEndPoint(vertical ? D2D1::Point2F(x, axis + halfWidth)
-                                                    : D2D1::Point2F(axis + halfWidth, y));
-            const float previous = brushLyricFollow_->GetOpacity();
-            brushLyricFollow_->SetOpacity(liveAlpha * opacity);
-            if (geometry.glyphMask) {
-                const auto destination = D2D1::RectF(x, y, x + width, y + height);
-                const auto source = D2D1::RectF(0, 0, width, height);
-                const auto antialias = rt->GetAntialiasMode();
-                rt->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
-                rt->FillOpacityMask(geometry.glyphMask, brushLyricFollow_, &destination, &source);
-                rt->SetAntialiasMode(antialias);
-            }
-            brushLyricFollow_->SetOpacity(previous);
-        }
+    void drawLyricOverlay(IDWriteTextLayout* layout, int lineIndex, float x, float y, float width,
+                          float height, bool vertical, float opacity, float progress,
+                          bool foreground, float rangeStart = 0.0f, float rangeSize = 1.0f) {
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(drawTarget()));
+        lyricEffectsRenderer_.drawLyricOverlay(layout, lineIndex, x, y, width, height, vertical,
+                                               opacity, progress, foreground, rangeStart,
+                                               rangeSize);
+        if (lyricEffectsRenderer_.consumeRedraw())
+            requestFrame();
     }
 
     void drawScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
                            float x, float y, float offset, ID2D1Brush* brush,
                            ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
                            ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f,
-                           float opacity = 1.0f,
-                           LyricAlignment alignment = LyricAlignment::Center,
+                           float opacity = 1.0f, LyricAlignment alignment = LyricAlignment::Center,
                            bool singleCopy = false, float rightExtend = 0.0f,
                            bool constantEdgeFade = false, float leftFadeDip = 0.0f,
                            float centerAnchor = -1.0f) {
@@ -7753,7 +5964,7 @@ struct TaskbarHost::Impl {
         }
         // 右缘（滚入侧）渐隐带借用到可视区之外的留白，可读区域内文字保持清晰
         ID2D1LinearGradientBrush* rightFade =
-            (textW > areaW && rightExtend > 0.0f && lyricRightFadeLayer_)
+            (textW > areaW && rightExtend > 0.0f && lyricRightFadeLayer_.Get())
                 ? lyricRightFadeBrush(x + areaW, rightExtend)
                 : nullptr;
         // 左缘（滚出侧）在区域内渐隐，文字不会越过区域边界：歌词渐隐带随滚出量
@@ -7764,38 +5975,33 @@ struct TaskbarHost::Impl {
         const float leftFadeW = std::min(fadeDip, areaW * 0.25f);
         const float leftScrolled = constantEdgeFade ? leftFadeW : offset;
         ID2D1LinearGradientBrush* fadeBrush =
-            (textW > areaW && leftScrolled > 0.0f && lyricEdgeFadeLayer_)
+            (textW > areaW && leftScrolled > 0.0f && lyricEdgeFadeLayer_.Get())
                 ? lyricEdgeFadeBrush(x, leftFadeW, leftScrolled)
                 : nullptr;
-        const int effectLine = layout == lyricLayout_ ? lyricEffectLayoutLine_
-            : layout == outgoingLyricLayout_ ? outgoingLyricEffectLine_ : -1;
-        const float effectTopPad = lyricStarEnabled(effectLine)
-            ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
-        D2D1_RECT_F clip{x, y - effectTopPad, x + areaW + (rightFade ? rightExtend : 0.0f), y + textH};
+        const int effectLine = layout == typesetter_.resources().lyricLayout_.Get()
+                                   ? lyricEffectLayoutLine_
+                               : layout == typesetter_.resources().outgoingLyricLayout_.Get()
+                                   ? outgoingLyricEffectLine_
+                                   : -1;
+        const float effectTopPad =
+            lyricStarEnabled(effectLine) ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
+        D2D1_RECT_F clip{x, y - effectTopPad, x + areaW + (rightFade ? rightExtend : 0.0f),
+                         y + textH};
         if (rightFade) {
-            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
-                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                 rightFade),
-                          lyricRightFadeLayer_);
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f, rightFade),
+                          lyricRightFadeLayer_.Get());
         }
         if (fadeBrush) {
-            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
-                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                 fadeBrush),
-                          lyricEdgeFadeLayer_);
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f, fadeBrush),
+                          lyricEdgeFadeLayer_.Get());
         } else {
             rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
         }
-        static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
-                                              {0.7071f, 0.7071f},
-                                              {0.0f, 1.0f},
-                                              {-0.7071f, 0.7071f},
-                                              {-1.0f, 0.0f},
-                                              {-0.7071f, -0.7071f},
-                                              {0.0f, -1.0f},
-                                              {0.7071f, -0.7071f}};
+        static constexpr float kDirs[8][2] = {
+            {1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
+            {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
         // 绘制起点：居中一个，或跑马灯首尾相接两个；逐字/转场入场时只有一份、不循环
         float bases[2];
         int n = 0;
@@ -7822,14 +6028,16 @@ struct TaskbarHost::Impl {
             bases[n++] = x - offset;
             bases[n++] = x - offset + loopW;
         }
-        const float effectProgress = lyricEffects_ == 0 ? 0.0f : karaokeBrush && textW > 0
-            ? std::clamp(karaokeX / textW, 0.0f, 1.0f) : lyricEffectProgress(effectLine);
+        const float effectProgress = lyricEffects_ == 0 ? 0.0f
+                                     : karaokeBrush && textW > 0
+                                         ? std::clamp(karaokeX / textW, 0.0f, 1.0f)
+                                         : lyricEffectProgress(effectLine);
         auto drawOverlay = [&](bool foreground) {
             if (effectLine < 0 || lyricEffects_ == 0)
                 return;
             for (int i = 0; i < n; ++i)
-                drawLyricOverlay(layout, effectLine, bases[i], y, textW, textH, false,
-                                  opacity, effectProgress, foreground);
+                drawLyricOverlay(layout, effectLine, bases[i], y, textW, textH, false, opacity,
+                                 effectProgress, foreground);
         };
         drawOverlay(false);
         if (fxBmp) {
@@ -7839,8 +6047,7 @@ struct TaskbarHost::Impl {
             for (int i = 0; i < n; ++i)
                 rt->DrawBitmap(fxBmp,
                                D2D1::RectF(bases[i] - textFxPad, y - textFxPad,
-                                           bases[i] - textFxPad + textFxW,
-                                           y - textFxPad + textFxH),
+                                           bases[i] - textFxPad + textFxW, y - textFxPad + textFxH),
                                opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
             if (glow || outline) {
@@ -7884,9 +6091,8 @@ struct TaskbarHost::Impl {
 
     void drawVerticalScrollingText(
         IDWriteTextLayout* layout, float textW, float textH, float areaH, float x, float y,
-        float offset, ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
-        ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
-        float karaokeX = 0.0f, float opacity = 1.0f,
+        float offset, ID2D1Brush* brush, ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
+        ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f, float opacity = 1.0f,
         LyricAlignment alignment = LyricAlignment::Center, bool singleCopy = false,
         bool rotated = false, float topExtend = 0.0f, float bottomExtend = 0.0f,
         bool constantEdgeFade = false, bool skipSlotClip = false, float slotY = -1.0f,
@@ -7896,8 +6102,11 @@ struct TaskbarHost::Impl {
         if (!rt || !layout || textW <= 0.0f || textH <= 0.0f || areaH <= 0.0f)
             return;
         if (effectLine < 0)
-            effectLine = layout == verticalLyricLayout_ ? lyricEffectLayoutLine_
-                : layout == outgoingVerticalLyricLayout_ ? outgoingLyricEffectLine_ : -1;
+            effectLine = layout == typesetter_.resources().verticalLyricLayout_.Get()
+                             ? lyricEffectLayoutLine_
+                         : layout == typesetter_.resources().outgoingVerticalLyricLayout_.Get()
+                             ? outgoingLyricEffectLine_
+                             : -1;
         const bool star = lyricStarEnabled(effectLine);
         // 竖排沿字列右侧预留星星通道，旋转英文与中文保持同一侧。
         const float starPad = star ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
@@ -7945,34 +6154,32 @@ struct TaskbarHost::Impl {
         const float topExt = fades.borrow && fades.borrowAtTop ? topExtend : 0.0f;
         const float bottomExt = fades.borrow && !fades.borrowAtTop ? bottomExtend : 0.0f;
         ID2D1LinearGradientBrush* borrowFade =
-            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_
+            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_.Get()
                 ? verticalBorrowFadeBrush(fades.borrowAtTop ? slotTop : slotTop + areaH,
-                                          fades.borrowAtTop ? topExt : bottomExt,
-                                          fades.borrowAtTop)
+                                          fades.borrowAtTop ? topExt : bottomExt, fades.borrowAtTop)
                 : nullptr;
         ID2D1LinearGradientBrush* outFade =
-            fades.outBand > 0.0f && lyricEdgeFadeLayer_
-                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH,
-                                       fades.outBand, fades.outAtTop)
+            fades.outBand > 0.0f && lyricEdgeFadeLayer_.Get()
+                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH, fades.outBand,
+                                       fades.outAtTop)
                 : nullptr;
-        const D2D1_RECT_F clip{x, slotTop - topExt, x + textW + starPad, slotTop + areaH + bottomExt};
+        const D2D1_RECT_F clip{x, slotTop - topExt, x + textW + starPad,
+                               slotTop + areaH + bottomExt};
         enum class ClipMode { kNone, kClip, kOutLayer, kBorrowLayer, kBothLayers };
         ClipMode clipMode = ClipMode::kNone;
         if (!skipSlotClip) {
             if (borrowFade) {
-                rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
-                                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                     D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                     borrowFade),
-                              lyricRightFadeLayer_);
+                rt->PushLayer(
+                    D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                           D2D1::Matrix3x2F::Identity(), 1.0f, borrowFade),
+                    lyricRightFadeLayer_.Get());
                 clipMode = ClipMode::kBorrowLayer;
             }
             if (outFade) {
                 rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
                                                      D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                     D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                     outFade),
-                              lyricEdgeFadeLayer_);
+                                                     D2D1::Matrix3x2F::Identity(), 1.0f, outFade),
+                              lyricEdgeFadeLayer_.Get());
                 clipMode = clipMode == ClipMode::kBorrowLayer ? ClipMode::kBothLayers
                                                               : ClipMode::kOutLayer;
             }
@@ -8010,11 +6217,15 @@ struct TaskbarHost::Impl {
         };
 
         if (effectLine < 0)
-            effectLine = layout == verticalLyricLayout_ ? lyricEffectLayoutLine_
-                : layout == outgoingVerticalLyricLayout_ ? outgoingLyricEffectLine_ : -1;
+            effectLine = layout == typesetter_.resources().verticalLyricLayout_.Get()
+                             ? lyricEffectLayoutLine_
+                         : layout == typesetter_.resources().outgoingVerticalLyricLayout_.Get()
+                             ? outgoingLyricEffectLine_
+                             : -1;
         if (effectProgress < 0)
             effectProgress = lyricEffects_ == 0 ? 0.0f
-                : karaokeBrush ? karaokeX : lyricEffectProgress(effectLine);
+                             : karaokeBrush     ? karaokeX
+                                                : lyricEffectProgress(effectLine);
         auto drawOverlay = [&](bool foreground) {
             if (effectLine < 0 || lyricEffects_ == 0)
                 return;
@@ -8024,12 +6235,11 @@ struct TaskbarHost::Impl {
                     rt->GetTransform(&previous);
                     rt->SetTransform(rotatedTransform(x, bases[i]) * previous);
                     drawLyricOverlay(layout, effectLine, 0, 0, textH, textW, false, opacity,
-                                      effectProgress, foreground, effectRangeStart, effectRangeSize);
+                                     effectProgress, foreground, effectRangeStart, effectRangeSize);
                     rt->SetTransform(previous);
                 } else {
-                    drawLyricOverlay(layout, effectLine, x, bases[i], textW, textH, true,
-                                      opacity, effectProgress, foreground,
-                                      effectRangeStart, effectRangeSize);
+                    drawLyricOverlay(layout, effectLine, x, bases[i], textW, textH, true, opacity,
+                                     effectProgress, foreground, effectRangeStart, effectRangeSize);
                 }
             }
         };
@@ -8041,39 +6251,31 @@ struct TaskbarHost::Impl {
             for (int i = 0; i < count; ++i)
                 rt->DrawBitmap(fxBmp,
                                D2D1::RectF(x - textFxPad, bases[i] - textFxPad,
-                                           x - textFxPad + textFxW,
-                                           bases[i] - textFxPad + textFxH),
+                                           x - textFxPad + textFxW, bases[i] - textFxPad + textFxH),
                                opacity, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         } else {
-            static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
-                                                  {0.7071f, 0.7071f},
-                                                  {0.0f, 1.0f},
-                                                  {-0.7071f, 0.7071f},
-                                                  {-1.0f, 0.0f},
-                                                  {-0.7071f, -0.7071f},
-                                                  {0.0f, -1.0f},
-                                                  {0.7071f, -0.7071f}};
+            static constexpr float kDirs[8][2] = {
+                {1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
+                {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
             if (glow || outline) {
                 for (int i = 0; i < count; ++i) {
                     if (glow) {
                         for (auto& d : kDirs)
                             if (rotated)
-                                drawRotatedLayout(x + d[0] * 2.4f,
-                                                  bases[i] + d[1] * 2.4f, glow);
+                                drawRotatedLayout(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f, glow);
                             else
                                 rt->DrawTextLayout(
-                                    D2D1::Point2F(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f),
-                                    layout, glow);
+                                    D2D1::Point2F(x + d[0] * 2.4f, bases[i] + d[1] * 2.4f), layout,
+                                    glow);
                     }
                     if (outline) {
                         for (auto& d : kDirs)
                             if (rotated)
-                                drawRotatedLayout(x + d[0] * 1.2f,
-                                                  bases[i] + d[1] * 1.2f, outline);
+                                drawRotatedLayout(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f, outline);
                             else
                                 rt->DrawTextLayout(
-                                    D2D1::Point2F(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f),
-                                    layout, outline);
+                                    D2D1::Point2F(x + d[0] * 1.2f, bases[i] + d[1] * 1.2f), layout,
+                                    outline);
                     }
                 }
             }
@@ -8115,14 +6317,12 @@ struct TaskbarHost::Impl {
     }
 
     void drawVerticalLyricParts(const std::vector<VerticalLyricPart>& parts, float blockH,
-                                float areaH, float railW, float y, float offset,
-                                ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
-                                ID2D1Brush* glow = nullptr,
-                                ID2D1Brush* karaokeBrush = nullptr,
-                                float karaokeProgress = 0.0f, float opacity = 1.0f,
-                                bool singleCopy = false, float topExtend = 0.0f,
-                                float bottomExtend = 0.0f, bool constantEdgeFade = false,
-                                float slotY = -1.0f) {
+                                float areaH, float railW, float y, float offset, ID2D1Brush* brush,
+                                ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
+                                ID2D1Brush* karaokeBrush = nullptr, float karaokeProgress = 0.0f,
+                                float opacity = 1.0f, bool singleCopy = false,
+                                float topExtend = 0.0f, float bottomExtend = 0.0f,
+                                bool constantEdgeFade = false, float slotY = -1.0f) {
         auto* rt = drawTarget();
         if (!rt || parts.empty() || blockH <= 0.0f || areaH <= 0.0f)
             return;
@@ -8136,34 +6336,29 @@ struct TaskbarHost::Impl {
         const float topExt = fades.borrow && fades.borrowAtTop ? topExtend : 0.0f;
         const float bottomExt = fades.borrow && !fades.borrowAtTop ? bottomExtend : 0.0f;
         ID2D1LinearGradientBrush* borrowFade =
-            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_
+            (topExt > 0.0f || bottomExt > 0.0f) && lyricRightFadeLayer_.Get()
                 ? verticalBorrowFadeBrush(fades.borrowAtTop ? slotTop : slotTop + areaH,
-                                          fades.borrowAtTop ? topExt : bottomExt,
-                                          fades.borrowAtTop)
+                                          fades.borrowAtTop ? topExt : bottomExt, fades.borrowAtTop)
                 : nullptr;
         ID2D1LinearGradientBrush* outFade =
-            fades.outBand > 0.0f && lyricEdgeFadeLayer_
-                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH,
-                                       fades.outBand, fades.outAtTop)
+            fades.outBand > 0.0f && lyricEdgeFadeLayer_.Get()
+                ? verticalOutFadeBrush(fades.outAtTop ? slotTop : slotTop + areaH, fades.outBand,
+                                       fades.outAtTop)
                 : nullptr;
         const D2D1_RECT_F clip{0.0f, slotTop - topExt, railW, slotTop + areaH + bottomExt};
         bool pushedBorrow = false;
         bool pushedOut = false;
         bool pushedClip = false;
         if (borrowFade) {
-            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
-                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                 borrowFade),
-                          lyricRightFadeLayer_);
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f, borrowFade),
+                          lyricRightFadeLayer_.Get());
             pushedBorrow = true;
         }
         if (outFade) {
-            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr,
-                                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::Matrix3x2F::Identity(), 1.0f,
-                                                 outFade),
-                          lyricEdgeFadeLayer_);
+            rt->PushLayer(D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                 D2D1::Matrix3x2F::Identity(), 1.0f, outFade),
+                          lyricEdgeFadeLayer_.Get());
             pushedOut = true;
         }
         if (!pushedBorrow && !pushedOut) {
@@ -8176,30 +6371,33 @@ struct TaskbarHost::Impl {
         const float loopH = blockH + kVerticalLyricGap;
         const int copyCount = karaokeBrush || singleCopy || blockH <= areaH ? 1 : 2;
         const float base = y + offset;
-        const int effectLine = &parts == &verticalLyricParts_ ? lyricEffectLayoutLine_
-            : &parts == &outgoingVerticalLyricParts_ ? outgoingLyricEffectLine_ : -1;
+        const int effectLine = &parts == &typesetter_.resources().verticalLyricParts_
+                                   ? lyricEffectLayoutLine_
+                               : &parts == &typesetter_.resources().outgoingVerticalLyricParts_
+                                   ? outgoingLyricEffectLine_
+                                   : -1;
         for (int copy = 0; copy < copyCount; ++copy) {
             float partTop = base - copy * loopH;
             float partOffset = 0.0f;
             for (const auto& part : parts) {
-                if (!part.layout || part.width <= 0.0f || part.height <= 0.0f)
+                if (!part.layout.Get() || part.width <= 0.0f || part.height <= 0.0f)
                     continue;
 
                 float partProgress = 0.0f;
                 if (karaokeBrush) {
-                    partProgress = std::clamp((sungExtent - partOffset) / part.height,
-                                              0.0f, 1.0f);
+                    partProgress = std::clamp((sungExtent - partOffset) / part.height, 0.0f, 1.0f);
                 }
                 ID2D1Brush* partKaraoke =
                     karaokeBrush && partProgress > 0.0f ? karaokeBrush : nullptr;
                 const float partX = part.rotated ? (railW - part.width) * 0.5f : 0.0f;
-                drawVerticalScrollingText(
-                    part.layout, part.width, part.height, areaH, partX, partTop, 0.0f, brush,
-                    outline, glow, partKaraoke, partProgress, opacity, LyricAlignment::Center,
-                    true, part.rotated, 0.0f, 0.0f, false, true, -1.0f,
-                    effectLine, partOffset / blockH, part.height / blockH,
-                    lyricEffects_ == 0 ? 0.0f
-                        : karaokeBrush ? karaokeProgress : lyricEffectProgress(effectLine));
+                drawVerticalScrollingText(part.layout.Get(), part.width, part.height, areaH, partX,
+                                          partTop, 0.0f, brush, outline, glow, partKaraoke,
+                                          partProgress, opacity, LyricAlignment::Center, true,
+                                          part.rotated, 0.0f, 0.0f, false, true, -1.0f, effectLine,
+                                          partOffset / blockH, part.height / blockH,
+                                          lyricEffects_ == 0 ? 0.0f
+                                          : karaokeBrush     ? karaokeProgress
+                                                             : lyricEffectProgress(effectLine));
                 partTop += part.height;
                 partOffset += part.height;
             }
@@ -8220,34 +6418,31 @@ struct TaskbarHost::Impl {
 
         const float areaH = layout.lyricBottom - layout.lyricY;
         const bool idleScene = scene_ == DisplayScene::Idle;
-        ID2D1Brush* primaryBrush = idleScene
-                                       ? static_cast<ID2D1Brush*>(brushText_)
-                                       : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
-                                                                               : brushText_);
-        const bool outgoingIdleScene = outgoingScene_ == DisplayScene::Idle;
-        ID2D1Brush* outgoingBrush = outgoingIdleScene
-                                        ? static_cast<ID2D1Brush*>(brushText_)
-                                        : primaryBrush;
+        ID2D1Brush* primaryBrush =
+            idleScene ? static_cast<ID2D1Brush*>(brushText_.Get())
+                      : static_cast<ID2D1Brush*>(brushLyric_.Get() ? brushLyric_.Get()
+                                                                   : brushText_.Get());
+        const bool outgoingIdleScene = transition_.outgoingScene() == DisplayScene::Idle;
+        ID2D1Brush* outgoingBrush =
+            outgoingIdleScene ? static_cast<ID2D1Brush*>(brushText_.Get()) : primaryBrush;
         ID2D1Brush* effectOutline = !idleScene && lyricOutline_
-                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_.Get())
                                         : nullptr;
-        ID2D1Brush* effectGlow = !idleScene && lyricGlow_
-                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_)
-                                     : nullptr;
+        ID2D1Brush* effectGlow =
+            !idleScene && lyricGlow_ ? static_cast<ID2D1Brush*>(brushLyricGlow_.Get()) : nullptr;
         ID2D1Brush* outgoingOutline = !outgoingIdleScene && lyricOutline_
-                                          ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                          ? static_cast<ID2D1Brush*>(brushLyricOutline_.Get())
                                           : nullptr;
         ID2D1Brush* outgoingGlow = !outgoingIdleScene && lyricGlow_
-                                       ? static_cast<ID2D1Brush*>(brushLyricGlow_)
+                                       ? static_cast<ID2D1Brush*>(brushLyricGlow_.Get())
                                        : nullptr;
         const LyricAlignment alignment = LyricAlignment::Center;
 
         auto drawLine = [&](IDWriteTextLayout* textLayout,
-                            const std::vector<VerticalLyricPart>* parts, float textW,
-                            float textH, float y, float offset, ID2D1Brush* brush, float opacity,
-                            bool singleCopy, bool rotated, ID2D1Brush* outline,
-                            ID2D1Brush* glow, ID2D1Brush* karaokeBrush,
-                            float karaokeProgress, bool constantFade) {
+                            const std::vector<VerticalLyricPart>* parts, float textW, float textH,
+                            float y, float offset, ID2D1Brush* brush, float opacity,
+                            bool singleCopy, bool rotated, ID2D1Brush* outline, ID2D1Brush* glow,
+                            ID2D1Brush* karaokeBrush, float karaokeProgress, bool constantFade) {
             // 滚入侧借位宽度：与竖排各区间距一致（封面与歌词间、歌词与底部/控件间
             // 均为 6 dip 或窗口边缘内边距），渐隐带不外溢到封面/控件上。
             // slotY 始终传歌词槽顶：转场期间 y 随动画移动，但裁剪/渐隐锚定歌词槽
@@ -8268,49 +6463,49 @@ struct TaskbarHost::Impl {
         };
 
         auto verticalKaraokeProgress = [&](float karaokeX) {
-            return lyricWidth_ > 0.0f
-                       ? std::clamp(karaokeX / lyricWidth_, 0.0f, 1.0f)
-                       : 0.0f;
+            return lyricWidth_ > 0.0f ? std::clamp(karaokeX / lyricWidth_, 0.0f, 1.0f) : 0.0f;
         };
 
         // 不再使用整段统一裁剪：各绘制路径自带裁剪/渐隐图层，滚入侧借位内容
         // 需要画出可视槽之外才能形成渐隐带
         if (isLyricTransitionActive() &&
-            (outgoingVerticalLyricLayout_ || !outgoingVerticalLyricParts_.empty())) {
+            (typesetter_.resources().outgoingVerticalLyricLayout_.Get() ||
+             !typesetter_.resources().outgoingVerticalLyricParts_.empty())) {
             const LyricTransitionSample transition = lyricTransitionSample();
             const float travel = std::clamp(areaH * 0.24f, 18.0f, 48.0f);
-            const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+            const float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
             const float oldY = layout.lyricY - direction * travel * transition.movement;
-            const float newY = layout.lyricY + direction * travel *
-                                                         (1.0f - transition.movement);
-            drawLine(outgoingVerticalLyricLayout_, &outgoingVerticalLyricParts_,
-                     outgoingVerticalLyricWidth_,
-                     outgoingVerticalLyricHeight_, oldY, outgoingLyricScrollOffset_,
-                     outgoingBrush, 1.0f - transition.fadeOut, true,
-                     outgoingVerticalLyricRotated_, outgoingOutline, outgoingGlow, nullptr,
-                     0.0f, outgoingIdleScene);
+            const float newY = layout.lyricY + direction * travel * (1.0f - transition.movement);
+            drawLine(typesetter_.resources().outgoingVerticalLyricLayout_.Get(),
+                     &typesetter_.resources().outgoingVerticalLyricParts_,
+                     outgoingVerticalLyricWidth_, outgoingVerticalLyricHeight_, oldY,
+                     outgoingLyricScrollOffset_, outgoingBrush, 1.0f - transition.fadeOut, true,
+                     outgoingVerticalLyricRotated_, outgoingOutline, outgoingGlow, nullptr, 0.0f,
+                     outgoingIdleScene);
 
             const LyricLine* incomingLine = !idleScene ? karaokeLine() : nullptr;
-            const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
-            const float incomingKaraokeX = incomingKaraoke ? karaokeSmoothStep(*incomingLine)
-                                                           : 0.0f;
-            drawLine(verticalLyricLayout_, &verticalLyricParts_, verticalLyricWidth_,
-                     verticalLyricHeight_, newY,
-                     lyricScrollOffset_,
-                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
+            const bool incomingKaraoke = incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
+            const float incomingKaraokeX =
+                incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
+            drawLine(typesetter_.resources().verticalLyricLayout_.Get(),
+                     &typesetter_.resources().verticalLyricParts_, verticalLyricWidth_,
+                     verticalLyricHeight_, newY, lyricScrollOffset_,
+                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                     : primaryBrush,
                      transition.fadeIn, true, verticalLyricRotated_, effectOutline, effectGlow,
-                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+                     incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_.Get()) : nullptr,
                      verticalKaraokeProgress(incomingKaraokeX), idleScene);
-        } else if (verticalLyricLayout_ || !verticalLyricParts_.empty()) {
+        } else if (typesetter_.resources().verticalLyricLayout_.Get() ||
+                   !typesetter_.resources().verticalLyricParts_.empty()) {
             const LyricLine* currentLine = !idleScene ? karaokeLine() : nullptr;
-            const bool karaoke = currentLine && brushLyric_ && brushLyricDim_;
+            const bool karaoke = currentLine && brushLyric_.Get() && brushLyricDim_.Get();
             const float karaokeX = karaoke ? karaokeSmoothStep(*currentLine) : 0.0f;
-            drawLine(verticalLyricLayout_, &verticalLyricParts_, verticalLyricWidth_,
-                     verticalLyricHeight_,
-                     layout.lyricY, lyricScrollOffset_,
-                     karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
-                     1.0f, false, verticalLyricRotated_, effectOutline, effectGlow,
-                     karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+            drawLine(typesetter_.resources().verticalLyricLayout_.Get(),
+                     &typesetter_.resources().verticalLyricParts_, verticalLyricWidth_,
+                     verticalLyricHeight_, layout.lyricY, lyricScrollOffset_,
+                     karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : primaryBrush, 1.0f,
+                     false, verticalLyricRotated_, effectOutline, effectGlow,
+                     karaoke ? static_cast<ID2D1Brush*>(brushLyric_.Get()) : nullptr,
                      verticalKaraokeProgress(karaokeX), idleScene);
         }
     }
@@ -8318,22 +6513,20 @@ struct TaskbarHost::Impl {
     LyricAlignment activeLyricAlignment() const {
         if (scene_ == DisplayScene::Idle)
             return idleQuoteAlignment_;
-        return isExpandedView() ? LyricAlignment::Center
-                                                        : lyricAlignment_;
+        return isExpandedView() ? LyricAlignment::Center : lyricAlignment_;
     }
 
     LyricAlignment lyricAlignmentForScene(DisplayScene scene) const {
         if (scene == DisplayScene::Idle)
             return idleQuoteAlignment_;
-        return isExpandedView() ? LyricAlignment::Center
-                                                        : lyricAlignment_;
+        return isExpandedView() ? LyricAlignment::Center : lyricAlignment_;
     }
 
-    void drawLyricScrollingTextAligned(
-        IDWriteTextLayout* layout, float textW, float textH, float areaW, float x, float y,
-        float offset, ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow,
-        ID2D1Brush* karaokeBrush, float karaokeX, float opacity, LyricAlignment alignment,
-        bool singleCopy = false) {
+    void drawLyricScrollingTextAligned(IDWriteTextLayout* layout, float textW, float textH,
+                                       float areaW, float x, float y, float offset,
+                                       ID2D1Brush* brush, ID2D1Brush* outline, ID2D1Brush* glow,
+                                       ID2D1Brush* karaokeBrush, float karaokeX, float opacity,
+                                       LyricAlignment alignment, bool singleCopy = false) {
         // 左缘渐隐宽度分场景：歌曲信息可见时用与分隔间距一致的 8 dip，且渐隐始终
         // 在歌词区域内，文字不会画进信息区；信息区隐藏时用默认宽度
         const float leftFadeDip =
@@ -8342,26 +6535,24 @@ struct TaskbarHost::Impl {
         // 每日一言与歌曲信息同属内容确定的无限循环跑马灯，是否滚动在内容确定时
         // 已知，渐隐恒定保持，避免每轮循环绕回时左缘渐隐消失再出现
         drawScrollingText(layout, textW, textH, areaW, x, y, offset, brush, outline, glow,
-                          karaokeBrush, karaokeX, opacity, alignment, singleCopy,
-                          kTextPadding, scene_ == DisplayScene::Idle, leftFadeDip,
-                          centerAnchor);
+                          karaokeBrush, karaokeX, opacity, alignment, singleCopy, kTextPadding,
+                          scene_ == DisplayScene::Idle, leftFadeDip, centerAnchor);
     }
 
-    void drawLyricScrollingText(IDWriteTextLayout* layout, float textW, float textH,
-                                float areaW, float x, float y, float offset, ID2D1Brush* brush,
+    void drawLyricScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
+                                float x, float y, float offset, ID2D1Brush* brush,
                                 ID2D1Brush* outline = nullptr, ID2D1Brush* glow = nullptr,
                                 ID2D1Brush* karaokeBrush = nullptr, float karaokeX = 0.0f,
                                 float opacity = 1.0f, bool singleCopy = false) {
         drawLyricScrollingTextAligned(layout, textW, textH, areaW, x, y, offset, brush, outline,
-                                      glow, karaokeBrush, karaokeX, opacity,
-                                      activeLyricAlignment(), singleCopy);
+                                      glow, karaokeBrush, karaokeX, opacity, activeLyricAlignment(),
+                                      singleCopy);
     }
 
-    void drawScaledScrollingText(IDWriteTextLayout* layout, float textW, float textH,
-                                 float areaW, float x, float y, float offset, ID2D1Brush* brush,
-                                 float opacity, float scale, ID2D1Brush* outline = nullptr,
-                                 ID2D1Brush* glow = nullptr,
-                                 ID2D1Brush* karaokeBrush = nullptr,
+    void drawScaledScrollingText(IDWriteTextLayout* layout, float textW, float textH, float areaW,
+                                 float x, float y, float offset, ID2D1Brush* brush, float opacity,
+                                 float scale, ID2D1Brush* outline = nullptr,
+                                 ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
                                  float karaokeX = 0.0f, bool singleCopy = false,
                                  float visibleW = 0.0f) {
         auto* rt = drawTarget();
@@ -8384,9 +6575,13 @@ struct TaskbarHost::Impl {
         // 外层裁剪先在最终窗口坐标中固定下来，再缩放文字。否则裁剪矩形会和文字
         // 一起围绕任务栏中心缩放；沉浸 / Dock 的歌词安全区左右不对称时，右边界
         // 会短暂移入频谱、时钟和控件区域，转场结束恢复普通裁剪时形成闪烁。
-        const int effectLine = layout == lyricLayout_ ? lyricEffectLayoutLine_
-            : layout == outgoingLyricLayout_ ? outgoingLyricEffectLine_ : -1;
-        const float starPad = lyricStarEnabled(effectLine) ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
+        const int effectLine = layout == typesetter_.resources().lyricLayout_.Get()
+                                   ? lyricEffectLayoutLine_
+                               : layout == typesetter_.resources().outgoingLyricLayout_.Get()
+                                   ? outgoingLyricEffectLine_
+                                   : -1;
+        const float starPad =
+            lyricStarEnabled(effectLine) ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
         const float textShift = lyricStarTextShift(layout);
         const D2D1_RECT_F safeClip =
             D2D1::RectF(x, y - starPad, x + areaW + kTextPadding, y + textH + textShift);
@@ -8398,58 +6593,53 @@ struct TaskbarHost::Impl {
         rt->GetTransform(&previous);
         rt->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, anchor) * previous);
         drawLyricScrollingText(layout, textW, textH, drawW, x, y, offset, brush, outline, glow,
-                                karaokeBrush, karaokeX, opacity, singleCopy);
+                               karaokeBrush, karaokeX, opacity, singleCopy);
         rt->SetTransform(previous);
         rt->PopAxisAlignedClip();
     }
 
     void drawDoubleLineLyrics(float lyricAreaX, float lyricAreaW, float h,
                               ID2D1Brush* primaryBrush) {
-        if (!lyricLayout_)
+        if (!typesetter_.resources().lyricLayout_.Get())
             return;
 
-        const float lyricBlockH = lyricHeight_ +
-                                  (nextLyricLayout_
-                                       ? kLyricPreviewGap + nextLyricHeight_
-                                       : 0.0f);
+        const float lyricBlockH = lyricHeight_ + (typesetter_.resources().nextLyricLayout_.Get()
+                                                      ? kLyricPreviewGap + nextLyricHeight_
+                                                      : 0.0f);
         const float coreY = h * 0.5f - lyricBlockH * 0.5f;
-        ID2D1Brush* coreBrush = primaryBrush
-                                    ? primaryBrush
-                                    : brushLyric_ ? static_cast<ID2D1Brush*>(brushLyric_)
-                                                  : static_cast<ID2D1Brush*>(brushText_);
-        ID2D1Brush* previewBrush = brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                                 : static_cast<ID2D1Brush*>(brushDim_);
+        ID2D1Brush* coreBrush = primaryBrush        ? primaryBrush
+                                : brushLyric_.Get() ? static_cast<ID2D1Brush*>(brushLyric_.Get())
+                                                    : static_cast<ID2D1Brush*>(brushText_.Get());
+        ID2D1Brush* previewBrush = brushLyricDim_.Get()
+                                       ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                       : static_cast<ID2D1Brush*>(brushDim_.Get());
         ID2D1Brush* effectOutline = scene_ != DisplayScene::Idle && lyricOutline_
-                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_.Get())
                                         : nullptr;
         ID2D1Brush* effectGlow = scene_ != DisplayScene::Idle && lyricGlow_
-                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_)
+                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_.Get())
                                      : nullptr;
-        if (isLyricTransitionActive() && outgoingLyricLayout_) {
+        if (isLyricTransitionActive() && typesetter_.resources().outgoingLyricLayout_.Get()) {
             const LyricTransitionSample transition = lyricTransitionSample();
             const float movementT = transition.movement;
-            float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
-                                       ? outgoingLyricBlockHeight_
-                                       : outgoingLyricHeight_;
+            float outgoingBlockH =
+                outgoingLyricBlockHeight_ > 0.0f ? outgoingLyricBlockHeight_ : outgoingLyricHeight_;
             float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
             float travel = std::max(outgoingLyricHeight_, lyricHeight_) + kLyricPreviewGap;
-            float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+            float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
             float oldShift = -direction * travel * movementT;
             float incomingStartY = direction > 0.0f
                                        ? outgoingY + outgoingLyricHeight_ + kLyricPreviewGap
                                        : coreY - travel;
             float incomingY = incomingStartY + (coreY - incomingStartY) * movementT;
             const LyricLine* incomingLine = karaokeLine();
-            bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+            bool incomingKaraoke = incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
             ID2D1Brush* incomingBrush =
-                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : coreBrush;
-            float incomingProgX =
-                incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
-            float incomingScale = kLyricPreviewScale +
-                                  (1.0f - kLyricPreviewScale) * movementT;
+                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : coreBrush;
+            float incomingProgX = incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
+            float incomingScale = kLyricPreviewScale + (1.0f - kLyricPreviewScale) * movementT;
             // y 是主字号布局的位置；缩小时校正半个缩放差，使视觉中心跟随位移而不跳动。
-            float scaledIncomingY =
-                incomingY - lyricHeight_ * (1.0f - incomingScale) * 0.5f;
+            float scaledIncomingY = incomingY - lyricHeight_ * (1.0f - incomingScale) * 0.5f;
 
             // 超出部分的消失与第二行上移同步：转场起点取预览期实际可见的右边界
             // （预览放得下=整行可见；放不下=预览渐隐位置，均换算到核心行文本坐标），
@@ -8463,44 +6653,45 @@ struct TaskbarHost::Impl {
             }
 
             // 下一行在转场前已经位于核心行下方；转场从这个位置接入核心，避免跳变。
-            drawLyricScrollingText(outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_,
-                                   lyricAreaW, lyricAreaX, outgoingY + oldShift,
-                                   outgoingLyricScrollOffset_, coreBrush,
-                                   effectOutline, effectGlow, nullptr, 0.0f,
+            drawLyricScrollingText(typesetter_.resources().outgoingLyricLayout_.Get(),
+                                   outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
+                                   lyricAreaX, outgoingY + oldShift, outgoingLyricScrollOffset_,
+                                   coreBrush, effectOutline, effectGlow, nullptr, 0.0f,
                                    1.0f - transition.fadeOut);
-            if (!outgoingDoubleLine_ && outgoingSecondaryLayout_)
-                drawLyricScrollingText(
-                    outgoingSecondaryLayout_, outgoingSecondaryWidth_, outgoingSecondaryHeight_,
-                    lyricAreaW, lyricAreaX,
-                    outgoingY + outgoingLyricHeight_ + 1.0f + oldShift,
-                    outgoingSecondaryScrollOffset_, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                    1.0f - transition.fadeOut);
+            if (!transition_.outgoingDoubleLine() &&
+                typesetter_.resources().outgoingSecondaryLayout_.Get())
+                drawLyricScrollingText(typesetter_.resources().outgoingSecondaryLayout_.Get(),
+                                       outgoingSecondaryWidth_, outgoingSecondaryHeight_,
+                                       lyricAreaW, lyricAreaX,
+                                       outgoingY + outgoingLyricHeight_ + 1.0f + oldShift,
+                                       outgoingSecondaryScrollOffset_, brushDim_.Get(), nullptr,
+                                       nullptr, nullptr, 0.0f, 1.0f - transition.fadeOut);
             drawScaledScrollingText(
-                lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, scaledIncomingY,
-                lyricScrollOffset_, incomingBrush,
+                typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_, lyricAreaW,
+                lyricAreaX, scaledIncomingY, lyricScrollOffset_, incomingBrush,
                 kLyricPreviewOpacity + (1.0f - kLyricPreviewOpacity) * transition.fadeIn,
-                incomingScale,
-                effectOutline, effectGlow,
-                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr,
+                incomingScale, effectOutline, effectGlow,
+                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_.Get()) : nullptr,
                 incomingProgX, true, incomingVisibleW);
             return;
         }
 
         // 核心行仍保留原有逐字高亮；下一行只作为低透明度预览，不参与逐字填充。
         const LyricLine* curLine = karaokeLine();
-        bool karaoke = curLine && brushLyric_ && brushLyricDim_;
+        bool karaoke = curLine && brushLyric_.Get() && brushLyricDim_.Get();
         float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
-        drawLyricScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
-                               coreY, lyricScrollOffset_,
-                               karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : coreBrush,
-                               effectOutline, effectGlow,
-                               karaoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr, progX);
+        drawLyricScrollingText(
+            typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_, lyricAreaW,
+            lyricAreaX, coreY, lyricScrollOffset_,
+            karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : coreBrush, effectOutline,
+            effectGlow, karaoke ? static_cast<ID2D1Brush*>(brushLyric_.Get()) : nullptr, progX);
 
-        if (nextLyricLayout_) {
+        if (typesetter_.resources().nextLyricLayout_.Get()) {
             float nextY = coreY + lyricHeight_ + kLyricPreviewGap;
-            drawLyricScrollingText(nextLyricLayout_, nextLyricWidth_, nextLyricHeight_, lyricAreaW,
-                                   lyricAreaX, nextY, 0.0f, previewBrush, nullptr, nullptr, nullptr,
-                                   0.0f, kLyricPreviewOpacity);
+            drawLyricScrollingText(typesetter_.resources().nextLyricLayout_.Get(), nextLyricWidth_,
+                                   nextLyricHeight_, lyricAreaW, lyricAreaX, nextY, 0.0f,
+                                   previewBrush, nullptr, nullptr, nullptr, 0.0f,
+                                   kLyricPreviewOpacity);
         }
     }
 
@@ -8509,25 +6700,30 @@ struct TaskbarHost::Impl {
     void drawSceneTransition(float w, float lyricAreaX, float lyricAreaW, float h,
                              float lyricBlockH) {
         auto* rt = drawTarget();
-        if (!rt || !lyricLayout_ || !outgoingLyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
+        if (!rt || !typesetter_.resources().lyricLayout_.Get() ||
+            !typesetter_.resources().outgoingLyricLayout_.Get() || lastPxW_ <= 0 || lastPxH_ <= 0)
             return;
 
-        const int outgoingPxW = sceneTransitionFromPxW_ > 0 ? sceneTransitionFromPxW_
-                                                            : lastLogicalPxW_;
-        const int outgoingPxH = sceneTransitionFromPxH_ > 0 ? sceneTransitionFromPxH_
-                                                            : lastLogicalPxH_;
-        const LyricArea outgoingArea = lyricAreaForScene(outgoingScene_, outgoingPxW,
-                                                         outgoingPxH);
+        const int outgoingPxW =
+            transition_.fromWidth() > 0 ? transition_.fromWidth() : lastLogicalPxW_;
+        const int outgoingPxH =
+            transition_.fromHeight() > 0 ? transition_.fromHeight() : lastLogicalPxH_;
+        const LyricArea outgoingArea =
+            lyricAreaForScene(transition_.outgoingScene(), outgoingPxW, outgoingPxH);
         const LyricTransitionSample transition = lyricTransitionSample();
         const float movementT = transition.movement;
-        const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
-        const bool incomingDoubleLine = useDoubleLineLyrics() && nextLyricLayout_;
+        const float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
+        const bool incomingDoubleLine =
+            useDoubleLineLyrics() && typesetter_.resources().nextLyricLayout_.Get();
         const float incomingBlockH =
             incomingDoubleLine ? lyricHeight_ + kLyricPreviewGap + nextLyricHeight_ : lyricBlockH;
         const float outgoingPreviewH =
-            outgoingDoubleLine_ && outgoingNextLyricLayout_
+            transition_.outgoingDoubleLine() &&
+                    typesetter_.resources().outgoingNextLyricLayout_.Get()
                 ? kLyricPreviewGap + outgoingNextLyricHeight_
-                : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
+            : typesetter_.resources().outgoingSecondaryLayout_.Get()
+                ? 1.0f + outgoingSecondaryHeight_
+                : 0.0f;
         const float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
                                          ? outgoingLyricBlockHeight_
                                          : outgoingLyricHeight_ + outgoingPreviewH;
@@ -8539,70 +6735,73 @@ struct TaskbarHost::Impl {
 
         auto primaryBrushForScene = [this](DisplayScene scene) -> ID2D1Brush* {
             if (scene == DisplayScene::Idle)
-                return brushText_;
-            return brushLyric_ ? static_cast<ID2D1Brush*>(brushLyric_)
-                               : static_cast<ID2D1Brush*>(brushText_);
+                return brushText_.Get();
+            return brushLyric_.Get() ? static_cast<ID2D1Brush*>(brushLyric_.Get())
+                                     : static_cast<ID2D1Brush*>(brushText_.Get());
         };
-        const bool outgoingEffects = outgoingScene_ != DisplayScene::Idle;
+        const bool outgoingEffects = transition_.outgoingScene() != DisplayScene::Idle;
         const bool incomingEffects = scene_ != DisplayScene::Idle;
-        ID2D1Brush* outgoingBrush = primaryBrushForScene(outgoingScene_);
+        ID2D1Brush* outgoingBrush = primaryBrushForScene(transition_.outgoingScene());
         ID2D1Brush* incomingBrush = primaryBrushForScene(scene_);
-        ID2D1Brush* outgoingOutline = outgoingEffects && lyricOutline_ ? brushLyricOutline_ : nullptr;
-        ID2D1Brush* outgoingGlow = outgoingEffects && lyricGlow_ ? brushLyricGlow_ : nullptr;
-        ID2D1Brush* incomingOutline = incomingEffects && lyricOutline_ ? brushLyricOutline_ : nullptr;
-        ID2D1Brush* incomingGlow = incomingEffects && lyricGlow_ ? brushLyricGlow_ : nullptr;
+        ID2D1Brush* outgoingOutline =
+            outgoingEffects && lyricOutline_ ? brushLyricOutline_.Get() : nullptr;
+        ID2D1Brush* outgoingGlow = outgoingEffects && lyricGlow_ ? brushLyricGlow_.Get() : nullptr;
+        ID2D1Brush* incomingOutline =
+            incomingEffects && lyricOutline_ ? brushLyricOutline_.Get() : nullptr;
+        ID2D1Brush* incomingGlow = incomingEffects && lyricGlow_ ? brushLyricGlow_.Get() : nullptr;
 
         const LyricLine* incomingLine = scene_ == DisplayScene::Lyrics ? karaokeLine() : nullptr;
-        const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
+        const bool incomingKaraoke = incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
         if (incomingKaraoke)
-            incomingBrush = brushLyricDim_;
+            incomingBrush = brushLyricDim_.Get();
         const float incomingProgX = incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
 
-        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, h),
-                                D2D1_ANTIALIAS_MODE_ALIASED);
+        rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, h), D2D1_ANTIALIAS_MODE_ALIASED);
         drawLyricScrollingTextAligned(
-            outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, outgoingArea.w,
-            outgoingArea.x, outgoingY + oldShift, outgoingLyricScrollOffset_, outgoingBrush,
-            outgoingOutline, outgoingGlow, nullptr, 0.0f, 1.0f - transition.fadeOut,
-            lyricAlignmentForScene(outgoingScene_));
-        if (outgoingDoubleLine_ && outgoingNextLyricLayout_) {
-            ID2D1Brush* previewBrush = brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                                     : static_cast<ID2D1Brush*>(brushDim_);
+            typesetter_.resources().outgoingLyricLayout_.Get(), outgoingLyricWidth_,
+            outgoingLyricHeight_, outgoingArea.w, outgoingArea.x, outgoingY + oldShift,
+            outgoingLyricScrollOffset_, outgoingBrush, outgoingOutline, outgoingGlow, nullptr, 0.0f,
+            1.0f - transition.fadeOut, lyricAlignmentForScene(transition_.outgoingScene()));
+        if (transition_.outgoingDoubleLine() &&
+            typesetter_.resources().outgoingNextLyricLayout_.Get()) {
+            ID2D1Brush* previewBrush = brushLyricDim_.Get()
+                                           ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                           : static_cast<ID2D1Brush*>(brushDim_.Get());
             drawLyricScrollingTextAligned(
-                outgoingNextLyricLayout_, outgoingNextLyricWidth_, outgoingNextLyricHeight_,
-                outgoingArea.w, outgoingArea.x,
-                outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f,
-                previewBrush, nullptr, nullptr, nullptr, 0.0f,
-                kLyricPreviewOpacity * (1.0f - transition.fadeOut),
-                lyricAlignmentForScene(outgoingScene_), true);
-        } else if (outgoingSecondaryLayout_) {
+                typesetter_.resources().outgoingNextLyricLayout_.Get(), outgoingNextLyricWidth_,
+                outgoingNextLyricHeight_, outgoingArea.w, outgoingArea.x,
+                outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f, previewBrush,
+                nullptr, nullptr, nullptr, 0.0f, kLyricPreviewOpacity * (1.0f - transition.fadeOut),
+                lyricAlignmentForScene(transition_.outgoingScene()), true);
+        } else if (typesetter_.resources().outgoingSecondaryLayout_.Get()) {
             drawLyricScrollingTextAligned(
-                outgoingSecondaryLayout_, outgoingSecondaryWidth_, outgoingSecondaryHeight_,
-                outgoingArea.w, outgoingArea.x,
-                outgoingY + outgoingLyricHeight_ + 1.0f + oldShift,
-                outgoingSecondaryScrollOffset_, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                1.0f - transition.fadeOut, lyricAlignmentForScene(outgoingScene_));
+                typesetter_.resources().outgoingSecondaryLayout_.Get(), outgoingSecondaryWidth_,
+                outgoingSecondaryHeight_, outgoingArea.w, outgoingArea.x,
+                outgoingY + outgoingLyricHeight_ + 1.0f + oldShift, outgoingSecondaryScrollOffset_,
+                brushDim_.Get(), nullptr, nullptr, nullptr, 0.0f, 1.0f - transition.fadeOut,
+                lyricAlignmentForScene(transition_.outgoingScene()));
         }
 
         drawLyricScrollingTextAligned(
-            lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, incomingY + newShift,
-            lyricScrollOffset_, incomingBrush, incomingOutline, incomingGlow,
-            incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_) : nullptr, incomingProgX,
-            transition.fadeIn, lyricAlignmentForScene(scene_), true);
+            typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_, lyricAreaW,
+            lyricAreaX, incomingY + newShift, lyricScrollOffset_, incomingBrush, incomingOutline,
+            incomingGlow, incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyric_.Get()) : nullptr,
+            incomingProgX, transition.fadeIn, lyricAlignmentForScene(scene_), true);
         if (incomingDoubleLine) {
-            ID2D1Brush* previewBrush = brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                                     : static_cast<ID2D1Brush*>(brushDim_);
+            ID2D1Brush* previewBrush = brushLyricDim_.Get()
+                                           ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                           : static_cast<ID2D1Brush*>(brushDim_.Get());
             drawLyricScrollingTextAligned(
-                nextLyricLayout_, nextLyricWidth_, nextLyricHeight_, lyricAreaW, lyricAreaX,
-                incomingY + lyricHeight_ + kLyricPreviewGap + newShift, 0.0f, previewBrush, nullptr,
-                nullptr, nullptr, 0.0f, kLyricPreviewOpacity * transition.fadeIn,
-                lyricAlignmentForScene(scene_), true);
-        } else if (secondaryLayout_) {
+                typesetter_.resources().nextLyricLayout_.Get(), nextLyricWidth_, nextLyricHeight_,
+                lyricAreaW, lyricAreaX, incomingY + lyricHeight_ + kLyricPreviewGap + newShift,
+                0.0f, previewBrush, nullptr, nullptr, nullptr, 0.0f,
+                kLyricPreviewOpacity * transition.fadeIn, lyricAlignmentForScene(scene_), true);
+        } else if (typesetter_.resources().secondaryLayout_.Get()) {
             drawLyricScrollingTextAligned(
-                secondaryLayout_, secondaryWidth_, secondaryHeight_, lyricAreaW, lyricAreaX,
-                incomingY + lyricHeight_ + 1.0f + newShift, secondaryScrollOffset_, brushDim_,
-                nullptr, nullptr, nullptr, 0.0f, transition.fadeIn,
-                lyricAlignmentForScene(scene_), true);
+                typesetter_.resources().secondaryLayout_.Get(), secondaryWidth_, secondaryHeight_,
+                lyricAreaW, lyricAreaX, incomingY + lyricHeight_ + 1.0f + newShift,
+                secondaryScrollOffset_, brushDim_.Get(), nullptr, nullptr, nullptr, 0.0f,
+                transition.fadeIn, lyricAlignmentForScene(scene_), true);
         }
         rt->PopAxisAlignedClip();
     }
@@ -8610,8 +6809,7 @@ struct TaskbarHost::Impl {
     void drawTransitionTextTo(ID2D1DeviceContext* rt, IDWriteTextLayout* layout, float textW,
                               float textH, float areaW, float x, float y, float offset,
                               ID2D1Brush* brush, ID2D1Brush* outline = nullptr,
-                              ID2D1Brush* glow = nullptr,
-                              ID2D1Brush* karaokeBrush = nullptr,
+                              ID2D1Brush* glow = nullptr, ID2D1Brush* karaokeBrush = nullptr,
                               float karaokeX = 0.0f, bool singleCopy = false) {
         if (!rt || !layout || !brush || areaW <= 0.0f)
             return;
@@ -8644,24 +6842,19 @@ struct TaskbarHost::Impl {
             bases[n++] = x - offset;
             bases[n++] = x - offset + loopW;
         }
-        static constexpr float kDirs[8][2] = {{1.0f, 0.0f},
-                                              {0.7071f, 0.7071f},
-                                              {0.0f, 1.0f},
-                                              {-0.7071f, 0.7071f},
-                                              {-1.0f, 0.0f},
-                                              {-0.7071f, -0.7071f},
-                                              {0.0f, -1.0f},
-                                              {0.7071f, -0.7071f}};
+        static constexpr float kDirs[8][2] = {
+            {1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
+            {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f}};
         for (int i = 0; i < n; ++i) {
             if (glow) {
                 for (auto& d : kDirs)
-                    rt->DrawTextLayout(
-                        D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f), layout, glow);
+                    rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f),
+                                       layout, glow);
             }
             if (outline) {
                 for (auto& d : kDirs)
-                    rt->DrawTextLayout(
-                        D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f), layout, outline);
+                    rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f),
+                                       layout, outline);
             }
         }
         for (int i = 0; i < n; ++i)
@@ -8677,8 +6870,11 @@ struct TaskbarHost::Impl {
 
     void drawLyricBlockSnapshot(ID2D1DeviceContext* dc, bool outgoing, float lyricAreaX,
                                 float lyricAreaW, float h) {
-        IDWriteTextLayout* main = outgoing ? outgoingLyricLayout_ : lyricLayout_;
-        IDWriteTextLayout* secondary = outgoing ? outgoingSecondaryLayout_ : secondaryLayout_;
+        IDWriteTextLayout* main = outgoing ? typesetter_.resources().outgoingLyricLayout_.Get()
+                                           : typesetter_.resources().lyricLayout_.Get();
+        IDWriteTextLayout* secondary = outgoing
+                                           ? typesetter_.resources().outgoingSecondaryLayout_.Get()
+                                           : typesetter_.resources().secondaryLayout_.Get();
         if (!main)
             return;
         const float mainW = outgoing ? outgoingLyricWidth_ : lyricWidth_;
@@ -8689,19 +6885,20 @@ struct TaskbarHost::Impl {
         const float blockH = mainH + gap + secondaryH;
         const float y = h * 0.5f - blockH * 0.5f;
         ID2D1Brush* mainBrush = scene_ == DisplayScene::Idle
-                                    ? static_cast<ID2D1Brush*>(brushText_)
-                                    : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
-                                                                            : brushText_);
+                                    ? static_cast<ID2D1Brush*>(brushText_.Get())
+                                    : static_cast<ID2D1Brush*>(
+                                          brushLyric_.Get() ? brushLyric_.Get() : brushText_.Get());
         float mainOffset = 0.0f;
         float secondaryOffset = 0.0f;
         ID2D1Brush* karaokeBrush = nullptr;
         float karaokeX = 0.0f;
         if (!outgoing) {
             const LyricLine* incomingLine = karaokeLine();
-            const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
-            mainBrush = incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : mainBrush;
+            const bool incomingKaraoke = incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
+            mainBrush =
+                incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : mainBrush;
             if (incomingKaraoke) {
-                karaokeBrush = brushLyric_;
+                karaokeBrush = brushLyric_.Get();
                 karaokeX = karaokeSmoothStep(*incomingLine);
             }
             mainOffset = lyricScrollOffset_;
@@ -8711,26 +6908,25 @@ struct TaskbarHost::Impl {
             secondaryOffset = outgoingSecondaryScrollOffset_;
         }
         ID2D1Brush* effectOutline = scene_ != DisplayScene::Idle && lyricOutline_
-                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_)
+                                        ? static_cast<ID2D1Brush*>(brushLyricOutline_.Get())
                                         : nullptr;
         ID2D1Brush* effectGlow = scene_ != DisplayScene::Idle && lyricGlow_
-                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_)
+                                     ? static_cast<ID2D1Brush*>(brushLyricGlow_.Get())
                                      : nullptr;
         drawTransitionTextTo(dc, main, mainW, mainH, lyricAreaW, lyricAreaX, y, mainOffset,
                              mainBrush, effectOutline, effectGlow, karaokeBrush, karaokeX,
                              !outgoing);
         if (secondary)
             drawTransitionTextTo(dc, secondary, secondaryW, secondaryH, lyricAreaW, lyricAreaX,
-                                 y + mainH + gap, secondaryOffset, brushDim_, nullptr, nullptr,
-                                 nullptr, 0.0f, !outgoing);
+                                 y + mainH + gap, secondaryOffset, brushDim_.Get(), nullptr,
+                                 nullptr, nullptr, 0.0f, !outgoing);
     }
 
     bool prepareLyricTransitionDComp(float lyricAreaX, float lyricAreaW, float h,
                                      float lyricBlockH) {
-        if (isVerticalTaskbar() || useDoubleLineLyrics() || outgoingDoubleLine_ ||
-            !isLyricTransitionActive() ||
-            !outgoingLyricLayout_ ||
-            !lyricLayout_ || lastPxW_ <= 0 || lastPxH_ <= 0)
+        if (isVerticalTaskbar() || useDoubleLineLyrics() || transition_.outgoingDoubleLine() ||
+            !isLyricTransitionActive() || !typesetter_.resources().outgoingLyricLayout_.Get() ||
+            !typesetter_.resources().lyricLayout_.Get() || lastPxW_ <= 0 || lastPxH_ <= 0)
             return false;
         if (!renderer.ensureLyricTransitionLayers(lastPxW_, lastPxH_, lastPxW_, lastPxH_))
             return false;
@@ -8750,11 +6946,11 @@ struct TaskbarHost::Impl {
             return false;
         }
 
-        const float outgoingGap = outgoingSecondaryLayout_ ? 1.0f : 0.0f;
-        const float outgoingBlockH =
-            outgoingLyricHeight_ + outgoingGap + outgoingSecondaryHeight_;
+        const float outgoingGap =
+            typesetter_.resources().outgoingSecondaryLayout_.Get() ? 1.0f : 0.0f;
+        const float outgoingBlockH = outgoingLyricHeight_ + outgoingGap + outgoingSecondaryHeight_;
         const float travel = std::max(lyricBlockH, outgoingBlockH) * scale();
-        const float direction = lyricTransitionDirection_ >= 0 ? 1.0f : -1.0f;
+        const float direction = transition_.direction() >= 0 ? 1.0f : -1.0f;
         const float durationSec = kLyricTransitionMs / 1000.0f;
         if (!renderer.animateLyricLayer(0, 0.0f, -direction * travel, 1.0f, 0.0f, durationSec))
             return false;
@@ -8776,8 +6972,7 @@ struct TaskbarHost::Impl {
         if (songContentTransition_ && songContentTransition_->compositorLayer)
             return;
         if ((isVerticalTaskbar() && isLyricDCompActive()) || isLyricDCompEndRequested() ||
-            (showControls && isLyricDCompActive()) ||
-            (isLyricDCompActive() && karaokeLine())) {
+            (showControls && isLyricDCompActive()) || (isLyricDCompActive() && karaokeLine())) {
             renderer.clearLyricTransitionLayers();
             clearLyricDCompState();
         }
@@ -8785,10 +6980,11 @@ struct TaskbarHost::Impl {
             return;
         // 逐字高亮需要每帧跟随真实播放位置；DComp 快照是静态位图，不能在入场期间
         // 更新填充边界，因此逐字歌词转场保留 D2D 路径，普通歌词仍使用合成器动画。
-        if (lyricTransitionKind_ != LyricTransitionKind::Scene &&
-            !isLyricDCompActive() && isLyricTransitionActive() && !useDoubleLineLyrics() &&
-            !outgoingDoubleLine_ &&
-            !karaokeLine() && outgoingLyricLayout_ && lyricLayout_) {
+        if (transition_.kind() != LyricTransitionKind::Scene && !isLyricDCompActive() &&
+            isLyricTransitionActive() && !useDoubleLineLyrics() &&
+            !transition_.outgoingDoubleLine() && !karaokeLine() &&
+            typesetter_.resources().outgoingLyricLayout_.Get() &&
+            typesetter_.resources().lyricLayout_.Get()) {
             if (!prepareLyricTransitionDComp(lyricAreaX, lyricAreaW, h, lyricBlockH)) {
                 renderer.clearLyricTransitionLayers();
                 clearLyricDCompState();
@@ -8799,8 +6995,7 @@ struct TaskbarHost::Impl {
     void drawHorizontalSongContent(ID2D1DeviceContext* contentRt, float w, float h, float leftW,
                                    float lyricAreaX, float lyricAreaW, float lyricBlockH,
                                    ID2D1Brush* primaryBrush, bool idleScene,
-                                   bool lyricEffectsEnabled, bool showControls,
-                                   bool showSpectrum) {
+                                   bool lyricEffectsEnabled, bool showControls, bool showSpectrum) {
         if (!contentRt)
             return;
 
@@ -8815,21 +7010,19 @@ struct TaskbarHost::Impl {
             if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
                 drawVinylCover(coverX, coverY, s);
             } else {
-                const D2D1_RECT_F coverRect =
-                    D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-                if (coverBmp && coverClip_ && coverLayer_) {
+                const D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
+                if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
                     contentRt->PushLayer(
-                        D2D1::LayerParameters1(
-                            D2D1::InfiniteRect(), coverClip_,
-                            D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                            D2D1::Matrix3x2F::Translation(coverX, coverY)),
-                        coverLayer_);
-                    contentRt->DrawBitmap(coverBmp, coverRect, 1.0f,
+                        D2D1::LayerParameters1(D2D1::InfiniteRect(), coverClip_.Get(),
+                                               D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                               D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                        coverLayer_.Get());
+                    contentRt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
                                           D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                     contentRt->PopLayer();
                 } else {
                     D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
-                    contentRt->FillRoundedRectangle(rr, brushDim_);
+                    contentRt->FillRoundedRectangle(rr, brushDim_.Get());
                 }
             }
             // 平台图标必须在封面之后绘制，保证它位于专辑封面的最顶层。
@@ -8844,14 +7037,15 @@ struct TaskbarHost::Impl {
             const float infoGap = 2.0f;
             const float totalInfoH = titleHeight_ + infoGap + artistHeight_;
             const float infoY = (h - totalInfoH) * 0.5f;
-            drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
-                              titleScrollOffset_, brushText_, nullptr, nullptr, nullptr, 0.0f,
+            drawScrollingText(typesetter_.resources().titleLayout_.Get(), titleWidth_, titleHeight_,
+                              infoW, infoX, infoY, titleScrollOffset_, brushText_.Get(), nullptr,
+                              nullptr, nullptr, 0.0f, 1.0f, LyricAlignment::Center, false,
+                              kTextPadding, true, kTextPadding);
+            drawScrollingText(typesetter_.resources().artistLayout_.Get(), artistWidth_,
+                              artistHeight_, infoW, infoX, infoY + titleHeight_ + infoGap,
+                              artistScrollOffset_, brushDim_.Get(), nullptr, nullptr, nullptr, 0.0f,
                               1.0f, LyricAlignment::Center, false, kTextPadding, true,
                               kTextPadding);
-            drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
-                              infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_,
-                              nullptr, nullptr, nullptr, 0.0f, 1.0f, LyricAlignment::Center,
-                              false, kTextPadding, true, kTextPadding);
             drawSongInfoDivider(leftW, h);
         }
 
@@ -8869,98 +7063,113 @@ struct TaskbarHost::Impl {
                 const float spectrumW = spectrumContentWForScene(scene_, w);
                 drawSpectrum(w - embeddedResourceExtra() - spectrumW - kTextPadding, h, spectrumW);
             }
-            if (lyricTransitionKind_ == LyricTransitionKind::Scene && isLyricTransitionActive() &&
-                outgoingLyricLayout_) {
+            if (transition_.kind() == LyricTransitionKind::Scene && isLyricTransitionActive() &&
+                typesetter_.resources().outgoingLyricLayout_.Get()) {
                 drawSceneTransition(w, lyricAreaX, lyricAreaW, h, lyricBlockH);
             } else if (useDoubleLineLyrics()) {
                 drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h, primaryBrush);
             } else if (!isLyricDCompActive()) {
-                if (isLyricTransitionActive() && outgoingLyricLayout_) {
+                if (isLyricTransitionActive() &&
+                    typesetter_.resources().outgoingLyricLayout_.Get()) {
                     // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
                     const LyricTransitionSample transition = lyricTransitionSample();
                     const float movementT = transition.movement;
                     const LyricLine* incomingLine = karaokeLine();
-                    const bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
-                    ID2D1Brush* incomingBrush =
-                        incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                        : primaryBrush;
+                    const bool incomingKaraoke =
+                        incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
+                    ID2D1Brush* incomingBrush = incomingKaraoke
+                                                    ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                                    : primaryBrush;
                     const float incomingProgX =
                         incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
                     const float outgoingPreviewH =
-                        outgoingDoubleLine_ && outgoingNextLyricLayout_
+                        transition_.outgoingDoubleLine() &&
+                                typesetter_.resources().outgoingNextLyricLayout_.Get()
                             ? kLyricPreviewGap + outgoingNextLyricHeight_
-                            : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
-                    const float outgoingGap = outgoingDoubleLine_ && outgoingNextLyricLayout_
-                                                 ? kLyricPreviewGap
-                                                 : outgoingSecondaryLayout_ ? 1.0f : 0.0f;
+                        : typesetter_.resources().outgoingSecondaryLayout_.Get()
+                            ? 1.0f + outgoingSecondaryHeight_
+                            : 0.0f;
+                    const float outgoingGap =
+                        transition_.outgoingDoubleLine() &&
+                                typesetter_.resources().outgoingNextLyricLayout_.Get()
+                            ? kLyricPreviewGap
+                        : typesetter_.resources().outgoingSecondaryLayout_.Get() ? 1.0f
+                                                                                 : 0.0f;
                     const float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
                                                      ? outgoingLyricBlockHeight_
                                                      : outgoingLyricHeight_ + outgoingPreviewH;
                     const float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
                     const float travel = std::max(lyricBlockH, outgoingBlockH);
-                    const float oldShift = -static_cast<float>(lyricTransitionDirection_) * travel *
-                                           movementT;
-                    const float newShift = static_cast<float>(lyricTransitionDirection_) * travel *
-                                           (1.0f - movementT);
+                    const float oldShift =
+                        -static_cast<float>(transition_.direction()) * travel * movementT;
+                    const float newShift =
+                        static_cast<float>(transition_.direction()) * travel * (1.0f - movementT);
                     drawLyricScrollingText(
-                        outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
-                        lyricAreaX, outgoingY + oldShift, outgoingLyricScrollOffset_, primaryBrush,
-                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_ : nullptr,
-                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr, nullptr, 0.0f,
-                        1.0f - transition.fadeOut);
-                    if (outgoingDoubleLine_ && outgoingNextLyricLayout_) {
+                        typesetter_.resources().outgoingLyricLayout_.Get(), outgoingLyricWidth_,
+                        outgoingLyricHeight_, lyricAreaW, lyricAreaX, outgoingY + oldShift,
+                        outgoingLyricScrollOffset_, primaryBrush,
+                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get() : nullptr,
+                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                        nullptr, 0.0f, 1.0f - transition.fadeOut);
+                    if (transition_.outgoingDoubleLine() &&
+                        typesetter_.resources().outgoingNextLyricLayout_.Get()) {
                         ID2D1Brush* previewBrush =
-                            brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                           : static_cast<ID2D1Brush*>(brushDim_);
+                            brushLyricDim_.Get() ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                                 : static_cast<ID2D1Brush*>(brushDim_.Get());
                         drawLyricScrollingText(
-                            outgoingNextLyricLayout_, outgoingNextLyricWidth_,
-                            outgoingNextLyricHeight_, lyricAreaW, lyricAreaX,
+                            typesetter_.resources().outgoingNextLyricLayout_.Get(),
+                            outgoingNextLyricWidth_, outgoingNextLyricHeight_, lyricAreaW,
+                            lyricAreaX,
                             outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f,
                             previewBrush, nullptr, nullptr, nullptr, 0.0f,
                             kLyricPreviewOpacity * (1.0f - transition.fadeOut));
-                    } else if (outgoingSecondaryLayout_) {
+                    } else if (typesetter_.resources().outgoingSecondaryLayout_.Get()) {
                         drawLyricScrollingText(
-                            outgoingSecondaryLayout_, outgoingSecondaryWidth_, outgoingSecondaryHeight_,
-                            lyricAreaW, lyricAreaX,
-                            outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
-                            outgoingSecondaryScrollOffset_, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                            1.0f - transition.fadeOut);
+                            typesetter_.resources().outgoingSecondaryLayout_.Get(),
+                            outgoingSecondaryWidth_, outgoingSecondaryHeight_, lyricAreaW,
+                            lyricAreaX, outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
+                            outgoingSecondaryScrollOffset_, brushDim_.Get(), nullptr, nullptr,
+                            nullptr, 0.0f, 1.0f - transition.fadeOut);
                     }
                     // 入场行同步显示真实播放位置的逐字填充，避免转场结束时突然跳色。
                     drawLyricScrollingText(
-                        lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
-                        h * 0.5f - lyricBlockH * 0.5f + newShift, lyricScrollOffset_, incomingBrush,
-                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_ : nullptr,
-                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr,
-                        incomingKaraoke ? brushLyric_ : nullptr, incomingProgX,
+                        typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_,
+                        lyricAreaW, lyricAreaX, h * 0.5f - lyricBlockH * 0.5f + newShift,
+                        lyricScrollOffset_, incomingBrush,
+                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get() : nullptr,
+                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                        incomingKaraoke ? brushLyric_.Get() : nullptr, incomingProgX,
                         transition.fadeIn, true);
-                    if (secondaryLayout_)
+                    if (typesetter_.resources().secondaryLayout_.Get())
                         drawLyricScrollingText(
-                            secondaryLayout_, secondaryWidth_, secondaryHeight_, lyricAreaW, lyricAreaX,
+                            typesetter_.resources().secondaryLayout_.Get(), secondaryWidth_,
+                            secondaryHeight_, lyricAreaW, lyricAreaX,
                             h * 0.5f - lyricBlockH * 0.5f + lyricHeight_ +
-                                (secondaryLayout_ ? 1.0f : 0.0f) + newShift,
-                            secondaryScrollOffset_, brushDim_, nullptr, nullptr, nullptr, 0.0f,
-                            transition.fadeIn, true);
+                                (typesetter_.resources().secondaryLayout_.Get() ? 1.0f : 0.0f) +
+                                newShift,
+                            secondaryScrollOffset_, brushDim_.Get(), nullptr, nullptr, nullptr,
+                            0.0f, transition.fadeIn, true);
                 } else {
                     // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
                     // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
                     const LyricLine* curLine = karaokeLine();
-                    const bool karaoke = curLine && brushLyric_ && brushLyricDim_;
+                    const bool karaoke = curLine && brushLyric_.Get() && brushLyricDim_.Get();
                     const float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
                     drawLyricScrollingText(
-                        lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX,
-                        h * 0.5f - lyricBlockH * 0.5f, lyricScrollOffset_,
-                        karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_) : primaryBrush,
-                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_ : nullptr,
-                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr,
-                        karaoke ? brushLyric_ : nullptr, progX);
+                        typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_,
+                        lyricAreaW, lyricAreaX, h * 0.5f - lyricBlockH * 0.5f, lyricScrollOffset_,
+                        karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : primaryBrush,
+                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get() : nullptr,
+                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                        karaoke ? brushLyric_.Get() : nullptr, progX);
                     // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
-                    if (secondaryLayout_)
+                    if (typesetter_.resources().secondaryLayout_.Get())
                         drawLyricScrollingText(
-                            secondaryLayout_, secondaryWidth_, secondaryHeight_, lyricAreaW, lyricAreaX,
+                            typesetter_.resources().secondaryLayout_.Get(), secondaryWidth_,
+                            secondaryHeight_, lyricAreaW, lyricAreaX,
                             h * 0.5f - lyricBlockH * 0.5f + lyricHeight_ +
-                                (secondaryLayout_ ? 1.0f : 0.0f),
-                            secondaryScrollOffset_, brushDim_);
+                                (typesetter_.resources().secondaryLayout_.Get() ? 1.0f : 0.0f),
+                            secondaryScrollOffset_, brushDim_.Get());
                 }
             }
         }
@@ -8981,18 +7190,15 @@ struct TaskbarHost::Impl {
 
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         const D2D1_ROUNDED_RECT bg = taskbarBackgroundRect(w, h);
-        if (isAppBarView() && brushBackground_) {
+        if (isAppBarView() && brushBackground_.Get()) {
             // 扩展模式会在下方提前返回；Dock 面向工作区的一侧要在此处绘制分隔线。
             const bool appDark = fluent::isWindowsAppDarkMode();
-            brushBackground_->SetColor(appDark
-                                           ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f)
-                                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.16f));
+            brushBackground_->SetColor(appDark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.12f)
+                                               : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.16f));
             const float pixel = 1.0f / std::max(scale(), 1.0f);
-            const float top = appBarEdge_ == AppBarEdge::Top
-                                  ? std::max(0.0f, h - pixel)
-                                  : 0.0f;
+            const float top = appBarEdge_ == AppBarEdge::Top ? std::max(0.0f, h - pixel) : 0.0f;
             rt->FillRectangle(D2D1::RectF(0.0f, top, w, std::min(h, top + pixel)),
-                              brushBackground_);
+                              brushBackground_.Get());
         }
         if (isExpandedView()) {
             // 主背景由 Composition 模糊层绘制；动态装饰仍需绘制到透明宿主上。
@@ -9001,69 +7207,63 @@ struct TaskbarHost::Impl {
             return;
         }
 
-        if (coverBlurChain && coverLayer_ && brushBackground_) {
+        if (coverBlurChain && coverLayer_.Get() && brushBackground_.Get()) {
             ID2D1RoundedRectangleGeometry* clip = nullptr;
             if (auto* factory = renderer.d2d())
                 factory->CreateRoundedRectangleGeometry(bg, &clip);
             if (clip) {
-                rt->PushLayer(D2D1::LayerParameters1(
-                                  D2D1::InfiniteRect(), clip,
-                                  D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                  D2D1::Matrix3x2F::Identity(),
-                                  coverBackgroundOpacityPct_ / 100.0f),
-                              coverLayer_);
+                rt->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), clip,
+                                                     D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::Matrix3x2F::Identity(),
+                                                     coverBackgroundOpacityPct_ / 100.0f),
+                              coverLayer_.Get());
                 rt->DrawImage(coverBlurChain, D2D1::Point2F(0.0f, 0.0f));
                 rt->PopLayer();
                 clip->Release();
-                brushBackground_->SetColor(lightTheme_
-                                               ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f)
-                                               : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f));
-                rt->FillRoundedRectangle(bg, brushBackground_);
+                brushBackground_->SetColor(lightTheme_ ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.45f)
+                                                       : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.45f));
+                rt->FillRoundedRectangle(bg, brushBackground_.Get());
             }
-        } else if (background_ == TaskbarBackground::Solid && brushBackground_) {
-            brushBackground_->SetColor(lightTheme_
-                                           ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.85f)
-                                           : D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.85f));
-            rt->FillRoundedRectangle(bg, brushBackground_);
+        } else if (background_ == TaskbarBackground::Solid && brushBackground_.Get()) {
+            brushBackground_->SetColor(lightTheme_ ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.85f)
+                                                   : D2D1::ColorF(0.13f, 0.13f, 0.13f, 0.85f));
+            rt->FillRoundedRectangle(bg, brushBackground_.Get());
         }
 
         if (!isExpandedView()) {
-            rt->FillRoundedRectangle(bg, brushBg_);
-            if (mouseOver_ && brushHover_)
-                rt->FillRoundedRectangle(bg, brushHover_);
+            rt->FillRoundedRectangle(bg, brushBg_.Get());
+            if (mouseOver_ && brushHover_.Get())
+                rt->FillRoundedRectangle(bg, brushHover_.Get());
         }
 
-        if (progressBackgroundActive() && brushProgressBg_ && media.durationMs > 0) {
-            const float fraction = static_cast<float>(std::clamp(
-                static_cast<double>(positionMs_) / static_cast<double>(media.durationMs), 0.0,
-                1.0));
+        if (progressBackgroundActive() && brushProgressBg_.Get() && media.durationMs > 0) {
+            const float fraction = static_cast<float>(
+                std::clamp(static_cast<double>(positionMs_) / static_cast<double>(media.durationMs),
+                           0.0, 1.0));
             const float fillExtent = progressExtent * fraction;
             if (fillExtent > 0.5f) {
-                const COLORREF c = media.hasDominantColor ? media.dominantColor
-                                                          : fluent::accentColor();
+                const COLORREF c =
+                    media.hasDominantColor ? media.dominantColor : fluent::accentColor();
                 brushProgressBg_->SetColor(
                     fluent::toD2D(c, progressBackgroundOpacityPct_ / 100.0f));
                 const float fillRadius = vertical
-                                             ? std::min({bg.radiusX, fillExtent * 0.5f,
-                                                         w * 0.5f})
-                                             : std::min({bg.radiusX, fillExtent * 0.5f,
-                                                         h * 0.5f});
-                const D2D1_RECT_F fillRect = vertical
-                                                 ? D2D1::RectF(0.0f, 0.0f, w, fillExtent)
-                                                 : D2D1::RectF(0.0f, 0.0f, fillExtent, h);
-                rt->FillRoundedRectangle(
-                    D2D1::RoundedRect(fillRect, fillRadius, fillRadius), brushProgressBg_);
+                                             ? std::min({bg.radiusX, fillExtent * 0.5f, w * 0.5f})
+                                             : std::min({bg.radiusX, fillExtent * 0.5f, h * 0.5f});
+                const D2D1_RECT_F fillRect = vertical ? D2D1::RectF(0.0f, 0.0f, w, fillExtent)
+                                                      : D2D1::RectF(0.0f, 0.0f, fillExtent, h);
+                rt->FillRoundedRectangle(D2D1::RoundedRect(fillRect, fillRadius, fillRadius),
+                                         brushProgressBg_.Get());
             }
         }
 
         if (taskbarDynamicBackgroundVisible())
             drawIdleQuoteBackground(w, h, dynamicBackgroundW);
-
     }
 
     bool finishTaskbarFrame(HRESULT hr) {
         if (hr == D2DERR_RECREATE_TARGET) {
-            runtime_log::writef(L"[taskbar] EndDraw requests device recreate, discarding device resources");
+            runtime_log::writef(
+                L"[taskbar] EndDraw requests device recreate, discarding device resources");
             discardDeviceResources();
             return false;
         }
@@ -9078,9 +7278,8 @@ struct TaskbarHost::Impl {
                     const float travel = kSongTransitionTravelDip * scale();
                     const bool vertical = isVerticalTaskbar();
                     const float fromX = vertical ? 0.0f : travel;
-                    const float fromY = vertical
-                                            ? (taskbarEdge_ == ABE_LEFT ? -travel : travel)
-                                            : 0.0f;
+                    const float fromY =
+                        vertical ? (taskbarEdge_ == ABE_LEFT ? -travel : travel) : 0.0f;
                     if (!renderer.animateRoot(fromX, 0.0f, fromY, 0.0f, 0.0f, 1.0f,
                                               kSongTransitionMs / 1000.0f))
                         renderer.resetRoot();
@@ -9126,30 +7325,28 @@ struct TaskbarHost::Impl {
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         drawTaskbarBackground(w, h, h, true, w, coverBlurChain);
 
-        const bool playbackScene = scene_ != DisplayScene::Idle &&
-                                    scene_ != DisplayScene::NoPlayback;
+        const bool playbackScene =
+            scene_ != DisplayScene::Idle && scene_ != DisplayScene::NoPlayback;
         if (layout.coverSize > 0.0f && playbackScene) {
             const float s = layout.coverSize;
             if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
                 drawVinylCover(layout.coverX, layout.coverY, s);
             } else {
                 const D2D1_RECT_F coverRect =
-                    D2D1::RectF(layout.coverX, layout.coverY, layout.coverX + s,
-                                layout.coverY + s);
-                if (coverBmp && coverClip_ && coverLayer_) {
+                    D2D1::RectF(layout.coverX, layout.coverY, layout.coverX + s, layout.coverY + s);
+                if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
                     rt->PushLayer(D2D1::LayerParameters1(
-                                      D2D1::InfiniteRect(), coverClip_,
+                                      D2D1::InfiniteRect(), coverClip_.Get(),
                                       D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                       D2D1::Matrix3x2F::Translation(layout.coverX, layout.coverY)),
-                                  coverLayer_);
-                    rt->DrawBitmap(coverBmp, coverRect, 1.0f,
+                                  coverLayer_.Get());
+                    rt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
                                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
                     rt->PopLayer();
-                } else if (brushDim_) {
-                    rt->FillRoundedRectangle(
-                        D2D1::RoundedRect(coverRect, std::min(4.0f, s * 0.18f),
-                                          std::min(4.0f, s * 0.18f)),
-                        brushDim_);
+                } else if (brushDim_.Get()) {
+                    rt->FillRoundedRectangle(D2D1::RoundedRect(coverRect, std::min(4.0f, s * 0.18f),
+                                                               std::min(4.0f, s * 0.18f)),
+                                             brushDim_.Get());
                 }
             }
             drawPlatformIcon(layout.coverX, layout.coverY, layout.coverSize);
@@ -9168,8 +7365,8 @@ struct TaskbarHost::Impl {
 
     bool renderDragPreview(float w, float h) {
         auto* rt = renderer.renderTarget();
-        if (!rt || !brushBackground_ || !brushDim_ || !brushText_ || !fmtDragPreview_ ||
-            w <= 0.0f || h <= 0.0f)
+        if (!rt || !brushBackground_.Get() || !brushDim_.Get() || !brushText_.Get() ||
+            !typesetter_.resources().fmtDragPreview_.Get() || w <= 0.0f || h <= 0.0f)
             return false;
 
         rt->BeginDraw();
@@ -9177,34 +7374,37 @@ struct TaskbarHost::Impl {
         rt->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
 
         const float inset = 1.5f;
-        const float radius = std::max(
-            1.0f, std::min(kCornerRadius, std::min(w, h) * 0.5f - inset));
+        const float radius = std::max(1.0f, std::min(kCornerRadius, std::min(w, h) * 0.5f - inset));
         const D2D1_ROUNDED_RECT preview = D2D1::RoundedRect(
-            D2D1::RectF(inset, inset, std::max(inset, w - inset),
-                        std::max(inset, h - inset)),
+            D2D1::RectF(inset, inset, std::max(inset, w - inset), std::max(inset, h - inset)),
             radius, radius);
-        brushBackground_->SetColor(lightTheme_
-                                       ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.88f)
-                                       : D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.82f));
-        rt->FillRoundedRectangle(preview, brushBackground_);
-        rt->DrawRoundedRectangle(preview, brushDim_, 1.25f, dragPreviewStroke_);
+        brushBackground_->SetColor(lightTheme_ ? D2D1::ColorF(0.97f, 0.97f, 0.97f, 0.88f)
+                                               : D2D1::ColorF(0.12f, 0.12f, 0.12f, 0.82f));
+        rt->FillRoundedRectangle(preview, brushBackground_.Get());
+        rt->DrawRoundedRectangle(preview, brushDim_.Get(), 1.25f, dragPreviewStroke_.Get());
 
         const float textInset = 8.0f;
-        const D2D1_RECT_F textRect = D2D1::RectF(
-            textInset, textInset, std::max(textInset, w - textInset),
-            std::max(textInset, h - textInset));
+        const D2D1_RECT_F textRect =
+            D2D1::RectF(textInset, textInset, std::max(textInset, w - textInset),
+                        std::max(textInset, h - textInset));
         if (isVerticalTaskbar()) {
             constexpr wchar_t verticalText[] = L"松\n手\n固\n定\n到\n这\n里";
-            rt->DrawTextW(verticalText, _countof(verticalText) - 1, fmtDragPreview_, textRect,
-                          brushText_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            rt->DrawTextW(verticalText, _countof(verticalText) - 1,
+                          typesetter_.resources().fmtDragPreview_.Get(), textRect, brushText_.Get(),
+                          D2D1_DRAW_TEXT_OPTIONS_CLIP);
         } else {
-            rt->DrawTextW(kDragPreviewText, _countof(kDragPreviewText) - 1, fmtDragPreview_,
-                          textRect, brushText_, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            rt->DrawTextW(kDragPreviewText, _countof(kDragPreviewText) - 1,
+                          typesetter_.resources().fmtDragPreview_.Get(), textRect, brushText_.Get(),
+                          D2D1_DRAW_TEXT_OPTIONS_CLIP);
         }
         return finishTaskbarFrame(rt->EndDraw());
     }
 
     void render() {
+        if (applyingAppearance_) {
+            appearancePaintPending_ = true;
+            return;
+        }
         if (!isWindowVisible() || !hwnd)
             return;
 
@@ -9283,10 +7483,8 @@ struct TaskbarHost::Impl {
                 // 内容几何继续保留，松手恢复歌词后再由完整渲染链处理。
                 InvalidationSnapshot previewInvalidation = invalidation;
                 previewInvalidation.mask &=
-                    toMask(RenderInvalidation::Paint) |
-                    toMask(RenderInvalidation::Text) |
-                    toMask(RenderInvalidation::SongInfo) |
-                    toMask(RenderInvalidation::Layout);
+                    toMask(RenderInvalidation::Paint) | toMask(RenderInvalidation::Text) |
+                    toMask(RenderInvalidation::SongInfo) | toMask(RenderInvalidation::Layout);
                 renderState_.commitInvalidation(previewInvalidation);
             }
             return;
@@ -9306,9 +7504,10 @@ struct TaskbarHost::Impl {
                 renderer.clearLyricTransitionLayers();
                 clearLyricDCompState();
             }
-            ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp
-                                              ? ensureCoverBlurChain(dip(pxW), dip(pxH))
-                                              : nullptr;
+            ID2D1Effect* coverBlurChain =
+                background_ == TaskbarBackground::CoverBlur && coverBmp.Get()
+                    ? ensureCoverBlurChain(dip(pxW), dip(pxH))
+                    : nullptr;
             if (renderVerticalTaskbar(dip(pxW), dip(pxH), coverBlurChain))
                 renderState_.commitInvalidation(invalidation);
             return;
@@ -9324,31 +7523,28 @@ struct TaskbarHost::Impl {
         float leftW = layout.leftW;
         float rightW = layout.rightW;
 
-        if (isInvalidated(RenderInvalidation::Text) ||
-            isInvalidated(RenderInvalidation::SongInfo))
+        if (isInvalidated(RenderInvalidation::Text) || isInvalidated(RenderInvalidation::SongInfo))
             buildTextLayouts(leftW, rightW);
 
         const LyricArea lyricArea = lyricAreaForScene(scene_, logicalPxW, logicalPxH);
         const float lyricAreaX = lyricArea.x;
         const float lyricAreaW = lyricArea.w;
-        float secondaryGap = secondaryLayout_ ? 1.0f : 0.0f;
+        float secondaryGap = typesetter_.resources().secondaryLayout_.Get() ? 1.0f : 0.0f;
         float lyricBlockH = lyricHeight_ + secondaryGap + secondaryHeight_;
         float lyricY = h * 0.5f - lyricBlockH * 0.5f;
         const bool idleScene = scene_ == DisplayScene::Idle;
         // 每日一言属于任务栏主题正文，不继承上一次播放歌词的用户自定义颜色。
         const bool lyricEffectsEnabled = !idleScene;
-        ID2D1Brush* primaryBrush = idleScene
-                                       ? static_cast<ID2D1Brush*>(brushText_)
-                                       : static_cast<ID2D1Brush*>(brushLyric_ ? brushLyric_
-                                                                                : brushText_);
+        ID2D1Brush* primaryBrush =
+            idleScene ? static_cast<ID2D1Brush*>(brushText_.Get())
+                      : static_cast<ID2D1Brush*>(brushLyric_.Get() ? brushLyric_.Get()
+                                                                   : brushText_.Get());
         // 只有开启悬浮控件且鼠标位于窗口内时才替换歌词，否则保持歌词/频谱视图。
-        bool showControls = mouseOver_ && controlsOnHover_ &&
-                            hoverControlStyle_ == HoverControlStyle::Inline && !idleScene &&
-                            !isExpandedView() &&
-                            !(lyricTransitionKind_ == LyricTransitionKind::Scene &&
-                              isLyricTransitionActive());
-        const bool backgroundSpectrum =
-            !idleScene && spectrumVisible_ && backgroundWaveEnabled();
+        bool showControls =
+            mouseOver_ && controlsOnHover_ && hoverControlStyle_ == HoverControlStyle::Inline &&
+            !idleScene && !isExpandedView() &&
+            !(transition_.kind() == LyricTransitionKind::Scene && isLyricTransitionActive());
+        const bool backgroundSpectrum = !idleScene && spectrumVisible_ && backgroundWaveEnabled();
         // 独立频谱占用歌词区右端；背景波浪不改变窗口宽度和歌词布局。
         bool showSpectrum = !idleScene && spectrumVisible_ && !showControls &&
                             !backgroundSpectrum && !integratedSpectrum();
@@ -9357,9 +7553,9 @@ struct TaskbarHost::Impl {
         syncLyricTransitionDComp(showControls, lyricAreaX, lyricAreaW, h, lyricBlockH);
 
         // 模糊效果链涉及资源创建（CreateEffect），与画刷一样放在 BeginDraw 之前
-        ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp
-                                           ? ensureCoverBlurChain(w, h)
-                                           : nullptr;
+        ID2D1Effect* coverBlurChain = background_ == TaskbarBackground::CoverBlur && coverBmp.Get()
+                                          ? ensureCoverBlurChain(w, h)
+                                          : nullptr;
 
         beginImmersiveSongContentTransition();
         bool compositorSongContent =
@@ -9379,11 +7575,10 @@ struct TaskbarHost::Impl {
 
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        const float dynamicBackgroundW = embeddedResourceOnly()
-                                              ? w
-                                          : showSpectrum || embeddedResourceVisible()
-                                              ? std::max(1.0f, lyricAreaX + lyricAreaW)
-                                              : w;
+        const float dynamicBackgroundW = embeddedResourceOnly() ? w
+                                         : showSpectrum || embeddedResourceVisible()
+                                             ? std::max(1.0f, lyricAreaX + lyricAreaW)
+                                             : w;
         // 背景、进度和动态底图由横竖两种布局共用，避免后续修复只落在一条路径。
         drawTaskbarBackground(w, h, lyricAreaX + lyricAreaW, false, dynamicBackgroundW,
                               coverBlurChain);
@@ -9407,8 +7602,7 @@ struct TaskbarHost::Impl {
         } else if (embeddedResourceVisible()) {
             const float resourceWidth =
                 std::min(resourceZoneWidth(), std::max(1.0f, w - kDockResourceRightPadding));
-            drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding,
-                                   h, resourceWidth);
+            drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding, h, resourceWidth);
         }
 
         const bool clipSongContent = embeddedResourceVisible();
@@ -9423,164 +7617,177 @@ struct TaskbarHost::Impl {
 
         // 左侧封面
         if (!compositorSongContent) {
-        float s = coverSize();
-        float coverX = kCoverPadding;
-        float coverY = (h - s) * 0.5f;
-        if (albumCoverVisible_ && !idleScene) {
-            if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
-                drawVinylCover(coverX, coverY, s);
+            float s = coverSize();
+            float coverX = kCoverPadding;
+            float coverY = (h - s) * 0.5f;
+            if (albumCoverVisible_ && !idleScene) {
+                if (albumCoverEffect_ == AlbumCoverEffect::Vinyl) {
+                    drawVinylCover(coverX, coverY, s);
+                } else {
+                    D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
+                    if (coverBmp.Get() && coverClip_.Get() && coverLayer_.Get()) {
+                        rt->PushLayer(
+                            D2D1::LayerParameters1(D2D1::InfiniteRect(), coverClip_.Get(),
+                                                   D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                   D2D1::Matrix3x2F::Translation(coverX, coverY)),
+                            coverLayer_.Get());
+                        rt->DrawBitmap(coverBmp.Get(), coverRect, 1.0f,
+                                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                        rt->PopLayer();
+                    } else {
+                        D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
+                        rt->FillRoundedRectangle(rr, brushDim_.Get());
+                    }
+                }
+                // 平台图标必须在封面之后绘制，保证它位于专辑封面的最顶层。
+                drawPlatformIcon(coverX, coverY, s);
+            }
+
+            if (songInfoVisible_ && !idleScene) {
+                // 左侧歌曲信息（封面显示时位于封面右侧，整体垂直居中，超长自动滚动）
+                // 左右边缘都保留渐隐，右缘在分隔线前收束，避免标题/歌手撞到歌词区
+                float infoX = infoStartX();
+                float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
+                float infoGap = 2.0f;
+                float totalInfoH = titleHeight_ + infoGap + artistHeight_;
+                float infoY = (h - totalInfoH) * 0.5f;
+                drawScrollingText(typesetter_.resources().titleLayout_.Get(), titleWidth_,
+                                  titleHeight_, infoW, infoX, infoY, titleScrollOffset_,
+                                  brushText_.Get(), nullptr, nullptr, nullptr, 0.0f, 1.0f,
+                                  LyricAlignment::Center, false, kTextPadding, true, kTextPadding);
+                drawScrollingText(typesetter_.resources().artistLayout_.Get(), artistWidth_,
+                                  artistHeight_, infoW, infoX, infoY + titleHeight_ + infoGap,
+                                  artistScrollOffset_, brushDim_.Get(), nullptr, nullptr, nullptr,
+                                  0.0f, 1.0f, LyricAlignment::Center, false, kTextPadding, true,
+                                  kTextPadding);
+                drawSongInfoDivider(leftW, h);
+            }
+
+            if (showControls) {
+                float centers[4]{};
+                float cy = 0.0f;
+                float r = 0.0f;
+                if (inlineControlsLayout(centers, cy, r)) {
+                    for (int i = 0; i < 3; ++i)
+                        drawButton(i, D2D1::Point2F(centers[i], cy), r);
+                    drawVolumeButton(D2D1::Point2F(centers[3], cy), r);
+                }
             } else {
-                D2D1_RECT_F coverRect = D2D1::RectF(coverX, coverY, coverX + s, coverY + s);
-                if (coverBmp && coverClip_ && coverLayer_) {
-                    rt->PushLayer(D2D1::LayerParameters1(
-                                      D2D1::InfiniteRect(), coverClip_,
-                                      D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                      D2D1::Matrix3x2F::Translation(coverX, coverY)),
-                                  coverLayer_);
-                    rt->DrawBitmap(coverBmp, coverRect, 1.0f,
-                                   D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                    rt->PopLayer();
-                } else {
-                    D2D1_ROUNDED_RECT rr{coverRect, 4.0f, 4.0f};
-                    rt->FillRoundedRectangle(rr, brushDim_);
+                if (showSpectrum && !isExpandedView()) {
+                    const float spectrumW = spectrumContentWForScene(scene_, w);
+                    drawSpectrum(w - embeddedResourceExtra() - spectrumW - kTextPadding, h,
+                                 spectrumW);
                 }
-            }
-            // 平台图标必须在封面之后绘制，保证它位于专辑封面的最顶层。
-            drawPlatformIcon(coverX, coverY, s);
-        }
-
-        if (songInfoVisible_ && !idleScene) {
-            // 左侧歌曲信息（封面显示时位于封面右侧，整体垂直居中，超长自动滚动）
-            // 左右边缘都保留渐隐，右缘在分隔线前收束，避免标题/歌手撞到歌词区
-            float infoX = infoStartX();
-            float infoW = std::max(1.0f, leftW - infoX - kTextPadding);
-            float infoGap = 2.0f;
-            float totalInfoH = titleHeight_ + infoGap + artistHeight_;
-            float infoY = (h - totalInfoH) * 0.5f;
-            drawScrollingText(titleLayout_, titleWidth_, titleHeight_, infoW, infoX, infoY,
-                              titleScrollOffset_, brushText_, nullptr, nullptr, nullptr, 0.0f,
-                              1.0f, LyricAlignment::Center, false, kTextPadding, true,
-                              kTextPadding);
-            drawScrollingText(artistLayout_, artistWidth_, artistHeight_, infoW, infoX,
-                              infoY + titleHeight_ + infoGap, artistScrollOffset_, brushDim_,
-                              nullptr, nullptr, nullptr, 0.0f, 1.0f, LyricAlignment::Center,
-                              false, kTextPadding, true, kTextPadding);
-            drawSongInfoDivider(leftW, h);
-        }
-
-        if (showControls) {
-            float centers[4]{};
-            float cy = 0.0f;
-            float r = 0.0f;
-            if (inlineControlsLayout(centers, cy, r)) {
-                for (int i = 0; i < 3; ++i)
-                    drawButton(i, D2D1::Point2F(centers[i], cy), r);
-                drawVolumeButton(D2D1::Point2F(centers[3], cy), r);
-            }
-        } else {
-            if (showSpectrum && !isExpandedView()) {
-                const float spectrumW = spectrumContentWForScene(scene_, w);
-                drawSpectrum(w - embeddedResourceExtra() - spectrumW - kTextPadding, h, spectrumW);
-            }
-            if (lyricTransitionKind_ == LyricTransitionKind::Scene && isLyricTransitionActive() &&
-                outgoingLyricLayout_) {
-                drawSceneTransition(w, lyricAreaX, lyricAreaW, h, lyricBlockH);
-            } else if (useDoubleLineLyrics()) {
-                drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h, primaryBrush);
-            } else if (!isLyricDCompActive()) {
-                if (isLyricTransitionActive() && outgoingLyricLayout_) {
-                    // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
-                    const LyricTransitionSample transition = lyricTransitionSample();
-                    const float movementT = transition.movement;
-                    const LyricLine* incomingLine = karaokeLine();
-                    bool incomingKaraoke = incomingLine && brushLyric_ && brushLyricDim_;
-                    ID2D1Brush* incomingBrush =
-                        incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                        : primaryBrush;
-                    const float incomingProgX =
-                        incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
-                    const float outgoingPreviewH =
-                        outgoingDoubleLine_ && outgoingNextLyricLayout_
-                            ? kLyricPreviewGap + outgoingNextLyricHeight_
-                            : outgoingSecondaryLayout_ ? 1.0f + outgoingSecondaryHeight_ : 0.0f;
-                    float outgoingGap = outgoingDoubleLine_ && outgoingNextLyricLayout_
-                                            ? kLyricPreviewGap
-                                            : outgoingSecondaryLayout_ ? 1.0f : 0.0f;
-                    float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
-                                               ? outgoingLyricBlockHeight_
-                                               : outgoingLyricHeight_ + outgoingPreviewH;
-                    float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
-                    float travel = std::max(lyricBlockH, outgoingBlockH);
-                    float oldShift = -static_cast<float>(lyricTransitionDirection_) * travel *
-                                     movementT;
-                    float newShift = static_cast<float>(lyricTransitionDirection_) * travel *
-                                     (1.0f - movementT);
-                    drawLyricScrollingText(
-                        outgoingLyricLayout_, outgoingLyricWidth_, outgoingLyricHeight_, lyricAreaW,
-                        lyricAreaX, outgoingY + oldShift, outgoingLyricScrollOffset_,
-                        primaryBrush,
-                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_ : nullptr,
-                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr,
-                        nullptr, 0.0f,
-                        1.0f - transition.fadeOut);
-                    if (outgoingDoubleLine_ && outgoingNextLyricLayout_) {
-                        ID2D1Brush* previewBrush =
-                            brushLyricDim_ ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                           : static_cast<ID2D1Brush*>(brushDim_);
+                if (transition_.kind() == LyricTransitionKind::Scene && isLyricTransitionActive() &&
+                    typesetter_.resources().outgoingLyricLayout_.Get()) {
+                    drawSceneTransition(w, lyricAreaX, lyricAreaW, h, lyricBlockH);
+                } else if (useDoubleLineLyrics()) {
+                    drawDoubleLineLyrics(lyricAreaX, lyricAreaW, h, primaryBrush);
+                } else if (!isLyricDCompActive()) {
+                    if (isLyricTransitionActive() &&
+                        typesetter_.resources().outgoingLyricLayout_.Get()) {
+                        // 位移使用平滑的 ease-in-out，避免一开始就冲得太快。
+                        const LyricTransitionSample transition = lyricTransitionSample();
+                        const float movementT = transition.movement;
+                        const LyricLine* incomingLine = karaokeLine();
+                        bool incomingKaraoke =
+                            incomingLine && brushLyric_.Get() && brushLyricDim_.Get();
+                        ID2D1Brush* incomingBrush =
+                            incomingKaraoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                            : primaryBrush;
+                        const float incomingProgX =
+                            incomingKaraoke ? karaokeSmoothStep(*incomingLine) : 0.0f;
+                        const float outgoingPreviewH =
+                            transition_.outgoingDoubleLine() &&
+                                    typesetter_.resources().outgoingNextLyricLayout_.Get()
+                                ? kLyricPreviewGap + outgoingNextLyricHeight_
+                            : typesetter_.resources().outgoingSecondaryLayout_.Get()
+                                ? 1.0f + outgoingSecondaryHeight_
+                                : 0.0f;
+                        float outgoingGap =
+                            transition_.outgoingDoubleLine() &&
+                                    typesetter_.resources().outgoingNextLyricLayout_.Get()
+                                ? kLyricPreviewGap
+                            : typesetter_.resources().outgoingSecondaryLayout_.Get() ? 1.0f
+                                                                                     : 0.0f;
+                        float outgoingBlockH = outgoingLyricBlockHeight_ > 0.0f
+                                                   ? outgoingLyricBlockHeight_
+                                                   : outgoingLyricHeight_ + outgoingPreviewH;
+                        float outgoingY = h * 0.5f - outgoingBlockH * 0.5f;
+                        float travel = std::max(lyricBlockH, outgoingBlockH);
+                        float oldShift =
+                            -static_cast<float>(transition_.direction()) * travel * movementT;
+                        float newShift = static_cast<float>(transition_.direction()) * travel *
+                                         (1.0f - movementT);
                         drawLyricScrollingText(
-                            outgoingNextLyricLayout_, outgoingNextLyricWidth_,
-                            outgoingNextLyricHeight_, lyricAreaW, lyricAreaX,
-                            outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift, 0.0f,
-                            previewBrush, nullptr, nullptr, nullptr, 0.0f,
-                            kLyricPreviewOpacity * (1.0f - transition.fadeOut));
-                    } else if (outgoingSecondaryLayout_)
-                        drawLyricScrollingText(outgoingSecondaryLayout_, outgoingSecondaryWidth_,
-                                               outgoingSecondaryHeight_, lyricAreaW, lyricAreaX,
-                                               outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
-                                               outgoingSecondaryScrollOffset_, brushDim_, nullptr,
-                                               nullptr, nullptr, 0.0f,
-                                               1.0f - transition.fadeOut);
-                    // 入场行同步显示真实播放位置的逐字填充，避免转场结束时突然跳色。
-                    drawLyricScrollingText(lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW,
-                                           lyricAreaX, lyricY + newShift, lyricScrollOffset_,
-                                           incomingBrush,
-                                           lyricEffectsEnabled && lyricOutline_
-                                               ? brushLyricOutline_
-                                               : nullptr,
-                                           lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_
-                                                                              : nullptr,
-                                           incomingKaraoke ? brushLyric_ : nullptr, incomingProgX,
-                                           transition.fadeIn, true);
-                    if (secondaryLayout_)
-                        drawLyricScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
-                                               lyricAreaW, lyricAreaX,
-                                               lyricY + lyricHeight_ + secondaryGap + newShift,
-                                               secondaryScrollOffset_, brushDim_, nullptr, nullptr,
-                                               nullptr, 0.0f, transition.fadeIn, true);
-                } else {
-                    // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
-                    // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
-                    const LyricLine* curLine = karaokeLine();
-                    bool karaoke = curLine && brushLyric_ && brushLyricDim_;
-                    float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
-                    drawLyricScrollingText(
-                        lyricLayout_, lyricWidth_, lyricHeight_, lyricAreaW, lyricAreaX, lyricY,
-                        lyricScrollOffset_,
-                        karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_)
-                                : primaryBrush,
-                        lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_ : nullptr,
-                        lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_ : nullptr,
-                        karaoke ? brushLyric_ : nullptr, progX);
-                    // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
-                    if (secondaryLayout_)
-                        drawLyricScrollingText(secondaryLayout_, secondaryWidth_, secondaryHeight_,
-                                               lyricAreaW, lyricAreaX,
-                                               lyricY + lyricHeight_ + secondaryGap,
-                                               secondaryScrollOffset_, brushDim_);
+                            typesetter_.resources().outgoingLyricLayout_.Get(), outgoingLyricWidth_,
+                            outgoingLyricHeight_, lyricAreaW, lyricAreaX, outgoingY + oldShift,
+                            outgoingLyricScrollOffset_, primaryBrush,
+                            lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get()
+                                                                 : nullptr,
+                            lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                            nullptr, 0.0f, 1.0f - transition.fadeOut);
+                        if (transition_.outgoingDoubleLine() &&
+                            typesetter_.resources().outgoingNextLyricLayout_.Get()) {
+                            ID2D1Brush* previewBrush =
+                                brushLyricDim_.Get()
+                                    ? static_cast<ID2D1Brush*>(brushLyricDim_.Get())
+                                    : static_cast<ID2D1Brush*>(brushDim_.Get());
+                            drawLyricScrollingText(
+                                typesetter_.resources().outgoingNextLyricLayout_.Get(),
+                                outgoingNextLyricWidth_, outgoingNextLyricHeight_, lyricAreaW,
+                                lyricAreaX,
+                                outgoingY + outgoingLyricHeight_ + kLyricPreviewGap + oldShift,
+                                0.0f, previewBrush, nullptr, nullptr, nullptr, 0.0f,
+                                kLyricPreviewOpacity * (1.0f - transition.fadeOut));
+                        } else if (typesetter_.resources().outgoingSecondaryLayout_.Get())
+                            drawLyricScrollingText(
+                                typesetter_.resources().outgoingSecondaryLayout_.Get(),
+                                outgoingSecondaryWidth_, outgoingSecondaryHeight_, lyricAreaW,
+                                lyricAreaX,
+                                outgoingY + outgoingLyricHeight_ + outgoingGap + oldShift,
+                                outgoingSecondaryScrollOffset_, brushDim_.Get(), nullptr, nullptr,
+                                nullptr, 0.0f, 1.0f - transition.fadeOut);
+                        // 入场行同步显示真实播放位置的逐字填充，避免转场结束时突然跳色。
+                        drawLyricScrollingText(
+                            typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_,
+                            lyricAreaW, lyricAreaX, lyricY + newShift, lyricScrollOffset_,
+                            incomingBrush,
+                            lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get()
+                                                                 : nullptr,
+                            lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                            incomingKaraoke ? brushLyric_.Get() : nullptr, incomingProgX,
+                            transition.fadeIn, true);
+                        if (typesetter_.resources().secondaryLayout_.Get())
+                            drawLyricScrollingText(typesetter_.resources().secondaryLayout_.Get(),
+                                                   secondaryWidth_, secondaryHeight_, lyricAreaW,
+                                                   lyricAreaX,
+                                                   lyricY + lyricHeight_ + secondaryGap + newShift,
+                                                   secondaryScrollOffset_, brushDim_.Get(), nullptr,
+                                                   nullptr, nullptr, 0.0f, transition.fadeIn, true);
+                    } else {
+                        // 逐字高亮：当前行有逐字时间轴且歌词布局对应该行时，
+                        // 整行先画未播放色，再按像素进度裁剪出已唱区域画已播放色
+                        const LyricLine* curLine = karaokeLine();
+                        bool karaoke = curLine && brushLyric_.Get() && brushLyricDim_.Get();
+                        float progX = karaoke ? karaokeSmoothStep(*curLine) : 0.0f;
+                        drawLyricScrollingText(
+                            typesetter_.resources().lyricLayout_.Get(), lyricWidth_, lyricHeight_,
+                            lyricAreaW, lyricAreaX, lyricY, lyricScrollOffset_,
+                            karaoke ? static_cast<ID2D1Brush*>(brushLyricDim_.Get()) : primaryBrush,
+                            lyricEffectsEnabled && lyricOutline_ ? brushLyricOutline_.Get()
+                                                                 : nullptr,
+                            lyricEffectsEnabled && lyricGlow_ ? brushLyricGlow_.Get() : nullptr,
+                            karaoke ? brushLyric_.Get() : nullptr, progX);
+                        // 翻译/罗马音仅作整行附属文本，不参与逐字裁剪、描边或光晕。
+                        if (typesetter_.resources().secondaryLayout_.Get())
+                            drawLyricScrollingText(typesetter_.resources().secondaryLayout_.Get(),
+                                                   secondaryWidth_, secondaryHeight_, lyricAreaW,
+                                                   lyricAreaX, lyricY + lyricHeight_ + secondaryGap,
+                                                   secondaryScrollOffset_, brushDim_.Get());
+                    }
                 }
             }
-        }
-
         }
 
         if (contentTransitionActive)
@@ -9596,8 +7803,9 @@ struct TaskbarHost::Impl {
         if (SUCCEEDED(frameHr) && compositorSongContent && !compositorSongContentPending &&
             lyricEffectsAnimating()) {
             if (auto* layerRt = renderer.beginLyricLayerDraw(0)) {
-                drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW,
-                    lyricBlockH, primaryBrush, idleScene, lyricEffectsEnabled, showControls, showSpectrum);
+                drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW, lyricBlockH,
+                                          primaryBrush, idleScene, lyricEffectsEnabled,
+                                          showControls, showSpectrum);
                 if (!renderer.endLyricLayerDraw(0, layerRt))
                     clearImmersiveSongContentTransition();
             }
@@ -9605,9 +7813,9 @@ struct TaskbarHost::Impl {
         if (SUCCEEDED(frameHr) && compositorSongContentPending) {
             bool layerReady = false;
             if (ID2D1DeviceContext* layerRt = renderer.beginLyricLayerDraw(0)) {
-                drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW,
-                                          lyricBlockH, primaryBrush, idleScene,
-                                          lyricEffectsEnabled, showControls, showSpectrum);
+                drawHorizontalSongContent(layerRt, w, h, leftW, lyricAreaX, lyricAreaW, lyricBlockH,
+                                          primaryBrush, idleScene, lyricEffectsEnabled,
+                                          showControls, showSpectrum);
                 layerReady = renderer.endLyricLayerDraw(0, layerRt);
             }
             if (layerReady) {
@@ -9643,11 +7851,10 @@ struct TaskbarHost::Impl {
                         drawDockPet(w, h, leftW);
                     drawImmersiveRightSide(w, h, showSpectrum);
                 } else if (embeddedResourceVisible()) {
-                    const float resourceWidth =
-                        std::min(resourceZoneWidth(),
-                                 std::max(1.0f, w - kDockResourceRightPadding));
-                    drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding,
-                                           h, resourceWidth);
+                    const float resourceWidth = std::min(
+                        resourceZoneWidth(), std::max(1.0f, w - kDockResourceRightPadding));
+                    drawDockResourceStatus(w - resourceWidth - kDockResourceRightPadding, h,
+                                           resourceWidth);
                 }
                 if (clipSongContent)
                     rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, songContentRight, h),
@@ -9655,9 +7862,9 @@ struct TaskbarHost::Impl {
                 contentTransitionActive = applyImmersiveSongContentTransform(rt);
                 // 失败回退时仍需绘制歌曲内容；这里复用与快照相同的绘制入口，
                 // 避免回退路径和正常路径再次产生视觉差异。
-                drawHorizontalSongContent(rt, w, h, leftW, lyricAreaX, lyricAreaW,
-                                          lyricBlockH, primaryBrush, idleScene,
-                                          lyricEffectsEnabled, showControls, showSpectrum);
+                drawHorizontalSongContent(rt, w, h, leftW, lyricAreaX, lyricAreaW, lyricBlockH,
+                                          primaryBrush, idleScene, lyricEffectsEnabled,
+                                          showControls, showSpectrum);
                 if (contentTransitionActive)
                     rt->SetTransform(D2D1::Matrix3x2F::Identity());
                 if (clipSongContent)
@@ -9681,8 +7888,8 @@ struct TaskbarHost::Impl {
         float dt = static_cast<float>(now - lastTickMs_) / 1000.0f;
         lastTickMs_ = now;
 
-        if (isLyricTransitionInProgress() &&
-            lyricTransitionRevision_ != 0 && lyricTransitionRevision_ != frameRevision_) {
+        if (isLyricTransitionInProgress() && transition_.revision() != 0 &&
+            transition_.revision() != frameRevision_) {
             // 不存在历史过渡队列：版本过期时直接丢弃旧过渡，下一次排版只处理当前行。
             resetLyricTransition();
             requestInvalidation(RenderInvalidation::Text);
@@ -9690,8 +7897,7 @@ struct TaskbarHost::Impl {
 
         const bool wasTransitioning = isLyricTransitionInProgress();
         if (isLyricTransitionActive() &&
-            now - lyricTransitionStartMs_ >=
-                static_cast<ULONGLONG>(lyricTransitionDurationMs())) {
+            now - transition_.startMs() >= static_cast<ULONGLONG>(lyricTransitionDurationMs())) {
             finalizeLyricTransition(now);
         }
 
@@ -9699,25 +7905,9 @@ struct TaskbarHost::Impl {
         bool animating = wasTransitioning;
         auto marquee = [&](float textW, float areaW, float speed, float& offset,
                            float loopGap = kTextPadding * 2.0f) {
-            if (!clientAnimations_) {
-                if (offset != 0.0f) {
-                    offset = 0.0f;
-                    animating = true;
-                }
-                return;
-            }
-            if (textW <= areaW || areaW <= 0.0f) {
-                if (offset != 0.0f) {
-                    offset = 0.0f;
-                    animating = true;
-                }
-                return;
-            }
-            float loopW = textW + loopGap;
-            offset = std::fmod(offset + speed * std::max(dt, 0.0f), loopW);
-            if (offset < 0.0f)
-                offset += loopW;
-            animating = true;
+            animating = taskbar_detail::advanceMarquee(textW, areaW, speed, dt, loopGap,
+                                                       clientAnimations_, offset) ||
+                        animating;
         };
         auto finishOneShotStatus = [&]() {
             statusTextOneShot_ = false;
@@ -9769,8 +7959,7 @@ struct TaskbarHost::Impl {
         logicalClientPixelSize(pxW, pxH);
         if (isVerticalTaskbar()) {
             const VerticalLayout verticalLayoutState = verticalLayout();
-            const float lyricAreaH = verticalLayoutState.lyricBottom -
-                                     verticalLayoutState.lyricY;
+            const float lyricAreaH = verticalLayoutState.lyricBottom - verticalLayoutState.lyricY;
             if (lyricAreaH <= 0.0f) {
                 scrollAnimating_ = animating;
                 return;
@@ -9779,9 +7968,8 @@ struct TaskbarHost::Impl {
             const bool holdLyricScroll = isLyricTransitionInProgress();
             const bool lyricMarqueePlaying = media.playing;
             const bool idleMarquee = scene_ == DisplayScene::Idle;
-            const float verticalLyricExtent = verticalLyricHeight_ > 0.0f
-                                                  ? verticalLyricHeight_
-                                                  : lyricWidth_;
+            const float verticalLyricExtent =
+                verticalLyricHeight_ > 0.0f ? verticalLyricHeight_ : lyricWidth_;
             if (verticalLayoutState.showControls) {
                 scrollAnimating_ = animating;
                 return;
@@ -9794,11 +7982,11 @@ struct TaskbarHost::Impl {
                             (karaokeSmoothLine_ == currentLine) ? karaokeProgX_ : 0.0f;
                         // 普通竖向跑马灯的 offset 正值代表向下；逐字高亮跟随时，
                         // 只有内容超出底部后才向上回收文本，避免当前字被推出可视区。
-                        const float target = std::clamp(
-                            lyricAreaH * 0.3f -
-                                verticalLyricExtent *
-                                    (lyricWidth_ > 0.0f ? sungX / lyricWidth_ : 0.0f),
-                            lyricAreaH - verticalLyricExtent, 0.0f);
+                        const float target =
+                            std::clamp(lyricAreaH * 0.3f -
+                                           verticalLyricExtent *
+                                               (lyricWidth_ > 0.0f ? sungX / lyricWidth_ : 0.0f),
+                                       lyricAreaH - verticalLyricExtent, 0.0f);
                         const float diff = target - lyricScrollOffset_;
                         const float followDtMs =
                             std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
@@ -9825,8 +8013,8 @@ struct TaskbarHost::Impl {
                     }
                 } else {
                     marquee(verticalLyricExtent, lyricAreaH,
-                            idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_,
-                            lyricScrollOffset_, kVerticalLyricGap);
+                            idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_,
+                            kVerticalLyricGap);
                 }
             }
             scrollAnimating_ = animating;
@@ -9874,8 +8062,7 @@ struct TaskbarHost::Impl {
                         std::clamp(sungX - lyricAreaW * 0.3f, 0.0f, lyricWidth_ - lyricAreaW);
                     float diff = target - lyricScrollOffset_;
                     // 用时间常数而不是固定帧比例，保证 30/60/120Hz 下观感一致。
-                    const float followDtMs =
-                        std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
+                    const float followDtMs = std::clamp(std::max(dt, 0.0f) * 1000.0f, 0.0f, 250.0f);
                     const float alpha = 1.0f - std::exp(-followDtMs / kKaraokeScrollFollowMs);
                     lyricScrollOffset_ =
                         std::fabs(diff) < 0.5f ? target : lyricScrollOffset_ + diff * alpha;
@@ -9892,14 +8079,14 @@ struct TaskbarHost::Impl {
             }
         } else if ((lyricMarqueePlaying || idleMarquee) && !holdLyricScroll) {
             if (statusTextOneShot_ && idleMarquee) {
-                if (oneShotMarquee(lyricWidth_, lyricAreaW, kInfoScrollSpeed,
-                                   lyricScrollOffset_, kTextPadding * 2.0f)) {
+                if (oneShotMarquee(lyricWidth_, lyricAreaW, kInfoScrollSpeed, lyricScrollOffset_,
+                                   kTextPadding * 2.0f)) {
                     scrollAnimating_ = false;
                     return;
                 }
             } else {
-                marquee(lyricWidth_, lyricAreaW,
-                        idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_, lyricScrollOffset_);
+                marquee(lyricWidth_, lyricAreaW, idleMarquee ? kInfoScrollSpeed : lyricScrollSpeed_,
+                        lyricScrollOffset_);
             }
         }
         if (lyricMarqueePlaying && !holdLyricScroll)
@@ -9908,50 +8095,10 @@ struct TaskbarHost::Impl {
     }
 
     void updateVinylRotation() {
-        const ULONGLONG now = monotonicNowMs();
-        if (vinylTickMs_ == 0)
-            vinylTickMs_ = now;
-        const ULONGLONG elapsed = now - vinylTickMs_;
-        vinylTickMs_ = now;
-        const float previousArmAngle = vinylArmAngleDeg_;
-        const bool armWasMoving = vinylArmStartMs_ != 0;
-
-        // 先采样尚未结束的动作，快速切换播放状态时从当前位置反向，不跳回端点。
-        if (vinylArmStartMs_ != 0) {
-            const float t = std::min(1.0f,
-                static_cast<float>(now - vinylArmStartMs_) / kVinylArmDurationMs);
-            const float eased = t * t * (3.0f - 2.0f * t);
-            vinylArmAngleDeg_ = vinylArmFromDeg_ +
-                               (vinylArmTargetDeg_ - vinylArmFromDeg_) * eased;
-            if (t >= 1.0f) {
-                vinylArmAngleDeg_ = vinylArmTargetDeg_;
-                vinylArmStartMs_ = 0;
-            }
-        }
-        const float target = media.playing ? 0.0f : kVinylArmParkedAngle;
-        const bool animate = albumCoverEffect_ == AlbumCoverEffect::Vinyl &&
-                             albumCoverVisible_ && clientAnimations_;
-        if (!animate) {
-            vinylArmAngleDeg_ = vinylArmFromDeg_ = vinylArmTargetDeg_ = target;
-            vinylArmStartMs_ = 0;
-        } else if (target != vinylArmTargetDeg_) {
-            vinylArmFromDeg_ = vinylArmAngleDeg_;
-            vinylArmTargetDeg_ = target;
-            vinylArmStartMs_ = vinylArmAngleDeg_ == target ? 0 : now;
-        }
-        // 收尾帧也要重绘，不能在清除动作标记后被静止判定跳过。
-        if (vinylArmAngleDeg_ != previousArmAngle)
+        if (vinyl_.advance(monotonicNowMs(), media.playing,
+                           albumCoverEffect_ == AlbumCoverEffect::Vinyl && albumCoverVisible_ &&
+                               clientAnimations_))
             requestFrame();
-
-        // 暂停立即停盘；恢复播放时等唱臂落稳，下一帧才开始推进角度。
-        if (!animate || !media.playing || armWasMoving || vinylArmStartMs_ != 0 ||
-            vinylArmAngleDeg_ != 0.0f)
-            return;
-        vinylAngleDeg_ = std::fmod(
-            vinylAngleDeg_ + static_cast<float>(elapsed) * kVinylRotationDegPerSecond / 1000.0f,
-            360.0f);
-        if (vinylAngleDeg_ < 0.0f)
-            vinylAngleDeg_ += 360.0f;
     }
 
     // ---------- 事件 ----------
@@ -9989,7 +8136,7 @@ struct TaskbarHost::Impl {
 
     bool hasHighFrequencyAnimation() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
-        if (vinylArmStartMs_ != 0 && clientAnimations_ && albumCoverVisible_ &&
+        if (vinyl_.armMoving() && clientAnimations_ && albumCoverVisible_ &&
             albumCoverEffect_ == AlbumCoverEffect::Vinyl && !songLayerActive)
             return true;
         if (horizontalImmersiveMode() && clientAnimations_ && dockPet_.animating())
@@ -10015,7 +8162,7 @@ struct TaskbarHost::Impl {
         if (media.playing && progressBackgroundActive())
             return true;
         if (media.playing && spectrumVisible_) {
-            for (float v : spectrumBands_)
+            for (float v : spectrum_.bands())
                 if (v > 0.01f)
                     return true;
         }
@@ -10049,8 +8196,7 @@ struct TaskbarHost::Impl {
     void setRenderMode(RenderMode mode) {
         if (mode == renderState_.mode())
             return;
-        const bool leavingStopped =
-            isStoppedMode() && mode != RenderMode::Stopped;
+        const bool leavingStopped = isStoppedMode() && mode != RenderMode::Stopped;
         const bool wasMinimal = isMinimalMode();
         renderState_.setMode(mode);
         if (leavingStopped) {
@@ -10064,7 +8210,7 @@ struct TaskbarHost::Impl {
                 // 真实探测，不能按旧的“有空间”结果先显示一帧再隐藏。
                 renderState_.setVisibilitySuppressed(true);
                 probeReady_ = false;
-                delete probeState_->out.exchange(nullptr);
+                placementProbe_.clearResult();
             }
             stopFrameTimer();
             stopPlacementTimer();
@@ -10136,7 +8282,7 @@ struct TaskbarHost::Impl {
     // 跳过时屏幕上保持上一次 DirectComposition 提交的内容，不会闪烁或丢状态。
     bool needsFrameRender() const {
         const bool songLayerActive = immersiveSongContentLayerActive();
-        if (vinylArmStartMs_ != 0 && clientAnimations_ && albumCoverVisible_ &&
+        if (vinyl_.armMoving() && clientAnimations_ && albumCoverVisible_ &&
             albumCoverEffect_ == AlbumCoverEffect::Vinyl && !songLayerActive)
             return true;
         if (renderState_.hasInvalidation())
@@ -10168,7 +8314,7 @@ struct TaskbarHost::Impl {
         if (spectrumVisualsAnimating() || spectrumEffectsAnimating() || lyricEffectsAnimating())
             return true;
         if (spectrumVisible_) {
-            for (float v : spectrumBands_)
+            for (float v : spectrum_.bands())
                 if (v > 0.01f)
                     return true;
         }
@@ -10276,13 +8422,12 @@ struct TaskbarHost::Impl {
         case WM_DISPLAYCHANGE:
             // 显示拓扑/分辨率变化（远程接入、虚拟屏开关等）是设备丢失的前置信号，
             // 记录下来便于和随后的 device lost / 重建日志对照。
-            runtime_log::writef(L"[display] changed: %lux%lu %lubpp",
-                                static_cast<unsigned long>(LOWORD(lp)),
-                                static_cast<unsigned long>(HIWORD(lp)),
-                                static_cast<unsigned long>(wp));
+            runtime_log::writef(
+                L"[display] changed: %lux%lu %lubpp", static_cast<unsigned long>(LOWORD(lp)),
+                static_cast<unsigned long>(HIWORD(lp)), static_cast<unsigned long>(wp));
             findTaskbar();
             updateDisplayRefresh();
-            if (isAppBarView() && appBarRegistered_)
+            if (isAppBarView() && appBar_.registered())
                 updateAppBarPosition();
             else
                 adjustPosition();
@@ -10301,7 +8446,7 @@ struct TaskbarHost::Impl {
             }
             return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_DPICHANGED:
-            if (isAppBarView() && appBarRegistered_) {
+            if (isAppBarView() && appBar_.registered()) {
                 dpi_ = HIWORD(wp) ? HIWORD(wp) : LOWORD(wp);
                 renderer.setDpi(dpi_);
                 requestInvalidation(toMask(RenderInvalidation::Layout) |
@@ -10313,7 +8458,7 @@ struct TaskbarHost::Impl {
             }
             return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_ACTIVATE:
-            if (appBarRegistered_) {
+            if (appBar_.registered()) {
                 APPBARDATA data{};
                 data.cbSize = sizeof(data);
                 data.hWnd = hwnd;
@@ -10322,7 +8467,7 @@ struct TaskbarHost::Impl {
             }
             return DefWindowProcW(hwnd, msg, wp, lp);
         case WM_WINDOWPOSCHANGED:
-            if (appBarRegistered_) {
+            if (appBar_.registered()) {
                 APPBARDATA data{};
                 data.cbSize = sizeof(data);
                 data.hWnd = hwnd;
@@ -10346,10 +8491,12 @@ struct TaskbarHost::Impl {
             if (dragPress_) {
                 dragCursorScreen_ = cursor;
                 if (!lyricDragging_) {
-                    const int thresholdX = std::max(GetSystemMetrics(SM_CXDRAG),
-                                                    (int)std::lround(kLyricDragThresholdDip * scale()));
-                    const int thresholdY = std::max(GetSystemMetrics(SM_CYDRAG),
-                                                    (int)std::lround(kLyricDragThresholdDip * scale()));
+                    const int thresholdX =
+                        std::max(GetSystemMetrics(SM_CXDRAG),
+                                 (int)std::lround(kLyricDragThresholdDip * scale()));
+                    const int thresholdY =
+                        std::max(GetSystemMetrics(SM_CYDRAG),
+                                 (int)std::lround(kLyricDragThresholdDip * scale()));
                     if (std::abs(cursor.x - dragPressScreen_.x) >= thresholdX ||
                         std::abs(cursor.y - dragPressScreen_.y) >= thresholdY)
                         beginLyricDrag();
@@ -10367,9 +8514,7 @@ struct TaskbarHost::Impl {
             trackMouseLeave();
             const float mouseX = static_cast<float>(GET_X_LPARAM(lp));
             const float mouseY = static_cast<float>(GET_Y_LPARAM(lp));
-            const int immersiveHover = isExpandedView()
-                                           ? hitImmersiveControl(mouseX, mouseY)
-                                           : -1;
+            const int immersiveHover = isExpandedView() ? hitImmersiveControl(mouseX, mouseY) : -1;
             if (immersiveHover != immersiveControlHover_) {
                 immersiveControlHover_ = immersiveHover;
                 requestFrameAndFlush();
@@ -10377,11 +8522,11 @@ struct TaskbarHost::Impl {
             if (viewMode_ == TaskbarViewMode::Immersive)
                 updateImmersiveYield(hitImmersiveControl(mouseX, mouseY, true));
             // 内嵌控件的音量按钮：悬停弹出音量滑块浮窗
-            const bool volHover = isExpandedView()
-                                      ? immersiveHover == kImmersiveControlVolume
-                                      : hitVolumeButton(mouseX, mouseY);
+            const bool volHover = isExpandedView() ? immersiveHover == kImmersiveControlVolume
+                                                   : hitVolumeButton(mouseX, mouseY);
             const int inlineHover = isExpandedView() ? -1
-                : volHover ? 3 : hitButton(mouseX, mouseY);
+                                    : volHover       ? 3
+                                                     : hitButton(mouseX, mouseY);
             if (inlineHover != inlineControlHover_) {
                 inlineControlHover_ = inlineHover;
                 requestFrameAndFlush();
@@ -10415,12 +8560,11 @@ struct TaskbarHost::Impl {
             // 滚轮消息使用屏幕坐标；音量图标上滚动直接调整应用音量（每格 ±2）
             POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
             ScreenToClient(hwnd, &pt);
-            const bool volumeHit = isExpandedView()
-                                       ? hitImmersiveControl(static_cast<float>(pt.x),
-                                                             static_cast<float>(pt.y)) ==
-                                             kImmersiveControlVolume
-                                       : hitVolumeButton(static_cast<float>(pt.x),
-                                                         static_cast<float>(pt.y));
+            const bool volumeHit =
+                isExpandedView()
+                    ? hitImmersiveControl(static_cast<float>(pt.x), static_cast<float>(pt.y)) ==
+                          kImmersiveControlVolume
+                    : hitVolumeButton(static_cast<float>(pt.x), static_cast<float>(pt.y));
             if (appVolume_.available && onAppVolume && volumeHit) {
                 const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
                 if (steps != 0)
@@ -10440,9 +8584,8 @@ struct TaskbarHost::Impl {
             // 点击与拖动从同一次按下并行识别：未越过系统拖动阈值仍按原按钮/卡片
             // 点击处理，越过阈值后才取消点击并进入位置拖拽。
             if (isExpandedView()) {
-                immersiveControlPressed_ =
-                    hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
-                                        static_cast<float>(GET_Y_LPARAM(lp)));
+                immersiveControlPressed_ = hitImmersiveControl(
+                    static_cast<float>(GET_X_LPARAM(lp)), static_cast<float>(GET_Y_LPARAM(lp)));
                 if (immersiveControlPressed_ >= 0) {
                     if (viewMode_ == TaskbarViewMode::Immersive)
                         cancelImmersiveHide();
@@ -10463,9 +8606,8 @@ struct TaskbarHost::Impl {
         case WM_LBUTTONUP: {
             if (isExpandedView()) {
                 const int pressed = immersiveControlPressed_;
-                const int released =
-                    hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
-                                        static_cast<float>(GET_Y_LPARAM(lp)));
+                const int released = hitImmersiveControl(static_cast<float>(GET_X_LPARAM(lp)),
+                                                         static_cast<float>(GET_Y_LPARAM(lp)));
                 immersiveControlPressed_ = -1;
                 if (GetCapture() == hwnd)
                     ReleaseCapture();
@@ -10531,17 +8673,17 @@ struct TaskbarHost::Impl {
             return 0;
         }
         case kAppBarCallbackMessage:
-            if (!appBarRegistered_)
+            if (!appBar_.registered())
                 return 0;
             switch (wp) {
             case ABN_POSCHANGED:
                 updateAppBarPosition();
                 break;
             case ABN_FULLSCREENAPP:
-                appBarFullscreenOpen_ = lp != FALSE;
+                appBar_.setFullscreen(lp != FALSE);
                 runtime_log::writef(L"[dock] fullscreen %s; z-order=%s",
-                                    appBarFullscreenOpen_ ? L"opened" : L"closed",
-                                    appBarFullscreenOpen_ ? L"bottom" : L"topmost");
+                                    appBar_.fullscreen() ? L"opened" : L"closed",
+                                    appBar_.fullscreen() ? L"bottom" : L"topmost");
                 updateAppBarZOrder();
                 break;
             case ABN_STATECHANGE:
@@ -10572,8 +8714,7 @@ struct TaskbarHost::Impl {
                 DestroyWindow(hwnd);
             return 0;
         case WM_DESTROY:
-            runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)",
-                                isWindowVisible() ? 1 : 0);
+            runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", isWindowVisible() ? 1 : 0);
             resetImmersivePresence();
             dockBackdrop_.reset();
             renderState_.setWindowPhase(RenderState::WindowPhase::Hidden);
@@ -10614,6 +8755,10 @@ struct TaskbarHost::Impl {
     }
 };
 
+void TaskbarHost::applyAppearance(const TaskbarAppearance& appearance) {
+    impl_->applyAppearance(appearance);
+}
+
 TaskbarHost::TaskbarHost() : impl_(std::make_unique<Impl>()) {}
 
 TaskbarHost::~TaskbarHost() {
@@ -10632,13 +8777,9 @@ bool TaskbarHost::create(HINSTANCE inst, const std::wstring& monitorDeviceName,
     return impl_->createWindow(inst, monitorDeviceName, initialViewMode);
 }
 
-HWND TaskbarHost::hwnd() const {
-    return impl_ ? impl_->hwnd : nullptr;
-}
+HWND TaskbarHost::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
 
-void TaskbarHost::setTickCallback(std::function<void()> cb) {
-    impl_->tick = std::move(cb);
-}
+void TaskbarHost::setTickCallback(std::function<void()> cb) { impl_->tick = std::move(cb); }
 
 void TaskbarHost::applyPresentationFrame(const PresentationFrame& frame) {
     impl_->applyPresentationFrame(frame);
@@ -10694,8 +8835,7 @@ void TaskbarHost::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&
     impl_->mediaPopup.setIdleTaskOpenCallback(std::move(cb));
 }
 
-void TaskbarHost::setIdleTaskCompleteCallback(
-    std::function<void(const IdleTaskInfo&)> cb) {
+void TaskbarHost::setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb) {
     impl_->mediaPopup.setIdleTaskCompleteCallback(std::move(cb));
 }
 
@@ -10723,8 +8863,7 @@ void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) 
     impl_->onStatusTextCycleCompleted_ = std::move(cb);
 }
 
-void TaskbarHost::setPlacementStatusCallback(
-    std::function<void(TaskbarPlacementStatus)> cb) {
+void TaskbarHost::setPlacementStatusCallback(std::function<void(TaskbarPlacementStatus)> cb) {
     impl_->onPlacementStatusChanged_ = std::move(cb);
 }
 
@@ -10734,250 +8873,52 @@ void TaskbarHost::setAllowOverlap(bool on) {
         impl_->requestFrameAndFlush();
 }
 
-void TaskbarHost::setVisibilitySuppressed(bool on) {
-    impl_->setVisibilitySuppressed(on);
-}
+void TaskbarHost::setVisibilitySuppressed(bool on) { impl_->setVisibilitySuppressed(on); }
 
-TaskbarPlacementStatus TaskbarHost::refreshPlacement() {
-    return impl_->refreshPlacement();
-}
+TaskbarPlacementStatus TaskbarHost::refreshPlacement() { return impl_->refreshPlacement(); }
 
-TaskbarPlacementStatus TaskbarHost::placementStatus() const {
-    return impl_->placementStatus_;
-}
+TaskbarPlacementStatus TaskbarHost::placementStatus() const { return impl_->placementStatus_; }
 
 bool TaskbarHost::isDisplayed() const {
     return impl_ && impl_->isWindowVisible() && impl_->hwnd && IsWindowVisible(impl_->hwnd);
 }
 
-const std::vector<LyricLine>& TaskbarHost::lyrics() const {
-    return impl_->lines;
-}
+const std::vector<LyricLine>& TaskbarHost::lyrics() const { return impl_->lines; }
 
-void TaskbarHost::show() {
-    impl_->show();
-}
+void TaskbarHost::show() { impl_->show(); }
 
-void TaskbarHost::hide() {
-    impl_->hide();
-}
+void TaskbarHost::hide() { impl_->hide(); }
 
-bool TaskbarHost::isTaskbar() const {
-    return true;
-}
+bool TaskbarHost::isTaskbar() const { return true; }
 
-bool TaskbarHost::isVerticalTaskbar() const {
-    return impl_ && impl_->isVerticalTaskbar();
-}
+bool TaskbarHost::isVerticalTaskbar() const { return impl_ && impl_->isVerticalTaskbar(); }
 
-bool TaskbarHost::isCompactTaskbar() const {
-    return impl_ && impl_->compactTaskbarHeight_ > 0.0f;
-}
+bool TaskbarHost::isCompactTaskbar() const { return impl_ && impl_->compactTaskbarHeight_ > 0.0f; }
 
-int TaskbarHost::currentLine() const {
-    return impl_->currentLine;
-}
+int TaskbarHost::currentLine() const { return impl_->currentLine; }
 
-const std::wstring& TaskbarHost::statusText() const {
-    return impl_->statusText;
-}
+const std::wstring& TaskbarHost::statusText() const { return impl_->statusText; }
 
-void TaskbarHost::changeFont(float delta) {
-    impl_->changeFont(delta);
-}
+void TaskbarHost::changeFont(float delta) { impl_->changeFont(delta); }
 
-LyricFontSizeContext TaskbarHost::fontSizeContext() const {
-    return impl_->fontSizeContext();
-}
+LyricFontSizeContext TaskbarHost::fontSizeContext() const { return impl_->fontSizeContext(); }
 
 void TaskbarHost::setFont(const std::wstring& family, float size, LyricFontStyle style) {
     impl_->setFont(family, size, style);
 }
 
-void TaskbarHost::setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) {
-    impl_->setFontColors(played, unplayed, unplayedAlphaPct);
-}
+void TaskbarHost::refreshTheme() { impl_->refreshTheme(); }
 
-void TaskbarHost::setFontGlow(bool on) {
-    impl_->setFontGlow(on);
-}
+void TaskbarHost::setRenderMode(RenderMode mode) { impl_->setRenderMode(mode); }
 
-void TaskbarHost::setFontOutline(bool on) {
-    impl_->setFontOutline(on);
-}
+void TaskbarHost::setSpectrumVisible(bool on) { impl_->setSpectrumVisible(on); }
 
-void TaskbarHost::setFontGlowColors(COLORREF glow, COLORREF outline) {
-    impl_->setFontGlowColors(glow, outline);
-}
+void TaskbarHost::setViewMode(TaskbarViewMode mode) { impl_->setViewMode(mode); }
 
-void TaskbarHost::setSecondaryLyricMode(bool translation, bool romanization) {
-    impl_->setSecondaryLyricMode(translation, romanization);
-}
+void TaskbarHost::setAppBarEdge(AppBarEdge edge) { impl_->setAppBarEdge(edge); }
 
-void TaskbarHost::setDoubleLineLyrics(bool on) {
-    impl_->setDoubleLineLyrics(on);
-}
+bool TaskbarHost::backgroundBlurAvailable() const { return impl_->backgroundBlurAvailable(); }
 
-void TaskbarHost::setLyricAlignment(LyricAlignment alignment) {
-    impl_->setLyricAlignment(alignment);
-}
+void TaskbarHost::setPositionMode(int mode) { impl_->setPositionMode(mode); }
 
-void TaskbarHost::setIdleQuoteAlignment(LyricAlignment alignment) {
-    impl_->setIdleQuoteAlignment(alignment);
-}
-
-void TaskbarHost::setIdleQuoteBackground(IdleQuoteBackground background) {
-    impl_->setIdleQuoteBackground(background);
-}
-
-void TaskbarHost::setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope) {
-    impl_->setIdleQuoteBackgroundScope(scope);
-}
-
-void TaskbarHost::setControlsOnHover(bool on) {
-    impl_->setControlsOnHover(on);
-}
-
-void TaskbarHost::setContextMenuEnabled(bool on) {
-    impl_->contextMenuEnabled_ = on;
-}
-
-void TaskbarHost::setHoverControlStyle(HoverControlStyle style) {
-    impl_->setHoverControlStyle(style);
-}
-
-void TaskbarHost::setFloatingCardTrigger(MediaPopupTrigger trigger) {
-    impl_->setFloatingCardTrigger(trigger);
-}
-
-void TaskbarHost::setFloatingCardBackground(MediaPopupBackground mode) {
-    impl_->setFloatingCardBackground(mode);
-}
-
-void TaskbarHost::setFloatingCardBackgroundColor(COLORREF color, bool customized) {
-    impl_->setFloatingCardBackgroundColor(color, customized);
-}
-
-void TaskbarHost::setFloatingCardFollowAlbum(bool on) {
-    impl_->setFloatingCardFollowAlbum(on);
-}
-
-void TaskbarHost::setFloatingCardAutoTextContrast(bool on) {
-    impl_->setFloatingCardAutoTextContrast(on);
-}
-
-void TaskbarHost::refreshTheme() {
-    impl_->refreshTheme();
-}
-
-void TaskbarHost::setSongInfoVisible(bool on) {
-    impl_->setSongInfoVisible(on);
-}
-
-void TaskbarHost::setAlbumCoverVisible(bool on) {
-    impl_->setAlbumCoverVisible(on);
-}
-
-void TaskbarHost::setPlatformIconVisible(bool on) {
-    impl_->setPlatformIconVisible(on);
-}
-
-void TaskbarHost::setAlbumCoverEffect(AlbumCoverEffect effect) {
-    impl_->setAlbumCoverEffect(effect);
-}
-
-void TaskbarHost::setRenderMode(RenderMode mode) {
-    impl_->setRenderMode(mode);
-}
-
-void TaskbarHost::setSpectrumVisible(bool on) {
-    impl_->setSpectrumVisible(on);
-}
-
-void TaskbarHost::setSpectrumStyle(SpectrumStyle style) {
-    impl_->setSpectrumStyle(style);
-}
-
-void TaskbarHost::setSpectrumColor(COLORREF color, bool customized, bool followAlbum) {
-    impl_->setSpectrumColor(color, customized, followAlbum);
-}
-
-void TaskbarHost::setSpectrumAlbumColor(COLORREF color, bool available) {
-    impl_->setSpectrumAlbumColor(color, available);
-}
-
-void TaskbarHost::setSpectrumGradient(bool on) {
-    impl_->setSpectrumGradient(on);
-}
-
-void TaskbarHost::setSpectrumEffects(uint32_t effects) {
-    impl_->setSpectrumEffects(effects);
-}
-
-void TaskbarHost::setLyricEffects(uint32_t effects) {
-    impl_->setLyricEffects(effects);
-}
-
-void TaskbarHost::setSpectrumBackground(bool on) {
-    impl_->setSpectrumBackground(on);
-}
-
-void TaskbarHost::setSpectrumOpacity(int percent) {
-    impl_->setSpectrumOpacity(percent);
-}
-
-void TaskbarHost::setProgressBackground(bool on) {
-    impl_->setProgressBackground(on);
-}
-
-void TaskbarHost::setProgressBackgroundOpacity(int percent) {
-    impl_->setProgressBackgroundOpacity(percent);
-}
-
-void TaskbarHost::setBackground(TaskbarBackground mode) {
-    impl_->setBackground(mode);
-}
-
-void TaskbarHost::setCoverBackgroundOpacity(int percent) {
-    impl_->setCoverBackgroundOpacity(percent);
-}
-
-void TaskbarHost::setViewMode(TaskbarViewMode mode) {
-    impl_->setViewMode(mode);
-}
-
-void TaskbarHost::setAppBarEdge(AppBarEdge edge) {
-    impl_->setAppBarEdge(edge);
-}
-
-void TaskbarHost::setImmersiveBackgroundBlur(int percent) {
-    impl_->setImmersiveBackgroundBlur(percent);
-}
-
-void TaskbarHost::setDockBackgroundBlur(int percent) {
-    impl_->setDockBackgroundBlur(percent);
-}
-
-void TaskbarHost::setImmersiveBackgroundAdjustment(int mode) {
-    impl_->setImmersiveBackgroundAdjustment(mode);
-}
-
-void TaskbarHost::setDockBackgroundAdjustment(int mode) {
-    impl_->setDockBackgroundAdjustment(mode);
-}
-
-bool TaskbarHost::backgroundBlurAvailable() const {
-    return impl_->backgroundBlurAvailable();
-}
-
-void TaskbarHost::setDockResourceVisibility(const DockResourceVisibility& visibility) {
-    impl_->setDockResourceVisibility(visibility);
-}
-
-void TaskbarHost::setPositionMode(int mode) {
-    impl_->setPositionMode(mode);
-}
-
-void TaskbarHost::onTaskbarCreated() {
-    impl_->onTaskbarCreated();
-}
+void TaskbarHost::onTaskbarCreated() { impl_->onTaskbarCreated(); }

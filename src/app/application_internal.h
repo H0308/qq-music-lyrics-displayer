@@ -31,6 +31,7 @@
 #include "logging/runtime_logger.h"
 #include "settings/settings_store.h"
 #include "settings/app_settings.h"
+#include "model/taskbar_appearance.h"
 #include "idle/idle_controller.h"
 #include "app/messages.h"
 #include "app/presentation_model.h"
@@ -396,6 +397,8 @@ private:
     // 各设置字段保存用户的常规配置；极简模式只在推送到宿主时临时覆盖有效值，
     // 退出后重新推送原配置，避免用户切换性能模式时丢失显示偏好。竖向任务栏则
     // 额外关闭不适合窄栏的有效显示，但歌词相关配置仍保留，切回横向即可继续使用。
+    TaskbarAppearance appearanceForHost(bool vertical) const;
+    void publishTaskbarAppearance();
     void applyEffectiveTaskbarSettings();
 
     // 频谱实际启停 = 用户开关 && 横向任务栏 && 正常渲染模式 && 宿主存在；
@@ -589,7 +592,7 @@ private:
     COLORREF effectivePlayedColor() const;
     COLORREF effectiveFloatingCardBackgroundColor() const;
     void applyFloatingCardBackgroundColor(COLORREF color);
-    const FontColorDialog::ThemeState& currentLyricAppearance() const;
+    const LyricAppearance& currentLyricAppearance() const;
     void tryExtractAlbumColor();
     void loadSettings();
     void saveSettings();

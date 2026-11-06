@@ -1,15 +1,10 @@
 #pragma once
 
+#include "model/display_types.h"
 #include <windows.h>
 #include <dwrite.h>
 
 // 用户选择的歌词字体样式。粗斜体同时启用粗体和斜体。
-enum class LyricFontStyle {
-    Normal,
-    Bold,
-    Italic,
-    BoldItalic,
-};
 
 // 字号建议使用任务栏的实际逻辑尺寸，与字体窗口的显示器缩放无关。
 struct LyricFontSizeContext {

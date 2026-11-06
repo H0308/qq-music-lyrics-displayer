@@ -1,9 +1,7 @@
 #pragma once
 
 #include "idle/idle_types.h"
-#include "ui/font_color_dialog.h"
-#include "ui/fluent_theme.h"
-#include "ui/taskbar_host.h"
+#include "model/display_types.h"
 #include <nlohmann/json_fwd.hpp>
 #include <cstdint>
 #include <string>
@@ -13,14 +11,14 @@
 struct AppSettings {
     // 字体状态（作为字体选择器的记忆源）。hasUserFont_ 为 false 时各宿主使用各自的默认字体。
     bool hasUserFont_ = false;
-    std::wstring fontFamily_ = fluent::uiFontFamily(); // 与普通窗口默认字体族一致
+    std::wstring fontFamily_ = kDefaultUiFontFamily; // 与普通窗口默认字体族一致
     float fontSize_ = 16.0f;
     LyricFontStyle fontStyle_ = LyricFontStyle::Normal;
     bool lyricAppearanceGlobal_ = false;
-    FontColorDialog::ThemeState lightLyricAppearance_;
-    FontColorDialog::ThemeState darkLyricAppearance_;
+    LyricAppearance lightLyricAppearance_;
+    LyricAppearance darkLyricAppearance_;
     bool hasGlobalLyricAppearance_ = false;
-    FontColorDialog::ThemeState globalLyricAppearance_;
+    LyricAppearance globalLyricAppearance_;
     bool idleEntryEnabled_ = true;
     bool idleQuoteEnabled_ = true;
     bool idleWelcomeEnabled_ = true;

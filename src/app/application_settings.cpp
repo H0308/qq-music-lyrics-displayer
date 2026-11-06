@@ -4,15 +4,9 @@ void App::applySecondaryLyricMode() {
     const uint32_t starBit = lyricEffectBit(LyricEffect::Stardust);
     if (settings_.secondaryLyricEnabled_ && (settings_.lyricEffects_ & starBit) != 0) {
         settings_.lyricEffects_ &= ~starBit;
-        forEachHost([&](TaskbarHost* host) { host->setLyricEffects(settings_.lyricEffects_); });
         logSettingInt(L"lyric-effects", static_cast<int>(settings_.lyricEffects_));
     }
-    const bool showTranslation =
-        !taskbarVertical_ && settings_.secondaryLyricEnabled_ && !settings_.preferRomanization_;
-    const bool showRomanization =
-        !taskbarVertical_ && settings_.secondaryLyricEnabled_ && settings_.preferRomanization_;
-    forEachHost(
-        [&](ILyricHost* host) { host->setSecondaryLyricMode(showTranslation, showRomanization); });
+    publishTaskbarAppearance();
 }
 
 void App::logSettingBool(const wchar_t* name, bool value) {
@@ -26,7 +20,7 @@ void App::logSettingInt(const wchar_t* name, int value) {
 void App::applySongInfoVisible(bool on) {
     settings_.songInfoVisible_ = on;
     forEachHost([&](TaskbarHost* host) {
-        host->setSongInfoVisible(host->isVerticalTaskbar() ? false : on);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
     });
     logSettingBool(L"song-info-visible", on);
     saveSettings();
@@ -34,24 +28,21 @@ void App::applySongInfoVisible(bool on) {
 
 void App::applyAlbumCoverVisible(bool on) {
     settings_.albumCoverVisible_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setAlbumCoverVisible(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"album-cover-visible", on);
     saveSettings();
 }
 
 void App::applyPlatformIconVisible(bool on) {
     settings_.platformIconVisible_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setPlatformIconVisible(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"platform-icon-visible", on);
     saveSettings();
 }
 
 void App::applyCoverEffect(bool vinyl) {
     settings_.albumCoverEffect_ = vinyl ? AlbumCoverEffect::Vinyl : AlbumCoverEffect::Default;
-    forEachHost([&](TaskbarHost* host) {
-        host->setAlbumCoverEffect(isMinimalRenderMode() ? AlbumCoverEffect::Default
-                                                        : settings_.albumCoverEffect_);
-    });
+    publishTaskbarAppearance();
     logSettingBool(L"album-cover-vinyl", vinyl);
     saveSettings();
 }
@@ -69,7 +60,7 @@ void App::applySpectrumStyle(int style) {
     settings_.spectrumStyle_ = taskbarVertical_
                                    ? SpectrumStyle::Default
                                    : static_cast<SpectrumStyle>(std::clamp(style, 0, 4));
-    forEachHost([&](TaskbarHost* host) { host->setSpectrumStyle(settings_.spectrumStyle_); });
+    publishTaskbarAppearance();
     tryRestoreSpectrumAfterNoSpace();
     logSettingInt(L"spectrum-style", spectrumStyleIndex(settings_.spectrumStyle_));
     saveSettings();
@@ -79,10 +70,7 @@ void App::applySpectrumColorMode(int mode) {
     const int normalizedMode = taskbarVertical_ ? 0 : std::clamp(mode, 0, 2);
     settings_.spectrumCustomColor_ = normalizedMode == 2;
     settings_.spectrumFollowAlbum_ = normalizedMode == 1;
-    forEachHost([&](TaskbarHost* host) {
-        host->setSpectrumColor(settings_.spectrumColor_, settings_.spectrumCustomColor_,
-                               settings_.spectrumFollowAlbum_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"spectrum-color-mode", normalizedMode);
     saveSettings();
 }
@@ -91,10 +79,7 @@ void App::applySpectrumColor(COLORREF color) {
     settings_.spectrumColor_ = color;
     settings_.spectrumCustomColor_ = taskbarVertical_ ? false : true;
     settings_.spectrumFollowAlbum_ = false;
-    forEachHost([&](TaskbarHost* host) {
-        host->setSpectrumColor(settings_.spectrumColor_, settings_.spectrumCustomColor_,
-                               settings_.spectrumFollowAlbum_);
-    });
+    publishTaskbarAppearance();
     runtime_log::writef(L"[action][setting] spectrum-color=#%02X%02X%02X", GetRValue(color),
                         GetGValue(color), GetBValue(color));
     saveSettings();
@@ -102,7 +87,7 @@ void App::applySpectrumColor(COLORREF color) {
 
 void App::applySpectrumGradient(bool on) {
     settings_.spectrumGradient_ = taskbarVertical_ ? false : on;
-    forEachHost([&](TaskbarHost* host) { host->setSpectrumGradient(settings_.spectrumGradient_); });
+    publishTaskbarAppearance();
     logSettingBool(L"spectrum-gradient", settings_.spectrumGradient_);
     saveSettings();
 }
@@ -115,7 +100,7 @@ void App::applySpectrumEffect(int effect, bool on) {
         settings_.spectrumEffects_ |= bit;
     else
         settings_.spectrumEffects_ &= ~bit;
-    forEachHost([&](TaskbarHost* host) { host->setSpectrumEffects(settings_.spectrumEffects_); });
+    publishTaskbarAppearance();
     logSettingInt(L"spectrum-effects", static_cast<int>(settings_.spectrumEffects_));
     saveSettings();
 }
@@ -134,7 +119,7 @@ void App::applyLyricEffect(int effect, bool on) {
         settings_.lyricEffects_ |= bit;
     else
         settings_.lyricEffects_ &= ~bit;
-    forEachHost([&](TaskbarHost* host) { host->setLyricEffects(settings_.lyricEffects_); });
+    publishTaskbarAppearance();
     logSettingInt(L"lyric-effects", static_cast<int>(settings_.lyricEffects_));
     refreshSettingsDialog(true);
     saveSettings();
@@ -142,54 +127,42 @@ void App::applyLyricEffect(int effect, bool on) {
 
 void App::applySpectrumBackground(bool on) {
     settings_.spectrumBackground_ = taskbarVertical_ ? false : on;
-    forEachHost([&](TaskbarHost* host) {
-        host->setSpectrumBackground(isMinimalRenderMode() ? false : settings_.spectrumBackground_);
-    });
+    publishTaskbarAppearance();
     logSettingBool(L"spectrum-background", settings_.spectrumBackground_);
     saveSettings();
 }
 
 void App::applySpectrumOpacity(int percent) {
     settings_.spectrumOpacity_ = std::clamp(percent, 0, 100);
-    forEachHost([&](TaskbarHost* host) { host->setSpectrumOpacity(settings_.spectrumOpacity_); });
+    publishTaskbarAppearance();
     logSettingInt(L"spectrum-opacity", settings_.spectrumOpacity_);
     saveSettings();
 }
 
 void App::applyProgressBackground(bool on) {
     settings_.progressBackground_ = on;
-    forEachHost([&](TaskbarHost* host) {
-        host->setProgressBackground(isMinimalRenderMode() ? false : on);
-    });
+    publishTaskbarAppearance();
     logSettingBool(L"progress-background", on);
     saveSettings();
 }
 
 void App::applyProgressBackgroundOpacity(int percent) {
     settings_.progressBackgroundOpacity_ = std::clamp(percent, 0, 100);
-    forEachHost([&](TaskbarHost* host) {
-        host->setProgressBackgroundOpacity(settings_.progressBackgroundOpacity_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"progress-background-opacity", settings_.progressBackgroundOpacity_);
     saveSettings();
 }
 
 void App::applyTaskbarBackground(int mode) {
     settings_.taskbarBackground_ = std::clamp(mode, 0, 2);
-    forEachHost([&](TaskbarHost* host) {
-        host->setBackground(isMinimalRenderMode()
-                                ? TaskbarBackground::None
-                                : static_cast<TaskbarBackground>(settings_.taskbarBackground_));
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"taskbar-background", settings_.taskbarBackground_);
     saveSettings();
 }
 
 void App::applyCoverBackgroundOpacity(int percent) {
     settings_.coverBackgroundOpacity_ = std::clamp(percent, 0, 100);
-    forEachHost([&](TaskbarHost* host) {
-        host->setCoverBackgroundOpacity(settings_.coverBackgroundOpacity_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"cover-background-opacity", settings_.coverBackgroundOpacity_);
     saveSettings();
 }
@@ -198,12 +171,7 @@ void App::applyTaskbarViewMode(int mode) {
     mode = std::clamp(mode, 0, 2);
     settings_.taskbarViewMode_ = static_cast<TaskbarViewMode>(mode);
     if (taskbarHost || taskbarPendingDisplayRebuild_) {
-        forEachHost([&](TaskbarHost* host) {
-            host->setImmersiveBackgroundAdjustment(settings_.immersiveBackgroundAdjustment_);
-            host->setDockBackgroundAdjustment(settings_.dockBackgroundAdjustment_);
-            host->setImmersiveBackgroundBlur(settings_.immersiveBackgroundBlur_);
-            host->setDockBackgroundBlur(settings_.dockBackgroundBlur_);
-        });
+        publishTaskbarAppearance();
         syncTaskbarView(monitor.snapshot());
         if (taskbarHost) {
             syncTaskbarOrientation();
@@ -229,9 +197,7 @@ void App::applyImmersiveBackgroundBlur(int percent) {
     if (settings_.immersiveBackgroundBlur_ == nextBlur)
         return;
     settings_.immersiveBackgroundBlur_ = nextBlur;
-    forEachHost([&](TaskbarHost* host) {
-        host->setImmersiveBackgroundBlur(settings_.immersiveBackgroundBlur_);
-    });
+    publishTaskbarAppearance();
     scheduleBackgroundBlurSettingsSave(true);
     if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
         refreshSettingsDialog(true);
@@ -242,8 +208,7 @@ void App::applyDockBackgroundBlur(int percent) {
     if (settings_.dockBackgroundBlur_ == nextBlur)
         return;
     settings_.dockBackgroundBlur_ = nextBlur;
-    forEachHost(
-        [&](TaskbarHost* host) { host->setDockBackgroundBlur(settings_.dockBackgroundBlur_); });
+    publishTaskbarAppearance();
     scheduleBackgroundBlurSettingsSave(false);
     if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
         refreshSettingsDialog(true);
@@ -280,9 +245,7 @@ void App::flushBackgroundBlurSettingsSave() {
 
 void App::applyImmersiveBackgroundAdjustment(int mode) {
     settings_.immersiveBackgroundAdjustment_ = std::clamp(mode, 0, 1);
-    forEachHost([&](TaskbarHost* host) {
-        host->setImmersiveBackgroundAdjustment(settings_.immersiveBackgroundAdjustment_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"immersive-background-adjustment", settings_.immersiveBackgroundAdjustment_);
     saveSettings();
     if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
@@ -291,9 +254,7 @@ void App::applyImmersiveBackgroundAdjustment(int mode) {
 
 void App::applyDockBackgroundAdjustment(int mode) {
     settings_.dockBackgroundAdjustment_ = std::clamp(mode, 0, 1);
-    forEachHost([&](TaskbarHost* host) {
-        host->setDockBackgroundAdjustment(settings_.dockBackgroundAdjustment_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"dock-background-adjustment", settings_.dockBackgroundAdjustment_);
     saveSettings();
     if (taskbarHost && !taskbarHost->backgroundBlurAvailable())
@@ -309,7 +270,7 @@ void App::applyDockResourceVisibility() {
     visibility.upload = settings_.dockResourceUpload_;
     visibility.gpuUsage = settings_.dockResourceGpuUsage_;
     visibility.cpuFrequency = settings_.dockResourceCpuFrequency_;
-    forEachHost([&](TaskbarHost* host) { host->setDockResourceVisibility(visibility); });
+    publishTaskbarAppearance();
 }
 
 void App::applyEmbeddedResourceMonitor(bool on) {
@@ -348,63 +309,26 @@ bool App::isMinimalRenderMode() const { return isRenderMode(RenderMode::Minimal)
 
 bool App::isNormalRenderMode() const { return isRenderMode(RenderMode::Normal); }
 
-void App::applyEffectiveTaskbarSettings() {
-    if (!taskbarHost)
-        return;
-    const bool minimal = isMinimalRenderMode();
+TaskbarAppearance App::appearanceForHost(bool vertical) const {
+    AppearanceContext context;
+    context.renderMode = static_cast<RenderMode>(renderMode_);
+    context.vertical = vertical;
+    context.lyricAppearance = currentLyricAppearance();
+    context.playedColor = effectivePlayedColor();
+    context.albumColor = playback_.state().albumColor_;
+    context.albumColorAvailable = playback_.state().hasAlbumColor_;
+    context.floatingCardBackground = effectiveFloatingCardBackgroundColor();
+    return resolveTaskbarAppearance(settings_, context);
+}
+
+void App::publishTaskbarAppearance() {
     forEachHost([&](TaskbarHost* host) {
-        const bool vertical =
-            host->isVerticalTaskbar() && settings_.taskbarViewMode_ != TaskbarViewMode::AppBar;
-        host->setSecondaryLyricMode(
-            vertical ? false : (settings_.secondaryLyricEnabled_ && !settings_.preferRomanization_),
-            vertical ? false : (settings_.secondaryLyricEnabled_ && settings_.preferRomanization_));
-        host->setDoubleLineLyrics(vertical ? false : settings_.doubleLineLyricsEnabled_);
-        host->setLyricEffects(settings_.lyricEffects_);
-        host->setLyricAlignment(vertical ? LyricAlignment::Left : settings_.lyricAlignment_);
-        host->setIdleQuoteAlignment(vertical ? LyricAlignment::Left
-                                             : settings_.idleQuoteAlignment_);
-        host->setSongInfoVisible(vertical ? false : settings_.songInfoVisible_);
-        host->setControlsOnHover(settings_.hoverPlaybackControls_);
-        host->setHoverControlStyle(minimal ? HoverControlStyle::Inline
-                                           : settings_.hoverControlStyle_);
-        host->setFloatingCardTrigger(settings_.floatingCardTrigger_);
-        host->setFloatingCardBackground(settings_.floatingCardBackground_);
-        host->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
-                                             settings_.floatingCardBackgroundColorCustomized_);
-        host->setIdleQuoteBackground(minimal ? IdleQuoteBackground::None
-                                             : settings_.idleQuoteBackground_);
-        host->setIdleQuoteBackgroundScope(minimal ? IdleQuoteBackgroundScope::None
-                                                  : settings_.idleQuoteBackgroundScope_);
-        host->setFloatingCardFollowAlbum(settings_.floatingCardFollowAlbum_);
-        host->setFloatingCardAutoTextContrast(settings_.floatingCardAutoTextContrast_);
-        host->setAlbumCoverEffect(minimal ? AlbumCoverEffect::Default
-                                          : settings_.albumCoverEffect_);
-        host->setSpectrumStyle(settings_.spectrumStyle_);
-        host->setSpectrumColor(settings_.spectrumColor_, settings_.spectrumCustomColor_,
-                               settings_.spectrumFollowAlbum_);
-        host->setSpectrumAlbumColor(playback_.state().albumColor_,
-                                    playback_.state().hasAlbumColor_);
-        host->setSpectrumGradient(settings_.spectrumGradient_);
-        host->setSpectrumEffects(settings_.spectrumEffects_);
-        host->setSpectrumBackground(minimal || vertical ? false : settings_.spectrumBackground_);
-        host->setSpectrumOpacity(settings_.spectrumOpacity_);
-        host->setProgressBackground(minimal ? false : settings_.progressBackground_);
-        host->setProgressBackgroundOpacity(settings_.progressBackgroundOpacity_);
-        host->setBackground(minimal ? TaskbarBackground::None
-                                    : static_cast<TaskbarBackground>(settings_.taskbarBackground_));
-        host->setCoverBackgroundOpacity(settings_.coverBackgroundOpacity_);
-        host->setImmersiveBackgroundAdjustment(settings_.immersiveBackgroundAdjustment_);
-        host->setDockBackgroundAdjustment(settings_.dockBackgroundAdjustment_);
-        host->setImmersiveBackgroundBlur(settings_.immersiveBackgroundBlur_);
-        host->setDockBackgroundBlur(settings_.dockBackgroundBlur_);
-        DockResourceVisibility visibility;
-        visibility.embeddedEnabled = settings_.embeddedResourceMonitor_;
-        visibility.gpuUsage = settings_.dockResourceGpuUsage_;
-        visibility.download = settings_.dockResourceDownload_;
-        visibility.upload = settings_.dockResourceUpload_;
-        visibility.cpuFrequency = settings_.dockResourceCpuFrequency_;
-        host->setDockResourceVisibility(visibility);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
     });
+}
+
+void App::applyEffectiveTaskbarSettings() {
+    publishTaskbarAppearance();
     syncTaskbarView(monitor.snapshot());
 }
 
@@ -459,14 +383,14 @@ void App::applyHoverControls(bool on) {
     if (taskbarExpandedConfigured() && !taskbarVertical_)
         return;
     settings_.hoverPlaybackControls_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setControlsOnHover(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"hover-playback-controls", on);
     saveSettings();
 }
 
 void App::applyTaskbarContextMenu(bool on) {
     settings_.taskbarContextMenuEnabled_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setContextMenuEnabled(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"taskbar-context-menu", on);
     saveSettings();
 }
@@ -476,10 +400,7 @@ void App::applyHoverControlStyle(int style) {
         return;
     settings_.hoverControlStyle_ =
         style == 1 ? HoverControlStyle::Popup : HoverControlStyle::Inline;
-    forEachHost([&](TaskbarHost* host) {
-        host->setHoverControlStyle(isMinimalRenderMode() ? HoverControlStyle::Inline
-                                                         : settings_.hoverControlStyle_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"hover-control-style", style == 1 ? 1 : 0);
     saveSettings();
 }
@@ -487,8 +408,7 @@ void App::applyHoverControlStyle(int style) {
 void App::applyFloatingCardTrigger(int mode) {
     settings_.floatingCardTrigger_ =
         mode == 1 ? MediaPopupTrigger::Click : MediaPopupTrigger::Hover;
-    forEachHost(
-        [&](TaskbarHost* host) { host->setFloatingCardTrigger(settings_.floatingCardTrigger_); });
+    publishTaskbarAppearance();
     logSettingInt(L"floating-card-trigger", mode == 1 ? 1 : 0);
     saveSettings();
 }
@@ -496,23 +416,21 @@ void App::applyFloatingCardTrigger(int mode) {
 void App::applyFloatingCardBackground(int mode) {
     settings_.floatingCardBackground_ =
         mode == 1 ? MediaPopupBackground::Frosted : MediaPopupBackground::Solid;
-    forEachHost([&](TaskbarHost* host) {
-        host->setFloatingCardBackground(settings_.floatingCardBackground_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"floating-card-background", mode == 1 ? 1 : 0);
     saveSettings();
 }
 
 void App::applyFloatingCardFollowAlbum(bool on) {
     settings_.floatingCardFollowAlbum_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setFloatingCardFollowAlbum(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"floating-card-follow-album", on);
     saveSettings();
 }
 
 void App::applyFloatingCardAutoTextContrast(bool on) {
     settings_.floatingCardAutoTextContrast_ = on;
-    forEachHost([&](TaskbarHost* host) { host->setFloatingCardAutoTextContrast(on); });
+    publishTaskbarAppearance();
     logSettingBool(L"floating-card-auto-text-contrast", on);
     saveSettings();
 }
@@ -641,10 +559,7 @@ void App::refreshTheme() {
     if (taskbarHost) {
         forEachHost([](TaskbarHost* host) { host->refreshTheme(); });
         applyFontAppearance();
-        forEachHost([&](TaskbarHost* host) {
-            host->setFloatingCardBackgroundColor(effectiveFloatingCardBackgroundColor(),
-                                                 settings_.floatingCardBackgroundColorCustomized_);
-        });
+        publishTaskbarAppearance();
     }
     refreshThemeWindows();
     refreshSettingsDialog(true);
@@ -679,7 +594,7 @@ void App::applyFollowAlbum(bool on) {
 void App::applyDoubleLineLyrics(bool on) {
     settings_.doubleLineLyricsEnabled_ = on;
     forEachHost([&](TaskbarHost* host) {
-        host->setDoubleLineLyrics(host->isVerticalTaskbar() ? false : on);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
     });
     logSettingBool(L"double-line-lyrics", on);
     saveSettings();
@@ -692,8 +607,7 @@ void App::applyLyricAlignment(int alignment) {
                                 : alignment == 2 ? LyricAlignment::Right
                                                  : LyricAlignment::Left;
     forEachHost([&](TaskbarHost* host) {
-        host->setLyricAlignment(host->isVerticalTaskbar() ? LyricAlignment::Left
-                                                          : settings_.lyricAlignment_);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
     });
     logSettingInt(L"lyric-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
     saveSettings();
@@ -704,8 +618,7 @@ void App::applyIdleQuoteAlignment(int alignment) {
                                     : alignment == 2 ? LyricAlignment::Right
                                                      : LyricAlignment::Left;
     forEachHost([&](TaskbarHost* host) {
-        host->setIdleQuoteAlignment(host->isVerticalTaskbar() ? LyricAlignment::Left
-                                                              : settings_.idleQuoteAlignment_);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
     });
     logSettingInt(L"daily-quote-alignment", alignment == 1 ? 1 : alignment == 2 ? 2 : 0);
     saveSettings();
@@ -714,10 +627,7 @@ void App::applyIdleQuoteAlignment(int alignment) {
 void App::applyIdleQuoteBackground(int background) {
     const int normalized = std::clamp(background, 0, 4);
     settings_.idleQuoteBackground_ = static_cast<IdleQuoteBackground>(normalized);
-    forEachHost([&](TaskbarHost* host) {
-        host->setIdleQuoteBackground(isMinimalRenderMode() ? IdleQuoteBackground::None
-                                                           : settings_.idleQuoteBackground_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"daily-quote-background", normalized);
     saveSettings();
 }
@@ -725,11 +635,7 @@ void App::applyIdleQuoteBackground(int background) {
 void App::applyIdleQuoteBackgroundScope(int scope) {
     const int normalized = std::clamp(scope, 0, 3);
     settings_.idleQuoteBackgroundScope_ = static_cast<IdleQuoteBackgroundScope>(normalized);
-    forEachHost([&](TaskbarHost* host) {
-        host->setIdleQuoteBackgroundScope(isMinimalRenderMode()
-                                              ? IdleQuoteBackgroundScope::None
-                                              : settings_.idleQuoteBackgroundScope_);
-    });
+    publishTaskbarAppearance();
     logSettingInt(L"taskbar-dynamic-background-scope", normalized);
     saveSettings();
 }
@@ -1049,7 +955,7 @@ LRESULT CALLBACK App::updatePromptWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-const FontColorDialog::ThemeState& App::currentLyricAppearance() const {
+const LyricAppearance& App::currentLyricAppearance() const {
     if (settings_.lyricAppearanceGlobal_)
         return settings_.globalLyricAppearance_;
     return fluent::isDarkMode(fluent::ThemeTarget::Taskbar) ? settings_.darkLyricAppearance_
@@ -1070,35 +976,15 @@ COLORREF App::effectiveFloatingCardBackgroundColor() const {
 void App::applyFloatingCardBackgroundColor(COLORREF color) {
     settings_.floatingCardBackgroundColor_ = color;
     settings_.floatingCardBackgroundColorCustomized_ = true;
-    forEachHost([&](TaskbarHost* host) {
-        host->setFloatingCardBackgroundColor(settings_.floatingCardBackgroundColor_, true);
-    });
+    publishTaskbarAppearance();
     runtime_log::writef(L"[action][floating-card] background-color=#%02X%02X%02X", GetRValue(color),
                         GetGValue(color), GetBValue(color));
     saveSettings();
 }
 
-void App::applyFontColors() {
-    const auto& appearance = currentLyricAppearance();
-    forEachHost([&](ILyricHost* host) {
-        host->setFontColors(effectivePlayedColor(), appearance.unplayed,
-                            appearance.unplayedAlphaPct);
-    });
-    forEachHost([&](TaskbarHost* host) {
-        host->setSpectrumAlbumColor(playback_.state().albumColor_,
-                                    playback_.state().hasAlbumColor_);
-    });
-}
+void App::applyFontColors() { publishTaskbarAppearance(); }
 
-void App::applyFontAppearance() {
-    const auto& appearance = currentLyricAppearance();
-    applyFontColors();
-    forEachHost([&](TaskbarHost* host) {
-        host->setFontGlow(appearance.glowOn);
-        host->setFontOutline(appearance.outlineOn);
-        host->setFontGlowColors(appearance.glowColor, appearance.outlineColor);
-    });
-}
+void App::applyFontAppearance() { publishTaskbarAppearance(); }
 
 void App::setAutoCheckOnStartup(bool enabled) {
     if (settings_.autoCheckOnStartup_ == enabled)
@@ -1111,6 +997,7 @@ void App::setAutoCheckOnStartup(bool enabled) {
 SettingsState App::currentSettingsState() const {
     SettingsState st;
     const bool vertical = taskbarVertical_;
+    const TaskbarAppearance view = appearanceForHost(vertical);
     st.idleEntryEnabled = settings_.idleEntryEnabled_;
     st.idleQuoteEnabled = settings_.idleQuoteEnabled_;
     st.idleWelcomeEnabled = settings_.idleWelcomeEnabled_;
@@ -1151,7 +1038,7 @@ SettingsState App::currentSettingsState() const {
     st.dockResourceDownload = settings_.dockResourceDownload_;
     st.dockResourceUpload = settings_.dockResourceUpload_;
     st.dockResourceCpuFrequency = settings_.dockResourceCpuFrequency_;
-    st.songInfoVisible = vertical ? false : settings_.songInfoVisible_;
+    st.songInfoVisible = view.songInfoVisible;
     st.albumCoverVisible = settings_.albumCoverVisible_;
     st.platformIconVisible = settings_.platformIconVisible_;
     st.coverEffectVinyl = settings_.albumCoverEffect_ == AlbumCoverEffect::Vinyl;
@@ -1159,9 +1046,9 @@ SettingsState App::currentSettingsState() const {
     st.spectrumStyle =
         spectrumStyleIndex(vertical ? SpectrumStyle::Default : settings_.spectrumStyle_);
     st.spectrumColor = settings_.spectrumColor_;
-    st.spectrumCustomColor = vertical ? false : settings_.spectrumCustomColor_;
-    st.spectrumFollowAlbum = vertical ? false : settings_.spectrumFollowAlbum_;
-    st.spectrumGradient = vertical ? false : settings_.spectrumGradient_;
+    st.spectrumCustomColor = view.spectrumColor.customized;
+    st.spectrumFollowAlbum = view.spectrumColor.followAlbum;
+    st.spectrumGradient = view.spectrumGradient;
     st.spectrumEffects = settings_.spectrumEffects_;
     st.spectrumBackground = vertical ? false : settings_.spectrumBackground_;
     st.spectrumOpacity = settings_.spectrumOpacity_;
@@ -1189,18 +1076,13 @@ SettingsState App::currentSettingsState() const {
     st.taskbarThemeMode = settings_.taskbarThemeMode_;
     st.windowThemeMode = settings_.windowThemeMode_;
     st.followAlbum = settings_.lyricFollowAlbum_;
-    st.doubleLineLyrics = vertical ? false : settings_.doubleLineLyricsEnabled_;
+    st.doubleLineLyrics = view.doubleLineLyrics;
     st.compactTaskbar = taskbarHost && taskbarHost->isCompactTaskbar();
     st.lyricEffects = settings_.lyricEffects_;
-    st.lyricAlignment = vertical                                              ? 0
-                        : settings_.lyricAlignment_ == LyricAlignment::Center ? 1
-                        : settings_.lyricAlignment_ == LyricAlignment::Right  ? 2
-                                                                              : 0;
-    st.idleQuoteAlignment = vertical                                                  ? 0
-                            : settings_.idleQuoteAlignment_ == LyricAlignment::Center ? 1
-                            : settings_.idleQuoteAlignment_ == LyricAlignment::Right  ? 2
-                                                                                      : 0;
-    st.secondaryEnabled = vertical ? false : settings_.secondaryLyricEnabled_;
+    st.lyricAlignment = static_cast<int>(view.lyricAlignment);
+    st.idleQuoteAlignment = static_cast<int>(view.idleQuoteAlignment);
+    st.secondaryEnabled =
+        view.secondaryLyricMode.translation || view.secondaryLyricMode.romanization;
     st.preferRomanization = vertical ? false : settings_.preferRomanization_;
     st.secondaryAvailability =
         playback_.state().lyricLoading_ ? 1

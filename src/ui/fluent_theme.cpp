@@ -56,13 +56,14 @@ IDWriteFontFallback* createUiFontFallback() {
         // 只覆盖中日韩相关区段；其他字符继续沿用 Windows 的完整系统回退表，
         // 这样不会因为自定义中文列表而影响符号、表情或其他文字脚本。
         const DWRITE_UNICODE_RANGE ranges[] = {
-            {0x2E80, 0x2FFF}, {0x3000, 0x303F}, {0x3100, 0x312F}, {0x31C0, 0x31EF},
-            {0x3200, 0x33FF}, {0x3400, 0x4DBF}, {0x4E00, 0x9FFF}, {0xF900, 0xFAFF},
+            {0x2E80, 0x2FFF}, {0x3000, 0x303F}, {0x3100, 0x312F},   {0x31C0, 0x31EF},
+            {0x3200, 0x33FF}, {0x3400, 0x4DBF}, {0x4E00, 0x9FFF},   {0xF900, 0xFAFF},
             {0xFE30, 0xFE4F}, {0xFF00, 0xFFEF}, {0x20000, 0x2FA1F},
         };
         const wchar_t* targetFamilies[] = {
-            L"Noto Sans SC",       L"Noto Sans CJK SC", L"Microsoft YaHei UI",
-            L"Microsoft YaHei",    L"DengXian",         L"SimHei", L"SimSun",
+            L"Noto Sans SC",    L"Noto Sans CJK SC", L"Microsoft YaHei UI",
+            L"Microsoft YaHei", L"DengXian",         L"SimHei",
+            L"SimSun",
         };
 
         // 应用字体优先，系统字体补齐列表中未覆盖的字符。
@@ -97,8 +98,8 @@ bool readLightThemeValue(const wchar_t* name, bool& light) {
     DWORD value = 1;
     DWORD size = sizeof(value);
     if (RegGetValueW(HKEY_CURRENT_USER,
-                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                     name, RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
+                     L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", name,
+                     RRF_RT_REG_DWORD, nullptr, &value, &size) != ERROR_SUCCESS)
         return false;
     light = value != 0;
     return true;
@@ -112,20 +113,19 @@ bool detectAppDarkMode() {
     // 注册表不可用时，UISettings 是 Windows 对 Win32 应用推荐的主题来源。
     try {
         winrt::Windows::UI::ViewManagement::UISettings settings;
-        auto foreground = settings.GetColorValue(
-            winrt::Windows::UI::ViewManagement::UIColorType::Foreground);
-        int brightness = 5 * static_cast<int>(foreground.G) +
-                         2 * static_cast<int>(foreground.R) +
+        auto foreground =
+            settings.GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Foreground);
+        int brightness = 5 * static_cast<int>(foreground.G) + 2 * static_cast<int>(foreground.R) +
                          static_cast<int>(foreground.B);
         return brightness > 8 * 128;
     } catch (...) {
         // 旧系统或 COM 初始化异常时保留注册表回退。
         DWORD value = 1; // 默认浅色
         DWORD size = sizeof(value);
-        if (RegGetValueW(
-                HKEY_CURRENT_USER,
-                L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
-                L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS)
+        if (RegGetValueW(HKEY_CURRENT_USER,
+                         L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                         L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value,
+                         &size) == ERROR_SUCCESS)
             return value == 0;
         return false;
     }
@@ -213,12 +213,12 @@ Palette makeWindowPalette(bool dark) {
     p.controlFill = dark ? toD2D(RGB(55, 55, 55)) : toD2D(RGB(255, 255, 255));
     p.controlHover = dark ? toD2D(RGB(62, 62, 62)) : toD2D(RGB(249, 249, 249));
     p.controlPressed = dark ? toD2D(RGB(48, 48, 48)) : toD2D(RGB(242, 242, 242));
-    p.controlStroke = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f)
-                           : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.14f);
-    p.listHover = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f)
-                      : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.04f);
-    p.listSelected = dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f)
-                         : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
+    p.controlStroke =
+        dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.14f);
+    p.listHover =
+        dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.04f);
+    p.listSelected =
+        dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.09f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.06f);
     p.menuFill = dark ? toD2D(RGB(44, 44, 44)) : toD2D(RGB(250, 250, 250));
     return p;
 }
@@ -231,15 +231,15 @@ void applyAccent(Palette& p, COLORREF a) {
                             std::min(1.0f, c.b * f), c.a);
     };
     auto mixWhite = [](D2D1_COLOR_F c, float t) {
-        return D2D1::ColorF(c.r + (1.0f - c.r) * t, c.g + (1.0f - c.g) * t,
-                            c.b + (1.0f - c.b) * t, c.a);
+        return D2D1::ColorF(c.r + (1.0f - c.r) * t, c.g + (1.0f - c.g) * t, c.b + (1.0f - c.b) * t,
+                            c.a);
     };
     p.accentHover = mixWhite(p.accent, 0.1f);
     p.accentPressed = scale(p.accent, 0.85f);
     // 强调色亮度决定其上文字用白还是黑
     float lum = 0.299f * p.accent.r + 0.587f * p.accent.g + 0.114f * p.accent.b;
-    p.textOnAccent = lum > 0.55f ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f)
-                                 : D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
+    p.textOnAccent =
+        lum > 0.55f ? D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f) : D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f);
 }
 
 } // namespace
@@ -249,26 +249,21 @@ void setThemeModes(ThemeMode taskbarMode, ThemeMode windowMode) {
     gWindowThemeMode = windowMode;
 }
 
-bool isDarkMode() {
-    return isDarkMode(ThemeTarget::Window);
-}
+bool isDarkMode() { return isDarkMode(ThemeTarget::Window); }
 
 bool isDarkMode(ThemeTarget target) {
-    return isDarkForMode(target == ThemeTarget::Taskbar ? gTaskbarThemeMode
-                                                         : gWindowThemeMode);
+    return isDarkForMode(target == ThemeTarget::Taskbar ? gTaskbarThemeMode : gWindowThemeMode);
 }
 
-bool isWindowsAppDarkMode() {
-    return detectAppDarkMode();
-}
+bool isWindowsAppDarkMode() { return detectAppDarkMode(); }
 
 COLORREF accentColor() {
     try {
         // 缓存 UISettings 对象，避免每次调用都重新激活运行时类；
         // GetColorValue 读取的始终是系统当前值，缓存对象不影响实时性。
         static winrt::Windows::UI::ViewManagement::UISettings cachedSettings;
-        auto c = cachedSettings.GetColorValue(
-            winrt::Windows::UI::ViewManagement::UIColorType::Accent);
+        auto c =
+            cachedSettings.GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Accent);
         return RGB(c.R, c.G, c.B);
     } catch (...) {
         return RGB(0, 120, 212);
@@ -276,13 +271,10 @@ COLORREF accentColor() {
 }
 
 D2D1_COLOR_F toD2D(COLORREF c, float alpha) {
-    return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f,
-                        alpha);
+    return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f, alpha);
 }
 
-const Palette& palette() {
-    return palette(ThemeTarget::Window);
-}
+const Palette& palette() { return palette(ThemeTarget::Window); }
 
 const Palette& palette(ThemeTarget target) {
     // Palette 是静态缓存，但系统强调色会随个性化设置即时变化；
@@ -343,8 +335,8 @@ bool styleDialogWindow(HWND hwnd, bool transientWindow) {
     const COLORREF captionColor = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
     DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &captionColor, sizeof(captionColor));
     const int type = kDwmsbtMainWindow;
-    bool backdrop = SUCCEEDED(DwmSetWindowAttribute(
-        hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type)));
+    bool backdrop =
+        SUCCEEDED(DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type)));
     const MARGINS margins = backdrop ? MARGINS{-1, -1, -1, -1} : MARGINS{};
     if (FAILED(DwmExtendFrameIntoClientArea(hwnd, &margins))) {
         clearBackdrop(hwnd);
@@ -378,9 +370,7 @@ void paintDialogBackground(HWND hwnd, HDC hdc, bool backdrop) {
     DeleteObject(brush);
 }
 
-const wchar_t* uiFontFamily() {
-    return L"Noto Sans SC";
-}
+const wchar_t* uiFontFamily() { return kDefaultUiFontFamily; }
 
 void applyUiFontFallback(IDWriteTextFormat* format) {
     if (!format)

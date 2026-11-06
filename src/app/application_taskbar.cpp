@@ -202,7 +202,9 @@ void App::syncSpectrumWithMode() {
         if (*processName)
             spectrum_.setTargetProcessName(std::wstring(processName));
         spectrum_.start();
-        forEachHost([&](TaskbarHost* host) { host->setSpectrumVisible(settings_.spectrumOn_); });
+        forEachHost([&](TaskbarHost* host) {
+            host->setSpectrumVisible(settings_.spectrumOn_ && !host->isVerticalTaskbar());
+        });
     } else {
         spectrum_.stop();
         forEachHost([&](TaskbarHost* host) { host->setSpectrumVisible(false); });
@@ -321,7 +323,6 @@ void App::configureTaskbarHostCallbacks(TaskbarHost* host, bool primary) {
         logSettingInt(L"taskbar-position-drag", settings_.taskbarPosition_);
         saveSettings();
     });
-    host->setContextMenuEnabled(settings_.taskbarContextMenuEnabled_);
     host->setAppVolumeCallback([this](int percent) {
         const bool ok = appVolume_.setVolumePercent(percent);
         runtime_log::writef(L"[action][volume] set percent=%d result=%s", percent,
@@ -420,8 +421,8 @@ TaskbarCreateResult App::createTaskbar(HINSTANCE inst, bool allowOverlap) {
         syncHost(host);
         if (settings_.hasUserFont_)
             host->setFont(settings_.fontFamily_, settings_.fontSize_, settings_.fontStyle_);
-        host->setAlbumCoverVisible(settings_.albumCoverVisible_);
-        host->setPlatformIconVisible(settings_.platformIconVisible_);
+        host->applyAppearance(appearanceForHost(host->isVerticalTaskbar()));
+
         host->setPositionMode(settings_.taskbarPosition_);
         host->setAppVolume(appVolumeState_);
     });

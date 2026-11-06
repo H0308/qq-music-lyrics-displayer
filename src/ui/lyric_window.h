@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/display_types.h"
 #include "ui/font_style.h"
 #include "idle/idle_types.h"
 #include "lyric/lyric_types.h"
@@ -17,10 +18,6 @@
 enum class MediaControl { Prev = 0, PlayPause = 1, Next = 2 };
 
 // 悬浮媒体卡片的背景材质
-enum class MediaPopupBackground {
-    Solid,
-    Frosted,
-};
 
 // 当前音乐应用的独立音量状态（对应音量合成器中该应用的一格）
 struct AppVolumeState {
@@ -35,23 +32,13 @@ struct OverlayMediaInfo {
     std::wstring artist;
     std::wstring sourceAppUserModelId; // SMTC 当前来源应用标识，用于平台图标和打开入口
     std::shared_ptr<const std::vector<uint8_t>> thumbnail; // 专辑封面图片字节
-    bool hasDominantColor = false;          // 当前封面是否已提取到专辑主色
-    COLORREF dominantColor = RGB(49, 194, 124); // 媒体卡片动态背景使用的专辑主色
-    int64_t durationMs = 0;             // 当前歌曲总时长；未知时为 0
+    bool hasDominantColor = false;                         // 当前封面是否已提取到专辑主色
+    COLORREF dominantColor = RGB(49, 194, 124);            // 媒体卡片动态背景使用的专辑主色
+    int64_t durationMs = 0;                                // 当前歌曲总时长；未知时为 0
     bool canPrev = false;
     bool canPlayPause = false;
     bool canNext = false;
     bool playing = false;
-};
-
-// 任务栏正式展示的语义场景。频谱柱值不放进完整帧，仍通过任务栏的高频接口更新。
-enum class DisplayScene {
-    NoPlayback,
-    Idle,
-    Searching,
-    Lyrics,
-    Message,
-    Spectrum,
 };
 
 // 频谱属于高频展示数据，不进入完整展示帧；TaskbarHost 与 AudioSpectrum 共用 12 段。
@@ -127,10 +114,8 @@ public:
     virtual void changeFont(float delta) = 0;
     virtual void setFont(const std::wstring& family, float size, LyricFontStyle style) = 0;
     // 歌词颜色：已播放色 + 逐字未播放色（含不透明度，单位 %）。LRC 单行歌词只用已播放色
-    virtual void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) = 0;
 
     virtual void show() = 0;
     virtual void hide() = 0;
     // 翻译与罗马音互斥；两者均 false 时只显示原文。
-    virtual void setSecondaryLyricMode(bool translation, bool romanization) = 0;
 };

@@ -15,25 +15,16 @@
 class FontColorDialog {
 public:
     // 一套深色或浅色模式下的歌词颜色与效果。
-    struct ThemeState {
-        COLORREF played = RGB(49, 194, 124);
-        COLORREF unplayed = RGB(49, 194, 124);
-        int unplayedAlphaPct = 45;
-        COLORREF glowColor = RGB(49, 194, 124);
-        COLORREF outlineColor = RGB(0, 0, 0);
-        bool glowOn = false;
-        bool outlineOn = false;
-    };
 
     // 打开时的外观快照。对话框内修改只落在工作副本和预览上；
     // 字体只用于预览（仍在“字体…”对话框中调整）。
     struct State {
-        bool global = false; // 开启后两种主题共用同一套配置
+        bool global = false;         // 开启后两种主题共用同一套配置
         bool hasGlobalTheme = false; // 是否已经初始化过全局共享配置
-        ThemeState light;
-        ThemeState dark;
-        ThemeState globalTheme; // 全局模式正在使用的共享配置
-        std::wstring fontFamily;   // 预览用字体族，空则用 UI 默认字体
+        LyricAppearance light;
+        LyricAppearance dark;
+        LyricAppearance globalTheme;                       // 全局模式正在使用的共享配置
+        std::wstring fontFamily;                           // 预览用字体族，空则用 UI 默认字体
         LyricFontStyle fontStyle = LyricFontStyle::Normal; // 预览用字体样式
         float lyricFontSize = 14.0f; // 预览用歌词字号（与实际任务栏渲染字号一致）
     };
@@ -42,9 +33,9 @@ public:
     struct Result {
         bool global;
         bool hasGlobalTheme;
-        ThemeState light;
-        ThemeState dark;
-        ThemeState globalTheme;
+        LyricAppearance light;
+        LyricAppearance dark;
+        LyricAppearance globalTheme;
     };
     using ApplyCallback = std::function<void(const Result&)>;
 

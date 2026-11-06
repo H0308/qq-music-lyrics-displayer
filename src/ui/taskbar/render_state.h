@@ -69,11 +69,6 @@ public:
         Hidden,
         Visible,
     };
-    enum class LyricTransitionPhase {
-        Idle,
-        Pending,
-        Running,
-    };
     enum class DCompTransitionPhase {
         Inactive,
         Active,
@@ -90,7 +85,6 @@ public:
 
     RenderMode mode() const { return mode_; }
     WindowPhase windowPhase() const { return window_; }
-    LyricTransitionPhase lyricTransitionPhase() const { return lyricTransition_; }
     DCompTransitionPhase dcompTransitionPhase() const { return dcompTransition_; }
     DeviceResourcePhase deviceResourcePhase() const { return deviceResources_; }
     bool sessionVisible() const { return sessionVisible_; }
@@ -101,7 +95,6 @@ public:
     void setWindowPhase(WindowPhase phase) { window_ = phase; }
     void setSessionVisible(bool visible) { sessionVisible_ = visible; }
     void setVisibilitySuppressed(bool suppressed) { visibilitySuppressed_ = suppressed; }
-    void setLyricTransitionPhase(LyricTransitionPhase phase) { lyricTransition_ = phase; }
     void setDCompTransitionPhase(DCompTransitionPhase phase) { dcompTransition_ = phase; }
     void setDeviceResourcePhase(DeviceResourcePhase phase) { deviceResources_ = phase; }
     void setSongTransitionPending(bool pending) {
@@ -120,7 +113,6 @@ public:
 private:
     RenderMode mode_ = RenderMode::Normal;
     WindowPhase window_ = WindowPhase::Hidden;
-    LyricTransitionPhase lyricTransition_ = LyricTransitionPhase::Idle;
     DCompTransitionPhase dcompTransition_ = DCompTransitionPhase::Inactive;
     DeviceResourcePhase deviceResources_ = DeviceResourcePhase::Uninitialized;
     bool sessionVisible_ = false;

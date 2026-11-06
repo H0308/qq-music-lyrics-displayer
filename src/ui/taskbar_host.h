@@ -1,5 +1,7 @@
 #pragma once
 
+#include "model/display_types.h"
+#include "model/taskbar_appearance.h"
 #include "ui/spectrum_effects.h"
 #include "ui/lyric_effects.h"
 
@@ -8,92 +10,6 @@
 #include <array>
 #include <string>
 #include <vector>
-
-enum class AlbumCoverEffect {
-    Default,
-    Vinyl,
-};
-
-enum class LyricAlignment {
-    Left,
-    Center,
-    Right,
-};
-
-enum class HoverControlStyle {
-    Inline,
-    Popup,
-};
-
-// 媒体卡片展开方式：悬浮停留片刻后展开，或点击歌词区域任意位置立即展开
-enum class MediaPopupTrigger {
-    Hover,
-    Click,
-};
-
-enum class SpectrumStyle {
-    Default,
-    Bars,
-    DreamyWave,
-    Segmented,
-    BottomBand,
-};
-
-// 任务栏歌词背景：无 / 封面模糊 / 纯色（跟随任务栏深浅色）；
-// 画在最底层，可与播放进度背景、频谱背景波浪叠加
-enum class TaskbarBackground {
-    None,
-    CoverBlur,
-    Solid,
-};
-
-enum class TaskbarPlacementStatus {
-    Unavailable,
-    Safe,
-    Compressed,
-    Relocated,
-    NoSpace,
-    ForcedOverlap,
-};
-
-// 复用 Dock 资源区；CPU、内存为基础指标，其余指标按开关紧凑排列。
-struct DockResourceVisibility {
-    bool embeddedEnabled = false;
-    bool download = true;
-    bool upload = true;
-    bool gpuUsage = false;
-    bool cpuFrequency = false;
-};
-
-// 任务栏内容动态背景；绘制在歌词等内容区域下方，不侵入独立频谱容器或悬浮卡片。
-enum class IdleQuoteBackground {
-    None,
-    FallingLeaves,
-    TwinklingStars,
-    BinaryRain,
-    FloatingParticles,
-};
-
-// 任务栏内容动态背景的作用范围：不启用 / 仅待机内容（每日一言或默认欢迎语）/ 仅歌词 / 两者。
-enum class IdleQuoteBackgroundScope {
-    None,
-    DailyQuote,
-    Lyrics,
-    All,
-};
-
-// 任务栏歌词的承载方式。嵌入模式只占用任务栏中的一段空闲区，沉浸模式
-// 覆盖当前任务栏客户区，AppBar 作为独立顶栏/底栏保留桌面工作区。
-enum class TaskbarViewMode {
-    Embedded,
-    Immersive,
-    AppBar,
-};
-
-enum class AppBarEdge {
-    Top,
-    Bottom,
-};
 
 // 当前桌面显示器及对应的 Explorer 任务栏。deviceName 用于跨进程重建时重新定位，
 // monitor 仅在本次显示拓扑有效。
@@ -112,12 +28,6 @@ std::vector<TaskbarDisplayInfo> enumerateTaskbarDisplays();
 
 // 任务栏渲染模式：极简模式只关闭附加视觉与弹窗，不改变歌词刷新策略。
 // 数值保持与 settings.json 中已有的 0/1/2 语义一致，Minimal 追加为 3。
-enum class RenderMode {
-    Normal = 0,
-    Low = 1,
-    Stopped = 2,
-    Minimal = 3,
-};
 
 // 任务栏歌词宿主：内嵌/沉浸时作为 Shell_TrayWnd 的子窗口，AppBar 时切换为
 // Shell 管理的独立顶层窗口。横向显示封面、歌曲信息和当前歌词；内嵌侧边任务栏
@@ -133,6 +43,7 @@ public:
     HWND hwnd() const override;
 
     void setTickCallback(std::function<void()> cb) override;
+    void applyAppearance(const TaskbarAppearance& appearance);
     void applyPresentationFrame(const PresentationFrame& frame) override;
     void applyPlaybackPatch(const PlaybackPatch& patch) override;
     void applySpectrumPatch(const SpectrumPatch& patch) override;
@@ -171,36 +82,14 @@ public:
     void changeFont(float delta) override;
     void setFont(const std::wstring& family, float size, LyricFontStyle style) override;
     LyricFontSizeContext fontSizeContext() const;
-    void setFontColors(COLORREF played, COLORREF unplayed, int unplayedAlphaPct) override;
 
     // 歌词外观：光晕 / 描边（任务栏独有，桌面歌词有自己的配色），开关和颜色分别独立
-    void setFontGlow(bool on);
-    void setFontOutline(bool on);
-    void setFontGlowColors(COLORREF glow, COLORREF outline);
-    void setSecondaryLyricMode(bool translation, bool romanization) override;
-    void setDoubleLineLyrics(bool on);
-    void setLyricAlignment(LyricAlignment alignment);
-    void setIdleQuoteAlignment(LyricAlignment alignment);
-    void setIdleQuoteBackground(IdleQuoteBackground background);
-    void setIdleQuoteBackgroundScope(IdleQuoteBackgroundScope scope);
     // 是否在鼠标悬浮时用播放控件替换右侧歌词，默认开启。
-    void setControlsOnHover(bool on);
     // 是否允许在任务栏歌词区域右键打开应用菜单，默认开启。
-    void setContextMenuEnabled(bool on);
     // 悬浮播放控件样式：保留当前歌词区内嵌控件，或展开独立媒体卡片。
-    void setHoverControlStyle(HoverControlStyle style);
     // 媒体卡片、每日一言和快捷启动卡片共用的展开方式与外观设置。
-    void setFloatingCardTrigger(MediaPopupTrigger trigger);
-    void setFloatingCardBackground(MediaPopupBackground mode);
-    void setFloatingCardBackgroundColor(COLORREF color, bool customized);
-    void setFloatingCardFollowAlbum(bool on);
-    void setFloatingCardAutoTextContrast(bool on);
     // 主题模式或 Windows 外观发生变化时重建任务栏与媒体卡片资源。
     void refreshTheme();
-    void setSongInfoVisible(bool on);
-    void setAlbumCoverVisible(bool on);
-    void setPlatformIconVisible(bool on);
-    void setAlbumCoverEffect(AlbumCoverEffect effect);
 
     // 渲染模式：0 正常（播放时跟随屏幕刷新率）；1 低渲染（固定 ~30fps，降低 GPU/CPU
     // 占用）；2 完全停止（隐藏窗口、停帧定时器并释放 GPU 设备，仅内存中保留数据状态）；
@@ -210,36 +99,19 @@ public:
     // 音频频谱（任务栏独有）：高频数据通过 SpectrumPatch 更新。
     // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;
-    void setSpectrumStyle(SpectrumStyle style);
-    void setSpectrumColor(COLORREF color, bool customized, bool followAlbum);
-    void setSpectrumAlbumColor(COLORREF color, bool available);
-    void setSpectrumGradient(bool on);
-    void setSpectrumEffects(uint32_t effects);
-    void setLyricEffects(uint32_t effects);
-    void setSpectrumBackground(bool on);
-    void setSpectrumOpacity(int percent);
     void setSpectrumVisible(bool on);
 
     // 播放进度背景：从窗口左缘到歌词右缘按播放进度填充专辑主题色；
     // 与背景波浪互斥（背景波浪生效时不绘制）
-    void setProgressBackground(bool on);
-    void setProgressBackgroundOpacity(int percent);
 
     // 任务栏歌词背景：封面模糊（不透明度可调）或跟随深浅色的纯色，画在最底层
-    void setBackground(TaskbarBackground mode);
-    void setCoverBackgroundOpacity(int percent);
 
     // 沉浸模式：覆盖当前任务栏客户区；Dock 模式作为独立 AppBar。两者的遮罩
     // 颜色都跟随 Windows 应用模式，不透明度分别配置。
     void setViewMode(TaskbarViewMode mode);
     // AppBar 仅支持水平顶部/底部；位置变更会立即重新向 Shell 协商工作区。
     void setAppBarEdge(AppBarEdge edge);
-    void setImmersiveBackgroundBlur(int percent);
-    void setDockBackgroundBlur(int percent);
-    void setImmersiveBackgroundAdjustment(int mode);
-    void setDockBackgroundAdjustment(int mode);
     bool backgroundBlurAvailable() const;
-    void setDockResourceVisibility(const DockResourceVisibility& visibility);
 
     void show() override;
     void hide() override;

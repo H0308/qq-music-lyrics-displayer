@@ -1,5 +1,6 @@
 #pragma once
 
+#include "model/display_types.h"
 #include <windows.h>
 #include <d2d1.h>
 #include <dwrite.h>
@@ -12,12 +13,6 @@ namespace fluent {
 
 // 主题跟随来源：系统模式读取 SystemUsesLightTheme，应用模式读取
 // AppsUseLightTheme；Light/Dark 用于用户固定选择。
-enum class ThemeMode {
-    FollowSystem,
-    FollowApp,
-    Light,
-    Dark,
-};
 
 // 需要独立主题来源的渲染面。
 enum class ThemeTarget {
@@ -67,13 +62,13 @@ struct Palette {
     D2D1_COLOR_F accent;         // 强调色按钮
     D2D1_COLOR_F accentHover;
     D2D1_COLOR_F accentPressed;
-    D2D1_COLOR_F textOnAccent;   // 强调色按钮上的文字
-    D2D1_COLOR_F listHover;      // 列表行悬停
-    D2D1_COLOR_F listSelected;   // 列表行选中
-    D2D1_COLOR_F menuFill;       // 菜单背景（不透明）
-    D2D1_COLOR_F menuStroke;     // 菜单边框
-    D2D1_COLOR_F separator;      // 分隔线
-    D2D1_COLOR_F editText;       // EDIT 真控件文字色
+    D2D1_COLOR_F textOnAccent; // 强调色按钮上的文字
+    D2D1_COLOR_F listHover;    // 列表行悬停
+    D2D1_COLOR_F listSelected; // 列表行选中
+    D2D1_COLOR_F menuFill;     // 菜单背景（不透明）
+    D2D1_COLOR_F menuStroke;   // 菜单边框
+    D2D1_COLOR_F separator;    // 分隔线
+    D2D1_COLOR_F editText;     // EDIT 真控件文字色
 };
 const Palette& palette();
 const Palette& palette(ThemeTarget target);
@@ -102,8 +97,6 @@ void applyUiFontFallback(IDWriteTextFormat* format);
 // GDI 真控件（EDIT）用字体；调用方负责 DeleteObject
 HFONT createUiFont(UINT dpi, float dipSize = 14.0f, int weight = FW_NORMAL);
 
-inline float dipScale(UINT dpi) {
-    return static_cast<float>(dpi) / 96.0f;
-}
+inline float dipScale(UINT dpi) { return static_cast<float>(dpi) / 96.0f; }
 
 } // namespace fluent

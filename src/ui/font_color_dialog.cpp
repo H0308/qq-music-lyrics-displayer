@@ -40,17 +40,15 @@ constexpr int kAlphaMax = 100;
 
 constexpr float kOptionsWidth = 340.0f;
 constexpr float kPreviewHeight = 96.0f;
-constexpr float kOptionsHeight = 16.0f + 5.0f * fluent::metrics::controlHeight +
-                                 4.0f * fluent::metrics::controlGap + 16.0f;
-constexpr float kMinClientWidthDip = fluent::metrics::pagePadding + kOptionsWidth +
-                                     fluent::metrics::pagePadding;
-constexpr float kMinClientHeightDip = fluent::metrics::pagePadding + 30.0f + 20.0f +
-                                       fluent::metrics::sectionGap + fluent::metrics::controlHeight +
-                                       fluent::metrics::sectionGap + fluent::metrics::controlHeight +
-                                       fluent::metrics::sectionGap + kOptionsHeight +
-                                       fluent::metrics::sectionGap + kPreviewHeight +
-                                       fluent::metrics::sectionGap + fluent::metrics::controlHeight +
-                                       fluent::metrics::pagePadding;
+constexpr float kOptionsHeight =
+    16.0f + 5.0f * fluent::metrics::controlHeight + 4.0f * fluent::metrics::controlGap + 16.0f;
+constexpr float kMinClientWidthDip =
+    fluent::metrics::pagePadding + kOptionsWidth + fluent::metrics::pagePadding;
+constexpr float kMinClientHeightDip =
+    fluent::metrics::pagePadding + 30.0f + 20.0f + fluent::metrics::sectionGap +
+    fluent::metrics::controlHeight + fluent::metrics::sectionGap + fluent::metrics::controlHeight +
+    fluent::metrics::sectionGap + kOptionsHeight + fluent::metrics::sectionGap + kPreviewHeight +
+    fluent::metrics::sectionGap + fluent::metrics::controlHeight + fluent::metrics::pagePadding;
 constexpr float kMinClientAspectRatio = kMinClientWidthDip / kMinClientHeightDip;
 constexpr float kAlphaEditorW = 44.0f;
 constexpr UINT_PTR kAlphaEditSubclassId = 1;
@@ -113,9 +111,7 @@ bool contains(const D2D1_RECT_F& rect, float x, float y) {
     return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
 }
 
-bool isShiftDown() {
-    return (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-}
+bool isShiftDown() { return (GetKeyState(VK_SHIFT) & 0x8000) != 0; }
 
 } // namespace
 
@@ -159,11 +155,11 @@ struct FontColorDialog::Impl {
     std::unique_ptr<ColorPickerDialog> picker;
     ApplyCallback onApply;
 
-    ThemeState& activeThemeState() {
+    LyricAppearance& activeThemeState() {
         return state.global ? state.globalTheme : activeTab == 0 ? state.dark : state.light;
     }
 
-    const ThemeState& activeThemeState() const {
+    const LyricAppearance& activeThemeState() const {
         return state.global ? state.globalTheme : activeTab == 0 ? state.dark : state.light;
     }
 
@@ -220,7 +216,7 @@ struct FontColorDialog::Impl {
     }
 
     COLORREF& colorRefOf(int id) {
-        ThemeState& theme = activeThemeState();
+        LyricAppearance& theme = activeThemeState();
         switch (id) {
         case kIdSwatchPlayed:
             return theme.played;
@@ -246,64 +242,64 @@ struct FontColorDialog::Impl {
         }
     }
 
-    void drawTab(fluent::FluentDialogSurface::Painter& painter,
-                 const D2D1_RECT_F& rect, const wchar_t* text, int id, bool selected) {
+    void drawTab(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                 const wchar_t* text, int id, bool selected) {
         const auto& p = fluent::palette();
         const bool hovered = hoverId == id;
         const bool pressed = pressedId == id;
-        const D2D1_COLOR_F fill = selected
-                                      ? p.listSelected
-                                      : (pressed ? p.controlPressed
-                                                  : hovered ? p.controlHover : p.controlFill);
+        const D2D1_COLOR_F fill = selected ? p.listSelected
+                                           : (pressed   ? p.controlPressed
+                                              : hovered ? p.controlHover
+                                                        : p.controlFill);
         painter.fillRoundRect(fill, rect, fluent::metrics::controlRadius);
         painter.strokeRoundRect(selected ? p.accent : p.cardStroke, rect, 1.0f,
                                 fluent::metrics::controlRadius);
         if (focusedId == id && focusVisible) {
-            painter.strokeRoundRect(
-                p.accent,
-                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
-                            rect.bottom - 1.5f),
-                1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
+            painter.strokeRoundRect(p.accent,
+                                    D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f,
+                                                rect.right - 1.5f, rect.bottom - 1.5f),
+                                    1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
         }
-        painter.drawText(text, painter.textFormat(13.0f, selected ? 600 : 400, true, true),
-                         rect, p.text);
+        painter.drawText(text, painter.textFormat(13.0f, selected ? 600 : 400, true, true), rect,
+                         p.text);
     }
 
-    void drawButton(fluent::FluentDialogSurface::Painter& painter,
-                    const D2D1_RECT_F& rect, const wchar_t* text, bool accent, int id) {
+    void drawButton(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    const wchar_t* text, bool accent, int id) {
         const auto& p = fluent::palette();
         const bool hovered = hoverId == id;
         const bool pressed = pressedId == id;
-        const D2D1_COLOR_F fill = accent
-                                      ? (pressed ? p.accentPressed
-                                                 : hovered ? p.accentHover : p.accent)
-                                      : (pressed ? p.controlPressed
-                                                 : hovered ? p.controlHover : p.controlFill);
+        const D2D1_COLOR_F fill = accent ? (pressed   ? p.accentPressed
+                                            : hovered ? p.accentHover
+                                                      : p.accent)
+                                         : (pressed   ? p.controlPressed
+                                            : hovered ? p.controlHover
+                                                      : p.controlFill);
         const D2D1_COLOR_F textColor = accent ? p.textOnAccent : p.text;
         painter.fillRoundRect(fill, rect);
         if (!accent)
             painter.strokeRoundRect(p.controlStroke, rect);
         if (focusedId == id && focusVisible) {
-            painter.strokeRoundRect(
-                accent ? p.textOnAccent : p.accent,
-                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
-                            rect.bottom - 1.5f),
-                1.5f, fluent::metrics::controlRadius - 1.0f);
+            painter.strokeRoundRect(accent ? p.textOnAccent : p.accent,
+                                    D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f,
+                                                rect.right - 1.5f, rect.bottom - 1.5f),
+                                    1.5f, fluent::metrics::controlRadius - 1.0f);
         }
         painter.drawText(text, painter.textFormat(14.0f, 400, true, true),
-                         D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f,
-                                     rect.bottom),
+                         D2D1::RectF(rect.left + 4.0f, rect.top, rect.right - 4.0f, rect.bottom),
                          textColor);
     }
 
-    void drawSwatch(fluent::FluentDialogSurface::Painter& painter,
-                    const D2D1_RECT_F& rect, COLORREF color, int id) {
+    void drawSwatch(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    COLORREF color, int id) {
         const auto& p = fluent::palette();
         const bool hovered = hoverId == id;
         const bool pressed = pressedId == id;
-        const D2D1_RECT_F outer = D2D1::RectF(rect.left + 0.5f, rect.top + 0.5f,
-                                              rect.right - 0.5f, rect.bottom - 0.5f);
-        painter.fillRoundRect(pressed ? p.controlPressed : hovered ? p.controlHover : p.controlFill,
+        const D2D1_RECT_F outer =
+            D2D1::RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f);
+        painter.fillRoundRect(pressed   ? p.controlPressed
+                              : hovered ? p.controlHover
+                                        : p.controlFill,
                               outer);
         painter.strokeRoundRect(hovered ? p.accent : p.cardStroke, outer);
 
@@ -311,28 +307,25 @@ struct FontColorDialog::Impl {
                                               outer.right - 4.0f, outer.bottom - 4.0f);
         painter.fillRoundRect(fluent::toD2D(color), inner, 2.5f);
         if (focusedId == id && focusVisible) {
-            painter.strokeRoundRect(
-                p.accent,
-                D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f, rect.right - 1.5f,
-                            rect.bottom - 1.5f),
-                1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
+            painter.strokeRoundRect(p.accent,
+                                    D2D1::RectF(rect.left + 1.5f, rect.top + 1.5f,
+                                                rect.right - 1.5f, rect.bottom - 1.5f),
+                                    1.5f, std::max(1.0f, fluent::metrics::controlRadius - 1.0f));
         }
     }
 
-    void drawToggle(fluent::FluentDialogSurface::Painter& painter,
-                    const D2D1_RECT_F& rect, bool checked, int id) {
+    void drawToggle(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
+                    bool checked, int id) {
         const auto& p = fluent::palette();
         const bool hovered = hoverId == id;
         const bool focused = focusedId == id && focusVisible;
         const float trackH = std::min(20.0f, rect.bottom - rect.top);
         const float centerY = (rect.top + rect.bottom) * 0.5f;
-        const D2D1_RECT_F track = D2D1::RectF(
-            rect.left + 0.5f, centerY - trackH * 0.5f, rect.right - 0.5f,
-            centerY + trackH * 0.5f);
+        const D2D1_RECT_F track = D2D1::RectF(rect.left + 0.5f, centerY - trackH * 0.5f,
+                                              rect.right - 0.5f, centerY + trackH * 0.5f);
         const float radius = trackH * 0.5f;
         const float knobR = trackH * 0.5f - 3.5f;
-        const float knobX = checked ? track.right - trackH * 0.5f
-                                    : track.left + trackH * 0.5f;
+        const float knobX = checked ? track.right - trackH * 0.5f : track.left + trackH * 0.5f;
         if (checked) {
             painter.fillRoundRect(hovered ? p.accentHover : p.accent, track, radius);
             if (auto* br = painter.brush(p.textOnAccent))
@@ -346,40 +339,38 @@ struct FontColorDialog::Impl {
                     D2D1::Ellipse(D2D1::Point2F(knobX, centerY), knobR, knobR), br);
         }
         if (focused) {
-            painter.strokeRoundRect(
-                p.accent,
-                D2D1::RectF(track.left + 1.5f, track.top + 1.5f,
-                            track.right - 1.5f, track.bottom - 1.5f),
-                1.5f, std::max(1.0f, radius - 1.5f));
+            painter.strokeRoundRect(p.accent,
+                                    D2D1::RectF(track.left + 1.5f, track.top + 1.5f,
+                                                track.right - 1.5f, track.bottom - 1.5f),
+                                    1.5f, std::max(1.0f, radius - 1.5f));
         }
     }
 
     void drawAlphaSlider(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
-        const ThemeState& theme = activeThemeState();
+        const LyricAppearance& theme = activeThemeState();
         const float trackL = alphaSliderRect.left + 8.0f;
         const float trackR = alphaSliderRect.right - 8.0f;
         const float centerY = (alphaSliderRect.top + alphaSliderRect.bottom) * 0.5f;
         const float thumbR = 8.0f;
-        const float t = static_cast<float>(std::clamp(theme.unplayedAlphaPct, kAlphaMin,
-                                                      kAlphaMax) - kAlphaMin) /
+        const float t = static_cast<float>(
+                            std::clamp(theme.unplayedAlphaPct, kAlphaMin, kAlphaMax) - kAlphaMin) /
                         static_cast<float>(kAlphaMax - kAlphaMin);
         const float thumbX = trackL + t * std::max(0.0f, trackR - trackL);
         const D2D1_RECT_F track = D2D1::RectF(trackL, centerY - 2.0f, trackR, centerY + 2.0f);
 
         painter.fillRoundRect(p.controlFill, track, 2.0f);
         if (thumbX > track.left)
-            painter.fillRoundRect(hoverId == kIdAlphaSlider || pressedId == kIdAlphaSlider
-                                      ? p.accentHover
-                                      : p.accent,
-                                  D2D1::RectF(track.left, track.top, thumbX, track.bottom), 2.0f);
+            painter.fillRoundRect(
+                hoverId == kIdAlphaSlider || pressedId == kIdAlphaSlider ? p.accentHover : p.accent,
+                D2D1::RectF(track.left, track.top, thumbX, track.bottom), 2.0f);
         if (auto* br = painter.brush(p.windowBg))
             painter.target()->FillEllipse(
                 D2D1::Ellipse(D2D1::Point2F(thumbX, centerY), thumbR, thumbR), br);
         if (auto* br = painter.brush(p.accent))
             painter.target()->DrawEllipse(
-                D2D1::Ellipse(D2D1::Point2F(thumbX, centerY), thumbR - 1.0f, thumbR - 1.0f),
-                br, 2.0f);
+                D2D1::Ellipse(D2D1::Point2F(thumbX, centerY), thumbR - 1.0f, thumbR - 1.0f), br,
+                2.0f);
         if (focusedId == kIdAlphaSlider && focusVisible) {
             painter.strokeRoundRect(
                 p.accent,
@@ -391,31 +382,26 @@ struct FontColorDialog::Impl {
 
     void drawPreview(fluent::FluentDialogSurface::Painter& painter) {
         const auto& p = fluent::palette();
-        const ThemeState& theme = activeThemeState();
-        const bool darkPreview = state.global
-                                     ? fluent::isDarkMode(fluent::ThemeTarget::Taskbar)
-                                     : activeTab == 0;
-        const D2D1_COLOR_F previewFill = darkPreview
-                                             ? fluent::toD2D(RGB(56, 56, 56))
-                                             : p.cardFill;
-        const D2D1_COLOR_F previewStroke = darkPreview
-                                               ? fluent::toD2D(RGB(88, 88, 88))
-                                               : p.cardStroke;
+        const LyricAppearance& theme = activeThemeState();
+        const bool darkPreview =
+            state.global ? fluent::isDarkMode(fluent::ThemeTarget::Taskbar) : activeTab == 0;
+        const D2D1_COLOR_F previewFill = darkPreview ? fluent::toD2D(RGB(56, 56, 56)) : p.cardFill;
+        const D2D1_COLOR_F previewStroke =
+            darkPreview ? fluent::toD2D(RGB(88, 88, 88)) : p.cardStroke;
         painter.fillRoundRect(previewFill, previewRect, fluent::metrics::cardRadius);
-        painter.strokeRoundRect(previewStroke, previewRect, 1.0f,
-                                fluent::metrics::cardRadius);
+        painter.strokeRoundRect(previewStroke, previewRect, 1.0f, fluent::metrics::cardRadius);
 
         IDWriteFactory* dwrite = painter.dwrite();
         if (!dwrite)
             return;
 
-        const wchar_t* family = state.fontFamily.empty() ? fluent::uiFontFamily()
-                                                          : state.fontFamily.c_str();
+        const wchar_t* family =
+            state.fontFamily.empty() ? fluent::uiFontFamily() : state.fontFamily.c_str();
         IDWriteTextFormat* format = nullptr;
-        if (FAILED(dwrite->CreateTextFormat(
-                family, nullptr, dwriteWeightOf(state.fontStyle), dwriteStyleOf(state.fontStyle),
-                DWRITE_FONT_STRETCH_NORMAL, std::max(1.0f, state.lyricFontSize), L"zh-cn",
-                &format)) ||
+        if (FAILED(
+                dwrite->CreateTextFormat(family, nullptr, dwriteWeightOf(state.fontStyle),
+                                         dwriteStyleOf(state.fontStyle), DWRITE_FONT_STRETCH_NORMAL,
+                                         std::max(1.0f, state.lyricFontSize), L"zh-cn", &format)) ||
             !format) {
             return;
         }
@@ -443,49 +429,45 @@ struct FontColorDialog::Impl {
         const D2D1_POINT_2F origin = D2D1::Point2F(previewRect.left, previewRect.top);
         const float textX = previewRect.left + (panelW - metrics.width) * 0.5f;
         const float textY = previewRect.top + (panelH - metrics.height) * 0.5f;
-        const D2D1_RECT_F panelClip = D2D1::RectF(
-            previewRect.left + 1.0f, previewRect.top + 1.0f, previewRect.right - 1.0f,
-            previewRect.bottom - 1.0f);
+        const D2D1_RECT_F panelClip =
+            D2D1::RectF(previewRect.left + 1.0f, previewRect.top + 1.0f, previewRect.right - 1.0f,
+                        previewRect.bottom - 1.0f);
         ID2D1RenderTarget* target = painter.target();
         target->PushAxisAlignedClip(panelClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
         static constexpr float kDirections[8][2] = {
-            {1.0f, 0.0f},        {0.7071f, 0.7071f}, {0.0f, 1.0f},
-            {-0.7071f, 0.7071f}, {-1.0f, 0.0f},     {-0.7071f, -0.7071f},
-            {0.0f, -1.0f},       {0.7071f, -0.7071f},
+            {1.0f, 0.0f},  {0.7071f, 0.7071f},   {0.0f, 1.0f},  {-0.7071f, 0.7071f},
+            {-1.0f, 0.0f}, {-0.7071f, -0.7071f}, {0.0f, -1.0f}, {0.7071f, -0.7071f},
         };
 
         if (theme.glowOn) {
             const D2D1_COLOR_F glow = fluent::toD2D(theme.glowColor, kGlowAlpha);
             for (const auto& direction : kDirections) {
-                painter.drawTextLayout(
-                    layout,
-                    D2D1::Point2F(origin.x + direction[0] * kGlowOffset,
-                                  origin.y + direction[1] * kGlowOffset),
-                    glow);
+                painter.drawTextLayout(layout,
+                                       D2D1::Point2F(origin.x + direction[0] * kGlowOffset,
+                                                     origin.y + direction[1] * kGlowOffset),
+                                       glow);
             }
         }
         if (theme.outlineOn) {
             const D2D1_COLOR_F outline = fluent::toD2D(theme.outlineColor, kOutlineAlpha);
             for (const auto& direction : kDirections) {
-                painter.drawTextLayout(
-                    layout,
-                    D2D1::Point2F(origin.x + direction[0] * kOutlineOffset,
-                                  origin.y + direction[1] * kOutlineOffset),
-                    outline);
+                painter.drawTextLayout(layout,
+                                       D2D1::Point2F(origin.x + direction[0] * kOutlineOffset,
+                                                     origin.y + direction[1] * kOutlineOffset),
+                                       outline);
             }
         }
 
-        painter.drawTextLayout(layout, origin,
-                               fluent::toD2D(theme.unplayed,
-                                             std::clamp(theme.unplayedAlphaPct, kAlphaMin,
-                                                        kAlphaMax) /
-                                                 100.0f));
+        painter.drawTextLayout(
+            layout, origin,
+            fluent::toD2D(theme.unplayed,
+                          std::clamp(theme.unplayedAlphaPct, kAlphaMin, kAlphaMax) / 100.0f));
         const float playedRight = textX + metrics.width * kPlayedRatio;
-        const D2D1_RECT_F playedClip = D2D1::RectF(
-            std::max(panelClip.left, textX), std::max(panelClip.top, textY - 8.0f),
-            std::min(panelClip.right, playedRight),
-            std::min(panelClip.bottom, textY + metrics.height + 8.0f));
+        const D2D1_RECT_F playedClip =
+            D2D1::RectF(std::max(panelClip.left, textX), std::max(panelClip.top, textY - 8.0f),
+                        std::min(panelClip.right, playedRight),
+                        std::min(panelClip.bottom, textY + metrics.height + 8.0f));
         if (playedClip.right > playedClip.left && playedClip.bottom > playedClip.top) {
             target->PushAxisAlignedClip(playedClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             painter.drawTextLayout(layout, origin, fluent::toD2D(theme.played));
@@ -497,7 +479,7 @@ struct FontColorDialog::Impl {
 
     void paint(fluent::FluentDialogSurface::Painter& painter, float, float) {
         const auto& p = fluent::palette();
-        const ThemeState& theme = activeThemeState();
+        const LyricAppearance& theme = activeThemeState();
         painter.drawText(L"歌词字体颜色与效果", painter.textFormat(20.0f, 600), titleRect, p.text);
         painter.drawText(L"调整歌词颜色、不透明度、光晕和描边", painter.textFormat(13.0f, 400),
                          subtitleRect, p.textSecondary);
@@ -563,29 +545,29 @@ struct FontColorDialog::Impl {
 
     std::vector<int> focusOrder() const {
         if (state.global) {
-            return {kIdToggleGlobal, kIdSwatchUnplayed, kIdSwatchPlayed, kIdAlphaSlider,
-                    kIdToggleGlow, kIdSwatchGlow, kIdToggleOutline, kIdSwatchOutline, kIdOk,
-                    kIdCancel};
+            return {kIdToggleGlobal, kIdSwatchUnplayed, kIdSwatchPlayed,  kIdAlphaSlider,
+                    kIdToggleGlow,   kIdSwatchGlow,     kIdToggleOutline, kIdSwatchOutline,
+                    kIdOk,           kIdCancel};
         }
-        return {kIdToggleGlobal, kIdTabDark, kIdTabLight, kIdSwatchUnplayed, kIdSwatchPlayed,
-                kIdAlphaSlider, kIdToggleGlow, kIdSwatchGlow, kIdToggleOutline, kIdSwatchOutline,
-                kIdOk, kIdCancel};
+        return {kIdToggleGlobal,  kIdTabDark,       kIdTabLight,   kIdSwatchUnplayed,
+                kIdSwatchPlayed,  kIdAlphaSlider,   kIdToggleGlow, kIdSwatchGlow,
+                kIdToggleOutline, kIdSwatchOutline, kIdOk,         kIdCancel};
     }
 
     void focusStep(int direction) {
         const auto order = focusOrder();
         auto it = std::find(order.begin(), order.end(), focusedId);
-        int index = it == order.end() ? (direction > 0 ? -1 : 0)
-                                      : static_cast<int>(it - order.begin());
-        index = (index + direction + static_cast<int>(order.size())) %
-                static_cast<int>(order.size());
+        int index =
+            it == order.end() ? (direction > 0 ? -1 : 0) : static_cast<int>(it - order.begin());
+        index =
+            (index + direction + static_cast<int>(order.size())) % static_cast<int>(order.size());
         focusedId = order[index];
         focusVisible = true;
         surface.invalidate();
     }
 
     void setAlpha(int value) {
-        ThemeState& theme = activeThemeState();
+        LyricAppearance& theme = activeThemeState();
         const int next = std::clamp(value, kAlphaMin, kAlphaMax);
         if (next == theme.unplayedAlphaPct)
             return;
@@ -628,7 +610,8 @@ struct FontColorDialog::Impl {
         const int x = static_cast<int>(std::lround((alphaValueRect.right - kAlphaEditorW) * s));
         const int y = static_cast<int>(std::lround(alphaValueRect.top * s));
         const int w = static_cast<int>(std::lround(kAlphaEditorW * s));
-        const int h = static_cast<int>(std::lround((alphaValueRect.bottom - alphaValueRect.top) * s));
+        const int h =
+            static_cast<int>(std::lround((alphaValueRect.bottom - alphaValueRect.top) * s));
         alphaValueEdit.move(x, y, std::max(1, w), std::max(1, h));
     }
 
@@ -771,18 +754,17 @@ struct FontColorDialog::Impl {
             surface.invalidate();
             return 0;
         case WM_GETMINMAXINFO:
-            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp),
-                                               kDialogStyle, kDialogExStyle,
-                                               kMinClientWidthDip, kMinClientHeightDip);
+            fluent::setDialogMinimumTrackSize(hwnd, reinterpret_cast<MINMAXINFO*>(lp), kDialogStyle,
+                                              kDialogExStyle, kMinClientWidthDip,
+                                              kMinClientHeightDip);
             return 0;
         case WM_SIZING:
             fluent::enforceDialogMinimumAspectRatio(hwnd, wp, reinterpret_cast<RECT*>(lp),
-                                                     kMinClientAspectRatio);
+                                                    kMinClientAspectRatio);
             return TRUE;
         case WM_DPICHANGED: {
             fluent::applyDialogDpiChange(hwnd, wp, reinterpret_cast<RECT*>(lp), kDialogStyle,
-                                         kDialogExStyle, kMinClientWidthDip,
-                                         kMinClientHeightDip);
+                                         kDialogExStyle, kMinClientWidthDip, kMinClientHeightDip);
             surface.initialize(hwnd, backdrop);
             layout();
             surface.invalidate();
@@ -977,8 +959,8 @@ struct FontColorDialog::Impl {
         const float subtitleH = 20.0f;
 
         titleRect = D2D1::RectF(pad, pad, std::max(pad, w - pad), pad + titleH);
-        subtitleRect = D2D1::RectF(pad, pad + titleH, std::max(pad, w - pad),
-                                    pad + titleH + subtitleH);
+        subtitleRect =
+            D2D1::RectF(pad, pad + titleH, std::max(pad, w - pad), pad + titleH + subtitleH);
 
         const float rowH = fluent::metrics::controlHeight;
         const float labelH = 20.0f;
@@ -994,12 +976,11 @@ struct FontColorDialog::Impl {
         const float toggleX = swatchX - 10.0f - toggleW;
 
         const float globalY = pad + titleH + subtitleH + fluent::metrics::sectionGap;
-        globalLabelRect = D2D1::RectF(pad, globalY + (rowH - labelH) * 0.5f,
-                                      pad + labelW,
+        globalLabelRect = D2D1::RectF(pad, globalY + (rowH - labelH) * 0.5f, pad + labelW,
                                       globalY + (rowH - labelH) * 0.5f + labelH);
-        globalToggleRect = D2D1::RectF(toggleX, globalY + (rowH - toggleH) * 0.5f,
-                                       toggleX + toggleW,
-                                       globalY + (rowH - toggleH) * 0.5f + toggleH);
+        globalToggleRect =
+            D2D1::RectF(toggleX, globalY + (rowH - toggleH) * 0.5f, toggleX + toggleW,
+                        globalY + (rowH - toggleH) * 0.5f + toggleH);
 
         tabsRect = {};
         tabDarkRect = {};
@@ -1008,16 +989,14 @@ struct FontColorDialog::Impl {
         if (!state.global) {
             const float tabInset = 2.0f;
             const float tabGap = fluent::metrics::compactGap;
-            tabsRect = D2D1::RectF(pad, optionsY, std::max(pad, w - pad),
-                                   optionsY + rowH);
-            const float tabW = std::max(
-                0.0f, (tabsRect.right - tabsRect.left - tabInset * 2.0f - tabGap) * 0.5f);
+            tabsRect = D2D1::RectF(pad, optionsY, std::max(pad, w - pad), optionsY + rowH);
+            const float tabW =
+                std::max(0.0f, (tabsRect.right - tabsRect.left - tabInset * 2.0f - tabGap) * 0.5f);
             tabDarkRect = D2D1::RectF(tabsRect.left + tabInset, tabsRect.top + tabInset,
-                                      tabsRect.left + tabInset + tabW,
-                                      tabsRect.bottom - tabInset);
-            tabLightRect = D2D1::RectF(tabDarkRect.right + tabGap, tabsRect.top + tabInset,
-                                       tabDarkRect.right + tabGap + tabW,
-                                       tabsRect.bottom - tabInset);
+                                      tabsRect.left + tabInset + tabW, tabsRect.bottom - tabInset);
+            tabLightRect =
+                D2D1::RectF(tabDarkRect.right + tabGap, tabsRect.top + tabInset,
+                            tabDarkRect.right + tabGap + tabW, tabsRect.bottom - tabInset);
             optionsY = tabsRect.bottom + fluent::metrics::sectionGap;
         }
 
@@ -1026,43 +1005,35 @@ struct FontColorDialog::Impl {
 
         for (int i = 0; i < 5; ++i) {
             const float y = optionsY + cardPad + i * (rowH + rowGap);
-            labelRects[i] = D2D1::RectF(labelX, y + (rowH - labelH) * 0.5f,
-                                        labelX + labelW,
+            labelRects[i] = D2D1::RectF(labelX, y + (rowH - labelH) * 0.5f, labelX + labelW,
                                         y + (rowH - labelH) * 0.5f + labelH);
         }
-        swatchRects[0] = D2D1::RectF(swatchX, optionsY + cardPad +
-                                             (rowH - swatchH) * 0.5f,
-                                     swatchX + swatchW,
-                                     optionsY + cardPad + (rowH - swatchH) * 0.5f + swatchH);
-        swatchRects[1] = D2D1::RectF(swatchX, optionsY + cardPad + rowH + rowGap +
-                                             (rowH - swatchH) * 0.5f,
-                                     swatchX + swatchW,
-                                     optionsY + cardPad + rowH + rowGap +
-                                         (rowH - swatchH) * 0.5f + swatchH);
+        swatchRects[0] =
+            D2D1::RectF(swatchX, optionsY + cardPad + (rowH - swatchH) * 0.5f, swatchX + swatchW,
+                        optionsY + cardPad + (rowH - swatchH) * 0.5f + swatchH);
+        swatchRects[1] =
+            D2D1::RectF(swatchX, optionsY + cardPad + rowH + rowGap + (rowH - swatchH) * 0.5f,
+                        swatchX + swatchW,
+                        optionsY + cardPad + rowH + rowGap + (rowH - swatchH) * 0.5f + swatchH);
 
         const float alphaY = optionsY + cardPad + 2.0f * (rowH + rowGap);
         const float valueW = 44.0f;
         const float valueX = w - pad - cardPad - valueW;
         const float sliderX = labelX + labelW + gap;
-        alphaSliderRect = D2D1::RectF(sliderX, alphaY, std::max(sliderX, valueX - gap),
-                                      alphaY + rowH);
-        alphaValueRect = D2D1::RectF(valueX, alphaY + (rowH - labelH) * 0.5f,
-                                     valueX + valueW,
+        alphaSliderRect =
+            D2D1::RectF(sliderX, alphaY, std::max(sliderX, valueX - gap), alphaY + rowH);
+        alphaValueRect = D2D1::RectF(valueX, alphaY + (rowH - labelH) * 0.5f, valueX + valueW,
                                      alphaY + (rowH - labelH) * 0.5f + labelH);
 
         const float glowY = optionsY + cardPad + 3.0f * (rowH + rowGap);
         const float outlineY = optionsY + cardPad + 4.0f * (rowH + rowGap);
-        swatchRects[2] = D2D1::RectF(swatchX, glowY + (rowH - swatchH) * 0.5f,
-                                     swatchX + swatchW,
+        swatchRects[2] = D2D1::RectF(swatchX, glowY + (rowH - swatchH) * 0.5f, swatchX + swatchW,
                                      glowY + (rowH - swatchH) * 0.5f + swatchH);
-        swatchRects[3] = D2D1::RectF(swatchX, outlineY + (rowH - swatchH) * 0.5f,
-                                     swatchX + swatchW,
+        swatchRects[3] = D2D1::RectF(swatchX, outlineY + (rowH - swatchH) * 0.5f, swatchX + swatchW,
                                      outlineY + (rowH - swatchH) * 0.5f + swatchH);
-        toggleRects[0] = D2D1::RectF(toggleX, glowY + (rowH - toggleH) * 0.5f,
-                                     toggleX + toggleW,
+        toggleRects[0] = D2D1::RectF(toggleX, glowY + (rowH - toggleH) * 0.5f, toggleX + toggleW,
                                      glowY + (rowH - toggleH) * 0.5f + toggleH);
-        toggleRects[1] = D2D1::RectF(toggleX, outlineY + (rowH - toggleH) * 0.5f,
-                                     toggleX + toggleW,
+        toggleRects[1] = D2D1::RectF(toggleX, outlineY + (rowH - toggleH) * 0.5f, toggleX + toggleW,
                                      outlineY + (rowH - toggleH) * 0.5f + toggleH);
 
         const float buttonH = fluent::metrics::controlHeight;
@@ -1070,17 +1041,16 @@ struct FontColorDialog::Impl {
         const float cancelW = 88.0f;
         const float okW = 96.0f;
         cancelRect = D2D1::RectF(w - pad - cancelW, buttonY, w - pad, buttonY + buttonH);
-        okRect = D2D1::RectF(w - pad - cancelW - gap - okW, buttonY,
-                             w - pad - cancelW - gap, buttonY + buttonH);
+        okRect = D2D1::RectF(w - pad - cancelW - gap - okW, buttonY, w - pad - cancelW - gap,
+                             buttonY + buttonH);
 
         const float previewY = optionsRect.bottom + fluent::metrics::sectionGap;
         const float previewBottom = std::max(previewY, buttonY - fluent::metrics::sectionGap);
         previewRect = D2D1::RectF(pad, previewY, std::max(pad, w - pad), previewBottom);
-        fluent::offsetDialogRects(content.offsetX, {
-            &titleRect, &subtitleRect, &globalLabelRect, &tabsRect,
-            &optionsRect, &previewRect, &alphaSliderRect, &alphaValueRect,
-            &okRect, &cancelRect, &globalToggleRect, &tabDarkRect,
-            &tabLightRect});
+        fluent::offsetDialogRects(
+            content.offsetX, {&titleRect, &subtitleRect, &globalLabelRect, &tabsRect, &optionsRect,
+                              &previewRect, &alphaSliderRect, &alphaValueRect, &okRect, &cancelRect,
+                              &globalToggleRect, &tabDarkRect, &tabLightRect});
         for (auto& rect : labelRects)
             fluent::offsetDialogRects(content.offsetX, {&rect});
         for (auto& rect : swatchRects)
@@ -1111,9 +1081,7 @@ struct FontColorDialog::Impl {
 
 FontColorDialog::FontColorDialog() : impl_(std::make_unique<Impl>()) {}
 
-FontColorDialog::~FontColorDialog() {
-    destroy();
-}
+FontColorDialog::~FontColorDialog() { destroy(); }
 
 bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) {
     impl_->notifyHwnd = parent; // 仅用于关闭通知；托盘窗口不能作为普通窗口的可见所有者
@@ -1130,9 +1098,9 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
         std::clamp(impl_->state.dark.unplayedAlphaPct, kAlphaMin, kAlphaMax);
     impl_->state.globalTheme.unplayedAlphaPct =
         std::clamp(impl_->state.globalTheme.unplayedAlphaPct, kAlphaMin, kAlphaMax);
-    impl_->focusedId = impl_->state.global
-                           ? kIdToggleGlobal
-                           : impl_->activeTab == 0 ? kIdTabDark : kIdTabLight;
+    impl_->focusedId = impl_->state.global     ? kIdToggleGlobal
+                       : impl_->activeTab == 0 ? kIdTabDark
+                                               : kIdTabLight;
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -1158,12 +1126,11 @@ bool FontColorDialog::create(HINSTANCE inst, HWND parent, const State& initial) 
     const int x = work.left + ((work.right - work.left) - w) / 2;
     const int y = work.top + ((work.bottom - work.top) - h) / 2;
 
-    impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontColor",
-                                  L"歌词字体颜色与效果", kDialogStyle, x, y, w, h,
-                                  nullptr, nullptr, inst, impl_.get());
+    impl_->hwnd = CreateWindowExW(kDialogExStyle, L"QQMusicLyricFontColor", L"歌词字体颜色与效果",
+                                  kDialogStyle, x, y, w, h, nullptr, nullptr, inst, impl_.get());
     if (impl_->hwnd) {
         fluent::ensureDialogMinimumSize(impl_->hwnd, kDialogStyle, kDialogExStyle,
-                                         kMinClientWidthDip, kMinClientHeightDip);
+                                        kMinClientWidthDip, kMinClientHeightDip);
         app_icon::applyWindowIcon(impl_->hwnd);
     }
     return impl_->hwnd != nullptr;
@@ -1177,26 +1144,14 @@ void FontColorDialog::show() {
     }
 }
 
-void FontColorDialog::destroy() {
-    impl_->destroy();
-}
+void FontColorDialog::destroy() { impl_->destroy(); }
 
-bool FontColorDialog::isOpen() const {
-    return impl_->hwnd != nullptr && IsWindow(impl_->hwnd);
-}
+bool FontColorDialog::isOpen() const { return impl_->hwnd != nullptr && IsWindow(impl_->hwnd); }
 
-HWND FontColorDialog::hwnd() const {
-    return impl_->hwnd;
-}
+HWND FontColorDialog::hwnd() const { return impl_->hwnd; }
 
-void FontColorDialog::refreshTheme() {
-    impl_->refreshTheme();
-}
+void FontColorDialog::refreshTheme() { impl_->refreshTheme(); }
 
-bool FontColorDialog::isDialogMessage(MSG* msg) {
-    return impl_->isDialogMessage(msg);
-}
+bool FontColorDialog::isDialogMessage(MSG* msg) { return impl_->isDialogMessage(msg); }
 
-void FontColorDialog::setApplyCallback(ApplyCallback cb) {
-    impl_->onApply = std::move(cb);
-}
+void FontColorDialog::setApplyCallback(ApplyCallback cb) { impl_->onApply = std::move(cb); }

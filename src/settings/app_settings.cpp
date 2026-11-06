@@ -1,4 +1,7 @@
 #include "settings/app_settings.h"
+#include "ui/fluent_theme.h"
+#include "ui/spectrum_effects.h"
+#include "ui/lyric_effects.h"
 #include "logging/runtime_logger.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
@@ -223,7 +226,7 @@ void AppSettings::readJson(const nlohmann::json& j, bool hasTickTickToken,
         fontFamily_ = fam;
     fontSize_ = (float)j.value("fontSize", 16.0);
     fontStyle_ = fontStyleOf(j.value("fontStyle", std::string("normal")));
-    FontColorDialog::ThemeState legacyAppearance;
+    LyricAppearance legacyAppearance;
     legacyAppearance.played = (COLORREF)j.value("lyricColor", (unsigned)legacyAppearance.played);
     // 未播放色默认跟随已播放色：旧配置进入双主题后视觉保持一致。
     legacyAppearance.unplayed =
@@ -239,7 +242,7 @@ void AppSettings::readJson(const nlohmann::json& j, bool hasTickTickToken,
     // 旧配置 lyricGlow 是描边+光晕总开关，升级时描边默认跟随它。
     legacyAppearance.outlineOn = j.value("lyricOutline", legacyAppearance.glowOn);
 
-    auto loadAppearance = [&j](const char* suffix, FontColorDialog::ThemeState fallback) {
+    auto loadAppearance = [&j](const char* suffix, LyricAppearance fallback) {
         const std::string suffixValue = suffix;
         fallback.played = static_cast<COLORREF>(
             j.value("lyricColor" + suffixValue, static_cast<unsigned>(fallback.played)));
@@ -452,7 +455,7 @@ nlohmann::json AppSettings::toJson() const {
     j["fontFamily"] = utf8Of(fontFamily_);
     j["fontSize"] = fontSize_;
     j["fontStyle"] = fontStyleName(fontStyle_);
-    auto saveAppearance = [&j](const char* suffix, const FontColorDialog::ThemeState& appearance) {
+    auto saveAppearance = [&j](const char* suffix, const LyricAppearance& appearance) {
         const std::string suffixValue = suffix;
         j["lyricColor" + suffixValue] = static_cast<unsigned>(appearance.played);
         j["lyricUnplayedColor" + suffixValue] = static_cast<unsigned>(appearance.unplayed);

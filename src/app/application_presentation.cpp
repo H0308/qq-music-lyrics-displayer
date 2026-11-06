@@ -66,6 +66,9 @@ void App::publishPresentationFrame(const SmtcSnapshot& snap, bool animateTransit
     // SMTC 状态/控制/封面事件只刷新帧字段；完整歌词仅在内容事务变化时复制。
     preparePresentationFrame(snap, animateTransition, lyricsChanged, durationOnlyUpdate);
     forEachHost([&](ILyricHost* host) { host->applyPresentationFrame(presentation_.frame()); });
+    // 歌词内容事务也会改变辅助歌词的可用状态，同步刷新已打开的设置窗口。
+    if (lyricsChanged)
+        refreshSettingsDialog(true);
     // 弹窗可见期间异步补齐封面等字段；隐藏时只缓存不渲染
     if (songToast_)
         songToast_->setMedia(presentation_.frame().media);
