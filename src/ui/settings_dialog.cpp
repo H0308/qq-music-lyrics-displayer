@@ -1,6 +1,8 @@
 #include "settings_dialog.h"
 
 #include "app_info.h"
+#include "logging/runtime_logger.h"
+#include "logging/ui_timing.h"
 #include "ui/app_icon.h"
 #include "ui/color_picker_dialog.h"
 #include "ui/dialog_notify.h"
@@ -148,7 +150,9 @@ struct SettingsDialog::Impl {
     HWND notifyHwnd = nullptr;
     HWND contentWindow = nullptr;
     DCompRenderer contentRenderer;
+    fluent::FluentDialogSurface::TextCache contentTextCache;
     bool contentLayerReady = false;
+    bool hintHeightsDirty = true;
     bool backdrop = false;
     SettingsSections sections_;
     Row* findRow(int id) { return sections_.findRow(id); }
@@ -171,6 +175,7 @@ struct SettingsDialog::Impl {
     const Row* findRow(int id) const { return sections_.findRow(id); }
     void createControls() { sections_.create(); }
     void onCommand(int id, int option = -1) {
+        hintHeightsDirty = true;
         const auto* row = sections_.findRow(id);
         if ((id == kIdSpectrumColor || id == kIdFloatingCardBackgroundColor) && row &&
             row->enabled) {
@@ -853,6 +858,8 @@ struct SettingsDialog::Impl {
     }
 
     void layout() {
+        hintHeightsDirty = true;
+        contentTextCache.clear();
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const float s = surface.dipScale();
@@ -1267,7 +1274,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawNav(fluent::FluentDialogSurface::Painter& painter) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         // 导航融入窗口底色，右侧设置卡片承担主要的表面层级。
         const bool triggerHovered = hoverId == kIdSettingsSearch;
         const bool triggerPressed = pressedId == kIdSettingsSearch;
@@ -1391,7 +1398,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawButton(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const bool hovered = hoverId == row.id;
         const bool pressed = pressedId == row.id;
         D2D1_COLOR_F fill = pressed ? p.controlPressed : hovered ? p.controlHover : p.controlFill;
@@ -1440,7 +1447,7 @@ struct SettingsDialog::Impl {
 
     void drawToggle(fluent::FluentDialogSurface::Painter& painter, const Row& row,
                     bool hovered, bool focused) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const bool enabled = row.enabled;
         const float trackH = std::min(20.0f, row.controlRect.bottom - row.controlRect.top);
         const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
@@ -1479,7 +1486,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawSlider(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const float centerY = (row.controlRect.top + row.controlRect.bottom) * 0.5f;
         constexpr float trackH = 4.0f;
         const float trackLeft = row.controlRect.left;
@@ -1553,7 +1560,7 @@ struct SettingsDialog::Impl {
     void drawRadioCardBackground(fluent::FluentDialogSurface::Painter& painter, const Row& row,
                                  const D2D1_RECT_F& card, bool selected, bool hovered,
                                  bool pressed) const {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         D2D1_COLOR_F fill = p.controlFill;
         if (!row.enabled)
             fill = p.listHover;
@@ -1580,7 +1587,7 @@ struct SettingsDialog::Impl {
     void drawRadioIndicator(fluent::FluentDialogSurface::Painter& painter, const Row& row,
                             const D2D1_RECT_F& card, bool selected, bool hovered, bool pressed,
                             float rightInset, float topInset) const {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const D2D1_POINT_2F radioCenter =
             D2D1::Point2F(card.right - rightInset, card.top + topInset);
         if (!row.enabled) {
@@ -1604,7 +1611,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawSpectrumStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(13.0f, 500, true, true);
         if (!titleFormat)
             return;
@@ -1649,7 +1656,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawCoverEffectRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(13.0f, 500, false, true);
         if (!titleFormat)
             return;
@@ -1686,7 +1693,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawSongToastPositionRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(13.0f, 500, true, true);
         if (!titleFormat)
             return;
@@ -1734,7 +1741,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawIdleQuoteBackgroundRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(12.5f, 600, true, true);
         auto* noneFormat = painter.textFormat(12.0f, 600, true, true);
         if (!titleFormat || !noneFormat)
@@ -1811,7 +1818,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawHoverControlStyleRadio(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(12.5f, 500, true, true);
         if (!titleFormat)
             return;
@@ -1871,7 +1878,7 @@ struct SettingsDialog::Impl {
             return;
         }
 
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* format = painter.textFormat(13.0f, 400, true, true);
         if (!format)
             return;
@@ -1916,7 +1923,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawModeGrid(fluent::FluentDialogSurface::Painter& painter, Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         auto* titleFormat = painter.textFormat(13.0f, 600, false, true);
         auto* hintFormat = painter.textFormat(11.0f, 400);
         if (!titleFormat || !hintFormat)
@@ -1981,7 +1988,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawIdleApps(fluent::FluentDialogSurface::Painter& painter, const Row& row) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const float innerX = row.cardRect.left + 16.0f;
         const float innerRight = row.cardRect.right - 16.0f;
         const float listTop = row.cardRect.top + kIdleAppsListTop;
@@ -2111,7 +2118,7 @@ struct SettingsDialog::Impl {
     void drawScrollBar(fluent::FluentDialogSurface::Painter& painter) {
         if (contentMaxScroll <= 0.0f || scrollThumbRect.bottom <= scrollThumbRect.top)
             return;
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const bool active = hoverId == kIdContentScrollBar ||
                             pressedId == kIdContentScrollBar || scrollDragging;
         painter.fillRoundRect(active ? p.accent : p.textSecondary, scrollThumbRect,
@@ -2119,7 +2126,7 @@ struct SettingsDialog::Impl {
     }
 
     void drawSettingGroups(fluent::FluentDialogSurface::Painter& painter) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const auto& pageRows = sections_.rows[activePage];
         for (size_t first = 0; first < pageRows.size();) {
             if (pageRows[first].kind == ControlKind::Header) {
@@ -2154,9 +2161,12 @@ struct SettingsDialog::Impl {
             drawScrollBar(painter);
             return;
         }
-        if (!navOnly && !contentOnly && !contentScrollAnimating)
+        if (hintHeightsDirty && !navOnly && !contentOnly && !contentScrollAnimating) {
             updateHintHeights(painter);
-        const auto& p = fluent::palette();
+            // updateHintHeights 内部可能调整行高并重新布局；本次已完成相应量测。
+            hintHeightsDirty = false;
+        }
+        const auto& p = painter.colors();
         if (!contentOnly)
             drawNav(painter);
         if (navOnly)
@@ -2177,7 +2187,7 @@ struct SettingsDialog::Impl {
     }
 
     void paintContent(fluent::FluentDialogSurface::Painter& painter) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         drawSettingGroups(painter);
         const float locatedAlpha = searchLocatedAlpha();
         if (const auto* located = findRow(searchLocatedId);
@@ -2263,6 +2273,7 @@ struct SettingsDialog::Impl {
     void renderContentLayer() {
         if (!contentWindow)
             return;
+        const auto started = runtime_log::uiTimeMs();
         const float scale = surface.dipScale();
         const float left = std::floor(contentViewportRect.left * scale) / scale;
         const float top = std::floor(contentViewportRect.top * scale) / scale;
@@ -2277,14 +2288,18 @@ struct SettingsDialog::Impl {
             return;
         }
         auto* target = contentRenderer.renderTarget();
+        const auto bound = runtime_log::uiTimeMs();
         target->BeginDraw();
         target->SetTransform(D2D1::Matrix3x2F::Translation(-left, contentPaintScroll - top));
         target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
         {
-            fluent::FluentDialogSurface::Painter painter(target, contentRenderer.dwrite());
+            fluent::FluentDialogSurface::Painter painter(target, contentRenderer.dwrite(),
+                                                        &contentTextCache);
             paintContent(painter);
         }
+        const auto painted = runtime_log::uiTimeMs();
         const HRESULT result = target->EndDraw();
+        const auto drawn = runtime_log::uiTimeMs();
         if (FAILED(result)) {
             contentRenderer.discard();
             contentLayerReady = false;
@@ -2299,6 +2314,16 @@ struct SettingsDialog::Impl {
             contentRenderer.setRootOffsetY(-std::round(contentScroll * scale));
         }
         contentLayerReady = contentRenderer.present();
+        const auto presented = runtime_log::uiTimeMs();
+        if (presented - started >= 24) {
+            runtime_log::writef(
+                L"[ui][settings-content] page=%d size=%dx%d bind=%llums paint=%llums "
+                L"end-draw=%llums present=%llums", activePage, width, height,
+                static_cast<unsigned long long>(bound - started),
+                static_cast<unsigned long long>(painted - bound),
+                static_cast<unsigned long long>(drawn - painted),
+                static_cast<unsigned long long>(presented - drawn));
+        }
         if (!contentLayerReady)
             contentRenderer.discard();
     }
@@ -2967,6 +2992,7 @@ struct SettingsDialog::Impl {
             KillTimer(hwnd, kSearchPaletteAnimTimer);
             search_.destroy();
             contentRenderer.releaseAll();
+            contentTextCache.clear();
             contentLayerReady = false;
             contentWindow = nullptr;
             surface.discard();

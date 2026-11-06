@@ -3,17 +3,17 @@
 #include "logging/runtime_logger.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <memory>
-#include <mutex>
 
 struct DCompSharedDevice {
     ID3D11Device* d3d = nullptr;
     IDXGIDevice* dxgi = nullptr;
-    bool invalid = false;
+    std::atomic<bool> invalid{false};
 
     ~DCompSharedDevice() {
         if (dxgi)
@@ -31,12 +31,12 @@ namespace {
 constexpr auto kDeviceRecreateInterval = std::chrono::seconds(2);
 
 std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
-    static std::weak_ptr<DCompSharedDevice> weak;
-    static std::mutex mutex;
-    static std::chrono::steady_clock::time_point lastAttempt;
-    static bool attempted = false;
-    static bool throttleLogged = false;
-    std::lock_guard<std::mutex> lock(mutex);
+    // 单线程 D2D 工厂只能在各自 UI 线程内共享底层 D3D 设备。
+    // 即时上下文的逐调用保护不能隔离不同工厂之间的完整绘制事务。
+    static thread_local std::weak_ptr<DCompSharedDevice> weak;
+    static thread_local std::chrono::steady_clock::time_point lastAttempt;
+    static thread_local bool attempted = false;
+    static thread_local bool throttleLogged = false;
 
     if (auto shared = weak.lock(); shared && !shared->invalid)
         return shared;
@@ -70,7 +70,7 @@ std::shared_ptr<DCompSharedDevice> acquireSharedDevice() {
     }
 
     weak = shared;
-    runtime_log::writef(L"[dcomp] shared device created");
+    runtime_log::writef(L"[dcomp] thread device created thread=%lu", GetCurrentThreadId());
     return shared;
 }
 
@@ -139,7 +139,7 @@ bool LyricRenderer::createFactories() {
     static ID2D1Factory* sharedD2d = [] {
         D2D1_FACTORY_OPTIONS opts{};
         ID2D1Factory* f = nullptr;
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory),
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_MULTI_THREADED, __uuidof(ID2D1Factory),
                                      &opts, reinterpret_cast<void**>(&f))))
             return static_cast<ID2D1Factory*>(nullptr);
         return f;
@@ -424,14 +424,23 @@ bool DCompRenderer::createDevice() {
 }
 
 bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
+    const auto fail = [this, hwnd, width, height](const wchar_t* stage, HRESULT hr) {
+        const HRESULT removed = d3d_ ? d3d_->GetDeviceRemovedReason() : S_OK;
+        runtime_log::writef(
+            L"[dcomp] swapchain bind failed stage=%s hr=0x%08X removed=0x%08X "
+            L"(hwnd=%p %dx%d thread=%lu)",
+            stage, static_cast<unsigned>(hr), static_cast<unsigned>(removed),
+            hwnd, width, height, GetCurrentThreadId());
+        // 初始化也是事务：任何一步失败都不能留下半套交换链供下一帧复用。
+        discard();
+        return false;
+    };
     if (swapchain_ && (width != width_ || height != height_)) {
         releaseBackBuffer();
         HRESULT hr = swapchain_->ResizeBuffers(0, static_cast<UINT>(width),
                                                static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN, 0);
-        if (FAILED(hr)) {
-            discard();
-            return false;
-        }
+        if (FAILED(hr))
+            return fail(L"ResizeBuffers", hr);
         width_ = width;
         height_ = height;
     }
@@ -467,7 +476,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
         HRESULT hr = CreateDXGIFactory1(__uuidof(IDXGIFactory2),
                                         reinterpret_cast<void**>(&factory));
         if (FAILED(hr))
-            return false;
+            return fail(L"CreateDXGIFactory1", hr);
 
         DXGI_SWAP_CHAIN_DESC1 desc{};
         desc.Width = static_cast<UINT>(width);
@@ -482,25 +491,40 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
         hr = factory->CreateSwapChainForComposition(dxgiDevice_, &desc, nullptr, &swapchain_);
         factory->Release();
         if (FAILED(hr))
-            return false;
+            return fail(L"CreateSwapChainForComposition", hr);
 
+        const wchar_t* stage = L"CreateTargetForHwnd";
         hr = dcomp_->CreateTargetForHwnd(hwnd, contentAboveChildren_ ? TRUE : FALSE, &target_);
-        if (SUCCEEDED(hr))
+        if (SUCCEEDED(hr)) {
+            stage = L"CreateVisual";
             hr = dcomp_->CreateVisual(&visual_);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"SetContent";
             hr = visual_->SetContent(swapchain_);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"CreateEffectGroup";
             hr = dcomp_->CreateEffectGroup(&rootOpacity_);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"SetOpacity";
             hr = rootOpacity_->SetOpacity(1.0f);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"SetEffect";
             hr = visual_->SetEffect(rootOpacity_);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"SetRoot";
             hr = target_->SetRoot(visual_);
-        if (SUCCEEDED(hr))
+        }
+        if (SUCCEEDED(hr)) {
+            stage = L"Commit";
             hr = dcomp_->Commit();
+        }
         if (FAILED(hr))
-            return false;
+            return fail(stage, hr);
         hwnd_ = hwnd;
         width_ = width;
         height_ = height;
@@ -510,7 +534,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
         HRESULT hr = swapchain_->GetBuffer(0, __uuidof(IDXGISurface),
                                            reinterpret_cast<void**>(&surface));
         if (FAILED(hr))
-            return false;
+            return fail(L"GetBuffer", hr);
         auto props = D2D1::BitmapProperties1(
             D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
@@ -518,7 +542,7 @@ bool DCompRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
         hr = dc_->CreateBitmapFromDxgiSurface(surface, &props, &backBmp_);
         surface->Release();
         if (FAILED(hr))
-            return false;
+            return fail(L"CreateBitmapFromDxgiSurface", hr);
         dc_->SetTarget(backBmp_);
     }
     return true;
@@ -543,7 +567,6 @@ bool DCompRenderer::bind(HWND hwnd, int width, int height) {
     if (!createDevice())
         return false;
     if (!ensureSwapchain(hwnd, width, height)) {
-        runtime_log::writef(L"[dcomp] swapchain bind failed (hwnd=%p %dx%d)", hwnd, width, height);
         return false;
     }
     return true;
@@ -1178,6 +1201,15 @@ bool DCompRenderer::setRootRoundedClip(float top, float bottom, float cornerRadi
 }
 
 void DCompRenderer::discard() {
+    // EndDraw 也可能先于 Present 报设备丢失；此时不能再次借回旧 D3D 设备。
+    if (sharedDevice_ && d3d_) {
+        const HRESULT reason = d3d_->GetDeviceRemovedReason();
+        if (FAILED(reason)) {
+            sharedDevice_->invalid = true;
+            runtime_log::writef(L"[dcomp] device removed on discard: 0x%08X thread=%lu",
+                                static_cast<unsigned>(reason), GetCurrentThreadId());
+        }
+    }
     releaseBackBuffer();
     releaseLyricTransitionLayers();
     auto release = [](auto*& p) {

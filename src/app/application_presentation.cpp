@@ -215,13 +215,6 @@ void App::onFrame() {
         // 补丁中的 actualPositionMs 仍是真实播放时间，避免逐字高亮跟着提前。
         host->applyPlaybackPatch(playback);
     });
-    if (taskbarHost && settings_.spectrumOn_ && !taskbarVertical_) {
-        SpectrumPatch spectrumPatch;
-        spectrumPatch.frameRevision = presentation_.frame().frameRevision;
-        spectrumPatch.requestGeneration = presentation_.frame().requestGeneration;
-        spectrumPatch.bands = spectrum_.bands();
-        forEachHost([&](TaskbarHost* host) { host->applySpectrumPatch(spectrumPatch); });
-    }
     if (manualSearchDialog && manualSearchDialog->isOpen()) {
         manualSearchDialog->setPlaybackPosition(snap.positionMs);
     }

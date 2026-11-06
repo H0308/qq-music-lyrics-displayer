@@ -24,6 +24,8 @@ public:
     // durationMs 为 0 时直接落到 to。
     void animatePresence(float from, float to, unsigned durationMs) noexcept;
     bool available() const noexcept;
+    // 所有本线程背景实例释放后调用；完成 DispatcherQueue 关闭再退出 WinRT。
+    static void shutdownThreadResources();
 
 private:
     struct Impl;

@@ -311,9 +311,16 @@ LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* pointers) {
 } // namespace
 
 struct RuntimeLogger::Impl {
+    struct Entry {
+        std::wstring diagnostic;
+        std::string utf8;
+    };
+    // mutex 只保护队列与界面快照；磁盘和控制台操作只能持有 ioMutex。
+    // 同时需要两把锁时，先取得 ioMutex，不能带着 mutex 等待 I/O。
     mutable std::recursive_mutex mutex;
+    std::recursive_mutex ioMutex;
     std::condition_variable_any wake;
-    std::deque<std::string> pending;
+    std::deque<Entry> pending;
     size_t pendingBytes = 0;
     std::ofstream file;
     std::wstring filePath;
@@ -322,62 +329,89 @@ struct RuntimeLogger::Impl {
     int retentionDays = 30;
     bool started = false;
     bool stopping = false;
+    bool cleanupRequested = false;
     std::thread worker;
     RuntimeLogSnapshot snapshot;
 
-    void ensureDirectoryLocked() {
-        if (directory.empty())
-            directory = RuntimeLogger::defaultDirectory();
-        if (directory.empty())
-            return;
-        std::error_code ec;
-        std::filesystem::create_directories(std::filesystem::path(directory), ec);
-    }
-
+    // 调用方持有 ioMutex；状态锁只用于复制路径，不能覆盖文件系统操作。
     void openFileLocked() {
         if (file.is_open() && file)
             return;
         if (file.is_open())
             file.close();
         file.clear();
-        ensureDirectoryLocked();
-        if (directory.empty())
+        std::wstring directoryCopy;
+        std::wstring sessionCopy;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex);
+            directoryCopy = directory;
+            sessionCopy = sessionFileName;
+        }
+        if (directoryCopy.empty())
             return;
-        if (sessionFileName.empty())
-            sessionFileName = std::wstring(kLogPrefix) + nowStamp(false) + kLogExtension;
-        const auto path = std::filesystem::path(directory) /
-                          std::filesystem::path(sessionFileName);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(directoryCopy), ec);
+        const auto path = std::filesystem::path(directoryCopy) /
+                          std::filesystem::path(sessionCopy);
         filePath = path.wstring();
         file.open(path, std::ios::binary | std::ios::app);
         if (!file)
             OutputDebugStringW(L"[logger] failed to open runtime log file\n");
     }
 
-    void enqueueUtf8Locked(const std::string& line) {
-        if (line.empty())
-            return;
-        pendingBytes += line.size();
-        pending.push_back(line);
+    void trimPendingLocked() {
         while (pendingBytes > kPendingHardLimit && !pending.empty()) {
-            pendingBytes -= pending.front().size();
+            pendingBytes -= pending.front().utf8.size();
             pending.pop_front();
         }
+    }
+
+    void enqueueLocked(Entry entry) {
+        if (entry.utf8.empty())
+            return;
+        pendingBytes += entry.utf8.size();
+        pending.push_back(std::move(entry));
+        trimPendingLocked();
         wake.notify_one();
     }
 
     void writePendingLocked() {
-        if (pending.empty())
+        std::deque<Entry> batch;
+        {
+            std::lock_guard<std::recursive_mutex> lock(mutex);
+            batch.swap(pending);
+            pendingBytes = 0;
+        }
+        if (batch.empty())
             return;
+
+        // 控制台和调试器都可能阻塞。每批只输出一次，正常操作线程只负责入队。
+        std::wstring diagnostics;
+        for (auto& entry : batch) {
+            diagnostics += entry.diagnostic;
+            entry.diagnostic.clear();
+        }
+        if (!diagnostics.empty()) {
+            std::fputws(diagnostics.c_str(), stdout);
+            OutputDebugStringW(diagnostics.c_str());
+        }
         openFileLocked();
-        if (!file)
-            return;
-        while (!pending.empty()) {
-            const std::string& line = pending.front();
+        while (file && !batch.empty()) {
+            const std::string& line = batch.front().utf8;
             file.write(line.data(), static_cast<std::streamsize>(line.size()));
             if (!file)
                 break;
-            pendingBytes -= std::min(pendingBytes, line.size());
-            pending.pop_front();
+            batch.pop_front();
+        }
+        // 沿用原有写入失败保留队列的行为，旧日志仍排在新日志之前。
+        if (!batch.empty()) {
+            std::lock_guard<std::recursive_mutex> lock(mutex);
+            while (!batch.empty()) {
+                pendingBytes += batch.back().utf8.size();
+                pending.push_front(std::move(batch.back()));
+                batch.pop_back();
+            }
+            trimPendingLocked();
         }
     }
 
@@ -431,24 +465,26 @@ struct RuntimeLogger::Impl {
 
         for (;;) {
             std::unique_lock<std::recursive_mutex> lock(mutex);
-            if (!stopping && pending.empty()) {
+            if (!stopping && !cleanupRequested && pending.empty()) {
                 wake.wait_for(lock, std::chrono::milliseconds(250), [this] {
-                    return stopping || !pending.empty();
+                    return stopping || cleanupRequested || !pending.empty();
                 });
-            } else if (!stopping && pendingBytes < kBufferedBytesLimit) {
+            } else if (!stopping && !cleanupRequested && pendingBytes < kBufferedBytesLimit) {
                 wake.wait_until(lock, nextFlush, [this] {
-                    return stopping || pendingBytes >= kBufferedBytesLimit;
+                    return stopping || cleanupRequested || pendingBytes >= kBufferedBytesLimit;
                 });
             }
             const auto now = std::chrono::steady_clock::now();
             const bool shouldStop = stopping;
+            const bool shouldCleanup = std::exchange(cleanupRequested, false);
             const bool shouldFlush = !pending.empty() &&
                                       (pendingBytes >= kBufferedBytesLimit || now >= nextFlush);
+            lock.unlock();
             if (shouldFlush || shouldStop) {
+                std::lock_guard<std::recursive_mutex> ioLock(ioMutex);
                 flushLocked();
                 nextFlush = now + kFlushInterval;
             }
-            lock.unlock();
 
             if (now >= nextSample) {
                 ResourceSample sample = resources.sample();
@@ -494,7 +530,7 @@ struct RuntimeLogger::Impl {
                 }
                 nextSample = now + kSampleInterval;
             }
-            if (now >= nextCleanup) {
+            if (shouldCleanup || now >= nextCleanup) {
                 cleanupLogs();
                 nextCleanup = now + kCleanupInterval;
             }
@@ -515,26 +551,30 @@ void RuntimeLogger::start(const std::wstring& directory, int retentionDays) {
         return;
     stop();
 
+    const std::wstring initialDirectory = directory.empty() ? defaultDirectory() : directory;
+    const std::wstring session = std::wstring(kLogPrefix) + nowStamp(false) + kLogExtension;
     {
         std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-        impl_->directory = directory.empty() ? defaultDirectory() : directory;
+        impl_->directory = initialDirectory;
         impl_->retentionDays = std::clamp(retentionDays, 0, 3650);
-        impl_->sessionFileName.clear();
+        impl_->sessionFileName = session;
         impl_->stopping = false;
+        impl_->cleanupRequested = false;
         impl_->started = true;
         impl_->snapshot.logDirectory = impl_->directory;
-        impl_->snapshot.sessionFileName.clear();
+        impl_->snapshot.sessionFileName = session;
         impl_->snapshot.retentionDays = impl_->retentionDays;
-        impl_->openFileLocked();
-        if (!impl_->sessionFileName.empty())
-            impl_->snapshot.sessionFileName = impl_->sessionFileName;
         g_activeLogger.store(this, std::memory_order_release);
+    }
+    {
+        std::lock_guard<std::recursive_mutex> ioLock(impl_->ioMutex);
+        impl_->openFileLocked();
     }
 
     std::set_terminate(terminateHandler);
     SetUnhandledExceptionFilter(unhandledExceptionFilter);
     impl_->worker = std::thread([this] { impl_->run(); });
-    writef(L"[lifecycle] runtime logger started: file=%s", impl_->sessionFileName.c_str());
+    writef(L"[lifecycle] runtime logger started: file=%s", session.c_str());
 }
 
 void RuntimeLogger::stop() {
@@ -550,12 +590,16 @@ void RuntimeLogger::stop() {
     if (impl_->worker.joinable())
         impl_->worker.join();
     {
-        std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+        std::lock_guard<std::recursive_mutex> ioLock(impl_->ioMutex);
+        {
+            std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+            impl_->started = false;
+        }
         impl_->flushLocked();
         if (impl_->file.is_open())
             impl_->file.close();
         impl_->filePath.clear();
-        impl_->started = false;
+        std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
         impl_->stopping = false;
     }
     RuntimeLogger* expected = this;
@@ -579,15 +623,16 @@ void RuntimeLogger::write(const std::wstring& message) {
         if (utf8.empty())
             return;
 
-        // main 在启动阶段把 stdout 设为 _O_U8TEXT；使用宽字符输出可保留 Debug
-        // 控制台的中文显示，磁盘仍使用下面的 UTF-8 字节队列。
+        {
+            std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+            if (impl_->started) {
+                impl_->enqueueLocked({line, utf8});
+                return;
+            }
+        }
+        // 未启动日志工作线程时，保持原有诊断输出。
         std::fputws(line.c_str(), stdout);
         OutputDebugStringW(line.c_str());
-        std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-        if (!impl_->started) {
-            return;
-        }
-        impl_->enqueueUtf8Locked(utf8);
     } catch (...) {
         OutputDebugStringW(L"[logger] write failed\n");
     }
@@ -608,12 +653,9 @@ void RuntimeLogger::writef(const wchar_t* format, ...) {
 void RuntimeLogger::flushSync() {
     if (!impl_)
         return;
-    std::wstring filePath;
-    {
-        std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-        impl_->flushLocked();
-        filePath = impl_->filePath;
-    }
+    std::lock_guard<std::recursive_mutex> ioLock(impl_->ioMutex);
+    impl_->flushLocked();
+    const std::wstring filePath = impl_->filePath;
     if (!filePath.empty()) {
         HANDLE handle = CreateFileW(filePath.c_str(), GENERIC_WRITE,
                                     FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -629,16 +671,21 @@ void RuntimeLogger::setDirectory(const std::wstring& directory) {
     if (!impl_ || directory.empty())
         return;
     {
-        std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
-        if (impl_->directory == directory)
-            return;
+        std::lock_guard<std::recursive_mutex> ioLock(impl_->ioMutex);
+        {
+            std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+            if (impl_->directory == directory)
+                return;
+        }
         impl_->flushLocked();
         if (impl_->file.is_open())
             impl_->file.close();
-        impl_->directory = directory;
+        {
+            std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
+            impl_->directory = directory;
+            impl_->snapshot.logDirectory = directory;
+        }
         impl_->openFileLocked();
-        impl_->snapshot.logDirectory = impl_->directory;
-        impl_->snapshot.sessionFileName = impl_->sessionFileName;
     }
     writef(L"[logger] log directory changed: %s", directory.c_str());
 }
@@ -651,8 +698,9 @@ void RuntimeLogger::setRetentionDays(int days) {
         std::lock_guard<std::recursive_mutex> lock(impl_->mutex);
         impl_->retentionDays = days;
         impl_->snapshot.retentionDays = days;
+        impl_->cleanupRequested = true;
+        impl_->wake.notify_one();
     }
-    impl_->cleanupLogs();
     writef(L"[logger] retention changed: %d days", days);
 }
 

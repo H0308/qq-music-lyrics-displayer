@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <algorithm>
+#include <atomic>
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -35,8 +36,9 @@ constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
 constexpr int kDwmsbtNone = 1;       // DWMSBT_NONE
 constexpr int kDwmsbtMainWindow = 2; // Windows 11 Mica
 
-ThemeMode gTaskbarThemeMode = ThemeMode::FollowSystem;
-ThemeMode gWindowThemeMode = ThemeMode::FollowApp;
+std::atomic<ThemeMode> gTaskbarThemeMode{ThemeMode::FollowSystem};
+std::atomic<ThemeMode> gWindowThemeMode{ThemeMode::FollowApp};
+thread_local winrt::Windows::UI::ViewManagement::UISettings gThreadUiSettings{nullptr};
 
 IDWriteFontFallback* createUiFontFallback() {
     IDWriteFactory* factory = nullptr;
@@ -252,7 +254,8 @@ void setThemeModes(ThemeMode taskbarMode, ThemeMode windowMode) {
 bool isDarkMode() { return isDarkMode(ThemeTarget::Window); }
 
 bool isDarkMode(ThemeTarget target) {
-    return isDarkForMode(target == ThemeTarget::Taskbar ? gTaskbarThemeMode : gWindowThemeMode);
+    return isDarkForMode(target == ThemeTarget::Taskbar ? gTaskbarThemeMode.load()
+                                                       : gWindowThemeMode.load());
 }
 
 bool isWindowsAppDarkMode() { return detectAppDarkMode(); }
@@ -261,14 +264,17 @@ COLORREF accentColor() {
     try {
         // 缓存 UISettings 对象，避免每次调用都重新激活运行时类；
         // GetColorValue 读取的始终是系统当前值，缓存对象不影响实时性。
-        static winrt::Windows::UI::ViewManagement::UISettings cachedSettings;
+        if (!gThreadUiSettings)
+            gThreadUiSettings = winrt::Windows::UI::ViewManagement::UISettings{};
         auto c =
-            cachedSettings.GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Accent);
+            gThreadUiSettings.GetColorValue(winrt::Windows::UI::ViewManagement::UIColorType::Accent);
         return RGB(c.R, c.G, c.B);
     } catch (...) {
         return RGB(0, 120, 212);
     }
 }
+
+void releaseThreadThemeResources() { gThreadUiSettings = nullptr; }
 
 D2D1_COLOR_F toD2D(COLORREF c, float alpha) {
     return D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f, alpha);
@@ -281,12 +287,12 @@ const Palette& palette(ThemeTarget target) {
     // 与 isDarkMode 每次实时读取一样，这里在使用时比对当前强调色，
     // 变化时同步刷新派生色（accentHover/accentPressed/textOnAccent），
     // 避免系统换色后必须重启程序才生效。
-    static Palette light = makeLight();
-    static Palette dark = makeDark();
-    static Palette windowLight = makeWindowPalette(false);
-    static Palette windowDark = makeWindowPalette(true);
-    static bool accentApplied = false;
-    static COLORREF cachedAccent = 0;
+    thread_local Palette light = makeLight();
+    thread_local Palette dark = makeDark();
+    thread_local Palette windowLight = makeWindowPalette(false);
+    thread_local Palette windowDark = makeWindowPalette(true);
+    thread_local bool accentApplied = false;
+    thread_local COLORREF cachedAccent = 0;
     const COLORREF current = accentColor();
     if (!accentApplied || current != cachedAccent) {
         cachedAccent = current;

@@ -67,6 +67,7 @@ add_executable(QQMusicLyric
     src/ui/taskbar/lyric_text_renderer.cpp
     src/ui/taskbar/interaction.cpp
     src/ui/taskbar/scene_transition.cpp
+    src/ui/ui_dispatcher.cpp
     src/ui/settings/sections_create.cpp
     src/ui/settings/sections_state.cpp
     src/ui/settings/sections_commands.cpp

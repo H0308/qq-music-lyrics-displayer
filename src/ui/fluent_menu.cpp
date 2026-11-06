@@ -3,6 +3,9 @@
 #include "ui/fluent_theme.h"
 #include "ui/lyric_renderer.h"
 #include "ui/platform_icon.h"
+#include "logging/runtime_logger.h"
+#include "logging/ui_timing.h"
+#include <wrl/client.h>
 
 #include <windowsx.h>
 #include <shellscalingapi.h> // GetDpiForMonitor
@@ -51,6 +54,46 @@ struct MenuWnd {
     ID2D1SolidColorBrush* brush = nullptr;
     IDWriteTextFormat* fmt = nullptr;
     std::vector<ID2D1Bitmap*> nativeIconBitmaps;
+    struct RowText {
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> label;
+        Microsoft::WRL::ComPtr<IDWriteTextLayout> detail;
+        float detailWidth = 0.0f;
+    };
+    std::vector<RowText> rowText;
+    float textWidthDip = 0.0f;
+    bool frameReady = false;
+
+    void prepareRowText(float widthDip) {
+        if (rowText.size() == items.size() && textWidthDip == widthDip)
+            return;
+        rowText.clear();
+        rowText.resize(items.size());
+        textWidthDip = widthDip;
+        auto* dw = renderer.dwrite();
+        for (size_t i = 0; i < items.size(); ++i) {
+            const auto& item = items[i];
+            if (item.separator)
+                continue;
+            const float stateSpace = item.checked
+                ? (item.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
+                : kRightPad;
+            float labelRight = widthDip - stateSpace;
+            auto& text = rowText[i];
+            if (!item.rightText.empty() &&
+                SUCCEEDED(dw->CreateTextLayout(item.rightText.c_str(),
+                    static_cast<UINT32>(item.rightText.size()), fmt,
+                    std::max(1.0f, widthDip - kGutter - stateSpace), kItemH,
+                    text.detail.GetAddressOf())) && text.detail) {
+                DWRITE_TEXT_METRICS metrics{};
+                text.detail->GetMetrics(&metrics);
+                text.detailWidth = metrics.width;
+                labelRight -= text.detailWidth + kRightTextGap;
+            }
+            dw->CreateTextLayout(item.text.c_str(), static_cast<UINT32>(item.text.size()), fmt,
+                                 std::max(1.0f, labelRight - kGutter), kItemH,
+                                 text.label.GetAddressOf());
+        }
+    }
 
     MenuWnd* root() {
         MenuWnd* m = this;
@@ -178,6 +221,8 @@ struct MenuWnd {
     void render() {
         if (!hwnd)
             return;
+        const auto started = runtime_log::uiTimeMs();
+        frameReady = false;
         RECT rc;
         GetClientRect(hwnd, &rc);
         int w = rc.right - rc.left;
@@ -188,19 +233,22 @@ struct MenuWnd {
             return;
         UINT dpi = GetDpiForWindow(hwnd);
         renderer.setDpi(dpi);
-        if (!renderer.bindDC(w, h))
+        if (!renderer.bindDC(w, h)) {
+            releaseNativeIconBitmaps();
+            if (brush) {
+                brush->Release();
+                brush = nullptr;
+            }
             return;
+        }
         auto* rt = renderer.renderTarget();
         if (!rt)
             return;
         float s = dipScale(dpi);
         float wDip = w / s;
 
-        if (brush) {
-            brush->Release();
-            brush = nullptr;
-        }
-        rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &brush);
+        if (!brush)
+            rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &brush);
         if (!fmt) {
             renderer.dwrite()->CreateTextFormat(uiFontFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -213,6 +261,7 @@ struct MenuWnd {
         if (!brush || !fmt)
             return;
         ensureNativeIconBitmaps(rt);
+        prepareRowText(wDip);
 
         const Palette& p = palette();
         rt->BeginDraw();
@@ -277,23 +326,15 @@ struct MenuWnd {
                 ? (it.submenu.empty() ? kCheckRightPad : kSubmenuCheckRightPad) + 10.0f
                 : kRightPad;
             float labelRight = wDip - stateSpace;
-            if (!it.rightText.empty()) {
-                IDWriteTextLayout* detailLayout = nullptr;
-                if (SUCCEEDED(renderer.dwrite()->CreateTextLayout(
-                        it.rightText.c_str(), static_cast<UINT32>(it.rightText.size()), fmt,
-                        wDip - kGutter - stateSpace, kItemH, &detailLayout)) && detailLayout) {
-                    DWRITE_TEXT_METRICS detailMetrics{};
-                    detailLayout->GetMetrics(&detailMetrics);
-                    const float detailLeft = labelRight - detailMetrics.width;
-                    brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
-                    rt->DrawTextLayout(D2D1::Point2F(detailLeft, y), detailLayout, brush);
-                    labelRight = detailLeft - kRightTextGap;
-                    detailLayout->Release();
-                }
+            const auto& text = rowText[static_cast<size_t>(i)];
+            if (text.detail) {
+                const float detailLeft = labelRight - text.detailWidth;
+                brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
+                rt->DrawTextLayout(D2D1::Point2F(detailLeft, y), text.detail.Get(), brush);
             }
             brush->SetColor(it.enabled ? p.text : p.disabled);
-            rt->DrawTextW(it.text.c_str(), static_cast<UINT32>(it.text.size()), fmt,
-                          D2D1::RectF(kGutter, y, labelRight, y + kItemH), brush);
+            if (text.label)
+                rt->DrawTextLayout(D2D1::Point2F(kGutter, y), text.label.Get(), brush);
             if (!it.submenu.empty()) {
                 // 子菜单箭头
                 brush->SetColor(it.enabled ? p.textSecondary : p.disabled);
@@ -307,11 +348,24 @@ struct MenuWnd {
         HRESULT hr = rt->EndDraw();
         if (hr == D2DERR_RECREATE_TARGET) {
             releaseNativeIconBitmaps();
+            if (brush) {
+                brush->Release();
+                brush = nullptr;
+            }
             renderer.discard();
-        } else {
-            HDC hdc = GetDC(hwnd);
-            renderer.copyToDC(hdc, w, h);
-            ReleaseDC(hwnd, hdc);
+        } else if (SUCCEEDED(hr)) {
+            frameReady = true;
+            // 显示前只准备位图，首个 WM_PAINT 复制它，不再重复整张菜单的绘制。
+            if (IsWindowVisible(hwnd)) {
+                HDC hdc = GetDC(hwnd);
+                renderer.copyToDC(hdc, w, h);
+                ReleaseDC(hwnd, hdc);
+            }
+        }
+        const auto elapsed = runtime_log::uiTimeMs() - started;
+        if (elapsed >= 24) {
+            runtime_log::writef(L"[ui][menu-render] rows=%zu elapsed=%llums", items.size(),
+                                static_cast<unsigned long long>(elapsed));
         }
     }
 };
@@ -482,10 +536,23 @@ LRESULT MenuWnd::handleMsg(UINT msg, WPARAM wp, LPARAM lp) {
         return GET_Y_LPARAM(l) / dipScale(GetDpiForWindow(hwnd));
     };
     switch (msg) {
+    case WM_SIZE:
+        frameReady = false;
+        return 0;
+    case WM_THEMECHANGED:
+    case WM_SETTINGCHANGE:
+        render();
+        return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps;
-        BeginPaint(hwnd, &ps);
-        render();
+        HDC hdc = BeginPaint(hwnd, &ps);
+        if (frameReady) {
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            renderer.copyToDC(hdc, client.right - client.left, client.bottom - client.top);
+        } else {
+            render();
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }

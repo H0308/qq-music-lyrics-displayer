@@ -17,4 +17,5 @@ public:
 private:
     bool registered_ = false;
     bool fullscreen_ = false;
+    bool positioning_ = false;
 };

@@ -1,4 +1,5 @@
 #include "taskbar_host.h"
+#include "lyric/lyric_provider.h"
 #include "ui/taskbar/vinyl_animation.h"
 #include "ui/taskbar/lyric_transition.h"
 #include "ui/taskbar/scene_transition.h"
@@ -202,7 +203,9 @@ bool sameLyrics(const std::vector<LyricLine>& a, const std::vector<LyricLine>& b
 // 生命周期阶段：阶段使用下面 RenderState 中的枚举表示，失效位只描述待处理工作。
 } // namespace
 
-struct TaskbarHost::Impl {
+struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
+
+    bool destroying_ = false;
 
     mutable SpectrumRenderer spectrum_;
     SpectrumContext spectrumContext(ID2D1DeviceContext* target = nullptr) const {
@@ -304,6 +307,7 @@ struct TaskbarHost::Impl {
     }
 
     void applyAppearance(const TaskbarAppearance& value) {
+        const auto lifetime = shared_from_this();
         if (appearance_ && *appearance_ == value)
             return;
         const UpdateScope update(*this);
@@ -462,6 +466,11 @@ struct TaskbarHost::Impl {
     std::function<void()> onStatusTextCycleCompleted_;
     int currentLine = -1;
     int64_t positionMs_ = 0; // 播放进度（每帧更新），驱动逐字高亮
+    PlaybackPatch playbackAnchor_;
+    std::function<std::array<float, kPresentationSpectrumBands>()> spectrumReader_;
+    ULONGLONG playbackAnchorClock_ = 0;
+    ULONGLONG lastFrameTick_ = 0;
+    std::function<void()> onClose_;
     DisplayScene scene_ = DisplayScene::NoPlayback;
     std::wstring trackKey_;
     uint64_t requestGeneration_ = 0;
@@ -498,7 +507,6 @@ struct TaskbarHost::Impl {
     MediaPopupTrigger floatingCardTrigger_ = MediaPopupTrigger::Hover;
     MediaPopup mediaPopup;
     bool mediaPopupEnabled_ = false;
-    bool quitting = false;
 
     // 沉浸模式默认覆盖任务栏；鼠标悬停在播放控件以外的区域时淡出并隐藏窗口，
     // 把任务栏交还给用户，鼠标离开任务栏后再淡入恢复。
@@ -986,7 +994,7 @@ struct TaskbarHost::Impl {
     void updateAppBarZOrder() { appBar_.updateZOrder(hwnd); }
 
     bool updateAppBarPosition() {
-        if (!hwnd || !appBar_.registered())
+        if (destroying_ || !isAppBarView() || !hwnd || !appBar_.registered())
             return false;
         MONITORINFO monitor{};
         monitor.cbSize = sizeof(monitor);
@@ -1008,7 +1016,11 @@ struct TaskbarHost::Impl {
 
         const LONG height =
             std::max<LONG>(1, static_cast<LONG>(std::lround(kAppBarHeightDip * dpi_ / 96.0f)));
-        if (!appBar_.positionWindow(hwnd, appBarMonitor(), appBarEdge_, height))
+        const HWND window = hwnd;
+        if (!appBar_.positionWindow(window, appBarMonitor(), appBarEdge_, height))
+            return false;
+        // Shell 调用可能处理同步消息；返回时模式或窗口生命周期可能已经改变。
+        if (destroying_ || hwnd != window || !isAppBarView() || !appBar_.registered())
             return false;
         mediaPopup.setAnchor(hwnd);
         setPlacementStatus(TaskbarPlacementStatus::Safe);
@@ -1063,6 +1075,7 @@ struct TaskbarHost::Impl {
 
     bool createWindow(HINSTANCE inst, const std::wstring& monitorDeviceName,
                       TaskbarViewMode initialViewMode) {
+        const auto lifetime = shared_from_this();
         this->inst = inst;
         targetMonitorDeviceName_ = monitorDeviceName;
         viewMode_ = initialViewMode;
@@ -2117,6 +2130,7 @@ struct TaskbarHost::Impl {
     }
 
     void setViewMode(TaskbarViewMode mode) {
+        const auto lifetime = shared_from_this();
         if (viewMode_ == mode)
             return;
 
@@ -2134,6 +2148,8 @@ struct TaskbarHost::Impl {
         clearImmersiveSongContentTransition();
         if (previousMode == TaskbarViewMode::AppBar)
             unregisterAppBar();
+        if (destroying_)
+            return;
         stopResourceMonitoring();
         viewMode_ = mode;
         bool immersiveBackdropPrepared = false;
@@ -2380,6 +2396,29 @@ struct TaskbarHost::Impl {
         spectrum_.setBands(bands);
     }
 
+    void acceptPlaybackPatch(const PlaybackPatch& patch) {
+        if (patch.frameRevision != frameRevision_ || patch.requestGeneration != requestGeneration_)
+            return;
+        playbackAnchor_ = patch;
+        playbackAnchorClock_ = monotonicNowMs();
+        applyPlaybackPatch(patch);
+    }
+
+    void advancePlaybackClock() {
+        if (!playbackAnchor_.playing || !media.playing || !isSessionVisible())
+            return;
+        PlaybackPatch patch = playbackAnchor_;
+        const auto now = monotonicNowMs();
+        const auto elapsed = static_cast<int64_t>(now >= playbackAnchorClock_
+                                                     ? now - playbackAnchorClock_ : 0);
+        patch.actualPositionMs += elapsed;
+        patch.lineSelectionPositionMs += elapsed;
+        if (media.durationMs > 0)
+            patch.actualPositionMs = std::min(patch.actualPositionMs, media.durationMs);
+        patch.currentLine = LyricProvider::findLine(lines, patch.lineSelectionPositionMs);
+        applyPlaybackPatch(patch);
+    }
+
     void applyPlaybackPatch(const PlaybackPatch& patch) {
         // 高频补丁必须属于当前已经应用的完整帧；旧曲目或旧帧的位置不能回写。
         if (patch.frameRevision != frameRevision_ || patch.requestGeneration != requestGeneration_)
@@ -2440,6 +2479,9 @@ struct TaskbarHost::Impl {
 
         const UpdateScope update(*this);
         const bool trackChanged = frame.trackKey != trackKey_;
+        playbackAnchor_ = {frame.frameRevision, frame.requestGeneration, frame.actualPositionMs,
+                           frame.lineSelectionPositionMs, frame.currentLine, frame.media.playing};
+        playbackAnchorClock_ = monotonicNowMs();
         syncLyricEffectClock(frame.actualPositionMs, frame.media.playing, trackChanged);
         if (trackChanged)
             resetSpectrumVisuals();
@@ -6724,6 +6766,7 @@ struct TaskbarHost::Impl {
     // 快照读取）没有任何可见效果，可见性恢复由 SMTC 事件驱动（不依赖定时器）。
     void startFrameTimer() {
         if (!timerRunning_ && hwnd) {
+            lastFrameTick_ = 0;
             updateDisplayRefresh();
             const UINT initialMs = desiredFrameMs();
             SetTimer(hwnd, kTimerId, initialMs, nullptr);
@@ -6737,6 +6780,7 @@ struct TaskbarHost::Impl {
             KillTimer(hwnd, kTimerId);
             timerRunning_ = false;
             timerMs_ = 0;
+            lastFrameTick_ = 0;
         }
     }
 
@@ -6883,8 +6927,18 @@ struct TaskbarHost::Impl {
     }
 
     void onTimer() {
+        const auto tickNow = monotonicNowMs();
+        if (lastFrameTick_ != 0 && tickNow - lastFrameTick_ > std::max<ULONGLONG>(64, timerMs_ * 3)) {
+            runtime_log::writef(L"[ui][taskbar-frame-gap] elapsed=%llums interval=%ums thread=%lu",
+                                static_cast<unsigned long long>(tickNow - lastFrameTick_),
+                                timerMs_, GetCurrentThreadId());
+        }
+        lastFrameTick_ = tickNow;
         if (tick)
             tick();
+        advancePlaybackClock();
+        if (spectrumVisible_ && spectrumReader_)
+            spectrum_.setBands(spectrumReader_());
         finishImmersiveSongContentTransitionIfNeeded();
         // TrafficMonitor 可能在两次渲染之间调整自己的任务栏子窗口 Z 序；
         // 即使当前画面静止，也要及时把沉浸宿主恢复到最上层。
@@ -7238,15 +7292,13 @@ struct TaskbarHost::Impl {
             return TRUE;
         case WM_ENDSESSION:
             if (wp) {
-                quitting = true;
-                if (hwnd)
-                    DestroyWindow(hwnd);
+                if (onClose_)
+                    onClose_();
             }
             return 0;
         case WM_CLOSE:
-            quitting = true;
-            if (hwnd)
-                DestroyWindow(hwnd);
+            if (onClose_)
+                onClose_();
             return 0;
         case WM_DESTROY:
             runtime_log::writef(L"[taskbar] WM_DESTROY (visible=%d)", isWindowVisible() ? 1 : 0);
@@ -7265,8 +7317,6 @@ struct TaskbarHost::Impl {
             mediaPopup.destroy();
             releaseAll();
             hwnd = nullptr;
-            if (quitting)
-                PostQuitMessage(0);
             return 0;
         default:
             return DefWindowProcW(hwnd, msg, wp, lp);
@@ -7283,176 +7333,362 @@ struct TaskbarHost::Impl {
         } else {
             self = reinterpret_cast<Impl*>(GetWindowLongPtrW(h, GWLP_USERDATA));
         }
-        if (self)
+        if (self) {
+            // 跨线程 SendMessage 等待期间允许重入派发器。即使重入任务释放了
+            // 宿主，当前窗口调用栈也必须保有 Impl，直至本次消息处理结束。
+            const auto lifetime = self->weak_from_this().lock();
+            if (!lifetime)
+                return DefWindowProcW(h, msg, wp, lp);
+            if (msg == WM_NCDESTROY) {
+                SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+                if (self->hwnd == h)
+                    self->hwnd = nullptr;
+                return DefWindowProcW(h, msg, wp, lp);
+            }
+            if (self->destroying_ && msg != WM_DESTROY)
+                return DefWindowProcW(h, msg, wp, lp);
             return self->handle(msg, wp, lp);
+        }
         return DefWindowProcW(h, msg, wp, lp);
     }
 };
 
 void TaskbarHost::applyAppearance(const TaskbarAppearance& appearance) {
-    impl_->applyAppearance(appearance);
+    thread_->invoke([=, this]() mutable {
+        impl_->applyAppearance(appearance);
+    });
 }
 
-TaskbarHost::TaskbarHost() : impl_(std::make_unique<Impl>()) {}
+TaskbarHost::TaskbarHost()
+    : callbacks_(std::make_unique<UiDispatcher>()), thread_(std::make_unique<UiThread>()) {
+    thread_->invoke([this] {
+        impl_ = std::make_shared<Impl>();
+        runtime_log::writef(L"[ui][thread] role=taskbar thread=%lu", GetCurrentThreadId());
+    });
+}
 
 TaskbarHost::~TaskbarHost() {
-    if (impl_)
+    callbacks_->close();
+    thread_->invoke([this] {
+        impl_->destroying_ = true;
         impl_->stopProbe();
-    if (impl_ && impl_->hwnd)
-        DestroyWindow(impl_->hwnd);
+        if (impl_->hwnd)
+            DestroyWindow(impl_->hwnd);
+        impl_.reset();
+    });
 }
 
 bool TaskbarHost::create(HINSTANCE inst) {
-    return impl_->createWindow(inst, L"", TaskbarViewMode::Embedded);
+    return thread_->invoke([=, this]() mutable {
+        return impl_->createWindow(inst, L"", TaskbarViewMode::Embedded);
+    });
 }
 
 bool TaskbarHost::create(HINSTANCE inst, const std::wstring& monitorDeviceName,
                          TaskbarViewMode initialViewMode) {
-    return impl_->createWindow(inst, monitorDeviceName, initialViewMode);
+    return thread_->invoke([=, this]() mutable {
+        return impl_->createWindow(inst, monitorDeviceName, initialViewMode);
+    });
 }
 
-HWND TaskbarHost::hwnd() const { return impl_ ? impl_->hwnd : nullptr; }
+HWND TaskbarHost::hwnd() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_ ? impl_->hwnd : nullptr;
+    });
+}
 
-void TaskbarHost::setTickCallback(std::function<void()> cb) { impl_->tick = std::move(cb); }
+void TaskbarHost::setTickCallback(std::function<void()> cb) {
+    cb = callbacks_->onceCallback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->tick = std::move(cb);
+    });
+}
+
+void TaskbarHost::setCloseCallback(std::function<void()> cb) {
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([this, cb = std::move(cb)]() mutable { impl_->onClose_ = std::move(cb); });
+}
 
 void TaskbarHost::applyPresentationFrame(const PresentationFrame& frame) {
-    impl_->applyPresentationFrame(frame);
+    thread_->invoke([=, this]() mutable {
+        impl_->applyPresentationFrame(frame);
+    });
 }
 
 void TaskbarHost::applyPlaybackPatch(const PlaybackPatch& patch) {
-    impl_->applyPlaybackPatch(patch);
+    thread_->invoke([=, this]() mutable {
+        impl_->acceptPlaybackPatch(patch);
+    });
 }
 
 void TaskbarHost::applySpectrumPatch(const SpectrumPatch& patch) {
-    impl_->applySpectrumPatch(patch);
+    thread_->invoke([=, this]() mutable {
+        impl_->applySpectrumPatch(patch);
+    });
 }
 
 void TaskbarHost::setControlCallback(std::function<void(MediaControl)> cb) {
-    impl_->onControl = cb;
-    impl_->mediaPopup.setControlCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onControl = cb;
+        impl_->mediaPopup.setControlCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setImmersiveExitCallback(std::function<void()> cb) {
-    impl_->onImmersiveExit = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onImmersiveExit = std::move(cb);
+    });
 }
 
 void TaskbarHost::setAppVolume(const AppVolumeState& state) {
-    const bool changed = state.available != impl_->appVolume_.available ||
-                         state.percent != impl_->appVolume_.percent ||
-                         state.muted != impl_->appVolume_.muted;
-    impl_->appVolume_ = state;
-    impl_->volumePopup_.setVolume(state.percent, state.muted, state.available);
-    impl_->mediaPopup.setAppVolume(state);
-    if (!state.available)
-        impl_->volumePopup_.hide();
-    if (changed) {
-        impl_->requestFrame();
-        impl_->flushRenderRequest();
-    }
+    thread_->invoke([=, this]() mutable {
+        const bool changed = state.available != impl_->appVolume_.available ||
+                             state.percent != impl_->appVolume_.percent ||
+                             state.muted != impl_->appVolume_.muted;
+        impl_->appVolume_ = state;
+        impl_->volumePopup_.setVolume(state.percent, state.muted, state.available);
+        impl_->mediaPopup.setAppVolume(state);
+        if (!state.available)
+            impl_->volumePopup_.hide();
+        if (changed) {
+            impl_->requestFrame();
+            impl_->flushRenderRequest();
+        }
+    });
 }
 
 void TaskbarHost::setAppVolumeCallback(std::function<void(int)> cb) {
-    impl_->onAppVolume = cb;
-    impl_->volumePopup_.setCallback(cb);
-    impl_->mediaPopup.setAppVolumeCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onAppVolume = cb;
+        impl_->volumePopup_.setCallback(cb);
+        impl_->mediaPopup.setAppVolumeCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
-    impl_->mediaPopup.setSourceOpenCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->mediaPopup.setSourceOpenCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb) {
-    impl_->mediaPopup.setIdleAppOpenCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->mediaPopup.setIdleAppOpenCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb) {
-    impl_->mediaPopup.setIdleTaskOpenCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->mediaPopup.setIdleTaskOpenCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setIdleTaskCompleteCallback(std::function<void(const IdleTaskInfo&)> cb) {
-    impl_->mediaPopup.setIdleTaskCompleteCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->mediaPopup.setIdleTaskCompleteCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setMediaPopupOpenedCallback(std::function<void()> cb) {
-    impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->mediaPopup.setPanelOpenedCallback(std::move(cb));
+    });
 }
 
 void TaskbarHost::setContextMenuCallback(std::function<void(POINT)> cb) {
-    impl_->onContextMenu = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onContextMenu = std::move(cb);
+    });
 }
 
 void TaskbarHost::setImmersiveMenuCallback(std::function<void(POINT)> cb) {
-    impl_->onImmersiveMenu = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onImmersiveMenu = std::move(cb);
+    });
 }
 
 void TaskbarHost::setDockQuickAppsCallback(std::function<void(POINT)> cb) {
-    impl_->onDockQuickApps = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onDockQuickApps = std::move(cb);
+    });
 }
 
 void TaskbarHost::setPositionModeChangedCallback(std::function<void(int)> cb) {
-    impl_->onPositionModeChanged = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onPositionModeChanged = std::move(cb);
+    });
 }
 
 void TaskbarHost::setStatusTextCycleCompletedCallback(std::function<void()> cb) {
-    impl_->onStatusTextCycleCompleted_ = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onStatusTextCycleCompleted_ = std::move(cb);
+    });
 }
 
 void TaskbarHost::setPlacementStatusCallback(std::function<void(TaskbarPlacementStatus)> cb) {
-    impl_->onPlacementStatusChanged_ = std::move(cb);
+    cb = callbacks_->callback(std::move(cb));
+    thread_->invoke([=, this]() mutable {
+        impl_->onPlacementStatusChanged_ = std::move(cb);
+    });
 }
 
 void TaskbarHost::setAllowOverlap(bool on) {
-    impl_->allowOverlap_ = on;
-    if (impl_->reconcileWindowVisibility() && impl_->isWindowVisible())
-        impl_->requestFrameAndFlush();
+    thread_->invoke([=, this]() mutable {
+        impl_->allowOverlap_ = on;
+        if (impl_->reconcileWindowVisibility() && impl_->isWindowVisible())
+            impl_->requestFrameAndFlush();
+    });
 }
 
-void TaskbarHost::setVisibilitySuppressed(bool on) { impl_->setVisibilitySuppressed(on); }
+void TaskbarHost::setVisibilitySuppressed(bool on) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setVisibilitySuppressed(on);
+    });
+}
 
-TaskbarPlacementStatus TaskbarHost::refreshPlacement() { return impl_->refreshPlacement(); }
+TaskbarPlacementStatus TaskbarHost::refreshPlacement() {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->refreshPlacement();
+    });
+}
 
-TaskbarPlacementStatus TaskbarHost::placementStatus() const { return impl_->placementStatus_; }
+TaskbarPlacementStatus TaskbarHost::placementStatus() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->placementStatus_;
+    });
+}
 
 bool TaskbarHost::isDisplayed() const {
-    return impl_ && impl_->isWindowVisible() && impl_->hwnd && IsWindowVisible(impl_->hwnd);
+    return thread_->invoke([=, this]() mutable {
+        return impl_ && impl_->isWindowVisible() && impl_->hwnd && IsWindowVisible(impl_->hwnd);
+    });
 }
 
-const std::vector<LyricLine>& TaskbarHost::lyrics() const { return impl_->lines; }
+std::vector<LyricLine> TaskbarHost::lyrics() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->lines;
+    });
+}
 
-void TaskbarHost::show() { impl_->show(); }
+void TaskbarHost::show() {
+    thread_->invoke([=, this]() mutable {
+        impl_->show();
+    });
+}
 
-void TaskbarHost::hide() { impl_->hide(); }
+void TaskbarHost::hide() {
+    thread_->invoke([=, this]() mutable {
+        impl_->hide();
+    });
+}
 
 bool TaskbarHost::isTaskbar() const { return true; }
 
-bool TaskbarHost::isVerticalTaskbar() const { return impl_ && impl_->isVerticalTaskbar(); }
-
-bool TaskbarHost::isCompactTaskbar() const { return impl_ && impl_->compactTaskbarHeight_ > 0.0f; }
-
-int TaskbarHost::currentLine() const { return impl_->currentLine; }
-
-const std::wstring& TaskbarHost::statusText() const { return impl_->statusText; }
-
-void TaskbarHost::changeFont(float delta) { impl_->changeFont(delta); }
-
-LyricFontSizeContext TaskbarHost::fontSizeContext() const { return impl_->fontSizeContext(); }
-
-void TaskbarHost::setFont(const std::wstring& family, float size, LyricFontStyle style) {
-    impl_->setFont(family, size, style);
+bool TaskbarHost::isVerticalTaskbar() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_ && impl_->isVerticalTaskbar();
+    });
 }
 
-void TaskbarHost::refreshTheme() { impl_->refreshTheme(); }
+bool TaskbarHost::isCompactTaskbar() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_ && impl_->compactTaskbarHeight_ > 0.0f;
+    });
+}
 
-void TaskbarHost::setRenderMode(RenderMode mode) { impl_->setRenderMode(mode); }
+int TaskbarHost::currentLine() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->currentLine;
+    });
+}
 
-void TaskbarHost::setSpectrumVisible(bool on) { impl_->setSpectrumVisible(on); }
+std::wstring TaskbarHost::statusText() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->statusText;
+    });
+}
 
-void TaskbarHost::setViewMode(TaskbarViewMode mode) { impl_->setViewMode(mode); }
+void TaskbarHost::changeFont(float delta) {
+    thread_->invoke([=, this]() mutable {
+        impl_->changeFont(delta);
+    });
+}
 
-void TaskbarHost::setAppBarEdge(AppBarEdge edge) { impl_->setAppBarEdge(edge); }
+LyricFontSizeContext TaskbarHost::fontSizeContext() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->fontSizeContext();
+    });
+}
 
-bool TaskbarHost::backgroundBlurAvailable() const { return impl_->backgroundBlurAvailable(); }
+void TaskbarHost::setFont(const std::wstring& family, float size, LyricFontStyle style) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setFont(family, size, style);
+    });
+}
 
-void TaskbarHost::setPositionMode(int mode) { impl_->setPositionMode(mode); }
+void TaskbarHost::refreshTheme() {
+    thread_->invoke([=, this]() mutable {
+        impl_->refreshTheme();
+    });
+}
 
-void TaskbarHost::onTaskbarCreated() { impl_->onTaskbarCreated(); }
+void TaskbarHost::setRenderMode(RenderMode mode) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setRenderMode(mode);
+    });
+}
+
+void TaskbarHost::setSpectrumVisible(bool on) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setSpectrumVisible(on);
+    });
+}
+
+void TaskbarHost::setSpectrumReader(std::function<std::array<float, kSpectrumBands>()> reader) {
+    thread_->invoke([this, reader = std::move(reader)]() mutable {
+        impl_->spectrumReader_ = std::move(reader);
+    });
+}
+
+void TaskbarHost::setViewMode(TaskbarViewMode mode) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setViewMode(mode);
+    });
+}
+
+void TaskbarHost::setAppBarEdge(AppBarEdge edge) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setAppBarEdge(edge);
+    });
+}
+
+bool TaskbarHost::backgroundBlurAvailable() const {
+    return thread_->invoke([=, this]() mutable {
+        return impl_->backgroundBlurAvailable();
+    });
+}
+
+void TaskbarHost::setPositionMode(int mode) {
+    thread_->invoke([=, this]() mutable {
+        impl_->setPositionMode(mode);
+    });
+}
+
+void TaskbarHost::onTaskbarCreated() {
+    thread_->invoke([=, this]() mutable {
+        impl_->onTaskbarCreated();
+    });
+}

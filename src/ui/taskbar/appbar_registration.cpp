@@ -32,8 +32,13 @@ void AppBarRegistration::updateZOrder(HWND window) {
 }
 bool AppBarRegistration::positionWindow(HWND window, HMONITOR monitor, AppBarEdge edge,
                                         LONG height) {
-    if (!window || !registered_)
+    if (!window || !registered_ || positioning_)
         return false;
+    struct PositionScope {
+        bool& active;
+        explicit PositionScope(bool& value) : active(value) { active = true; }
+        ~PositionScope() { active = false; }
+    } scope(positioning_);
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (!GetMonitorInfoW(monitor, &monitorInfo))
@@ -49,12 +54,16 @@ bool AppBarRegistration::positionWindow(HWND window, HMONITOR monitor, AppBarEdg
     else
         data.rc.top = data.rc.bottom - height;
     SHAppBarMessage(ABM_QUERYPOS, &data);
+    if (!registered_)
+        return false;
 
     if (data.uEdge == ABE_TOP)
         data.rc.bottom = data.rc.top + height;
     else
         data.rc.top = data.rc.bottom - height;
     SHAppBarMessage(ABM_SETPOS, &data);
+    if (!registered_)
+        return false;
     if (data.rc.right <= data.rc.left || data.rc.bottom <= data.rc.top)
         return false;
 

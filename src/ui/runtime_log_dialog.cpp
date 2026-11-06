@@ -264,7 +264,7 @@ struct RuntimeLogDialog::Impl {
     void drawButton(fluent::FluentDialogSurface::Painter& painter,
                     const D2D1_RECT_F& rect, const std::wstring& text, int id,
                     bool accent = false) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const bool hovered = hoverId == id;
         const bool pressed = pressedId == id;
         D2D1_COLOR_F fill = accent ? p.accent : p.controlFill;
@@ -287,7 +287,7 @@ struct RuntimeLogDialog::Impl {
     void drawCard(fluent::FluentDialogSurface::Painter& painter, const D2D1_RECT_F& rect,
                   const std::wstring& label, const std::wstring& value,
                   bool primary = false) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         painter.fillRoundRect(p.cardFill, rect, kCardRadius);
         painter.strokeRoundRect(p.cardStroke, rect, 1.0f, kCardRadius);
         painter.drawText(label, painter.textFormat(12.0f, 500, false, true),
@@ -303,7 +303,7 @@ struct RuntimeLogDialog::Impl {
     }
 
     void drawCoverToggle(fluent::FluentDialogSurface::Painter& painter, bool checked) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const bool hovered = hoverId == kHitCoverToggle;
         const bool pressed = pressedId == kHitCoverToggle;
         const bool focused = focusedId == kHitCoverToggle && focusVisible;
@@ -347,7 +347,7 @@ struct RuntimeLogDialog::Impl {
                        bool coverLoaded,
                        const std::wstring& coverSource,
                        const std::shared_ptr<const std::vector<uint8_t>>& image) {
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         painter.fillRoundRect(p.cardFill, rect, kCardRadius);
         painter.strokeRoundRect(p.cardStroke, rect, 1.0f, kCardRadius);
         painter.drawText(L"封面加载", painter.textFormat(12.0f, 500, false, true),
@@ -421,7 +421,7 @@ struct RuntimeLogDialog::Impl {
         if (!logger)
             return;
         const auto snapshot = logger->snapshot();
-        const auto& p = fluent::palette();
+        const auto& p = painter.colors();
         const auto content = fluent::centeredDialogLayout(width);
         width = content.width;
         const float contentLeft = content.offsetX + kPagePadding;
@@ -585,7 +585,7 @@ struct RuntimeLogDialog::Impl {
         switch (msg) {
         case WM_CREATE:
             backdrop = fluent::styleDialogWindow(hwnd, false);
-            surface.initialize(hwnd, backdrop);
+            surface.initialize(hwnd, backdrop, true);
             SetTimer(hwnd, kRefreshTimer, 1000, nullptr);
             layout();
             return 0;

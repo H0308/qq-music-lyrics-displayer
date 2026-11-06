@@ -1,7 +1,13 @@
 #include "app/application_internal.h"
 #include "app/application.h"
 #include "graphics/gdiplus_runtime.h"
+#include "logging/ui_timing.h"
 namespace lyrics_app {
+App::~App() {
+    // 显示线程可能仍读取频谱原子快照；必须在采样器等成员析构前停止宿主。
+    destroyTaskbar();
+}
+
 void App::restartApplication() {
     if (shutdownRequested_)
         return;
@@ -131,6 +137,27 @@ int App::messageLoop() {
         const BOOL result = GetMessageW(&msg, nullptr, 0, 0);
         if (result <= 0)
             return result == 0 ? 0 : 1;
+
+        // 覆盖线程消息和 IsDialogMessage 内部触发的按钮操作，不能只量 DispatchMessage。
+        struct MessageTiming {
+            UINT message;
+            wchar_t windowClass[128]{};
+            ULONGLONG start;
+            explicit MessageTiming(const MSG& value)
+                : message(value.message), start(runtime_log::uiTimeMs()) {
+                if (value.hwnd)
+                    GetClassNameW(value.hwnd, windowClass, _countof(windowClass));
+            }
+            ~MessageTiming() {
+                const ULONGLONG elapsed = runtime_log::uiTimeMs() - start;
+                if (elapsed >= 32) {
+                    runtime_log::writef(
+                        L"[ui][slow-message] class=%s message=0x%04X elapsed=%llums",
+                        windowClass[0] ? windowClass : L"thread",
+                        static_cast<unsigned>(message), static_cast<unsigned long long>(elapsed));
+                }
+            }
+        } timing(msg);
         if (msg.hwnd == nullptr) {
             dispatchThreadMessage(msg);
             continue;

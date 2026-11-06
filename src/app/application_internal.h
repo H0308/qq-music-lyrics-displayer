@@ -176,7 +176,7 @@ struct IdleAppPayload {
 class App {
 public:
     App() = default;
-    ~App() = default;
+    ~App();
     bool initialize(HINSTANCE inst, bool wantTaskbar);
     int messageLoop();
     void finish();

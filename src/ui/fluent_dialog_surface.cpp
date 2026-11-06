@@ -1,4 +1,6 @@
 #include "fluent_dialog_surface.h"
+#include "logging/runtime_logger.h"
+#include "logging/ui_timing.h"
 
 #include <algorithm>
 #include <cmath>
@@ -187,7 +189,7 @@ void enforceDialogMinimumAspectRatio(HWND hwnd, WPARAM sizingEdge, RECT* propose
 
 FluentDialogSurface::Painter::Painter(ID2D1RenderTarget* target, IDWriteFactory* dwrite,
                                        TextCache* textCache)
-    : target_(target), dwrite_(dwrite), textCache_(textCache) {}
+    : target_(target), dwrite_(dwrite), colors_(fluent::palette()), textCache_(textCache) {}
 
 FluentDialogSurface::Painter::~Painter() {
     for (auto* layout : layouts_) {
@@ -388,6 +390,7 @@ void FluentDialogSurface::eraseBackground(HDC hdc, bool backdrop) {
 bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& callback) {
     if (!hwnd_ || !hdc)
         return false;
+    const auto started = runtime_log::uiTimeMs();
     RECT client{};
     GetClientRect(hwnd_, &client);
     const int width = client.right - client.left;
@@ -402,6 +405,9 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
         textCacheWidth_ = width;
         textCacheHeight_ = height;
     }
+    // 日志等动态文本不长期累积历史布局；只在帧开始时清理，格式继续复用。
+    if (textCache_.layouts.size() > 512)
+        textCache_.layouts.clear();
     if (!renderer_.initialize())
         return false;
     renderer_.setDpi(dpi_);
@@ -415,6 +421,7 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
     excludeVisibleChildren(hwnd_, hdc);
     if (FAILED(target->BindDC(hdc, &renderRect)))
         return false;
+    const auto bound = runtime_log::uiTimeMs();
 
     // Mica 窗口留出透明根背景；卡片和原生输入框仍使用各自的不透明表面。
     target->BeginDraw();
@@ -434,7 +441,18 @@ bool FluentDialogSurface::paint(HDC hdc, bool backdrop, const PaintCallback& cal
                  static_cast<float>(height) / dipScale());
 
     target->PopAxisAlignedClip();
+    const auto painted = runtime_log::uiTimeMs();
     HRESULT hr = target->EndDraw();
+    const auto drawn = runtime_log::uiTimeMs();
+    if (drawn - started >= 24) {
+        wchar_t windowClass[128]{};
+        GetClassNameW(hwnd_, windowClass, _countof(windowClass));
+        runtime_log::writef(
+            L"[ui][dialog-paint] class=%s prepare=%llums paint=%llums end-draw=%llums",
+            windowClass, static_cast<unsigned long long>(bound - started),
+            static_cast<unsigned long long>(painted - bound),
+            static_cast<unsigned long long>(drawn - painted));
+    }
     if (hr == D2DERR_RECREATE_TARGET) {
         renderer_.discard();
         InvalidateRect(hwnd_, nullptr, FALSE);

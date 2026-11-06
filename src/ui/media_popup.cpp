@@ -14,6 +14,7 @@
 #include "media_control_icons.h"
 #include "platform_icon.h"
 #include "logging/runtime_logger.h"
+#include "logging/ui_timing.h"
 
 #include <d2d1.h>
 #include <d2d1effects.h>
@@ -981,7 +982,10 @@ struct MediaPopup::Impl {
                                     anchorRect.bottom > cardRect.top;
         if (anchorOverlaps)
             ShowWindow(anchor, SW_HIDE);
-        DwmFlush();
+        // 只有实际隐藏过窗口才需要等合成器移除旧画面。首次打开时通常没有
+        // 窗口覆盖采样区域，无条件等待会把点击处理拖过一个或多个刷新周期。
+        if (restoreVisible || anchorOverlaps)
+            DwmFlush();
 
         auto restoreWindows = [&]() {
             if (anchorOverlaps)
@@ -2234,6 +2238,7 @@ struct MediaPopup::Impl {
             presentationUpdatePending = true;
             return true;
         }
+        const auto renderStarted = runtime_log::uiTimeMs();
         RECT rc{};
         GetClientRect(hwnd, &rc);
         const int pxW = rc.right - rc.left;
@@ -2242,6 +2247,7 @@ struct MediaPopup::Impl {
             return false;
         if (!renderer.bind(hwnd, pxW, pxH))
             return false;
+        const auto renderBound = runtime_log::uiTimeMs();
         if (deviceGeneration != renderer.deviceGeneration()) {
             if (deviceGeneration != 0)
                 releaseDeviceResources();
@@ -2260,6 +2266,7 @@ struct MediaPopup::Impl {
             return false;
         if (!createResources())
             return false;
+        const auto resourcesReady = runtime_log::uiTimeMs();
         const bool categoryTransitionNeedsDynamicBackground =
             categoryTransition.active() &&
             (dynamicBackgroundEnabledForPage(categorySnapshot.from) ||
@@ -2277,6 +2284,7 @@ struct MediaPopup::Impl {
         if (frostedBackgroundActive() || categoryTransitionNeedsBackdrop || prewarmBackdrop)
             captureBackdrop(!frostedBackgroundActive() &&
                             (categoryTransitionNeedsBackdrop || prewarmBackdrop));
+        const auto backdropReady = runtime_log::uiTimeMs();
         buildTextLayouts();
         if (coverDirty)
             decodeCover();
@@ -2287,6 +2295,7 @@ struct MediaPopup::Impl {
                 buildIdleTextLayout();
             decodeIdleIcons();
         }
+        const auto contentReady = runtime_log::uiTimeMs();
 
         auto* rt = renderer.renderTarget();
         if (!rt)
@@ -2321,6 +2330,7 @@ struct MediaPopup::Impl {
 
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         const HRESULT hr = rt->EndDraw();
+        const auto renderDrawn = runtime_log::uiTimeMs();
         if (FAILED(hr)) {
             runtime_log::writef(
                 L"[media-popup] EndDraw failed: 0x%08X, releasing drawing resources",
@@ -2348,6 +2358,18 @@ struct MediaPopup::Impl {
         if (!renderer.present()) {
             releaseDrawingResources();
             return false;
+        }
+        const auto renderPresented = runtime_log::uiTimeMs();
+        if (renderPresented - renderStarted >= 24) {
+            runtime_log::writef(
+                L"[ui][media-popup-render] bind=%llums resources=%llums backdrop=%llums "
+                L"content=%llums draw=%llums present=%llums",
+                static_cast<unsigned long long>(renderBound - renderStarted),
+                static_cast<unsigned long long>(resourcesReady - renderBound),
+                static_cast<unsigned long long>(backdropReady - resourcesReady),
+                static_cast<unsigned long long>(contentReady - backdropReady),
+                static_cast<unsigned long long>(renderDrawn - contentReady),
+                static_cast<unsigned long long>(renderPresented - renderDrawn));
         }
         return true;
     }
@@ -2962,6 +2984,7 @@ struct MediaPopup::Impl {
     void showPopup() {
         if (!hwnd || !enabled || !available)
             return;
+        const auto showStarted = runtime_log::uiTimeMs();
         const bool wasVisible = visibility.visible();
         KillTimer(hwnd, kShowTimer);
         KillTimer(hwnd, kHideTimer);
@@ -2974,6 +2997,7 @@ struct MediaPopup::Impl {
         deferredRender = false;
         visibility.beginOpen();
         reposition();
+        const auto positioned = runtime_log::uiTimeMs();
         const bool canUseFrostedBackdropOnEitherPage =
             frostedBackgroundActiveForPage(PopupPage::Media) ||
             frostedBackgroundActiveForPage(PopupPage::Idle);
@@ -2983,6 +3007,7 @@ struct MediaPopup::Impl {
             visibility.finishOpen();
             return;
         }
+        const auto rendered = runtime_log::uiTimeMs();
 
         // 窗口本身保持固定位置，只让 DirectComposition 根视觉做位移动画。
         // 透明度始终为 1，避免淡入淡出时出现第二层背板。
@@ -3007,6 +3032,14 @@ struct MediaPopup::Impl {
         if (!wasVisible && onPanelOpened)
             onPanelOpened();
         SetTimer(hwnd, kEnterTimer, kOpenAnimationMs, nullptr);
+        const auto shown = runtime_log::uiTimeMs();
+        if (shown - showStarted >= 24) {
+            runtime_log::writef(
+                L"[ui][media-popup-show] prepare=%llums render=%llums reveal=%llums",
+                static_cast<unsigned long long>(positioned - showStarted),
+                static_cast<unsigned long long>(rendered - positioned),
+                static_cast<unsigned long long>(shown - rendered));
+        }
     }
 
     void hideAnimated() {
@@ -3606,471 +3639,550 @@ struct MediaPopup::Impl {
     }
 };
 
-MediaPopup::MediaPopup() : impl_(std::make_unique<Impl>()) {}
+MediaPopup::MediaPopup() : thread_(std::make_unique<UiThread>()) {
+    thread_->invoke([this] {
+        impl_ = std::make_unique<Impl>();
+        runtime_log::writef(L"[ui][thread] role=media-popup thread=%lu", GetCurrentThreadId());
+    });
+}
 
 MediaPopup::~MediaPopup() {
     destroy();
+    thread_->invoke([this] { impl_.reset(); });
+}
+
+void MediaPopup::enqueue(std::function<void()> action) {
+    if (updateDepth_ != 0) {
+        updateActions_.push_back(std::move(action));
+    } else if (!thread_->post(std::move(action))) {
+        throw std::runtime_error("Media popup thread is closed");
+    }
 }
 
 bool MediaPopup::create(HINSTANCE inst, HWND anchor) {
-    if (impl_->hwnd) {
+    return thread_->invoke([=, this]() mutable {
+        if (impl_->hwnd) {
+            impl_->anchor = anchor;
+            impl_->reposition();
+            return true;
+        }
+        impl_->inst = inst;
         impl_->anchor = anchor;
+        impl_->refreshClientAnimations();
+
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = Impl::wndProc;
+        wc.hInstance = inst;
+        wc.lpszClassName = kWndClassName;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&wc);
+
+        const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
+        impl_->hwnd = CreateWindowExW(exStyle, kWndClassName, L"QQMusicLyricMediaPopup",
+                                      WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, impl_.get());
+        if (!impl_->hwnd)
+            return false;
+        if (!impl_->idleScrollView.create(impl_->hwnd, kIdleSmoothScrollTimer,
+                                          [impl = impl_.get()](float position, bool) {
+            impl->idleScrollOffset = position;
+            impl->renderOrDefer();
+        }, &impl_->renderer)) {
+            DestroyWindow(impl_->hwnd);
+            return false;
+        }
+        impl_->dpi = GetDpiForWindow(impl_->hwnd);
+        if (impl_->dpi == 0)
+            impl_->dpi = GetDpiForSystem();
         impl_->reposition();
         return true;
-    }
-    impl_->inst = inst;
-    impl_->anchor = anchor;
-    impl_->refreshClientAnimations();
-
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = Impl::wndProc;
-    wc.hInstance = inst;
-    wc.lpszClassName = kWndClassName;
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    RegisterClassExW(&wc);
-
-    const DWORD exStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
-    impl_->hwnd = CreateWindowExW(exStyle, kWndClassName, L"QQMusicLyricMediaPopup",
-                                  WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, impl_.get());
-    if (!impl_->hwnd)
-        return false;
-    if (!impl_->idleScrollView.create(impl_->hwnd, kIdleSmoothScrollTimer,
-                                      [impl = impl_.get()](float position, bool) {
-        impl->idleScrollOffset = position;
-        impl->renderOrDefer();
-    }, &impl_->renderer)) {
-        DestroyWindow(impl_->hwnd);
-        return false;
-    }
-    impl_->dpi = GetDpiForWindow(impl_->hwnd);
-    if (impl_->dpi == 0)
-        impl_->dpi = GetDpiForSystem();
-    impl_->reposition();
-    return true;
+    });
 }
 
 void MediaPopup::destroy() {
-    if (!impl_)
-        return;
-    impl_->hideImmediate();
-    if (impl_->hwnd)
-        DestroyWindow(impl_->hwnd);
-    impl_->releaseAll();
+    thread_->invoke([=, this]() mutable {
+        if (!impl_)
+            return;
+        impl_->hideImmediate();
+        if (impl_->hwnd)
+            DestroyWindow(impl_->hwnd);
+        impl_->releaseAll();
+    });
 }
 
 void MediaPopup::setControlCallback(std::function<void(MediaControl)> cb) {
-    impl_->onControl = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onControl = std::move(cb);
+    });
 }
 
 void MediaPopup::setAppVolume(const AppVolumeState& state) {
-    const bool changed = state.available != impl_->volume.available ||
-                         state.percent != impl_->volume.percent ||
-                         state.muted != impl_->volume.muted;
-    impl_->volume = state;
-    if (!state.available && impl_->volumeSliderOn) {
-        // 会话消失：直接收起滑块，不走过渡动画
-        impl_->volumeSliderOn = false;
-        impl_->volumeSliderT = 0.0f;
-        impl_->volumeDragging = false;
-        if (impl_->hwnd)
-            KillTimer(impl_->hwnd, kVolumeTimer);
-    }
-    if (changed && impl_->visibility.visible())
-        impl_->renderOrDefer();
+    enqueue([=, this]() mutable {
+        const bool changed = state.available != impl_->volume.available ||
+                             state.percent != impl_->volume.percent ||
+                             state.muted != impl_->volume.muted;
+        impl_->volume = state;
+        if (!state.available && impl_->volumeSliderOn) {
+            // 会话消失：直接收起滑块，不走过渡动画
+            impl_->volumeSliderOn = false;
+            impl_->volumeSliderT = 0.0f;
+            impl_->volumeDragging = false;
+            if (impl_->hwnd)
+                KillTimer(impl_->hwnd, kVolumeTimer);
+        }
+        if (changed && impl_->visibility.visible())
+            impl_->renderOrDefer();
+    });
 }
 
 void MediaPopup::setAppVolumeCallback(std::function<void(int)> cb) {
-    impl_->onAppVolume = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onAppVolume = std::move(cb);
+    });
 }
 
 void MediaPopup::setSourceOpenCallback(std::function<void(const std::wstring&)> cb) {
-    impl_->onSourceOpen = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onSourceOpen = std::move(cb);
+    });
 }
 
 void MediaPopup::setIdleAppOpenCallback(std::function<void(const std::wstring&)> cb) {
-    impl_->onIdleAppOpen = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onIdleAppOpen = std::move(cb);
+    });
 }
 
 void MediaPopup::setIdleTaskOpenCallback(std::function<void(const IdleTaskInfo&)> cb) {
-    impl_->onIdleTaskOpen = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onIdleTaskOpen = std::move(cb);
+    });
 }
 
 void MediaPopup::setIdleTaskCompleteCallback(
     std::function<void(const IdleTaskInfo&)> cb) {
-    impl_->onIdleTaskComplete = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onIdleTaskComplete = std::move(cb);
+    });
 }
 
 void MediaPopup::setPanelOpenedCallback(std::function<void()> cb) {
-    impl_->onPanelOpened = std::move(cb);
+    enqueue([=, this]() mutable {
+        impl_->onPanelOpened = std::move(cb);
+    });
 }
 
 void MediaPopup::setEnabled(bool enabled) {
-    impl_->enabled = enabled;
-    if (!enabled) {
-        impl_->hideImmediate();
-        // 媒体卡片是极简模式明确关闭的附加窗口；禁用时连同 DComp/D2D 资源一起释放，
-        // 下次重新启用时由现有 bind/render 路径惰性重建。
-        impl_->releaseAll();
-        return;
-    }
-    if (!impl_->hwnd)
-        return;
-    if (impl_->opensOnHover() && impl_->anchorHover && impl_->available &&
-        !impl_->visibility.visible())
-        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    enqueue([=, this]() mutable {
+        impl_->enabled = enabled;
+        if (!enabled) {
+            impl_->hideImmediate();
+            // 媒体卡片是极简模式明确关闭的附加窗口；禁用时连同 DComp/D2D 资源一起释放，
+            // 下次重新启用时由现有 bind/render 路径惰性重建。
+            impl_->releaseAll();
+            return;
+        }
+        if (!impl_->hwnd)
+            return;
+        if (impl_->opensOnHover() && impl_->anchorHover && impl_->available &&
+            !impl_->visibility.visible())
+            SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    });
 }
 
 void MediaPopup::setTriggerOnHover(bool on) {
-    if (impl_->triggerOnHover == on)
-        return;
-    impl_->triggerOnHover = on;
-    if (!impl_->hwnd)
-        return;
-    if (!impl_->opensOnHover()) {
-        KillTimer(impl_->hwnd, kShowTimer);
-    } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
-               !impl_->visibility.visible()) {
-        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
-    }
+    enqueue([=, this]() mutable {
+        if (impl_->triggerOnHover == on)
+            return;
+        impl_->triggerOnHover = on;
+        if (!impl_->hwnd)
+            return;
+        if (!impl_->opensOnHover()) {
+            KillTimer(impl_->hwnd, kShowTimer);
+        } else if (impl_->enabled && impl_->anchorHover && impl_->available &&
+                   !impl_->visibility.visible()) {
+            SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+        }
+    });
 }
 
 void MediaPopup::setBackgroundMode(MediaPopupBackground mode) {
-    if (impl_->backgroundMode == mode)
-        return;
-    impl_->backgroundMode = mode;
-    if (mode != MediaPopupBackground::Frosted)
-        impl_->releaseDynamicBackgroundResources();
-    if (!impl_->hwnd)
-        return;
-    impl_->releaseDrawingResources();
-    if (!impl_->visibility.visible())
-        return;
-    if (impl_->visibility.animating())
-        impl_->deferredRender = true;
-    else
-        impl_->render();
+    enqueue([=, this]() mutable {
+        if (impl_->backgroundMode == mode)
+            return;
+        impl_->backgroundMode = mode;
+        if (mode != MediaPopupBackground::Frosted)
+            impl_->releaseDynamicBackgroundResources();
+        if (!impl_->hwnd)
+            return;
+        impl_->releaseDrawingResources();
+        if (!impl_->visibility.visible())
+            return;
+        if (impl_->visibility.animating())
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    });
 }
 
 void MediaPopup::setBackgroundColor(COLORREF color, bool customized) {
-    if (impl_->floatingCardBackgroundColor == color &&
-        impl_->floatingCardBackgroundColorCustomized == customized)
-        return;
-    impl_->floatingCardBackgroundColor = color;
-    impl_->floatingCardBackgroundColorCustomized = customized;
-    if (!impl_->hwnd)
-        return;
-    impl_->releaseDrawingResources();
-    if (!impl_->visibility.visible())
-        return;
-    if (impl_->visibility.animating())
-        impl_->deferredRender = true;
-    else
-        impl_->render();
+    enqueue([=, this]() mutable {
+        if (impl_->floatingCardBackgroundColor == color &&
+            impl_->floatingCardBackgroundColorCustomized == customized)
+            return;
+        impl_->floatingCardBackgroundColor = color;
+        impl_->floatingCardBackgroundColorCustomized = customized;
+        if (!impl_->hwnd)
+            return;
+        impl_->releaseDrawingResources();
+        if (!impl_->visibility.visible())
+            return;
+        if (impl_->visibility.animating())
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    });
 }
 
 void MediaPopup::setFollowAlbumBackground(bool on) {
-    if (impl_->followAlbumBackground == on)
-        return;
-    impl_->followAlbumBackground = on;
-    if (!impl_->dynamicBackgroundEnabled())
-        impl_->releaseDynamicBackgroundResources();
-    else
-        impl_->dynamicBackgroundDirty = true;
-    if (!impl_->hwnd || !impl_->visibility.visible())
-        return;
-    if (impl_->visibility.animating())
-        impl_->deferredRender = true;
-    else
-        impl_->render();
+    enqueue([=, this]() mutable {
+        if (impl_->followAlbumBackground == on)
+            return;
+        impl_->followAlbumBackground = on;
+        if (!impl_->dynamicBackgroundEnabled())
+            impl_->releaseDynamicBackgroundResources();
+        else
+            impl_->dynamicBackgroundDirty = true;
+        if (!impl_->hwnd || !impl_->visibility.visible())
+            return;
+        if (impl_->visibility.animating())
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    });
 }
 
 void MediaPopup::setAutoTextContrast(bool on) {
-    if (impl_->autoTextContrast == on)
-        return;
-    impl_->autoTextContrast = on;
-    if (on)
-        impl_->backdropDirty = true;
-    else
-        impl_->resetBackdropTextColors();
-    if (!impl_->hwnd || !impl_->visibility.visible())
-        return;
-    if (impl_->visibility.animating())
-        impl_->deferredRender = true;
-    else
-        impl_->render();
+    enqueue([=, this]() mutable {
+        if (impl_->autoTextContrast == on)
+            return;
+        impl_->autoTextContrast = on;
+        if (on)
+            impl_->backdropDirty = true;
+        else
+            impl_->resetBackdropTextColors();
+        if (!impl_->hwnd || !impl_->visibility.visible())
+            return;
+        if (impl_->visibility.animating())
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    });
 }
 
 void MediaPopup::refreshTheme() {
-    impl_->releaseDrawingResources();
-    if (!impl_->hwnd || !impl_->visibility.visible())
-        return;
-    if (impl_->visibility.animating())
-        impl_->deferredRender = true;
-    else
-        impl_->render();
+    enqueue([=, this]() mutable {
+        impl_->releaseDrawingResources();
+        if (!impl_->hwnd || !impl_->visibility.visible())
+            return;
+        if (impl_->visibility.animating())
+            impl_->deferredRender = true;
+        else
+            impl_->render();
+    });
 }
 
 void MediaPopup::setMedia(const OverlayMediaInfo& info, bool available,
                           bool animateSongTransition) {
-    const bool coverChanged = info.thumbnail != impl_->media.thumbnail;
-    const bool sourceChanged = info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
-    const bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
-    const bool dominantColorChanged =
-        info.hasDominantColor != impl_->media.hasDominantColor ||
-        (info.hasDominantColor && info.dominantColor != impl_->media.dominantColor);
-    const bool changed = coverChanged || info.title != impl_->media.title ||
-                         info.artist != impl_->media.artist ||
-                         sourceChanged ||
-                         dominantColorChanged ||
-                         info.durationMs != impl_->media.durationMs ||
-                         info.canPrev != impl_->media.canPrev ||
-                         info.canPlayPause != impl_->media.canPlayPause ||
-                         info.canNext != impl_->media.canNext ||
-                         info.playing != impl_->media.playing;
-    impl_->songTransitionPending = false;
-    impl_->media = info;
-    impl_->available = available;
-    impl_->syncPetMode(textChanged);
-    if (coverChanged)
-        impl_->coverDirty = true;
-    if (sourceChanged)
-        impl_->sourceIconDirty = true;
-    if (dominantColorChanged)
-        impl_->dynamicBackgroundDirty = true;
-    if (textChanged) {
-        impl_->textDirty = true;
-        impl_->titleScrollOffset = 0.0f;
-        impl_->artistScrollOffset = 0.0f;
-        impl_->scrollTickMs = 0;
-    }
-    if (!available) {
-        impl_->hideImmediate();
-        return;
-    }
-    impl_->songTransitionPending = animateSongTransition && changed &&
-                                   impl_->visibility.visible() && !impl_->visibility.animating() &&
-                                   impl_->clientAnimations && !impl_->idleMode &&
-                                   !impl_->categoryTransition.active();
-    if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
-        !impl_->quickExpandTransition.active() && (!impl_->idleMode || dominantColorChanged)) {
-        if (impl_->visibility.animating())
-            impl_->deferredRender = true;
-        else
-            impl_->render();
-    }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
-        impl_->opensOnHover())
-        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    enqueue([=, this]() mutable {
+        const bool coverChanged = info.thumbnail != impl_->media.thumbnail;
+        const bool sourceChanged = info.sourceAppUserModelId != impl_->media.sourceAppUserModelId;
+        const bool textChanged = info.title != impl_->media.title || info.artist != impl_->media.artist;
+        const bool dominantColorChanged =
+            info.hasDominantColor != impl_->media.hasDominantColor ||
+            (info.hasDominantColor && info.dominantColor != impl_->media.dominantColor);
+        const bool changed = coverChanged || info.title != impl_->media.title ||
+                             info.artist != impl_->media.artist ||
+                             sourceChanged ||
+                             dominantColorChanged ||
+                             info.durationMs != impl_->media.durationMs ||
+                             info.canPrev != impl_->media.canPrev ||
+                             info.canPlayPause != impl_->media.canPlayPause ||
+                             info.canNext != impl_->media.canNext ||
+                             info.playing != impl_->media.playing;
+        impl_->songTransitionPending = false;
+        impl_->media = info;
+        impl_->available = available;
+        impl_->syncPetMode(textChanged);
+        if (coverChanged)
+            impl_->coverDirty = true;
+        if (sourceChanged)
+            impl_->sourceIconDirty = true;
+        if (dominantColorChanged)
+            impl_->dynamicBackgroundDirty = true;
+        if (textChanged) {
+            impl_->textDirty = true;
+            impl_->titleScrollOffset = 0.0f;
+            impl_->artistScrollOffset = 0.0f;
+            impl_->scrollTickMs = 0;
+        }
+        if (!available) {
+            impl_->hideImmediate();
+            return;
+        }
+        impl_->songTransitionPending = animateSongTransition && changed &&
+                                       impl_->visibility.visible() && !impl_->visibility.animating() &&
+                                       impl_->clientAnimations && !impl_->idleMode &&
+                                       !impl_->categoryTransition.active();
+        if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
+            !impl_->quickExpandTransition.active() && (!impl_->idleMode || dominantColorChanged)) {
+            if (impl_->visibility.animating())
+                impl_->deferredRender = true;
+            else
+                impl_->render();
+        }
+        if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
+            impl_->opensOnHover())
+            SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    });
 }
 
 void MediaPopup::setIdleContent(const IdlePresentation& content, bool available) {
-    const bool textVisibilityChanged = content.showText != impl_->idle.showText;
-    const bool idleAvailabilityChanged =
-        content.quickStartEnabled != impl_->idle.quickStartEnabled;
-    const bool quoteContentChanged = content.sentence != impl_->idle.sentence ||
-                                     content.loading != impl_->idle.loading ||
-                                     content.source != impl_->idle.source;
-    const bool quoteChanged = quoteContentChanged ||
-                              content.showText != impl_->idle.showText ||
-                              content.showQuote != impl_->idle.showQuote ||
-                              content.copyEnabled != impl_->idle.copyEnabled ||
-                              content.quickStartEnabled != impl_->idle.quickStartEnabled;
-    const bool appCountChanged = content.apps.size() != impl_->idle.apps.size();
-    bool appsChanged = content.showAppNames != impl_->idle.showAppNames || appCountChanged;
-    bool appIconsChanged = appCountChanged;
-    const size_t appCount = std::min(content.apps.size(), impl_->idle.apps.size());
-    for (size_t i = 0; i < appCount; ++i) {
-        const auto& oldApp = impl_->idle.apps[i];
-        const auto& newApp = content.apps[i];
-        if (oldApp.path != newApp.path || oldApp.customName != newApp.customName ||
-            oldApp.name != newApp.name || oldApp.pathValid != newApp.pathValid) {
-            appsChanged = true;
-        }
-        if (oldApp.path != newApp.path || oldApp.iconPixels != newApp.iconPixels ||
-            oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
-            oldApp.pathValid != newApp.pathValid) {
-            appIconsChanged = true;
-        }
-    }
-
-    const bool taskListStateChanged =
-        content.todayTasksEnabled != impl_->idle.todayTasksEnabled ||
-        content.todayTasks.size() != impl_->idle.todayTasks.size() ||
-        content.todayTasksLoading != impl_->idle.todayTasksLoading ||
-        content.todayTasksConnected != impl_->idle.todayTasksConnected ||
-        content.todayTasksStatus != impl_->idle.todayTasksStatus;
-    bool tasksChanged = taskListStateChanged;
-    const size_t taskCount = std::min(content.todayTasks.size(), impl_->idle.todayTasks.size());
-    for (size_t i = 0; i < taskCount; ++i) {
-        const auto& oldTask = impl_->idle.todayTasks[i];
-        const auto& newTask = content.todayTasks[i];
-        if (oldTask.id != newTask.id || oldTask.projectId != newTask.projectId ||
-            oldTask.title != newTask.title ||
-            oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
-            oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
-            tasksChanged = true;
-        }
-    }
-
-    const bool changed = quoteChanged || appsChanged || appIconsChanged || tasksChanged;
-    if (appsChanged || appIconsChanged || tasksChanged) {
-        impl_->idleScrollOffset = impl_->idleScrollView.offset();
-        impl_->idleScrollView.stop();
-    }
-
-    if (quoteContentChanged || !content.showQuote || !content.copyEnabled ||
-        content.loading || content.sentence.empty()) {
-        if (impl_->hwnd)
-            KillTimer(impl_->hwnd, kCopyFeedbackTimer);
-        impl_->copySucceeded = false;
-    }
-
-    if (quoteContentChanged) {
-        const bool canAnimateQuote = impl_->idleMode && impl_->visibility.visible() &&
-                                     impl_->clientAnimations && !impl_->visibility.animating() &&
-                                     !impl_->categoryTransition.active();
-        if (canAnimateQuote) {
-            if (!impl_->idleContentTransition.active) {
-                impl_->idleContentTransition.from = impl_->idle;
-                impl_->idleContentTransition.startMs = GetTickCount64();
+    enqueue([=, this]() mutable {
+        const bool textVisibilityChanged = content.showText != impl_->idle.showText;
+        const bool idleAvailabilityChanged =
+            content.quickStartEnabled != impl_->idle.quickStartEnabled;
+        const bool quoteContentChanged = content.sentence != impl_->idle.sentence ||
+                                         content.loading != impl_->idle.loading ||
+                                         content.source != impl_->idle.source;
+        const bool quoteChanged = quoteContentChanged ||
+                                  content.showText != impl_->idle.showText ||
+                                  content.showQuote != impl_->idle.showQuote ||
+                                  content.copyEnabled != impl_->idle.copyEnabled ||
+                                  content.quickStartEnabled != impl_->idle.quickStartEnabled;
+        const bool appCountChanged = content.apps.size() != impl_->idle.apps.size();
+        bool appsChanged = content.showAppNames != impl_->idle.showAppNames || appCountChanged;
+        bool appIconsChanged = appCountChanged;
+        const size_t appCount = std::min(content.apps.size(), impl_->idle.apps.size());
+        for (size_t i = 0; i < appCount; ++i) {
+            const auto& oldApp = impl_->idle.apps[i];
+            const auto& newApp = content.apps[i];
+            if (oldApp.path != newApp.path || oldApp.customName != newApp.customName ||
+                oldApp.name != newApp.name || oldApp.pathValid != newApp.pathValid) {
+                appsChanged = true;
             }
-            impl_->idleContentTransition.active = true;
-        } else {
-            impl_->idleContentTransition.active = false;
+            if (oldApp.path != newApp.path || oldApp.iconPixels != newApp.iconPixels ||
+                oldApp.iconWidth != newApp.iconWidth || oldApp.iconHeight != newApp.iconHeight ||
+                oldApp.pathValid != newApp.pathValid) {
+                appIconsChanged = true;
+            }
         }
-    }
-    impl_->idle = content;
-    impl_->available = available;
-    impl_->syncPetMode(false);
-    if (!content.todayTasksEnabled) {
-        impl_->idleQuickTab = IdleQuickTab::QuickStart;
-        impl_->hoverIdleQuickTab = -1;
-        impl_->pressedIdleQuickTab = -1;
-        impl_->idleQuickTabRects[0] = {};
-        impl_->idleQuickTabRects[1] = {};
-        impl_->hoverIdleTask = -1;
-        impl_->hoverIdleTaskCheckbox = -1;
-        impl_->pressedIdleTask = -1;
-        impl_->pressedIdleTaskCheckbox = -1;
-        impl_->idleScrollOffset = 0.0f;
-        impl_->idleScrollView.setOffset(0.0f);
-        impl_->idleScrollDragging = false;
-    }
-    if (!content.quickStartEnabled) {
-        impl_->quickExpansion.expanded = false;
-        impl_->quickExpansion.opening = false;
-        impl_->quickExpansion.progress = 0.0f;
-        impl_->stopQuickExpandTransition();
-    } else if (!content.showText) {
-        impl_->quickExpansion.expanded = true;
-        impl_->quickExpansion.opening = false;
-        impl_->quickExpansion.progress = 1.0f;
-        impl_->stopQuickExpandTransition();
-    } else if (textVisibilityChanged) {
-        impl_->quickExpansion.expanded = false;
-        impl_->quickExpansion.opening = false;
-        impl_->quickExpansion.progress = 0.0f;
-        impl_->stopQuickExpandTransition();
-    }
-    if (changed) {
-        if (quoteChanged) {
-            impl_->idleQuoteScrollOffset = 0.0f;
-            impl_->idleQuoteSourceScrollOffset = 0.0f;
-            impl_->scrollTickMs = 0;
+
+        const bool taskListStateChanged =
+            content.todayTasksEnabled != impl_->idle.todayTasksEnabled ||
+            content.todayTasks.size() != impl_->idle.todayTasks.size() ||
+            content.todayTasksLoading != impl_->idle.todayTasksLoading ||
+            content.todayTasksConnected != impl_->idle.todayTasksConnected ||
+            content.todayTasksStatus != impl_->idle.todayTasksStatus;
+        bool tasksChanged = taskListStateChanged;
+        const size_t taskCount = std::min(content.todayTasks.size(), impl_->idle.todayTasks.size());
+        for (size_t i = 0; i < taskCount; ++i) {
+            const auto& oldTask = impl_->idle.todayTasks[i];
+            const auto& newTask = content.todayTasks[i];
+            if (oldTask.id != newTask.id || oldTask.projectId != newTask.projectId ||
+                oldTask.title != newTask.title ||
+                oldTask.dueText != newTask.dueText || oldTask.completed != newTask.completed ||
+                oldTask.overdue != newTask.overdue || oldTask.priority != newTask.priority) {
+                tasksChanged = true;
+            }
         }
-        if (quoteContentChanged)
-            impl_->idleTextDirty = true;
-        if (appIconsChanged)
-            impl_->idleIconsDirty = true;
-        if (impl_->visibility.visible() && impl_->idleMode)
-            impl_->reposition();
-    }
-    if (!available) {
-        impl_->hideImmediate();
-        return;
-    }
-    if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
-        !impl_->quickExpandTransition.active() && (impl_->idleMode || idleAvailabilityChanged)) {
-        if (impl_->visibility.animating())
-            impl_->deferredRender = true;
-        else
-            impl_->render();
-    }
-    if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
-        impl_->opensOnHover())
-        SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+
+        const bool changed = quoteChanged || appsChanged || appIconsChanged || tasksChanged;
+        if (appsChanged || appIconsChanged || tasksChanged) {
+            impl_->idleScrollOffset = impl_->idleScrollView.offset();
+            impl_->idleScrollView.stop();
+        }
+
+        if (quoteContentChanged || !content.showQuote || !content.copyEnabled ||
+            content.loading || content.sentence.empty()) {
+            if (impl_->hwnd)
+                KillTimer(impl_->hwnd, kCopyFeedbackTimer);
+            impl_->copySucceeded = false;
+        }
+
+        if (quoteContentChanged) {
+            const bool canAnimateQuote = impl_->idleMode && impl_->visibility.visible() &&
+                                         impl_->clientAnimations && !impl_->visibility.animating() &&
+                                         !impl_->categoryTransition.active();
+            if (canAnimateQuote) {
+                if (!impl_->idleContentTransition.active) {
+                    impl_->idleContentTransition.from = impl_->idle;
+                    impl_->idleContentTransition.startMs = GetTickCount64();
+                }
+                impl_->idleContentTransition.active = true;
+            } else {
+                impl_->idleContentTransition.active = false;
+            }
+        }
+        impl_->idle = content;
+        impl_->available = available;
+        impl_->syncPetMode(false);
+        if (!content.todayTasksEnabled) {
+            impl_->idleQuickTab = IdleQuickTab::QuickStart;
+            impl_->hoverIdleQuickTab = -1;
+            impl_->pressedIdleQuickTab = -1;
+            impl_->idleQuickTabRects[0] = {};
+            impl_->idleQuickTabRects[1] = {};
+            impl_->hoverIdleTask = -1;
+            impl_->hoverIdleTaskCheckbox = -1;
+            impl_->pressedIdleTask = -1;
+            impl_->pressedIdleTaskCheckbox = -1;
+            impl_->idleScrollOffset = 0.0f;
+            impl_->idleScrollView.setOffset(0.0f);
+            impl_->idleScrollDragging = false;
+        }
+        if (!content.quickStartEnabled) {
+            impl_->quickExpansion.expanded = false;
+            impl_->quickExpansion.opening = false;
+            impl_->quickExpansion.progress = 0.0f;
+            impl_->stopQuickExpandTransition();
+        } else if (!content.showText) {
+            impl_->quickExpansion.expanded = true;
+            impl_->quickExpansion.opening = false;
+            impl_->quickExpansion.progress = 1.0f;
+            impl_->stopQuickExpandTransition();
+        } else if (textVisibilityChanged) {
+            impl_->quickExpansion.expanded = false;
+            impl_->quickExpansion.opening = false;
+            impl_->quickExpansion.progress = 0.0f;
+            impl_->stopQuickExpandTransition();
+        }
+        if (changed) {
+            if (quoteChanged) {
+                impl_->idleQuoteScrollOffset = 0.0f;
+                impl_->idleQuoteSourceScrollOffset = 0.0f;
+                impl_->scrollTickMs = 0;
+            }
+            if (quoteContentChanged)
+                impl_->idleTextDirty = true;
+            if (appIconsChanged)
+                impl_->idleIconsDirty = true;
+            if (impl_->visibility.visible() && impl_->idleMode)
+                impl_->reposition();
+        }
+        if (!available) {
+            impl_->hideImmediate();
+            return;
+        }
+        if (changed && impl_->visibility.visible() && !impl_->categoryTransition.active() &&
+            !impl_->quickExpandTransition.active() && (impl_->idleMode || idleAvailabilityChanged)) {
+            if (impl_->visibility.animating())
+                impl_->deferredRender = true;
+            else
+                impl_->render();
+        }
+        if (impl_->hwnd && impl_->anchorHover && impl_->enabled && !impl_->visibility.visible() &&
+            impl_->opensOnHover())
+            SetTimer(impl_->hwnd, kShowTimer, kShowDelayMs, nullptr);
+    });
 }
 
 void MediaPopup::beginPresentationUpdate() {
-    impl_->beginPresentationUpdate();
+    ++updateDepth_;
 }
 
 void MediaPopup::endPresentationUpdate() {
-    impl_->endPresentationUpdate();
+    if (updateDepth_ == 0 || --updateDepth_ != 0)
+        return;
+    auto actions = std::move(updateActions_);
+    updateActions_.clear();
+    enqueue([this, actions = std::move(actions)] {
+        impl_->beginPresentationUpdate();
+        for (const auto& action : actions)
+            action();
+        impl_->endPresentationUpdate();
+    });
 }
 
 void MediaPopup::setPresentationMode(DisplayScene scene, bool available, bool inlineControls) {
-    impl_->inlineControls = inlineControls;
+    enqueue([=, this]() mutable {
+        impl_->inlineControls = inlineControls;
 
-    if (!available) {
-        impl_->available = false;
+        if (!available) {
+            impl_->available = false;
+            impl_->syncPetMode(false);
+            impl_->playbackScene = false;
+            impl_->idlePanelManual = false;
+            impl_->idleContentTransition.active = false;
+            impl_->hideImmediate();
+            return;
+        }
+
+        impl_->available = true;
         impl_->syncPetMode(false);
-        impl_->playbackScene = false;
-        impl_->idlePanelManual = false;
-        impl_->idleContentTransition.active = false;
-        impl_->hideImmediate();
-        return;
-    }
-
-    impl_->available = true;
-    impl_->syncPetMode(false);
-    const bool noPlayback = scene == DisplayScene::Idle || scene == DisplayScene::NoPlayback;
-    impl_->playbackScene = !noPlayback;
-    if (noPlayback || inlineControls)
-        impl_->idlePanelManual = false;
-    const bool keepManualIdle = !inlineControls && impl_->playbackScene &&
-                                impl_->idlePanelManual &&
-                                impl_->currentPage() == MediaPopup::Impl::PopupPage::Idle &&
-                                impl_->idlePageAllowed();
-    const MediaPopup::Impl::PopupPage target =
-        noPlayback || keepManualIdle || inlineControls ? MediaPopup::Impl::PopupPage::Idle
-                                                        : MediaPopup::Impl::PopupPage::Media;
-    impl_->setPage(target);
+        const bool noPlayback = scene == DisplayScene::Idle || scene == DisplayScene::NoPlayback;
+        impl_->playbackScene = !noPlayback;
+        if (noPlayback || inlineControls)
+            impl_->idlePanelManual = false;
+        const bool keepManualIdle = !inlineControls && impl_->playbackScene &&
+                                    impl_->idlePanelManual &&
+                                    impl_->currentPage() == MediaPopup::Impl::PopupPage::Idle &&
+                                    impl_->idlePageAllowed();
+        const MediaPopup::Impl::PopupPage target =
+            noPlayback || keepManualIdle || inlineControls ? MediaPopup::Impl::PopupPage::Idle
+                                                            : MediaPopup::Impl::PopupPage::Media;
+        impl_->setPage(target);
+    });
 }
 
 void MediaPopup::setProgress(int64_t positionMs) {
-    const int64_t nextPositionMs = std::max<int64_t>(positionMs, 0);
-    // 层转场期间新页内容承载在静态合成层快照上：进度只挂起不应用，
-    // 由 finishLayerTransition 在撤层交接后再落到 positionMs 并重绘。
-    if (impl_->categoryTransition.active() || impl_->quickExpandTransition.active()) {
-        impl_->deferredPositionMs = nextPositionMs;
-        return;
-    }
-    if (impl_->positionMs == nextPositionMs)
-        return;
-    impl_->positionMs = nextPositionMs;
-    if (impl_->visibility.visible())
-        impl_->renderOrDefer();
+    enqueue([=, this]() mutable {
+        const int64_t nextPositionMs = std::max<int64_t>(positionMs, 0);
+        // 层转场期间新页内容承载在静态合成层快照上：进度只挂起不应用，
+        // 由 finishLayerTransition 在撤层交接后再落到 positionMs 并重绘。
+        if (impl_->categoryTransition.active() || impl_->quickExpandTransition.active()) {
+            impl_->deferredPositionMs = nextPositionMs;
+            return;
+        }
+        if (impl_->positionMs == nextPositionMs)
+            return;
+        impl_->positionMs = nextPositionMs;
+        if (impl_->visibility.visible()) {
+            if (impl_->presentationUpdateDepth > 0 || impl_->visibility.animating())
+                impl_->renderOrDefer();
+            else
+                InvalidateRect(impl_->hwnd, nullptr, FALSE);
+        }
+    });
 }
 
 void MediaPopup::setAnchor(HWND anchor) {
-    impl_->anchor = anchor;
-    impl_->reposition();
+    enqueue([=, this]() mutable {
+        impl_->anchor = anchor;
+        impl_->reposition();
+    });
 }
 
 void MediaPopup::onAnchorEnter() {
-    impl_->onAnchorEnter();
+    enqueue([=, this]() mutable {
+        impl_->onAnchorEnter();
+    });
 }
 
 void MediaPopup::onAnchorLeave() {
-    impl_->onAnchorLeave();
+    enqueue([=, this]() mutable {
+        impl_->onAnchorLeave();
+    });
 }
 
 void MediaPopup::onAnchorClick() {
-    impl_->onAnchorClick();
+    enqueue([=, this]() mutable {
+        impl_->onAnchorClick();
+    });
 }
 
 void MediaPopup::hideImmediate() {
-    impl_->hideImmediate();
+    enqueue([=, this]() mutable {
+        impl_->hideImmediate();
+    });
 }

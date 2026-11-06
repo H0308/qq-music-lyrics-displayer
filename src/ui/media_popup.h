@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lyric_window.h"
+#include "ui/ui_dispatcher.h"
 
 #include <functional>
 #include <memory>
@@ -8,7 +9,7 @@
 #include <windows.h>
 
 // 任务栏歌词悬浮时展开的媒体卡片。它是独立的非激活窗口，
-// 只消费宿主已经整理好的媒体快照，不直接访问播放器或歌词提供器。
+// 在独立 UI 线程消费宿主按值提交的媒体快照，不直接访问播放器或歌词提供器。
 class MediaPopup {
 public:
     MediaPopup();
@@ -44,7 +45,7 @@ public:
     void setMedia(const OverlayMediaInfo& info, bool available,
                   bool animateSongTransition = false);
     void setIdleContent(const IdlePresentation& content, bool available);
-    // 将同一完整展示帧中的多个弹窗状态更新合并为一次绘制/提交。
+    // 在调用方收集同一完整展示帧，结束后作为一个任务交给窗口线程绘制/提交。
     void beginPresentationUpdate();
     void endPresentationUpdate();
     // 展示类别与具体内容分开同步：scene 不为 Idle 时表示播放媒体；
@@ -63,5 +64,9 @@ public:
 
 private:
     struct Impl;
+    void enqueue(std::function<void()> action);
+    std::unique_ptr<UiThread> thread_;
     std::unique_ptr<Impl> impl_;
+    unsigned updateDepth_ = 0;
+    std::vector<std::function<void()>> updateActions_;
 };

@@ -5,7 +5,7 @@
 #include <cmath>
 void SettingsArtwork::drawSpectrumStyleArtwork(fluent::FluentDialogSurface::Painter& painter,
                                                const D2D1_RECT_F& bounds, int style, bool enabled) {
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color) {
         if (!enabled)
             color.a *= 0.42f;
@@ -173,7 +173,7 @@ void SettingsArtwork::drawSpectrumEffectArtwork(fluent::FluentDialogSurface::Pai
     auto* rt = painter.target();
     if (!rt || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
         return;
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color, float opacity = 1.0f) {
         color.a *= opacity * (enabled ? 1.0f : 0.42f);
         return color;
@@ -287,7 +287,7 @@ void SettingsArtwork::drawLyricEffectArtwork(fluent::FluentDialogSurface::Painte
     auto* rt = painter.target();
     if (!rt || bounds.right <= bounds.left || bounds.bottom <= bounds.top)
         return;
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     auto tone = [&](D2D1_COLOR_F color, float alpha) {
         color.a *= alpha * (enabled ? 1.0f : 0.42f);
         return color;
@@ -355,7 +355,7 @@ void SettingsArtwork::drawLyricEffectArtwork(fluent::FluentDialogSurface::Painte
 
 void SettingsArtwork::drawSpectrumBackgroundArtwork(fluent::FluentDialogSurface::Painter& painter,
                                                     const D2D1_RECT_F& bounds, bool enabled) {
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color) {
         if (!enabled)
             color.a *= 0.42f;
@@ -569,7 +569,7 @@ void SettingsArtwork::drawCoverEffectArtwork(fluent::FluentDialogSurface::Painte
 void SettingsArtwork::drawSongToastPositionArtwork(fluent::FluentDialogSurface::Painter& painter,
                                                    const D2D1_RECT_F& bounds, bool top,
                                                    bool enabled) {
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color) {
         if (!enabled)
             color.a *= 0.42f;
@@ -616,7 +616,7 @@ void SettingsArtwork::drawSongToastPositionArtwork(fluent::FluentDialogSurface::
 void SettingsArtwork::drawHoverControlStyleArtwork(fluent::FluentDialogSurface::Painter& painter,
                                                    const D2D1_RECT_F& bounds, bool mediaCard,
                                                    bool enabled) {
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color) {
         if (!enabled)
             color.a *= 0.42f;
@@ -771,7 +771,7 @@ void SettingsArtwork::drawIdleQuoteBackgroundArtwork(fluent::FluentDialogSurface
     if (!rt)
         return;
 
-    const auto& p = fluent::palette();
+    const auto& p = painter.colors();
     const auto tone = [enabled](D2D1_COLOR_F color) {
         if (!enabled)
             color.a *= 0.42f;

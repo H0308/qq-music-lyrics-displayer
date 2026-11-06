@@ -92,7 +92,8 @@ void drawScrollingText(const PagePaintContext& context, ID2D1DeviceContext* rt,
     rt->PushAxisAlignedClip(rect, D2D1_ANTIALIAS_MODE_ALIASED);
     for (int i = 0; i < count; ++i) {
         const float x = scrolling ? bases[i] : rect.left;
-        rt->DrawTextLayout(D2D1::Point2F(x, y), layout, brush);
+        // 活页与转场表面共用连续基线，避免默认垂直像素吸附在交接时改变文字位置。
+        rt->DrawTextLayout(D2D1::Point2F(x, y), layout, brush, D2D1_DRAW_TEXT_OPTIONS_NO_SNAP);
     }
     rt->PopAxisAlignedClip();
     if (useEdgeFade)

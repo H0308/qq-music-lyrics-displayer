@@ -6,6 +6,7 @@
 #include "ui/lyric_effects.h"
 
 #include "lyric_window.h"
+#include "ui/ui_dispatcher.h"
 
 #include <array>
 #include <string>
@@ -43,6 +44,7 @@ public:
     HWND hwnd() const override;
 
     void setTickCallback(std::function<void()> cb) override;
+    void setCloseCallback(std::function<void()> cb);
     void applyAppearance(const TaskbarAppearance& appearance);
     void applyPresentationFrame(const PresentationFrame& frame) override;
     void applyPlaybackPatch(const PlaybackPatch& patch) override;
@@ -71,13 +73,13 @@ public:
     TaskbarPlacementStatus placementStatus() const;
     bool isDisplayed() const;
 
-    const std::vector<LyricLine>& lyrics() const override;
+    std::vector<LyricLine> lyrics() const override;
 
     bool isTaskbar() const override;
     bool isVerticalTaskbar() const;
     bool isCompactTaskbar() const;
     int currentLine() const override;
-    const std::wstring& statusText() const override;
+    std::wstring statusText() const override;
 
     void changeFont(float delta) override;
     void setFont(const std::wstring& family, float size, LyricFontStyle style) override;
@@ -97,8 +99,10 @@ public:
     void setRenderMode(RenderMode mode);
 
     // 音频频谱（任务栏独有）：高频数据通过 SpectrumPatch 更新。
-    // 频段值仅在 UI 线程读写（onFrame 经宿主定时器回调），无需加锁
+    // 显示状态只在宿主线程读写；频谱读取器消费采样线程发布的原子快照。
     static constexpr int kSpectrumBands = kPresentationSpectrumBands;
+    // 读取器只能访问线程安全的采样快照，不得读取应用配置或直接操作界面。
+    void setSpectrumReader(std::function<std::array<float, kSpectrumBands>()> reader);
     void setSpectrumVisible(bool on);
 
     // 播放进度背景：从窗口左缘到歌词右缘按播放进度填充专辑主题色；
@@ -127,5 +131,7 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    std::unique_ptr<UiDispatcher> callbacks_;
+    std::unique_ptr<UiThread> thread_;
+    std::shared_ptr<Impl> impl_;
 };

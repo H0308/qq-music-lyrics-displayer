@@ -28,6 +28,7 @@ namespace abi_composition_desktop = ABI::Windows::UI::Composition::Desktop;
 
 constexpr float kMaxDockBlurAmount = 48.0f;
 constexpr wchar_t kBlurProperty[] = L"DockGaussianBlur.BlurAmount";
+thread_local winrt::Windows::System::DispatcherQueueController gDispatcherController{nullptr};
 constexpr GUID kGaussianBlurEffectId{
     0x1feb6d69, 0x2fe6, 0x4ac9, {0x8c, 0x58, 0x1d, 0x7f, 0x93, 0xe7, 0xa6, 0xa5}};
 
@@ -44,8 +45,7 @@ bool ensureDispatcherQueue() {
     if (winrt::Windows::System::DispatcherQueue::GetForCurrentThread())
         return true;
 
-    static winrt::Windows::System::DispatcherQueueController controller{nullptr};
-    if (!controller) {
+    if (!gDispatcherController) {
         DispatcherQueueOptions options{};
         options.dwSize = static_cast<DWORD>(sizeof(options));
         options.threadType = DQTYPE_THREAD_CURRENT;
@@ -53,10 +53,10 @@ bool ensureDispatcherQueue() {
 
         PDISPATCHERQUEUECONTROLLER rawController = nullptr;
         winrt::check_hresult(CreateDispatcherQueueController(options, &rawController));
-        controller = winrt::Windows::System::DispatcherQueueController{
+        gDispatcherController = winrt::Windows::System::DispatcherQueueController{
             rawController, winrt::take_ownership_from_abi};
     }
-    return static_cast<bool>(controller);
+    return static_cast<bool>(gDispatcherController);
 }
 
 class GaussianBlurEffect final
@@ -219,6 +219,24 @@ struct DockBackdrop::Impl {
 DockBackdrop::DockBackdrop() : impl_(std::make_unique<Impl>()) {}
 
 DockBackdrop::~DockBackdrop() { reset(); }
+
+void DockBackdrop::shutdownThreadResources() {
+    if (!gDispatcherController)
+        return;
+    const DWORD owner = GetCurrentThreadId();
+    auto shutdown = gDispatcherController.ShutdownQueueAsync();
+    shutdown.Completed([owner](const auto&, auto) {
+        PostThreadMessageW(owner, WM_QUIT, 0, 0);
+    });
+    // Windows.System 当前线程队列必须继续泵消息，直到关闭操作完成。
+    MSG message{};
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    shutdown.GetResults();
+    gDispatcherController = nullptr;
+}
 
 bool DockBackdrop::initialize(HWND hwnd) {
     reset();

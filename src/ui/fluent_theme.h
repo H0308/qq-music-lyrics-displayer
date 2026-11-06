@@ -43,6 +43,8 @@ bool isWindowsAppDarkMode();
 
 // 系统强调色（取不到时回退 Win11 默认蓝）
 COLORREF accentColor();
+// 专用 UI 线程退出时，在解除 WinRT apartment 前释放线程主题对象。
+void releaseThreadThemeResources();
 
 D2D1_COLOR_F toD2D(COLORREF c, float alpha = 1.0f);
 

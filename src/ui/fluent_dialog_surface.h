@@ -74,6 +74,7 @@ public:
 
         ID2D1RenderTarget* target() const { return target_; }
         IDWriteFactory* dwrite() const { return dwrite_; }
+        const Palette& colors() const { return colors_; }
 
         ID2D1SolidColorBrush* brush(D2D1_COLOR_F color);
         // 为 DirectWrite 的 DrawingEffect 等需要独立颜色的场景创建额外画刷。
@@ -102,6 +103,7 @@ public:
     private:
         ID2D1RenderTarget* target_ = nullptr;
         IDWriteFactory* dwrite_ = nullptr;
+        const Palette colors_;
         TextCache* textCache_ = nullptr;
         ID2D1SolidColorBrush* brush_ = nullptr;
         std::vector<ID2D1SolidColorBrush*> brushes_;

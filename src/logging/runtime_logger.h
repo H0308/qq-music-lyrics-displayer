@@ -42,8 +42,10 @@ public:
     void start(const std::wstring& directory, int retentionDays = 30);
     void stop();
 
+    // 运行期间只格式化并入队；控制台、调试器与磁盘输出由工作线程批量处理。
     void write(const std::wstring& message);
     void writef(const wchar_t* format, ...);
+    // 退出或崩溃等显式同步点；会等待输出完成，不用于普通 UI 操作。
     void flushSync();
 
     void setDirectory(const std::wstring& directory);

@@ -293,12 +293,18 @@ void App::tryRestoreTaskbarAfterNoSpace() {
 void App::configureTaskbarHostCallbacks(TaskbarHost* host, bool primary) {
     if (!host)
         return;
+    host->setCloseCallback([this] { requestQuit(); });
+    host->setSpectrumReader([source = &spectrum_] { return source->bands(); });
     if (primary) {
         host->setTickCallback([this] { onFrame(); });
         host->setStatusTextCycleCompletedCallback(
             [this] { idle_.onStartupTaskSummaryCompleted(); });
         host->setPlacementStatusCallback(
-            [this](TaskbarPlacementStatus status) { onTaskbarPlacementStatus(status); });
+            [this, host](TaskbarPlacementStatus status) {
+                // 状态通知异步回到主线程后，不能用旧的空间判定覆盖当前宿主状态。
+                if (taskbarHost.get() == host && host->placementStatus() == status)
+                    onTaskbarPlacementStatus(status);
+            });
     }
     host->setControlCallback([this](MediaControl c) { onControl(c); });
     host->setImmersiveExitCallback([this] { applyTaskbarViewMode(0); });

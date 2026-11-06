@@ -105,11 +105,11 @@ public:
     virtual void setAppVolume(const AppVolumeState& state) = 0;
     virtual void setAppVolumeCallback(std::function<void(int percent)> cb) = 0;
 
-    virtual const std::vector<LyricLine>& lyrics() const = 0;
+    virtual std::vector<LyricLine> lyrics() const = 0;
 
     virtual bool isTaskbar() const = 0;
     virtual int currentLine() const = 0;
-    virtual const std::wstring& statusText() const = 0;
+    virtual std::wstring statusText() const = 0;
 
     virtual void changeFont(float delta) = 0;
     virtual void setFont(const std::wstring& family, float size, LyricFontStyle style) = 0;
