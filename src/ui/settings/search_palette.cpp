@@ -10,14 +10,13 @@
 #include <cstring>
 
 namespace settings_ui {
-namespace {
-constexpr UINT kNavIndicatorFrameMs = USER_TIMER_MINIMUM;
-}
 bool SettingsSearchPalette::searching() const {
     return searchModel_.active();
 }
 
 void SettingsSearchPalette::refreshSearch() {
+    if (searchPaletteAnimating && searchPaletteOpen)
+        finishSearchPaletteAnimation();
     std::vector<SettingsSearchEntry> entries;
     for (int page = 0; page < kSettingsPageCount; ++page) {
         std::wstring group;
@@ -140,27 +139,178 @@ void SettingsSearchPalette::setWindowClickThrough(HWND window, bool clickThrough
         SetWindowLongPtrW(window, GWL_EXSTYLE, nextStyle);
 }
 
-BYTE SettingsSearchPalette::searchPaletteAlphaByte() const {
-    return static_cast<BYTE>(
-        std::clamp(static_cast<int>(std::lround(searchPaletteProgress * 255.0f)), 0, 255));
+void SettingsSearchPalette::updateSearchPaletteProgress() {
+    if (!searchPaletteAnimating)
+        return;
+    const float elapsed = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - searchPaletteAnimStarted).count();
+    const float t = std::clamp(elapsed / searchPaletteAnimDurationMs, 0.0f, 1.0f);
+    // 与合成器的缓出曲线一致，仅用于中断和完成判定。
+    const float inverse = 1.0f - t;
+    const float eased = searchPaletteAnimTarget > 0.5f
+                            ? 1.0f - inverse * inverse * inverse
+                            : 1.0f - inverse * inverse;
+    searchPaletteProgress = searchPaletteAnimFrom +
+                            (searchPaletteAnimTarget - searchPaletteAnimFrom) * eased;
 }
 
-int SettingsSearchPalette::searchPaletteOffsetYPx(float scale) const {
-    const float slideDip =
-        searchPaletteAnimTarget > 0.5f ? kSearchPaletteOpenSlideDip : kSearchPaletteCloseSlideDip;
-    return static_cast<int>(std::lround((1.0f - searchPaletteProgress) * slideDip * scale));
-}
-
-void SettingsSearchPalette::applySearchPaletteAnimationVisuals() {
-    const BYTE alphaByte = searchPaletteAlphaByte();
-    if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
-        SetLayeredWindowAttributes(searchPaletteHwnd, 0, alphaByte, LWA_ALPHA);
-        SetWindowPos(searchPaletteHwnd, nullptr, searchPaletteBaseX,
-                     searchPaletteBaseY + searchPaletteOffsetYPx(searchPaletteScale), 0, 0,
-                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+bool SettingsSearchPalette::startSearchPaletteAnimation() {
+    if (!searchAnimationHwnd) {
+        WNDCLASSEXW windowClass{};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = &SettingsSearchPalette::animationWndProc;
+        windowClass.hInstance = owner_.inst;
+        windowClass.lpszClassName = L"QQMusicLyricSettingsSearchAnimation";
+        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        RegisterClassExW(&windowClass);
+        searchAnimationHwnd = CreateWindowExW(
+            WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            windowClass.lpszClassName, L"", WS_POPUP, 0, 0, 1, 1,
+            owner_.hwnd, nullptr, owner_.inst, this);
+        if (searchAnimationHwnd) {
+            const BOOL disableTransitions = TRUE;
+            DwmSetWindowAttribute(searchAnimationHwnd, DWMWA_TRANSITIONS_FORCEDISABLED,
+                                  &disableTransitions, sizeof(disableTransitions));
+        }
     }
-    if (searchScrimHwnd && IsWindow(searchScrimHwnd))
-        searchScrimRenderer.present(searchScrimHwnd, alphaByte);
+    RECT client{};
+    if (!searchAnimationHwnd || !GetClientRect(searchPaletteHwnd, &client))
+        return false;
+    const int margin = static_cast<int>(std::ceil(
+        std::max(std::abs(kSearchPaletteOpenSlideDip), std::abs(kSearchPaletteCloseSlideDip)) *
+        searchPaletteScale));
+    SetWindowPos(searchAnimationHwnd, HWND_TOP, searchPaletteBaseX, searchPaletteBaseY - margin,
+                 client.right, client.bottom + margin, SWP_NOACTIVATE);
+    const UINT dpi = GetDpiForWindow(searchPaletteHwnd);
+    // 原生子控件也必须完成首帧，不能只更新排除了 EDIT 的父窗口表面。
+    RedrawWindow(searchPaletteHwnd, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    searchAnimationRenderer.setDpi(dpi);
+    if (!searchAnimationRenderer.bind(searchAnimationHwnd, client.right, client.bottom + margin) ||
+        !searchAnimationRenderer.setWindowContent(searchPaletteHwnd) ||
+        !searchAnimationRenderer.setRootRoundedClip(
+            0.0f, static_cast<float>(client.bottom), fluent::metrics::cardRadius * searchPaletteScale))
+        return false;
+    const float slide = (searchPaletteAnimTarget > 0.5f ? kSearchPaletteOpenSlideDip
+                                                       : kSearchPaletteCloseSlideDip) *
+                        searchPaletteScale;
+    const float fromY = margin + (1.0f - searchPaletteAnimFrom) * slide;
+    const float toY = margin + (1.0f - searchPaletteAnimTarget) * slide;
+    const float duration = searchPaletteAnimDurationMs / 1000.0f;
+    const auto curve = searchPaletteAnimTarget > 0.5f
+                           ? DCompRenderer::RootAnimationCurve::EaseOutCubic
+                           : DCompRenderer::RootAnimationCurve::EaseOutQuadratic;
+    if (!searchAnimationRenderer.animateRoot(0.0f, 0.0f, fromY, toY,
+                                             searchPaletteAnimFrom, searchPaletteAnimTarget, duration, curve) ||
+        !searchScrimRenderer.animateRoot(0.0f, 0.0f, 0.0f, 0.0f,
+                                         searchPaletteAnimFrom, searchPaletteAnimTarget, duration, curve))
+        return false;
+    // Cloak 只隐藏原窗口，保留其原生 EDIT 的实时表面和键盘输入。
+    const BOOL cloak = TRUE;
+    if (FAILED(DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_CLOAK, &cloak, sizeof(cloak))))
+        return false;
+    searchAnimationRenderer.commit();
+    searchScrimRenderer.commit();
+    ShowWindow(searchAnimationHwnd, SW_SHOWNOACTIVATE);
+    searchPaletteAnimStarted = std::chrono::steady_clock::now();
+    searchPaletteAnimating = true;
+    // 定时器只做最终交接，逐帧位移和透明度由合成器按刷新率推进。
+    return SetTimer(owner_.hwnd, kSearchPaletteAnimTimer,
+                    static_cast<UINT>(std::ceil(searchPaletteAnimDurationMs)), nullptr) != 0;
+}
+
+void SettingsSearchPalette::finishSearchPaletteAnimation() {
+    if (owner_.hwnd)
+        KillTimer(owner_.hwnd, kSearchPaletteAnimTimer);
+    searchPaletteAnimating = false;
+    searchPaletteProgress = 1.0f;
+    const BOOL cloak = FALSE;
+    if (searchPaletteHwnd)
+        DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
+    if (searchAnimationHwnd)
+        ShowWindow(searchAnimationHwnd, SW_HIDE);
+    searchScrimRenderer.resetRoot();
+    searchScrimRenderer.commit();
+}
+
+LRESULT CALLBACK SettingsSearchPalette::animationWndProc(HWND window, UINT message,
+                                                         WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<SettingsSearchPalette*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (message == WM_NCCREATE) {
+        self = static_cast<SettingsSearchPalette*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    }
+    if (!self)
+        return DefWindowProcW(window, message, wp, lp);
+    switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        BeginPaint(window, &paint);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_NCHITTEST: {
+        if (!self->searchPaletteOpen)
+            return HTTRANSPARENT;
+        self->updateSearchPaletteProgress();
+        POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ScreenToClient(self->searchPaletteHwnd, &point);
+        const float slide = kSearchPaletteOpenSlideDip * self->searchPaletteScale;
+        const float y = point.y - (1.0f - self->searchPaletteProgress) * slide;
+        RECT client{};
+        GetClientRect(self->searchPaletteHwnd, &client);
+        return point.x >= 0 && point.x < client.right && y >= 0.0f && y < client.bottom
+                   ? HTCLIENT : HTTRANSPARENT;
+    }
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN: {
+        if (!self->searchPaletteOpen)
+            return 0;
+        POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+        ClientToScreen(window, &point);
+        ScreenToClient(self->searchPaletteHwnd, &point);
+        self->updateSearchPaletteProgress();
+        point.y -= static_cast<LONG>(std::lround(
+            (1.0f - self->searchPaletteProgress) * kSearchPaletteOpenSlideDip * self->searchPaletteScale));
+        self->finishSearchPaletteAnimation();
+        SetActiveWindow(self->searchPaletteHwnd);
+        self->settingsSearch.focus();
+        HWND target = self->searchPaletteHwnd;
+        for (;;) {
+            HWND child = ChildWindowFromPointEx(target, point, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED);
+            if (!child || child == target)
+                break;
+            MapWindowPoints(target, child, &point, 1);
+            target = child;
+        }
+        SendMessageW(target, message, wp, MAKELPARAM(point.x, point.y));
+        return 0;
+    }
+    case WM_MOUSEWHEEL:
+        if (self->searchPaletteOpen) {
+            self->finishSearchPaletteAnimation();
+            SendMessageW(self->searchPaletteHwnd, message, wp, lp);
+        }
+        return 0;
+    case WM_NCDESTROY:
+        SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        return DefWindowProcW(window, message, wp, lp);
+    }
+    return DefWindowProcW(window, message, wp, lp);
+}
+
+void SettingsSearchPalette::invalidateSearchTrigger() {
+    const float scale = owner_.surface.dipScale();
+    const RECT dirty{static_cast<LONG>(std::floor(searchTriggerRect.left * scale)) - 2,
+                     static_cast<LONG>(std::floor(searchTriggerRect.top * scale)) - 2,
+                     static_cast<LONG>(std::ceil(searchTriggerRect.right * scale)) + 2,
+                     static_cast<LONG>(std::ceil(searchTriggerRect.bottom * scale)) + 2};
+    owner_.surface.invalidate(&dirty);
 }
 
 void SettingsSearchPalette::finalizeSearchPaletteClosed() {
@@ -173,9 +323,13 @@ void SettingsSearchPalette::finalizeSearchPaletteClosed() {
     closingSearchPalette = true;
     if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
         ShowWindow(searchPaletteHwnd, SW_HIDE);
+        const BOOL cloak = FALSE;
+        DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
         setWindowClickThrough(searchPaletteHwnd, false);
         settingsSearch.setText(L"");
     }
+    if (searchAnimationHwnd)
+        ShowWindow(searchAnimationHwnd, SW_HIDE);
     if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
         ShowWindow(searchScrimHwnd, SW_HIDE);
         setWindowClickThrough(searchScrimHwnd, false);
@@ -190,29 +344,18 @@ void SettingsSearchPalette::finalizeSearchPaletteClosed() {
 void SettingsSearchPalette::advanceSearchPaletteAnimation() {
     if (!searchPaletteAnimating)
         return;
-    const float elapsed = static_cast<float>(GetTickCount64() - searchPaletteAnimStartMs);
-    const float rawProgress = searchPaletteAnimDurationMs <= 1.0f
-                                  ? 1.0f
-                                  : std::clamp(elapsed / searchPaletteAnimDurationMs, 0.0f, 1.0f);
-    const float inverse = 1.0f - rawProgress;
-    if (searchPaletteAnimTarget > 0.5f) {
-        const float eased = 1.0f - inverse * inverse * inverse;
-        searchPaletteProgress = searchPaletteAnimFrom + (1.0f - searchPaletteAnimFrom) * eased;
-    } else {
-        const float eased = 1.0f - inverse * inverse;
-        searchPaletteProgress = searchPaletteAnimFrom * (1.0f - eased);
+    updateSearchPaletteProgress();
+    const float elapsed = std::chrono::duration<float, std::milli>(
+        std::chrono::steady_clock::now() - searchPaletteAnimStarted).count();
+    if (elapsed < searchPaletteAnimDurationMs) {
+        SetTimer(owner_.hwnd, kSearchPaletteAnimTimer,
+                 static_cast<UINT>(std::ceil(searchPaletteAnimDurationMs - elapsed)), nullptr);
+        return;
     }
-    if (rawProgress >= 1.0f) {
-        if (searchPaletteAnimTarget <= 0.5f) {
-            finalizeSearchPaletteClosed();
-            return;
-        }
-        if (owner_.hwnd)
-            KillTimer(owner_.hwnd, kSearchPaletteAnimTimer);
-        searchPaletteAnimating = false;
-        searchPaletteProgress = 1.0f;
-    }
-    applySearchPaletteAnimationVisuals();
+    if (searchPaletteAnimTarget <= 0.5f)
+        finalizeSearchPaletteClosed();
+    else
+        finishSearchPaletteAnimation();
 }
 
 float SettingsSearchPalette::searchPaletteDesiredHeightDip() const {
@@ -227,6 +370,14 @@ float SettingsSearchPalette::searchPaletteDesiredHeightDip() const {
 }
 
 void SettingsSearchPalette::layoutSearchPalette() {
+    if (searchPaletteAnimating) {
+        if (searchPaletteOpen)
+            finishSearchPaletteAnimation();
+        else {
+            finalizeSearchPaletteClosed();
+            return;
+        }
+    }
     if (!searchPaletteHwnd || !owner_.hwnd || !IsWindow(owner_.hwnd))
         return;
     RECT ownerClient{};
@@ -306,8 +457,7 @@ void SettingsSearchPalette::layoutSearchPalette() {
     searchPaletteBaseX = screenX;
     searchPaletteBaseY = screenY;
     searchPaletteScale = scale;
-    const int animatedScreenY = screenY + searchPaletteOffsetYPx(scale);
-    SetWindowPos(searchPaletteHwnd, HWND_TOP, screenX, animatedScreenY, paletteWidthPx,
+    SetWindowPos(searchPaletteHwnd, HWND_TOP, screenX, screenY, paletteWidthPx,
                  paletteHeightPx, SWP_NOACTIVATE);
     if (searchScrimHwnd && IsWindow(searchScrimHwnd)) {
         RECT scrimBounds{};
@@ -340,18 +490,21 @@ void SettingsSearchPalette::renderSearchScrim(int widthPx, int heightPx, UINT dp
         return;
     const bool dark = fluent::isDarkMode();
     const bool zoomed = owner_.hwnd && IsZoomed(owner_.hwnd) != FALSE;
-    const BYTE alphaByte = searchPaletteAlphaByte();
-    if (widthPx == searchScrimLastWidth && heightPx == searchScrimLastHeight &&
-        dpi == searchScrimLastDpi && dark == searchScrimLastDark &&
-        zoomed == searchScrimLastZoomed) {
-        searchScrimRenderer.present(searchScrimHwnd, alphaByte);
-        return;
-    }
     if (!searchScrimRenderer.initialize())
         return;
     searchScrimRenderer.setDpi(dpi);
-    if (!searchScrimRenderer.bindDC(widthPx, heightPx))
+    if (!searchScrimRenderer.bind(searchScrimHwnd, widthPx, heightPx)) {
+        searchScrimLastWidth = 0;
         return;
+    }
+    searchScrimRenderer.setRootOpacity(searchPaletteProgress);
+    if (widthPx == searchScrimLastWidth && heightPx == searchScrimLastHeight &&
+        dpi == searchScrimLastDpi && dark == searchScrimLastDark &&
+        zoomed == searchScrimLastZoomed &&
+        searchScrimLastDeviceGeneration == searchScrimRenderer.deviceGeneration()) {
+        searchScrimRenderer.commit();
+        return;
+    }
     auto* target = searchScrimRenderer.renderTarget();
     if (!target)
         return;
@@ -388,14 +541,19 @@ void SettingsSearchPalette::renderSearchScrim(int widthPx, int heightPx, UINT dp
     }
     if (FAILED(target->EndDraw())) {
         searchScrimRenderer.discard();
+        searchScrimLastWidth = 0;
         return;
     }
-    if (searchScrimRenderer.present(searchScrimHwnd, alphaByte)) {
+    if (searchScrimRenderer.present()) {
+        searchScrimLastDeviceGeneration = searchScrimRenderer.deviceGeneration();
         searchScrimLastWidth = widthPx;
         searchScrimLastHeight = heightPx;
         searchScrimLastDpi = dpi;
         searchScrimLastDark = dark;
         searchScrimLastZoomed = zoomed;
+    } else {
+        searchScrimRenderer.discard();
+        searchScrimLastWidth = 0;
     }
 }
 
@@ -414,6 +572,17 @@ LRESULT CALLBACK SettingsSearchPalette::searchScrimWndProc(HWND window, UINT mes
         return DefWindowProcW(window, message, wp, lp);
 
     switch (message) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        BeginPaint(window, &paint);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    case WM_NCHITTEST:
+        // 普通合成窗口的 WS_EX_TRANSPARENT 不负责鼠标穿透。
+        return self->searchPaletteOpen ? HTCLIENT : HTTRANSPARENT;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_SETCURSOR:
@@ -449,7 +618,7 @@ bool SettingsSearchPalette::ensureSearchScrimWindow() {
     scrimClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     RegisterClassExW(&scrimClass);
 
-    searchScrimHwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+    searchScrimHwnd = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                                       L"QQMusicLyricSettingsSearchScrim", L"", WS_POPUP, 0, 0, 1, 1,
                                       owner_.hwnd, nullptr, owner_.inst, this);
     searchScrimLastWidth = 0;
@@ -873,6 +1042,7 @@ void SettingsSearchPalette::openSearchPalette() {
         return;
     ensureSearchScrimWindow();
 
+    updateSearchPaletteProgress();
     const bool wasClosing =
         !searchPaletteOpen && searchPaletteAnimating && searchPaletteProgress > 0.01f;
     if (owner_.hwnd)
@@ -904,7 +1074,10 @@ void SettingsSearchPalette::openSearchPalette() {
     searchPaletteOpen = true;
 
     layoutSearchPalette();
-    SetLayeredWindowAttributes(searchPaletteHwnd, 0, searchPaletteAlphaByte(), LWA_ALPHA);
+    // 先隐藏原表面再显示窗口，避免准备合成资源期间闪出完整面板。
+    const BOOL cloak = clientAnimations && startProgress < 0.999f;
+    DwmSetWindowAttribute(searchPaletteHwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
+    SetLayeredWindowAttributes(searchPaletteHwnd, 0, 255, LWA_ALPHA);
     if (searchScrimHwnd && IsWindow(searchScrimHwnd))
         ShowWindow(searchScrimHwnd, SW_SHOWNOACTIVATE);
     ShowWindow(searchPaletteHwnd, SW_SHOW);
@@ -914,17 +1087,16 @@ void SettingsSearchPalette::openSearchPalette() {
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     searchPaletteSurface.invalidate();
-    UpdateWindow(searchPaletteHwnd);
     SetActiveWindow(searchPaletteHwnd);
     settingsSearch.focus();
     if (clientAnimations && startProgress < 0.999f) {
-        searchPaletteAnimating = true;
-        searchPaletteAnimStartMs = GetTickCount64();
         searchPaletteAnimDurationMs =
             std::max(40.0f, kSearchPaletteOpenDurationMs * (1.0f - startProgress));
-        SetTimer(owner_.hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
-    }
-    owner_.surface.invalidate();
+        if (!startSearchPaletteAnimation())
+            finishSearchPaletteAnimation();
+    } else
+        finishSearchPaletteAnimation();
+    invalidateSearchTrigger();
 }
 
 void SettingsSearchPalette::closeSearchPalette(bool restoreOwnerFocus, bool immediate) {
@@ -946,11 +1118,12 @@ void SettingsSearchPalette::closeSearchPalette(bool restoreOwnerFocus, bool imme
             owner_.focusVisible = keepFocusVisible;
         }
         if (owner_.hwnd && IsWindow(owner_.hwnd))
-            owner_.surface.invalidate();
+            invalidateSearchTrigger();
         return;
     }
     if (!searchPaletteOpen || closingSearchPalette)
         return;
+    updateSearchPaletteProgress();
     closingSearchPalette = true;
     searchPaletteOpen = false;
     searchPaletteHoverKind = kSearchPaletteHitNone;
@@ -975,21 +1148,25 @@ void SettingsSearchPalette::closeSearchPalette(bool restoreOwnerFocus, bool imme
     if (!clientAnimations || searchPaletteProgress <= 0.02f || !owner_.hwnd) {
         finalizeSearchPaletteClosed();
     } else {
-        searchPaletteAnimating = true;
         searchPaletteAnimFrom = searchPaletteProgress;
         searchPaletteAnimTarget = 0.0f;
-        searchPaletteAnimStartMs = GetTickCount64();
         searchPaletteAnimDurationMs =
             std::max(36.0f, kSearchPaletteCloseDurationMs * searchPaletteProgress);
-        SetTimer(owner_.hwnd, kSearchPaletteAnimTimer, kNavIndicatorFrameMs, nullptr);
+        if (!startSearchPaletteAnimation())
+            finalizeSearchPaletteClosed();
     }
     if (owner_.hwnd && IsWindow(owner_.hwnd))
-        owner_.surface.invalidate();
+        invalidateSearchTrigger();
 }
 
 void SettingsSearchPalette::destroy() {
     closeSearchPalette(false, true);
     searchPaletteAnimating = false;
+    searchAnimationRenderer.releaseAll();
+    if (searchAnimationHwnd) {
+        DestroyWindow(searchAnimationHwnd);
+        searchAnimationHwnd = nullptr;
+    }
     if (searchPaletteHwnd && IsWindow(searchPaletteHwnd)) {
         DestroyWindow(searchPaletteHwnd);
         searchPaletteHwnd = nullptr;

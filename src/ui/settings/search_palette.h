@@ -6,6 +6,7 @@
 #include "ui/fluent_dialog_surface.h"
 #include "ui/lyric_renderer.h"
 #include <functional>
+#include <chrono>
 #include <utility>
 
 namespace settings_ui {
@@ -52,9 +53,11 @@ private:
                                            UINT_PTR subclassId, DWORD_PTR refData);
     void styleSearchPaletteWindow();
     static void setWindowClickThrough(HWND window, bool clickThrough);
-    BYTE searchPaletteAlphaByte() const;
-    int searchPaletteOffsetYPx(float scale) const;
-    void applySearchPaletteAnimationVisuals();
+    void updateSearchPaletteProgress();
+    bool startSearchPaletteAnimation();
+    void finishSearchPaletteAnimation();
+    static LRESULT CALLBACK animationWndProc(HWND window, UINT message, WPARAM wp, LPARAM lp);
+    void invalidateSearchTrigger();
     void finalizeSearchPaletteClosed();
     float searchPaletteDesiredHeightDip() const;
     void renderSearchScrim(int widthPx, int heightPx, UINT dpi);
@@ -73,19 +76,22 @@ private:
     int selectedSearchResult = -1;
     D2D1_RECT_F searchTriggerRect{};
     HWND searchScrimHwnd = nullptr;
-    LyricRenderer searchScrimRenderer;
+    DCompRenderer searchScrimRenderer;
+    uint64_t searchScrimLastDeviceGeneration = 0;
     int searchScrimLastWidth = 0;
     int searchScrimLastHeight = 0;
     UINT searchScrimLastDpi = 0;
     bool searchScrimLastDark = false;
     bool searchScrimLastZoomed = false;
     HWND searchPaletteHwnd = nullptr;
+    HWND searchAnimationHwnd = nullptr;
+    DCompRenderer searchAnimationRenderer;
     fluent::FluentDialogSurface searchPaletteSurface;
     bool searchPaletteOpen = false;
     bool closingSearchPalette = false;
     bool suppressNextSearchTriggerPress = false;
     bool searchPaletteAnimating = false;
-    ULONGLONG searchPaletteAnimStartMs = 0;
+    std::chrono::steady_clock::time_point searchPaletteAnimStarted{};
     float searchPaletteAnimDurationMs = kSearchPaletteOpenDurationMs;
     float searchPaletteAnimFrom = 0.0f;
     float searchPaletteAnimTarget = 0.0f;

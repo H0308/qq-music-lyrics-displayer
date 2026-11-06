@@ -89,6 +89,9 @@ public:
     // 提交交换链并经 DComposition 上屏；设备丢失返回 false，调用方走 discard。
     bool present();
 
+    // 用原生分层窗口的实时表面替换根内容，保留子控件绘制，由根视觉统一转场。
+    bool setWindowContent(HWND source);
+
     // 设备丢失：释放设备链全部对象，下次 bind() 惰性重建；保留工厂。
     void discard();
 
@@ -128,8 +131,10 @@ public:
                                     float toOpacity = 1.0f);
     void clearLyricTransitionLayers();
     // 弹出式宿主的根视觉动画：只改变合成器位移和透明度，不触发布局。
+    enum class RootAnimationCurve { SmoothStep, EaseOutQuadratic, EaseOutCubic };
     bool animateRoot(float fromX, float toX, float fromY, float toY,
-                     float fromOpacity, float toOpacity, float durationSec);
+                     float fromOpacity, float toOpacity, float durationSec,
+                     RootAnimationCurve curve = RootAnimationCurve::SmoothStep);
     void resetRoot();
     // 直接设置根视觉透明度（取消其上的透明度动画），不改变位移。
     void setRootOpacity(float opacity);

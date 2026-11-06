@@ -580,6 +580,18 @@ bool DCompRenderer::bind(HWND hwnd, int width, int height) {
     return true;
 }
 
+bool DCompRenderer::setWindowContent(HWND source) {
+    if (!dcomp_ || !visual_ || !source)
+        return false;
+    IUnknown* content = nullptr;
+    HRESULT hr = dcomp_->CreateSurfaceFromHwnd(source, &content);
+    if (SUCCEEDED(hr))
+        hr = visual_->SetContent(content);
+    if (content)
+        content->Release();
+    return SUCCEEDED(hr);
+}
+
 bool DCompRenderer::present() {
     if (!swapchain_)
         return false;
@@ -1087,11 +1099,22 @@ bool DCompRenderer::animateLyricLayerClipSlide(int index, float offsetX, float f
 }
 
 bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
-                                float fromOpacity, float toOpacity, float durationSec) {
+                                float fromOpacity, float toOpacity, float durationSec,
+                                RootAnimationCurve curve) {
     if (!dcomp_ || !visual_ || !rootOpacity_ || durationSec <= 0.0f)
         return false;
 
     const double duration = static_cast<double>(durationSec);
+    auto addSegment = [&](IDCompositionAnimation* animation, float from, float to) {
+        if (curve == RootAnimationCurve::SmoothStep)
+            return addSmoothStep(animation, 0.0, duration, from, to);
+        const double delta = static_cast<double>(to) - from;
+        const bool cubic = curve == RootAnimationCurve::EaseOutCubic;
+        return SUCCEEDED(animation->AddCubic(
+            0.0, from, static_cast<float>((cubic ? 3.0 : 2.0) * delta / duration),
+            static_cast<float>(-(cubic ? 3.0 : 1.0) * delta / (duration * duration)),
+            cubic ? static_cast<float>(delta / (duration * duration * duration)) : 0.0f));
+    };
     IDCompositionAnimation* xAnim = nullptr;
     IDCompositionAnimation* yAnim = nullptr;
     IDCompositionAnimation* opacityAnim = nullptr;
@@ -1101,11 +1124,11 @@ bool DCompRenderer::animateRoot(float fromX, float toX, float fromY, float toY,
     if (SUCCEEDED(hr))
         hr = dcomp_->CreateAnimation(&opacityAnim);
     if (SUCCEEDED(hr))
-        hr = addSmoothStep(xAnim, 0.0, duration, fromX, toX) ? S_OK : E_FAIL;
+        hr = addSegment(xAnim, fromX, toX) ? S_OK : E_FAIL;
     if (SUCCEEDED(hr))
-        hr = addSmoothStep(yAnim, 0.0, duration, fromY, toY) ? S_OK : E_FAIL;
+        hr = addSegment(yAnim, fromY, toY) ? S_OK : E_FAIL;
     if (SUCCEEDED(hr))
-        hr = addSmoothStep(opacityAnim, 0.0, duration, fromOpacity, toOpacity) ? S_OK : E_FAIL;
+        hr = addSegment(opacityAnim, fromOpacity, toOpacity) ? S_OK : E_FAIL;
     if (SUCCEEDED(hr))
         hr = xAnim->End(duration, toX);
     if (SUCCEEDED(hr))
