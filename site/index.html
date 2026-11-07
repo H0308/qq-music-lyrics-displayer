@@ -4,9 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>QQ 音乐 / 网易云任务栏歌词 — 把歌词嵌入 Windows 任务栏</title>
-  <meta name="description" content="把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏：逐字高亮与歌词特效、播放控制、音频频谱、资源监视、每日一言，支持字号建议与小任务栏自动适配。C++ 原生实现，无 Electron。">
+  <meta name="description" content="把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏：逐字高亮与歌词特效、播放控制、音频频谱、资源监视、每日一言，支持字号建议与小任务栏自动适配。C++ 原生实现，无 Electron、WebView 和 .NET/WPF 运行时，秉持工具软件应尽可能少占内存的原则。">
   <meta property="og:title" content="QQ 音乐 / 网易云任务栏歌词">
-  <meta property="og:description" content="把歌词嵌入 Windows 任务栏：逐字跟唱、流星粒子拖尾、音频频谱、资源监视与小任务栏自动适配。C++ 原生实现，无 Electron。">
+  <meta property="og:description" content="把歌词嵌入 Windows 任务栏：逐字跟唱、流星粒子拖尾、音频频谱、资源监视与小任务栏自动适配。C++ 原生实现，无 Electron、WebView 和 .NET/WPF 运行时，秉持工具软件应尽可能少占内存的原则。">
   <meta property="og:type" content="website">
   <meta property="og:image" content="assets/img/social-preview.png">
   <link rel="icon" type="image/png" href="assets/img/logo.png">
@@ -75,7 +75,7 @@
         <h1>把歌词嵌入<br><span class="accent">Windows 任务栏</span></h1>
         <p class="hero-sub">
           QQ 音乐、网易云音乐双平台自动识别，滚动歌词、逐字高亮、播放控制、音频频谱、每日一言<br>
-          C++ 原生实现，无 Electron
+          C++ 原生实现，无 Electron、WebView 和 .NET/WPF 运行时
         </p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">Github 下载</a>
@@ -93,7 +93,7 @@
     <!-- 亮点条 -->
     <section class="highlights">
       <div class="container highlights-grid">
-        <div class="hl reveal"><strong>C++ 原生</strong><span>无 Electron，日常使用占用内存20~80MB</span></div>
+        <div class="hl reveal"><strong>C++ 原生</strong><span>无 Electron、WebView 和 .NET/WPF 运行时，日常使用占用内存20~80MB</span></div>
         <div class="hl reveal"><strong>双平台</strong><span>QQ 音乐 / 网易云自动识别切换</span></div>
         <div class="hl reveal"><strong>逐字高亮</strong><span>逐字时间轴按像素进度平滑填充</span></div>
         <div class="hl reveal"><strong>音频频谱</strong><span>进程级回环捕获，跟随QQ/网易云音乐播放器跳动，不会识别其他媒体软件</span></div>
@@ -267,7 +267,7 @@
     <section class="cta" id="download">
       <div class="container reveal">
         <h2>免费、开源、原生</h2>
-        <p>Apache-2.0 许可证 · 无广告 · 无 Electron</p>
+        <p>Apache-2.0 许可证 · 无广告 · 无 Electron / WebView / .NET</p>
         <a class="btn btn-primary" href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest" target="_blank" rel="noopener">立即下载</a>
       </div>
     </section>
