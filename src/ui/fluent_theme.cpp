@@ -35,6 +35,7 @@ constexpr int kDwmWcpRound = 2;      // DWMWCP_ROUND
 constexpr int kDwmWcpRoundSmall = 3; // DWMWCP_ROUNDSMALL
 constexpr int kDwmsbtNone = 1;       // DWMSBT_NONE
 constexpr int kDwmsbtMainWindow = 2; // Windows 11 Mica
+constexpr int kDwmsbtTransientWindow = 3; // Windows 11 Desktop Acrylic
 
 std::atomic<ThemeMode> gTaskbarThemeMode{ThemeMode::FollowSystem};
 std::atomic<ThemeMode> gWindowThemeMode{ThemeMode::FollowApp};
@@ -320,6 +321,20 @@ void clearBackdrop(HWND hwnd) {
 void applyDarkCaption(HWND hwnd, bool dark) {
     BOOL value = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &value, sizeof(value));
+}
+
+bool applyAcrylicBackdrop(HWND hwnd) {
+    applyRoundCorners(hwnd);
+    applyDarkCaption(hwnd, isDarkMode(ThemeTarget::Window));
+    const int type = kDwmsbtTransientWindow;
+    if (FAILED(DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &type, sizeof(type))))
+        return false;
+    const MARGINS margins{-1, -1, -1, -1};
+    if (FAILED(DwmExtendFrameIntoClientArea(hwnd, &margins))) {
+        clearBackdrop(hwnd);
+        return false;
+    }
+    return true;
 }
 
 void applyBorderColor(HWND hwnd, COLORREF color) {
