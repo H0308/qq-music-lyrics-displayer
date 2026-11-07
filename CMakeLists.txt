@@ -197,13 +197,67 @@ target_link_libraries(QQMusicLyric PRIVATE
 
 if(BUILD_TESTING)
     add_executable(QQMusicLyricParserTests
+        tests/test_main.cpp
         tests/lrc_parser_tests.cpp
+        tests/settings_logic_tests.cpp
+        tests/transition_and_state_tests.cpp
+        tests/layout_and_sections_tests.cpp
+        tests/playback_and_presentation_tests.cpp
+        src/app/presentation_model.cpp
+        src/graphics/gdiplus_runtime.cpp
+        src/graphics/pixel_luminance.cpp
+        src/logging/runtime_logger.cpp
+        src/lyric/cover_provider.cpp
         src/lyric/lrc_parser.cpp
+        src/lyric/lyric_provider.cpp
+        src/lyric/qrc_decoder.cpp
+        src/lyric/qrc_des.cpp
+        src/media/playback_controller.cpp
+        src/media/track_identity.cpp
+        src/settings/app_settings.cpp
+        src/settings/display_rules.cpp
+        src/settings/settings_store.cpp
+        src/settings/taskbar_appearance.cpp
+        src/ui/fluent_theme.cpp
+        src/ui/media_popup/page_layout.cpp
+        src/ui/settings/lyric_section.cpp
+        src/ui/settings/search_model.cpp
+        src/ui/settings/sections_commands.cpp
+        src/ui/settings/sections_create.cpp
+        src/ui/settings/sections_state.cpp
+        src/ui/settings/spectrum_section.cpp
+        src/ui/taskbar/interaction.cpp
+        src/ui/taskbar/karaoke_tracker.cpp
+        src/ui/taskbar/layout.cpp
+        src/ui/taskbar/placement.cpp
+        src/ui/taskbar/scene_transition.cpp
+        src/ui/taskbar/text_scroll.cpp
+        src/ui/taskbar/vinyl_animation.cpp
+        src/ui/taskbar/word_wave_renderer.cpp
+        src/util/base64.cpp
+        src/util/dominant_color.cpp
     )
     target_include_directories(QQMusicLyricParserTests PRIVATE src)
     target_compile_definitions(QQMusicLyricParserTests PRIVATE
         UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00)
     target_compile_options(QQMusicLyricParserTests PRIVATE /utf-8 /EHsc)
+    target_link_libraries(QQMusicLyricParserTests PRIVATE
+        CURL::libcurl
+        nlohmann_json::nlohmann_json
+        ZLIB::ZLIB
+        windowsapp
+        d2d1
+        dwrite
+        dwmapi
+        gdiplus
+        user32
+        gdi32
+        shell32
+        ole32
+        advapi32
+        pdh
+        psapi
+    )
     add_test(NAME QQMusicLyricParserTests COMMAND QQMusicLyricParserTests)
 endif()
 

@@ -140,6 +140,10 @@ jobs:
         shell: pwsh
         run: cmake --build --preset windows-msvc-release
 
+      - name: Run tests
+        shell: pwsh
+        run: ctest --test-dir build/windows-msvc-release --output-on-failure
+
       - name: Verify Release executable
         shell: pwsh
         run: |
