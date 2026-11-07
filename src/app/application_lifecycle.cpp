@@ -2,6 +2,9 @@
 #include "app/application.h"
 #include "graphics/gdiplus_runtime.h"
 #include "logging/ui_timing.h"
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 namespace lyrics_app {
 App::~App() {
     startupUpdateCheck_.reset();
@@ -99,6 +102,8 @@ void App::dispatchThreadMessage(const MSG& msg) {
     } else if (msg.message == kMsgTickTickTaskCompleteReady) {
         idle_.onTickTickTaskCompleteReady(std::unique_ptr<TickTickTaskCompletePayload>(
             reinterpret_cast<TickTickTaskCompletePayload*>(msg.lParam)));
+    } else if (msg.message == kMsgRequestQuit) {
+        requestQuit();
     }
 }
 
@@ -127,6 +132,13 @@ void App::finish() {
     destroyTray();
     runtimeLogger_.write(L"[lifecycle] message loop ended");
     runtimeLogger_.flushSync();
+}
+
+void App::requestQuitAsync() const noexcept {
+    if (const HWND hwnd = trayHwnd)
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+    if (mainThread != 0)
+        PostThreadMessageW(mainThread, kMsgRequestQuit, 0, 0);
 }
 
 int App::messageLoop() {
@@ -213,6 +225,78 @@ bool App::initialize(HINSTANCE inst, bool wantTaskbar) {
 }
 
 namespace {
+struct ConsoleQuitBridge {
+    std::mutex mutex;
+    std::condition_variable cv;
+    const App* app = nullptr;
+    bool finished = false;
+
+    void bind(const App* instance) {
+        std::lock_guard<std::mutex> lock(mutex);
+        app = instance;
+        finished = false;
+    }
+
+    void notifyFinished() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            app = nullptr;
+            finished = true;
+        }
+        cv.notify_all();
+    }
+
+    void requestQuitAndWait(DWORD ctrlType) {
+        runtime_log::writef(L"[lifecycle] console ctrl event=%lu",
+                            static_cast<unsigned long>(ctrlType));
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (finished || !app)
+                return;
+            app->requestQuitAsync();
+        }
+
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait_for(lock, std::chrono::seconds(4), [this] { return finished; });
+    }
+};
+
+ConsoleQuitBridge& consoleQuitBridge() {
+    static ConsoleQuitBridge bridge;
+    return bridge;
+}
+
+BOOL WINAPI onConsoleCtrlEvent(DWORD ctrlType) {
+    switch (ctrlType) {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        consoleQuitBridge().requestQuitAndWait(ctrlType);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+
+struct ConsoleCtrlGuard {
+    void bind(const App& app) {
+        consoleQuitBridge().bind(&app);
+        SetConsoleCtrlHandler(onConsoleCtrlEvent, TRUE);
+        registered = true;
+    }
+    ~ConsoleCtrlGuard() {
+        if (!registered)
+            return;
+        consoleQuitBridge().notifyFinished();
+        SetConsoleCtrlHandler(onConsoleCtrlEvent, FALSE);
+    }
+
+private:
+    bool registered = false;
+};
+
 struct StartupOptions {
     bool valid = true;
     bool verifyRelease = false;
@@ -307,9 +391,11 @@ int runApplication() {
     winrt::init_apartment();
     graphics::gdiplusStatus();
 
+    ConsoleCtrlGuard consoleCtrlGuard;
     App app;
     if (!app.initialize(GetModuleHandleW(nullptr), options.wantTaskbar))
         return 1;
+    consoleCtrlGuard.bind(app);
     const int exitCode = app.messageLoop();
     app.finish();
     return exitCode;

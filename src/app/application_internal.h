@@ -180,6 +180,7 @@ public:
     bool initialize(HINSTANCE inst, bool wantTaskbar);
     int messageLoop();
     void finish();
+    void requestQuitAsync() const noexcept;
 
 private:
     void dispatchThreadMessage(const MSG& msg);
