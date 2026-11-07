@@ -69,9 +69,18 @@ void LyricEffectsRenderer::syncLyricEffectClock(int64_t position, bool playing, 
 }
 
 bool LyricEffectsRenderer::lyricEffectsAnimating() const {
-    if (context_.effects == 0 || !context_.animations || context_.minimal || context_.stopped ||
+    if (context_.effects == 0 || !context_.lines || !context_.animations || context_.minimal || context_.stopped ||
         context_.scene != DisplayScene::Lyrics || context_.currentLine < 0)
         return false;
+    const auto otherEffects = context_.effects & ~lyricEffectBit(LyricEffect::WordWave);
+    const bool wave = wordWaveEnabled(context_.currentLine);
+    if (otherEffects == 0) {
+        return context_.playing && wave &&
+               WordWaveRenderer::animating((*context_.lines)[context_.currentLine], context_.positionMs);
+    }
+    if (context_.playing && wave &&
+        WordWaveRenderer::animating((*context_.lines)[context_.currentLine], context_.positionMs))
+        return true;
     // 暂停后继续画到所有短尾迹消散，末帧由 tick 主动失效刷新。
     if (!context_.playing)
         return lyricFxPauseMs_ != 0 && monotonicNowMs() - lyricFxPauseMs_ <= 700;
@@ -89,9 +98,30 @@ bool LyricEffectsRenderer::lyricEffectsAnimating() const {
 }
 
 void LyricEffectsRenderer::clearLyricEffectGeometry() {
+    wordWave_.clear();
     lyricFxGeometry_.clear();
     for (auto& source : lyricFxSources_)
         source = {};
+}
+
+bool LyricEffectsRenderer::wordWaveEnabled(int lineIndex) const {
+    return lineIndex == context_.currentLine && lineIndex >= 0 && context_.lines &&
+           static_cast<size_t>(lineIndex) < context_.lines->size() &&
+           !(*context_.lines)[lineIndex].chars.empty() &&
+           !context_.vertical && context_.compactHeight <= 0.0f &&
+           context_.animations && !context_.minimal && !context_.stopped &&
+           context_.scene == DisplayScene::Lyrics && lyricEffectEnabled(LyricEffect::WordWave) &&
+           !lyricEffectEnabled(LyricEffect::Stardust);
+}
+
+bool LyricEffectsRenderer::prepareWordWave(IDWriteTextLayout* layout, int lineIndex) {
+    return wordWaveEnabled(lineIndex) && layout == context_.currentLayout &&
+           wordWave_.prepare(layout, lineIndex, (*context_.lines)[lineIndex],
+                             context_.positionMs, context_.fontSize);
+}
+
+void LyricEffectsRenderer::drawWordWaveText(D2D1_POINT_2F origin, ID2D1Brush* brush) const {
+    wordWave_.draw(drawTarget(), origin, brush);
 }
 
 bool LyricEffectsRenderer::lyricStarEnabled(int lineIndex) const {
@@ -245,7 +275,8 @@ void LyricEffectsRenderer::drawLyricOverlay(IDWriteTextLayout* layout, int lineI
                                             float opacity, float progress, bool foreground,
                                             float rangeStart, float rangeSize) {
     auto* rt = drawTarget();
-    if (!foreground || !rt || !layout || !brushLyricFx_.Get() || context_.effects == 0 ||
+    if (!foreground || !rt || !layout || !brushLyricFx_.Get() ||
+        (context_.effects & ~lyricEffectBit(LyricEffect::WordWave)) == 0 ||
         !context_.animations || context_.minimal || context_.stopped ||
         context_.scene != DisplayScene::Lyrics || lineIndex < 0 ||
         static_cast<size_t>(lineIndex) >= (*context_.lines).size() || width <= 0 || height <= 0 ||
@@ -384,7 +415,15 @@ void LyricEffectsRenderer::drawLyricOverlay(IDWriteTextLayout* layout, int lineI
         const float elapsed = static_cast<float>(context_.positionMs - token.startMs);
         if (lyricEffectEnabled(LyricEffect::Ripple) && token.startMs >= lyricFxEmitFromMs_ &&
             elapsed + pauseAge < 420) {
-            const auto center = D2D1::Point2F(x + origin.center.x, y + origin.center.y);
+            const LyricChar timing{token.startMs, token.endMs, {}};
+            const float waveY = !vertical && wordWaveEnabled(lineIndex)
+                                    ? WordWaveRenderer::offset(timing, line.ms,
+                                                              context_.positionMs, context_.fontSize) +
+                                      WordWaveRenderer::lineOffset(line.ms,
+                                          WordWaveRenderer::endTime(line), context_.positionMs,
+                                          context_.fontSize, origin.center.x / width)
+                                    : 0.0f;
+            const auto center = D2D1::Point2F(x + origin.center.x, y + origin.center.y + waveY);
             const float t = (elapsed + pauseAge) / 420.0f;
             color((1.0f - t) * 0.78f);
             const float radius = 2.0f + t * std::min(8.0f, context_.fontSize * 0.36f);
@@ -411,7 +450,9 @@ void LyricEffectsRenderer::drawLyricOverlay(IDWriteTextLayout* layout, int lineI
     if (hasTiming && lyricEffectEnabled(LyricEffect::FollowLight) &&
         context_.positionMs < line.chars.back().endMs && progress > rangeStart &&
         progress <= rangeStart + rangeSize && liveAlpha > 0 && brushLyricFollow_.Get()) {
-        ensureLyricGlyphMask(layout, geometry);
+        const bool wave = !vertical && prepareWordWave(layout, lineIndex);
+        if (!wave)
+            ensureLyricGlyphMask(layout, geometry);
         const float axis = vertical ? y + localProgress * height : x + localProgress * width;
         const float halfWidth = std::clamp(context_.fontSize * 0.65f, 7.0f, 18.0f);
         brushLyricFollow_->SetStartPoint(vertical ? D2D1::Point2F(x, axis - halfWidth)
@@ -420,7 +461,9 @@ void LyricEffectsRenderer::drawLyricOverlay(IDWriteTextLayout* layout, int lineI
                                                 : D2D1::Point2F(axis + halfWidth, y));
         const float previous = brushLyricFollow_->GetOpacity();
         brushLyricFollow_->SetOpacity(liveAlpha * opacity);
-        if (geometry.glyphMask.Get()) {
+        if (wave) {
+            drawWordWaveText(D2D1::Point2F(x, y), brushLyricFollow_.Get());
+        } else if (geometry.glyphMask.Get()) {
             const auto destination = D2D1::RectF(x, y, x + width, y + height);
             const auto source = D2D1::RectF(0, 0, width, height);
             const auto antialias = rt->GetAntialiasMode();

@@ -144,6 +144,7 @@ inline settings_icon::Kind iconForRow(int id) {
     case kIdLyricEffectFirst + 1:
     case kIdLyricEffectFirst + 2:
     case kIdLyricEffectFirst + 3:
+    case kIdLyricEffectFirst + 4:
         return settings_icon::Kind::Lyrics;
     case kIdSongToast:
     case kIdSongToastPreview:

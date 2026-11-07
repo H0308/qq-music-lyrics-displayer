@@ -109,11 +109,8 @@ void App::applySpectrumEffect(int effect, bool on) {
 void App::applyLyricEffect(int effect, bool on) {
     if (effect < 0 || effect >= kLyricEffectCount)
         return;
-    const uint32_t bit = 1u << effect;
-    if (on)
-        settings_.lyricEffects_ |= bit;
-    else
-        settings_.lyricEffects_ &= ~bit;
+    settings_.lyricEffects_ = withLyricEffect(settings_.lyricEffects_,
+                                             static_cast<LyricEffect>(effect), on);
     if (on && effect == static_cast<int>(LyricEffect::Stardust) &&
         display_rules::resolveLyricConflict(settings_, display_rules::LyricPriority::Effects))
         logSettingBool(L"secondary-lyrics", false);

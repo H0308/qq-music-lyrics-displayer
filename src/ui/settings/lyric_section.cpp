@@ -19,16 +19,20 @@ std::vector<Row> createLyricRows(const SettingsState& state) {
     builder.addToggle(kIdFollowAlbum, L"歌词已播放颜色跟随专辑", state.followAlbum);
     builder.addHeader(L"歌词特效");
     const wchar_t* lyricEffectNames[kLyricEffectCount] = {L"星尘跟唱", L"跟唱流光", L"笔触下划线",
-                                                          L"字间涟漪"};
+                                                          L"字间涟漪", L"逐字浮波"};
     for (int i = 0; i < kLyricEffectCount; ++i) {
         Row& effect = builder.addRow(
             kIdLyricEffectFirst + i, ControlKind::Toggle, lyricEffectNames[i],
             i == 0
-                ? L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。"
-                : L"需要逐字歌词，仅作用于当前演唱行。",
+                ? L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与逐字浮波及翻译/罗马音互斥。"
+                : i == static_cast<int>(LyricEffect::WordWave)
+                    ? L"支持单行和双行逐字歌词，整行长波轻柔起伏，逐字下沉后缓慢浮起；与星尘跟唱互斥。"
+                    : L"需要逐字歌词，仅作用于当前演唱行。",
             40.0f, kRowTallH);
         effect.checked = (state.lyricEffects & (1u << i)) != 0;
         effect.enabled = !minimal && (i != 0 || vertical || !state.doubleLineLyrics);
+        if (i == static_cast<int>(LyricEffect::WordWave))
+            effect.enabled = !minimal && !vertical && !state.compactTaskbar;
     }
     builder.addHeader(L"翻译与罗马音");
     builder.addToggle(kIdSecondaryOn, L"开启翻译/罗马音", vertical ? false : state.secondaryEnabled)
@@ -75,6 +79,8 @@ void updateLyricRows(std::vector<Row>& rows, const SettingsState& s) {
         if (auto* row = findRow(kIdLyricEffectFirst + i)) {
             row->checked = (s.lyricEffects & (1u << i)) != 0;
             row->enabled = !minimal && (i != 0 || vertical || !s.doubleLineLyrics);
+            if (i == static_cast<int>(LyricEffect::WordWave))
+                row->enabled = !minimal && !vertical && !s.compactTaskbar;
         }
     }
     if (auto* row = findRow(kIdAlignment)) {
@@ -132,7 +138,7 @@ void updateCompactLyricRows(std::vector<Row>& rows, const SettingsState& state) 
         row->hint =
             state.compactTaskbar
                 ? compactHint
-                : L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与翻译/罗马音互斥。";
+                : L"仅单行逐字歌词生效，歌词下沉、星星跳动旋转并带流星粒子拖尾；与逐字浮波及翻译/罗马音互斥。";
         if (state.compactTaskbar)
             row->enabled = false;
     }
@@ -146,7 +152,6 @@ bool handleLyricCommand(int id, Row& value, std::vector<Row>& rows, SettingsStat
                         const SettingsActions& actions) {
     Row* row = &value;
     auto findRow = [&](int rowId) { return settings_ui::findRow(rows, rowId); };
-    const bool minimal = state.renderMode == kRenderModeMinimal;
     switch (id) {
     case kIdFontColor:
         if (actions.onFontColorEffect)
@@ -161,14 +166,18 @@ bool handleLyricCommand(int id, Row& value, std::vector<Row>& rows, SettingsStat
     case kIdLyricEffectFirst + 1:
     case kIdLyricEffectFirst + 2:
     case kIdLyricEffectFirst + 3:
+    case kIdLyricEffectFirst + 4:
         row->checked = !row->checked;
+        state.lyricEffects = withLyricEffect(state.lyricEffects,
+            static_cast<LyricEffect>(row->id - kIdLyricEffectFirst), row->checked);
+        updateLyricRows(rows, state);
         if (actions.onLyricEffect)
             actions.onLyricEffect(row->id - kIdLyricEffectFirst, row->checked);
         break;
     case kIdDoubleLine:
         row->checked = !row->checked;
-        if (auto* stardust = findRow(kIdLyricEffectFirst))
-            stardust->enabled = !row->checked && !minimal;
+        state.doubleLineLyrics = row->checked;
+        updateLyricRows(rows, state);
         if (actions.onDoubleLineLyrics)
             actions.onDoubleLineLyrics(row->checked);
         break;

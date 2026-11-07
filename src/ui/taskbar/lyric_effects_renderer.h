@@ -4,6 +4,7 @@
 #include "ui/lyric_effects.h"
 #include "ui/lyric_star.h"
 #include "ui/taskbar/animation_clock.h"
+#include "ui/taskbar/word_wave_renderer.h"
 #include <d2d1_1.h>
 #include <dwrite.h>
 #include <wrl/client.h>
@@ -84,6 +85,9 @@ public:
     bool lyricEffectsAnimating() const;
     void clearLyricEffectGeometry();
     bool lyricStarEnabled(int lineIndex) const;
+    bool wordWaveEnabled(int lineIndex) const;
+    bool prepareWordWave(IDWriteTextLayout* layout, int lineIndex);
+    void drawWordWaveText(D2D1_POINT_2F origin, ID2D1Brush* brush) const;
     const std::vector<LyricFxToken>& lyricEffectTokens(int lineIndex);
     float lyricEffectProgress(int lineIndex);
     LyricFxGeometry& lyricEffectGeometry(IDWriteTextLayout* layout, int lineIndex, float width,
@@ -109,6 +113,7 @@ private:
     std::array<LyricFxSource, 2> lyricFxSources_{};
     std::unordered_map<const IDWriteTextLayout*, std::unique_ptr<LyricFxGeometry>> lyricFxGeometry_;
     LyricStarShape lyricStar_;
+    WordWaveRenderer wordWave_;
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brushLyricFx_;
     Microsoft::WRL::ComPtr<ID2D1LinearGradientBrush> brushLyricFollow_;
 };

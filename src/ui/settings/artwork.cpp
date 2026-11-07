@@ -313,7 +313,18 @@ void SettingsArtwork::drawLyricEffectArtwork(fluent::FluentDialogSurface::Painte
             rt->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(cx, cy), 12, 12), brush, 1.0f);
         }
     }
-    painter.drawText(L"听见音乐", format, textRect, tone(p.accent, 0.82f));
+    if (effect == LyricEffect::WordWave) {
+        const wchar_t* letters[] = {L"听", L"见", L"音", L"乐"};
+        const float offsets[] = {0.2f, 1.0f, 1.5f, 0.5f};
+        for (int i = 0; i < 4; ++i) {
+            const float left = cx - 28.0f + i * 14.0f;
+            painter.drawText(letters[i], format,
+                D2D1::RectF(left, textRect.top + offsets[i], left + 14.0f,
+                            textRect.bottom + offsets[i]), tone(p.accent, 0.82f));
+        }
+    } else {
+        painter.drawText(L"听见音乐", format, textRect, tone(p.accent, 0.82f));
+    }
     if (effect == LyricEffect::FollowLight) {
         rt->PushAxisAlignedClip(D2D1::RectF(cx - 8, panel.top, cx + 8, panel.bottom),
                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);

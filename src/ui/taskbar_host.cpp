@@ -5384,8 +5384,11 @@ struct TaskbarHost::Impl : std::enable_shared_from_this<TaskbarHost::Impl> {
         const float starPad =
             lyricStarEnabled(effectLine) ? lyricStarRadius() * 2.0f + 10.0f : 0.0f;
         const float textShift = lyricStarTextShift(layout);
+        lyricEffectsRenderer_.setContext(lyricEffectsContext(rt));
+        const float wavePad = lyricEffectsRenderer_.wordWaveEnabled(effectLine) ? 2.0f : 0.0f;
         const D2D1_RECT_F safeClip =
-            D2D1::RectF(x, y - starPad, x + areaW + kTextPadding, y + textH + textShift);
+            D2D1::RectF(x, y - starPad - wavePad, x + areaW + kTextPadding,
+                         y + textH + textShift + wavePad);
         rt->PushAxisAlignedClip(safeClip, D2D1_ANTIALIAS_MODE_ALIASED);
         // visibleW 是转场期间可见的文本坐标宽度；缩放轴与歌词的实际居中锚点
         // 保持一致，避免新旧两句在入场时发生横向漂移。

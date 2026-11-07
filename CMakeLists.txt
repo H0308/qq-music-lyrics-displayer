@@ -82,6 +82,7 @@ add_executable(QQMusicLyric
     src/ui/taskbar/placement.cpp
     src/ui/taskbar/appbar_registration.cpp
     src/ui/taskbar/lyric_effects_renderer.cpp
+    src/ui/taskbar/word_wave_renderer.cpp
     src/ui/taskbar/lyric_typesetter.cpp
     src/ui/taskbar/vinyl_animation.cpp
     src/app/application_dialogs.cpp

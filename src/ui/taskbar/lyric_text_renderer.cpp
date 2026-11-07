@@ -132,6 +132,10 @@ void LyricTextRenderer::drawScrollingText(const LyricTextDrawContext& context,
     auto* rt = context.target;
     if (!rt || !layout || areaW <= 0.0f)
         return;
+    const int effectLine = layout == (*context.resources).lyricLayout_.Get() ? context.currentLine
+                           : layout == (*context.resources).outgoingLyricLayout_.Get()
+                               ? context.outgoingLine : -1;
+    const bool wave = context.effects.prepareWordWave(layout, effectLine);
     y += context.starTextShift;
     opacity = std::clamp(opacity, 0.0f, 1.0f);
     if (opacity >= 0.999f)
@@ -139,7 +143,7 @@ void LyricTextRenderer::drawScrollingText(const LyricTextDrawContext& context,
     // 光晕/描边走离屏缓存：三层合成一次，之后滚动/淡变只 DrawImage；
     // 失败时 fxBmp 为空，回落到逐层直接绘制
     ID2D1Bitmap* fxBmp = nullptr;
-    if (glow || outline)
+    if ((glow || outline) && !wave)
         fxBmp = textFxBitmap(context, layout, textW, textH, brush, outline, glow);
     ID2D1Brush* brushes[4] = {fxBmp ? nullptr : brush, fxBmp ? nullptr : outline,
                               fxBmp ? nullptr : glow, karaokeBrush};
@@ -174,15 +178,13 @@ void LyricTextRenderer::drawScrollingText(const LyricTextDrawContext& context,
         (textW > areaW && leftScrolled > 0.0f && lyricEdgeFadeLayer_.Get())
             ? lyricEdgeFadeBrush(context, x, leftFadeW, leftScrolled)
             : nullptr;
-    const int effectLine = layout == (*context.resources).lyricLayout_.Get() ? context.currentLine
-                           : layout == (*context.resources).outgoingLyricLayout_.Get()
-                               ? context.outgoingLine
-                               : -1;
     const float effectTopPad =
         context.effects.lyricStarEnabled(effectLine)
             ? LyricEffectsRenderer::starRadius(context.fontSize) * 2.0f + 10.0f
             : 0.0f;
-    D2D1_RECT_F clip{x, y - effectTopPad, x + areaW + (rightFade ? rightExtend : 0.0f), y + textH};
+    const float wavePad = wave ? 2.0f : 0.0f;
+    D2D1_RECT_F clip{x, y - effectTopPad - wavePad,
+                    x + areaW + (rightFade ? rightExtend : 0.0f), y + textH + wavePad};
     if (rightFade) {
         rt->PushLayer(D2D1::LayerParameters1(clip, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
                                              D2D1::Matrix3x2F::Identity(), 1.0f, rightFade),
@@ -236,6 +238,12 @@ void LyricTextRenderer::drawScrollingText(const LyricTextDrawContext& context,
                                              opacity, effectProgress, foreground);
     };
     drawOverlay(false);
+    auto drawText = [&](D2D1_POINT_2F origin, ID2D1Brush* drawBrush) {
+        if (wave)
+            context.effects.drawWordWaveText(origin, drawBrush);
+        else
+            rt->DrawTextLayout(origin, layout, drawBrush);
+    };
     if (fxBmp) {
         constexpr float textFxPad = 3.0f;
         const float textFxW = textW + textFxPad * 2.0f;
@@ -250,24 +258,23 @@ void LyricTextRenderer::drawScrollingText(const LyricTextDrawContext& context,
             for (int i = 0; i < n; ++i) {
                 if (glow) {
                     for (auto& d : kDirs)
-                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f),
-                                           layout, glow);
+                        drawText(D2D1::Point2F(bases[i] + d[0] * 2.4f, y + d[1] * 2.4f), glow);
                 }
                 if (outline) {
                     for (auto& d : kDirs)
-                        rt->DrawTextLayout(D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f),
-                                           layout, outline);
+                        drawText(D2D1::Point2F(bases[i] + d[0] * 1.2f, y + d[1] * 1.2f), outline);
                 }
             }
         }
         for (int i = 0; i < n; ++i)
-            rt->DrawTextLayout(D2D1::Point2F(bases[i], y), layout, brush);
+            drawText(D2D1::Point2F(bases[i], y), brush);
     }
     // 逐字高亮层：裁剪到填充进度
     if (karaokeBrush && karaokeX > 0.0f) {
-        rt->PushAxisAlignedClip(D2D1::RectF(bases[0], y, bases[0] + karaokeX, y + textH),
+        rt->PushAxisAlignedClip(D2D1::RectF(bases[0], y - wavePad, bases[0] + karaokeX,
+                                          y + textH + wavePad),
                                 D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        rt->DrawTextLayout(D2D1::Point2F(bases[0], y), layout, karaokeBrush);
+        drawText(D2D1::Point2F(bases[0], y), karaokeBrush);
         rt->PopAxisAlignedClip();
     }
     drawOverlay(true);
