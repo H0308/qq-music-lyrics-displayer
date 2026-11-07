@@ -1,7 +1,7 @@
 <div align="center">
    <img src="asset/logo-dark.png" width="96" alt="logo">
    <h1>QQ 音乐/网易云任务栏歌词</h1>
-   <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏——滚动歌词、每日一言、逐字高亮、播放控制、音频频谱，支持Windows 11任务栏上、下、左、右四边布局，程序本体为 C++ 原生实现，无 Electron</p>
+   <p>把 QQ 音乐和网易云音乐的歌词嵌入 Windows 10/11 任务栏——滚动歌词、每日一言、逐字高亮、播放控制、音频频谱，支持Windows 11任务栏上、下、左、右四边布局，程序本体为 C++ 原生实现，无 Electron、WebView 和 .NET/WPF 运行时，秉持工具软件应尽可能少占内存的原则</p>
    <p>
       <a href="https://github.com/H0308/qq-music-lyrics-displayer/releases/latest"><img src="https://img.shields.io/github/v/release/H0308/qq-music-lyrics-displayer?display_name=tag&amp;sort=semver" alt="最新版本"></a>
       <a href="https://github.com/H0308/qq-music-lyrics-displayer/actions/workflows/build-and-release.yml"><img src="https://github.com/H0308/qq-music-lyrics-displayer/actions/workflows/build-and-release.yml/badge.svg?branch=main" alt="构建状态"></a>
