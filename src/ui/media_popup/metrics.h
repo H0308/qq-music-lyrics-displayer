@@ -6,10 +6,10 @@ inline constexpr float kPopupHeightDip = 208.0f;
 // 每日一言 + 快速启动组合面板与播放中的媒体控件卡片保持同一外层高度。
 inline constexpr float kIdlePopupHeightDip = kPopupHeightDip;
 inline constexpr float kPopupGapDip = 8.0f;
-inline constexpr float kPopupCornerDip = 12.0f;
+inline constexpr float kPopupCornerDip = 10.0f;
 inline constexpr float kCoverSizeDip = 80.0f;
-inline constexpr float kPopupTextLeftDip = 112.0f;
-inline constexpr float kPopupTextRightPaddingDip = 16.0f;
+inline constexpr float kPopupTextLeftDip = 116.0f;
+inline constexpr float kPopupTextRightPaddingDip = 20.0f;
 inline constexpr float kPopupTextEdgeFadeDip = 8.0f;
 inline constexpr float kPopupTextPaddingDip = 8.0f;
 inline constexpr float kPopupInfoScrollSpeed = 10.0f;
@@ -32,14 +32,14 @@ inline constexpr float kIdleListBottomPaddingDip = 8.0f;
 inline constexpr float kIdleListExpandedHeightDip = kIdlePopupHeightDip - kIdleListBottomPaddingDip;
 inline constexpr float kIdleQuickVisualClipPaddingDip = 1.0f;
 inline constexpr float kIdleQuickExpandedTopDip = 15.0f;
-inline constexpr float kIdleQuickTitleLeftDip = 16.0f;
+inline constexpr float kIdleQuickTitleLeftDip = 20.0f;
 inline constexpr float kIdleQuickTriggerHorizontalPaddingDip = 8.0f;
 inline constexpr float kIdleQuickTriggerVerticalPaddingDip = 4.0f;
 inline constexpr float kIdleQuickExpandButtonRightPaddingDip = 16.0f;
 inline constexpr float kIdleQuickPageArrowReserveDip = 44.0f;
-inline constexpr float kIdleQuickTabWidthDip = 112.0f;
-inline constexpr float kIdleQuickTabGapDip = 6.0f;
-inline constexpr float kIdleQuickTabHeightDip = 28.0f;
+inline constexpr float kIdleQuickTabWidthDip = 104.0f;
+inline constexpr float kIdleQuickTabGapDip = 2.0f;
+inline constexpr float kIdleQuickTabHeightDip = 26.0f;
 inline constexpr float kIdleQuickTabContentGapDip = 8.0f;
 inline constexpr float kIdleTaskRowHeightDip = 28.0f;
 inline constexpr float kIdleTaskRowGapDip = 6.0f;
@@ -55,19 +55,19 @@ inline constexpr float kIdleQuickHeaderGapDip = 30.0f;
 inline constexpr float kIdleQuickHeaderHeightDip = 16.0f;
 inline constexpr float kMediaSourceRowTopDip = 12.0f;
 inline constexpr float kMediaSourceRowBottomDip = 34.0f;
-inline constexpr float kMediaSourceTextLeftDip = 42.0f;
+inline constexpr float kMediaSourceTextLeftDip = 44.0f;
 inline constexpr float kMediaSourceTextRightDip = 220.0f;
-inline constexpr float kMediaTitleTopDip = 48.0f;
-inline constexpr float kMediaTitleBottomDip = 76.0f;
-inline constexpr float kMediaArtistTopDip = 78.0f;
-inline constexpr float kMediaArtistBottomDip = 102.0f;
+inline constexpr float kMediaTitleTopDip = 52.0f;
+inline constexpr float kMediaTitleBottomDip = 80.0f;
+inline constexpr float kMediaArtistTopDip = 84.0f;
+inline constexpr float kMediaArtistBottomDip = 106.0f;
 // 标题/歌手右侧为伴听宠物预留的固定座位。座位宽度不足以漫游，
 // 宠物只在原地表演（听歌摇摆、唱歌、跳舞、哈欠与瞌睡）。
 inline constexpr float kMediaPetZoneWidthDip = 48.0f;
-inline constexpr float kMediaPetLaneTopDip = 50.0f;
+inline constexpr float kMediaPetLaneTopDip = 60.0f;
 inline constexpr float kMediaPetLaneHeightDip = 48.0f;
 inline constexpr float kMediaTextRightReserveDip =
-    kPopupTextRightPaddingDip + kMediaPetZoneWidthDip;
+    kPopupTextRightPaddingDip + kMediaPetZoneWidthDip + 8.0f;
 
 enum class IdleQuickTab { QuickStart, TodayTasks };
 } // namespace media_popup_detail

@@ -86,6 +86,7 @@ struct PagePaintInteraction {
     bool pressedCopy;
     bool copySucceeded;
     int hoverIdleApp;
+    int pressedIdleApp;
     int hoverIdleTask;
     int hoverIdleTaskCheckbox;
     int pressedIdleTask;
@@ -152,8 +153,6 @@ void drawCopyButton(const PagePaintContext& context, ID2D1DeviceContext* rt,
                     const D2D1_RECT_F& rect, bool hovered, bool pressed, bool succeeded);
 void drawIdleQuickHeader(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
                          float headerTop, const IdlePresentation& content, bool updateHitTest);
-void drawIdleQuickDivider(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
-                          float headerTop, const IdlePresentation& content);
 void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
                        const IdlePresentation& content, float quoteHeight,
                        IDWriteTextLayout* layout, float textWidth, float textHeight,

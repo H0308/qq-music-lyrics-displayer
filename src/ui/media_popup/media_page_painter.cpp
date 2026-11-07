@@ -66,7 +66,7 @@ void drawMediaContent(const PagePaintContext& context, ID2D1DeviceContext* rt, f
 void drawMediaSnapshot(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
                        const OverlayMediaInfo& snapshot, bool useCachedLayers) {
     auto& categorySnapshot = context.media.categorySnapshot;
-    auto& brushText = context.resources.brushText;
+    auto& brushSecondary = context.resources.brushSecondary;
     auto& fmtSource = context.resources.fmtSource;
     auto& fmtTitle = context.resources.fmtTitle;
     auto& fmtArtist = context.resources.fmtArtist;
@@ -80,7 +80,7 @@ void drawMediaSnapshot(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     if (!snapshot.sourceAppUserModelId.empty()) {
         drawSourceIcon(context, rt, snapshot.sourceAppUserModelId);
         drawText(rt, sourceLabel(snapshot.sourceAppUserModelId), fmtSource,
-                 context.geometry.mediaLayout_.source, brushText);
+                 context.geometry.mediaLayout_.source, brushSecondary);
     }
     drawCover(context, rt, useCachedLayers);
     IDWriteTextLayout* snapshotTitleLayout = nullptr;
@@ -112,7 +112,7 @@ void drawSourceIcon(const PagePaintContext& context, ID2D1DeviceContext* rt,
     auto& sourceIconBmp = context.resources.sourceIconBmp;
     auto& sourceIconLoadedFor = context.resources.sourceIconLoadedFor;
 
-    const D2D1_RECT_F iconRect = D2D1::RectF(16.0f, 14.0f, 34.0f, 32.0f);
+    const D2D1_RECT_F iconRect = D2D1::RectF(20.0f, 15.0f, 36.0f, 31.0f);
     if (sourceIconBmp && sourceIconLoadedFor == source) {
         rt->DrawBitmap(sourceIconBmp, iconRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else {
@@ -123,12 +123,12 @@ void drawSourceIcon(const PagePaintContext& context, ID2D1DeviceContext* rt,
 
 void drawSource(const PagePaintContext& context, ID2D1DeviceContext* rt) {
     auto& media = context.media.media;
-    auto& brushText = context.resources.brushText;
+    auto& brushSecondary = context.resources.brushSecondary;
     auto& fmtSource = context.resources.fmtSource;
 
     drawSourceIcon(context, rt, media.sourceAppUserModelId);
     drawText(rt, sourceLabel(media.sourceAppUserModelId), fmtSource,
-             context.geometry.mediaLayout_.source, brushText);
+             context.geometry.mediaLayout_.source, brushSecondary);
 }
 
 void drawProgress(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
@@ -147,7 +147,12 @@ void drawProgress(const PagePaintContext& context, ID2D1DeviceContext* rt, float
     const auto track = context.geometry.mediaLayout_.track;
     const float left = track.left, right = track.right;
     const float trackTop = track.top, trackBottom = track.bottom;
-    rt->FillRoundedRectangle(D2D1::RoundedRect(track, 2.0f, 2.0f), brushProgressTrack);
+    const auto trackColor = brushProgressTrack->GetColor();
+    auto subduedTrack = brushSecondary->GetColor();
+    subduedTrack.a *= 0.30f;
+    brushProgressTrack->SetColor(subduedTrack);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(track, 1.5f, 1.5f), brushProgressTrack);
+    brushProgressTrack->SetColor(trackColor);
 
     const int64_t displayPositionMs = content.durationMs > 0
                                           ? std::clamp(positionMs, int64_t{0}, content.durationMs)
@@ -158,7 +163,7 @@ void drawProgress(const PagePaintContext& context, ID2D1DeviceContext* rt, float
         const float fillRight = left + (right - left) * fraction;
         if (fillRight > left)
             rt->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(left, trackTop, fillRight, trackBottom), 2.0f, 2.0f),
+                D2D1::RoundedRect(D2D1::RectF(left, trackTop, fillRight, trackBottom), 1.5f, 1.5f),
                 brushAccent);
     }
 
@@ -205,7 +210,7 @@ void drawButton(const PagePaintContext& context, ID2D1DeviceContext* rt, int ind
     ID2D1Brush* iconBrush = enabled ? brushText : brushDisabled;
     if (index == 1 && enabled)
         iconBrush = brushTextOnAccent;
-    const float radius = index == 1 ? 11.0f : (rect.bottom - rect.top) * 0.26f;
+    const float radius = index == 1 ? 9.5f : 8.5f;
     media_control::draw(rt, controlGeometry, index, content.playing, D2D1::Point2F(cx, cy), radius,
                         iconBrush);
 }
@@ -219,7 +224,7 @@ void drawCover(const PagePaintContext& context, ID2D1DeviceContext* rt, bool use
     auto& coverLayer = context.resources.coverLayer;
 
     const D2D1_RECT_F rect = context.geometry.mediaLayout_.cover;
-    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 10.0f, 10.0f), brushControl);
+    rt->FillRoundedRectangle(D2D1::RoundedRect(rect, 8.0f, 8.0f), brushControl);
     ID2D1Layer* temporaryLayer = nullptr;
     ID2D1Layer* clipLayer = useCachedLayer ? coverLayer : nullptr;
     if (coverBmp && coverClip && !clipLayer && FAILED(rt->CreateLayer(&temporaryLayer)))

@@ -129,7 +129,7 @@ IdleListLayout IdlePageLayout::list(float w, float top, const IdlePresentation& 
     const float listHeight = std::min(maxListHeight, availableHeight);
     // 始终为滚动条预留固定槽位，避免滚动条出现或消失时网格横向跳动。
     const float listRight = w - 16.0f - kIdleScrollBarHitWidthDip;
-    result.rect = D2D1::RectF(16.0f, top, listRight, top + listHeight);
+    result.rect = D2D1::RectF(20.0f, top, listRight, top + listHeight);
     const float contentHeight = idleQuickListContentHeight(listContent);
     // 当前可视区放不下完整内容时就允许滚动；展开按钮只扩大可视区，
     // 如果扩大后已经能容纳全部内容，滚动条会自动消失。
@@ -162,9 +162,9 @@ IdleListLayout IdlePageLayout::list(float w, float top, const IdlePresentation& 
 MediaPageLayout mediaPageLayout(float w, float origin) {
     MediaPageLayout result;
     result.buttons = {
-        D2D1::RectF(w * 0.5f - 102.0f, origin + 164.0f, w * 0.5f - 66.0f, origin + 200.0f),
-        D2D1::RectF(w * 0.5f - 20.0f, origin + 162.0f, w * 0.5f + 20.0f, origin + 202.0f),
-        D2D1::RectF(w * 0.5f + 66.0f, origin + 164.0f, w * 0.5f + 102.0f, origin + 200.0f)};
+        D2D1::RectF(w * 0.5f - 80.0f, origin + 164.0f, w * 0.5f - 44.0f, origin + 200.0f),
+        D2D1::RectF(w * 0.5f - 18.0f, origin + 164.0f, w * 0.5f + 18.0f, origin + 200.0f),
+        D2D1::RectF(w * 0.5f + 44.0f, origin + 164.0f, w * 0.5f + 80.0f, origin + 200.0f)};
     result.source = D2D1::RectF(kMediaSourceTextLeftDip, kMediaSourceRowTopDip,
                                 kMediaSourceTextRightDip, kMediaSourceRowBottomDip);
     result.sourceHit = D2D1::RectF(8.0f, origin + 8.0f, 220.0f, origin + 40.0f);
@@ -172,10 +172,10 @@ MediaPageLayout mediaPageLayout(float w, float origin) {
                                kMediaTitleBottomDip);
     result.artist = D2D1::RectF(kPopupTextLeftDip, kMediaArtistTopDip,
                                 w - kMediaTextRightReserveDip, kMediaArtistBottomDip);
-    result.cover = D2D1::RectF(16.0f, 44.0f, 16.0f + kCoverSizeDip, 44.0f + kCoverSizeDip);
-    result.track = D2D1::RectF(16.0f, 148.0f, std::max(17.0f, w - 16.0f), 152.0f);
-    result.timeLeft = D2D1::RectF(16.0f, 126.0f, 88.0f, 144.0f);
-    result.timeRight = D2D1::RectF(result.track.right - 72.0f, 126.0f, result.track.right, 144.0f);
+    result.cover = D2D1::RectF(20.0f, 44.0f, 20.0f + kCoverSizeDip, 44.0f + kCoverSizeDip);
+    result.track = D2D1::RectF(20.0f, 148.5f, std::max(21.0f, w - 20.0f), 151.5f);
+    result.timeLeft = D2D1::RectF(20.0f, 128.0f, 92.0f, 144.0f);
+    result.timeRight = D2D1::RectF(result.track.right - 72.0f, 128.0f, result.track.right, 144.0f);
     return result;
 }
 } // namespace media_popup_detail

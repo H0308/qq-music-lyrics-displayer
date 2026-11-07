@@ -17,24 +17,9 @@ void drawIdleQuickHeader(const PagePaintContext& context, ID2D1DeviceContext* rt
         content.quickStartEnabled && content.showText ? expandButton.left - 8.0f : w - 16.0f;
     drawText(rt, content.todayTasksEnabled ? L"快捷启动与今日任务" : L"快捷启动",
              fmtIdleHeader,
-             D2D1::RectF(16.0f, headerTop, headerRight, headerTop + kIdleQuickHeaderHeightDip),
+             D2D1::RectF(kIdleQuickTitleLeftDip, headerTop, headerRight,
+                         headerTop + kIdleQuickHeaderHeightDip),
              brushSecondary);
-}
-
-void drawIdleQuickDivider(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
-                          float headerTop, const IdlePresentation& content) {
-    auto& brushProgressTrack = context.resources.brushProgressTrack;
-
-    if (!rt || !brushProgressTrack || !content.showText)
-        return;
-    const float opacity = 1.0f - layoutFor(context, content).idleQuickExpandProgress(content);
-    if (opacity <= 0.0f)
-        return;
-    const float dividerTop = layoutFor(context, content).idleQuickExpandButtonTop(headerTop) - 4.0f;
-    brushProgressTrack->SetOpacity(opacity);
-    rt->FillRectangle(D2D1::RectF(16.0f, dividerTop, w - 16.0f, dividerTop + 1.0f),
-                      brushProgressTrack);
-    brushProgressTrack->SetOpacity(1.0f);
 }
 
 void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, float w,
@@ -52,7 +37,7 @@ void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     if (!rt)
         return;
     const float quoteTop = kIdleQuoteTopDip;
-    const D2D1_RECT_F quoteRect = D2D1::RectF(16.0f, quoteTop, w - 16.0f, quoteTop + quoteHeight);
+    const D2D1_RECT_F quoteRect = D2D1::RectF(20.0f, quoteTop, w - 20.0f, quoteTop + quoteHeight);
     if (layout && !content.sentence.empty()) {
         drawScrollingText(context, rt, layout, textWidth, textHeight, quoteRect, scrollOffset,
                           brushText, brushIdleTextEdgeFade);
@@ -66,7 +51,7 @@ void drawIdleQuoteText(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     }
 
     const float sourceTop = quoteTop + quoteHeight + kIdleQuoteSourceGapDip;
-    const D2D1_RECT_F sourceRect = D2D1::RectF(16.0f, sourceTop, w - 16.0f, sourceTop + 18.0f);
+    const D2D1_RECT_F sourceRect = D2D1::RectF(20.0f, sourceTop, w - 20.0f, sourceTop + 18.0f);
     if (sourceLayout && !content.source.empty()) {
         drawScrollingText(context, rt, sourceLayout, sourceWidth, sourceHeight, sourceRect,
                           sourceScrollOffset, brushSecondary, brushIdleTextEdgeFade);
@@ -195,7 +180,7 @@ void drawIdleQuickExpandButton(const PagePaintContext& context, ID2D1DeviceConte
     // 收起状态提示向上展开，展开状态提示向下收起。
     drawVerticalChevron(
         rt,
-        D2D1::Point2F((local.left + local.right) * 0.5f, (local.top + local.bottom) * 0.5f), 6.5f,
+        D2D1::Point2F((local.left + local.right) * 0.5f, (local.top + local.bottom) * 0.5f), 6.0f,
         brushSecondary, !quickExpansion.expanded);
 }
 
@@ -207,7 +192,6 @@ void drawIdleQuickTabs(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     auto& idleQuickTabRects = context.geometry.idleQuickTabRects;
     auto& brushText = context.resources.brushText;
     auto& brushSecondary = context.resources.brushSecondary;
-    auto& brushAccent = context.resources.brushAccent;
     auto& fmtIdleApp = context.resources.fmtIdleApp;
 
     if (!rt)
@@ -222,7 +206,7 @@ void drawIdleQuickTabs(const PagePaintContext& context, ID2D1DeviceContext* rt, 
 
     const float tabWidth =
         std::min(kIdleQuickTabWidthDip, std::max(1.0f, (w - 32.0f - kIdleQuickTabGapDip) * 0.5f));
-    const float left = 16.0f;
+    const float left = 22.0f;
     const D2D1_RECT_F tabs[2] = {
         D2D1::RectF(left, top, left + tabWidth, top + kIdleQuickTabHeightDip),
         D2D1::RectF(left + tabWidth + kIdleQuickTabGapDip, top,
@@ -234,29 +218,26 @@ void drawIdleQuickTabs(const PagePaintContext& context, ID2D1DeviceContext* rt, 
     }
 
     const float opacity = std::clamp(progress, 0.0f, 1.0f);
+    if (brushText) {
+        const float previousOpacity = brushText->GetOpacity();
+        brushText->SetOpacity(previousOpacity * 0.04f * opacity);
+        rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(
+            left - 2.0f, top - 2.0f, tabs[1].right + 2.0f, tabs[1].bottom + 2.0f),
+            8.0f, 8.0f), brushText);
+        brushText->SetOpacity(previousOpacity);
+    }
     const wchar_t* labels[2] = {L"快速启动", L"今日任务"};
     for (int i = 0; i < 2; ++i) {
         const bool selected = (i == 0 && idleQuickTab == IdleQuickTab::QuickStart) ||
                               (i == 1 && idleQuickTab == IdleQuickTab::TodayTasks);
         const bool hovered = i == hoverIdleQuickTab;
         const bool pressed = i == pressedIdleQuickTab;
-        if (selected && brushAccent) {
-            const float previousOpacity = brushAccent->GetOpacity();
-            brushAccent->SetOpacity(previousOpacity * 0.16f * opacity);
-            rt->FillRoundedRectangle(D2D1::RoundedRect(tabs[i], 8.0f, 8.0f), brushAccent);
-            brushAccent->SetOpacity(previousOpacity);
-        }
-        if (hovered || pressed)
-            drawAdaptiveControlSurface(context, rt, tabs[i], 8.0f, pressed, PopupPage::Idle);
-        if (selected && brushAccent) {
-            const float previousOpacity = brushAccent->GetOpacity();
-            brushAccent->SetOpacity(previousOpacity * opacity);
-            rt->FillRoundedRectangle(
-                D2D1::RoundedRect(D2D1::RectF(tabs[i].left + 12.0f, tabs[i].bottom - 2.0f,
-                                              tabs[i].right - 12.0f, tabs[i].bottom),
-                                  1.0f, 1.0f),
-                brushAccent);
-            brushAccent->SetOpacity(previousOpacity);
+        if ((selected || hovered || pressed) && brushText) {
+            const float previousOpacity = brushText->GetOpacity();
+            const float fillOpacity = pressed ? 0.16f : selected ? 0.11f : 0.06f;
+            brushText->SetOpacity(previousOpacity * fillOpacity * opacity);
+            rt->FillRoundedRectangle(D2D1::RoundedRect(tabs[i], 6.0f, 6.0f), brushText);
+            brushText->SetOpacity(previousOpacity);
         }
         ID2D1SolidColorBrush* textBrush = selected ? brushText : brushSecondary;
         if (textBrush) {
@@ -319,12 +300,15 @@ void drawIdleTodayTasks(const PagePaintContext& context, ID2D1DeviceContext* rt,
         const bool checkboxHovered = static_cast<int>(i) == hoverIdleTaskCheckbox;
         const bool pressed = static_cast<int>(i) == pressedIdleTask;
         const bool checkboxPressed = static_cast<int>(i) == pressedIdleTaskCheckbox;
-        rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f),
-                                 hovered ? brushIdleCellHover : brushIdleCell);
+        auto* rowBrush = hovered ? brushIdleCellHover : brushIdleCell;
+        const float rowOpacity = rowBrush->GetOpacity();
+        rowBrush->SetOpacity(rowOpacity * (hovered ? 0.85f : 0.35f));
+        rt->FillRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), rowBrush);
+        rowBrush->SetOpacity(rowOpacity);
         if (pressed)
             drawAdaptiveControlSurface(context, rt, row, 8.0f, true, PopupPage::Idle);
         if (brushStroke) {
-            brushStroke->SetOpacity(hovered || pressed ? 0.85f : 0.45f);
+            brushStroke->SetOpacity(hovered || pressed ? 0.65f : 0.15f);
             rt->DrawRoundedRectangle(D2D1::RoundedRect(row, 8.0f, 8.0f), brushStroke,
                                      hovered || pressed ? 1.0f : 0.75f);
             brushStroke->SetOpacity(1.0f);
@@ -399,6 +383,7 @@ void drawIdleQuickListContent(const PagePaintContext& context, ID2D1DeviceContex
     auto& idleScrollMax = context.idle.idleScrollMax;
     auto& idleQuickTab = context.idle.idleQuickTab;
     auto& hoverIdleApp = context.interaction.hoverIdleApp;
+    auto& pressedIdleApp = context.interaction.pressedIdleApp;
     auto& idleListRect = context.geometry.idleListRect;
     auto& idleScrollTrackRect = context.geometry.idleScrollTrackRect;
     auto& idleScrollThumbRect = context.geometry.idleScrollThumbRect;
@@ -444,12 +429,16 @@ void drawIdleQuickListContent(const PagePaintContext& context, ID2D1DeviceContex
             if (cell.bottom < visualClip.top || cell.top > visualClip.bottom)
                 continue;
             const bool hovered = static_cast<int>(i) == hoverIdleApp;
+            const bool pressed = static_cast<int>(i) == pressedIdleApp;
             const bool valid = content.apps[i].pathValid;
-            rt->FillRoundedRectangle(D2D1::RoundedRect(cell, 9.0f, 9.0f),
-                                     hovered ? brushIdleCellHover : brushIdleCell);
+            auto* cellBrush = hovered || pressed ? brushIdleCellHover : brushIdleCell;
+            const float cellOpacity = cellBrush->GetOpacity();
+            cellBrush->SetOpacity(cellOpacity * (pressed ? 0.65f : hovered ? 0.85f : 0.35f));
+            rt->FillRoundedRectangle(D2D1::RoundedRect(cell, 8.0f, 8.0f), cellBrush);
+            cellBrush->SetOpacity(cellOpacity);
             if (brushStroke) {
-                brushStroke->SetOpacity(hovered ? 0.85f : 0.55f);
-                rt->DrawRoundedRectangle(D2D1::RoundedRect(cell, 9.0f, 9.0f), brushStroke,
+                brushStroke->SetOpacity(hovered ? 0.65f : 0.15f);
+                rt->DrawRoundedRectangle(D2D1::RoundedRect(cell, 8.0f, 8.0f), brushStroke,
                                          hovered ? 1.0f : 0.75f);
                 brushStroke->SetOpacity(1.0f);
             }
@@ -477,10 +466,13 @@ void drawIdleQuickListContent(const PagePaintContext& context, ID2D1DeviceContex
     }
     rt->PopAxisAlignedClip();
     if (!paintBounds && idleScrollMax > 0.0f) {
+        const float previousOpacity = brushSecondary->GetOpacity();
         rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f),
                                  brushProgressTrack);
+        brushSecondary->SetOpacity(previousOpacity * 0.55f);
         rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollThumbRect, 1.5f, 1.5f),
                                  brushSecondary);
+        brushSecondary->SetOpacity(previousOpacity);
     }
 }
 

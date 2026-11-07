@@ -326,6 +326,7 @@ struct MediaPopup::Impl {
                  idleQuoteWidth, idleQuoteHeight, idleQuoteSourceWidth, idleQuoteSourceHeight,
                  idleQuoteScrollOffset, idleQuoteSourceScrollOffset},
                 {hoverButton, pressedButton, hoverCopy, pressedCopy, copySucceeded, hoverIdleApp,
+                 pressedIdleApp,
                  hoverIdleTask, hoverIdleTaskCheckbox, pressedIdleTask, pressedIdleTaskCheckbox,
                  hoverIdleQuickTab, pressedIdleQuickTab, hoverIdleQuickExpand,
                  pressedIdleQuickExpand},
@@ -358,7 +359,7 @@ struct MediaPopup::Impl {
     float idleQuoteAreaWidth() const {
         // 复制按钮已经移到标题行，与返回按钮并排；正文可以使用完整宽度，
         // 文本滚动区域必须与实际绘制区域保持一致。
-        return std::max(1.0f, kPopupWidthDip - 32.0f);
+        return std::max(1.0f, kPopupWidthDip - 40.0f);
     }
 
     float idleContentTransitionProgress() const {
@@ -435,11 +436,6 @@ struct MediaPopup::Impl {
                                                updateHitTest);
     }
 
-    void drawIdleQuickDivider(ID2D1DeviceContext* rt, float w, float headerTop,
-                              const IdlePresentation& content) {
-        media_popup_paint::drawIdleQuickDivider(pagePaintContext(), rt, w, headerTop, content);
-    }
-
     MediaPopupBackground backgroundModeForPage(PopupPage page) const {
         (void)page;
         return backgroundMode;
@@ -485,35 +481,13 @@ struct MediaPopup::Impl {
         if (!frostedBackgroundActiveForPage(page))
             return p.windowBg;
         const bool dark = fluent::isDarkMode(fluent::ThemeTarget::Window);
-        D2D1_COLOR_F cardFill = p.cardFillSolid;
-        if (page == PopupPage::Idle) {
-            // 纯色模式只跟随窗口深浅色；自定义颜色只参与磨砂 tint。
-            cardFill = dark ? D2D1::ColorF(D2D1::ColorF::Black)
-                            : D2D1::ColorF(D2D1::ColorF::White);
-            if (frostedBackgroundActiveForPage(page)) {
-                const float tintAlpha = dark ? 0.10f : 0.16f;
-                if (dynamicBackgroundEnabledForPage(page)) {
-                    cardFill = p.cardFill;
-                    cardFill.a = tintAlpha;
-                } else if (floatingCardBackgroundColorCustomized) {
-                    cardFill = fluent::toD2D(floatingCardBackgroundColor, tintAlpha);
-                } else {
-                    cardFill = p.cardFill;
-                }
-            }
-        } else if (frostedBackgroundActiveForPage(page)) {
-            const float tintAlpha = dark ? 0.10f : 0.16f;
-            if (dynamicBackgroundEnabledForPage(page)) {
-                cardFill = p.cardFill;
-                cardFill.a = tintAlpha;
-            } else if (floatingCardBackgroundColorCustomized) {
-                cardFill = fluent::toD2D(floatingCardBackgroundColor, tintAlpha);
-            } else {
-                // 未设置自定义颜色时保留系统磨砂卡片的默认颜色。
-                cardFill = p.cardFill;
-                cardFill.a = tintAlpha;
-            }
-        }
+        // 两个页面使用一致的有色底层，压低背景局部亮斑，保留磨砂和专辑配色。
+        const float tintAlpha = dark ? 0.24f : 0.32f;
+        D2D1_COLOR_F cardFill = !dynamicBackgroundEnabledForPage(page) &&
+                                      floatingCardBackgroundColorCustomized
+                                  ? fluent::toD2D(floatingCardBackgroundColor)
+                                  : p.cardFillSolid;
+        cardFill.a = tintAlpha;
         return cardFill;
     }
 
@@ -538,6 +512,13 @@ struct MediaPopup::Impl {
             resetBackdropTextColors();
             return;
         }
+        // 自动对比度同时考虑磨砂上的底色，避免加深背景后仍按原截图选黑字。
+        const auto fill = cardFillForPage(page);
+        const uint8_t tintPixel[] = {
+            static_cast<uint8_t>(std::lround(fill.b * 255.0f)),
+            static_cast<uint8_t>(std::lround(fill.g * 255.0f)),
+            static_cast<uint8_t>(std::lround(fill.r * 255.0f)), 255};
+        luminance = luminance * (1.0f - fill.a) + backdropLuminance(tintPixel, 1, 1) * fill.a;
         const float blackContrast = (luminance + 0.05f) / 0.05f;
         const float whiteContrast = 1.05f / (luminance + 0.05f);
         const bool useBlack = blackContrast >= whiteContrast;
@@ -801,16 +782,16 @@ struct MediaPopup::Impl {
                                              &brushTaskPriorityLow)) ||
             FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0x8A8A8A, 0.82f),
                                              &brushTaskPriorityNone)) ||
-            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtSource) ||
-            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtTimeRight) ||
-            !createTextFormat(16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtTitle) ||
-            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtArtist) ||
+            !createTextFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtSource) ||
+            !createTextFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtTimeRight) ||
+            !createTextFormat(17.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtTitle) ||
+            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtArtist) ||
             !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIcon) ||
-            !createTextFormat(13.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD, &fmtIdleHeader) ||
+            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleHeader) ||
             !createTextFormat(14.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleQuote,
                                DWRITE_PARAGRAPH_ALIGNMENT_NEAR) ||
-            !createTextFormat(12.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleSource) ||
-            !createTextFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleApp)) {
+            !createTextFormat(11.0f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleSource) ||
+            !createTextFormat(10.5f, DWRITE_FONT_WEIGHT_NORMAL, &fmtIdleApp)) {
             releaseDrawingResources();
             return false;
         }
@@ -834,7 +815,7 @@ struct MediaPopup::Impl {
         if (!factory || FAILED(factory->CreateRoundedRectangleGeometry(
                                  D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, kCoverSizeDip,
                                                                kCoverSizeDip),
-                                                   10.0f, 10.0f),
+                                                   8.0f, 8.0f),
                                  &coverClip)) ||
             FAILED(rt->CreateLayer(&coverLayer)) ||
             FAILED(factory->CreateRoundedRectangleGeometry(
@@ -878,7 +859,7 @@ struct MediaPopup::Impl {
             kPopupTextLeftDip, kPopupWidthDip - kMediaTextRightReserveDip,
             &brushMediaTextEdgeFade);
         const bool idleFadeReady = createTextEdgeFade(
-            16.0f, kPopupWidthDip - 16.0f, &brushIdleTextEdgeFade);
+            20.0f, kPopupWidthDip - 20.0f, &brushIdleTextEdgeFade);
         if ((mediaFadeReady || idleFadeReady) && FAILED(rt->CreateLayer(&textEdgeFadeLayer))) {
             releaseCom(brushMediaTextEdgeFade);
             releaseCom(brushIdleTextEdgeFade);
@@ -1522,10 +1503,13 @@ struct MediaPopup::Impl {
             });
             idleScrollView.setVisible(true);
             if (idleScrollMax > 0.0f) {
+                const float previousOpacity = brushSecondary->GetOpacity();
                 rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollTrackRect, 1.5f, 1.5f),
                                           brushProgressTrack);
+                brushSecondary->SetOpacity(previousOpacity * 0.55f);
                 rt->FillRoundedRectangle(D2D1::RoundedRect(idleScrollThumbRect, 1.5f, 1.5f),
                                           brushSecondary);
+                brushSecondary->SetOpacity(previousOpacity);
             }
         } else {
             // 离屏快照只负责绘制，不能提前隐藏仍在屏幕上显示的滚动层。
@@ -1550,7 +1534,7 @@ struct MediaPopup::Impl {
             rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
                                     D2D1_ANTIALIAS_MODE_ALIASED);
             drawText(rt, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                     D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
+                     D2D1::RectF(20.0f, kIdleHeaderTopDip, w - 20.0f, kIdleHeaderBottomDip),
                      brushText);
 
             if (idleContentTransition.active && !categoryTransition.active()) {
@@ -1588,7 +1572,6 @@ struct MediaPopup::Impl {
                 copyRect = {};
         }
 
-        drawIdleQuickDivider(rt, w, layout.headerTop, idle);
         drawIdleQuickHeader(rt, w, layout.headerTop, idle, updateHitTest);
         drawIdleQuickList(rt, w, layout.listTop, idle, updateHitTest);
     }
@@ -1636,7 +1619,7 @@ struct MediaPopup::Impl {
         drawChevron(rt,
                     D2D1::Point2F((local.left + local.right) * 0.5f,
                                   (local.top + local.bottom) * 0.5f),
-                    7.0f, brushSecondary, page == PopupPage::Media);
+                    6.0f, brushSecondary, page == PopupPage::Media);
     }
 
     void drawBackdrop(ID2D1DeviceContext* rt, float w, float h, bool enabled,
@@ -1680,12 +1663,12 @@ struct MediaPopup::Impl {
 
         brushDynamicGradient->SetStartPoint(D2D1::Point2F(0.0f, 0.0f));
         brushDynamicGradient->SetEndPoint(D2D1::Point2F(w, h));
-        brushDynamicGradient->SetOpacity(0.51f);
+        brushDynamicGradient->SetOpacity(0.36f);
         brushDynamicGlow->SetCenter(D2D1::Point2F(w * 0.74f, h * 0.28f));
         brushDynamicGlow->SetGradientOriginOffset(D2D1::Point2F(-w * 0.05f, -h * 0.06f));
         brushDynamicGlow->SetRadiusX(w * 0.72f);
         brushDynamicGlow->SetRadiusY(h * 0.92f);
-        brushDynamicGlow->SetOpacity(0.25f);
+        brushDynamicGlow->SetOpacity(0.14f);
 
         const auto card = D2D1::RoundedRect(D2D1::RectF(0.0f, 0.0f, w, h),
                                              kPopupCornerDip, kPopupCornerDip);
@@ -1723,7 +1706,7 @@ struct MediaPopup::Impl {
 
     void drawVolumeControl(ID2D1DeviceContext* rt, float w, PopupPage page,
                            bool interactive) {
-        // 图标固定在卡片右上角（来源行右端）；悬浮底是与播放键一致的 32px 圆形
+        // 图标固定在来源行右端，32 DIP 的命中区域与顶栏控件保持一致。
         const float cy = 23.0f;
         const bool arrowVisible = playbackScene && available && idlePageAllowed() &&
                                   page == PopupPage::Media;
@@ -1793,8 +1776,8 @@ struct MediaPopup::Impl {
         const int level = !volume.available || volume.muted
                               ? 0
                               : volume.percent == 0 ? 1 : volume.percent < 50 ? 2 : 3;
-        media_control::drawVolume(rt, D2D1::Point2F(iconCx, cy), 8.0f,
-                                  volume.available ? brushText : brushDisabled, level);
+        media_control::drawVolume(rt, D2D1::Point2F(iconCx, cy), 7.0f,
+                                  volume.available ? brushSecondary : brushDisabled, level);
     }
 
     void drawIdleSnapshot(ID2D1DeviceContext* rt, float w, const IdlePresentation& content) {
@@ -1819,7 +1802,7 @@ struct MediaPopup::Impl {
             rt->PushAxisAlignedClip(D2D1::RectF(0.0f, 0.0f, w, layout.expandButtonTop),
                                     D2D1_ANTIALIAS_MODE_ALIASED);
             drawText(rt, content.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                     D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f, kIdleHeaderBottomDip),
+                     D2D1::RectF(20.0f, kIdleHeaderTopDip, w - 20.0f, kIdleHeaderBottomDip),
                      brushText);
             drawIdleQuoteText(rt, w, content, quoteHeight, snapshotQuoteLayout, snapshotQuoteWidth,
                               snapshotQuoteHeight, categorySnapshot.idleQuoteScrollOffset,
@@ -1829,7 +1812,6 @@ struct MediaPopup::Impl {
             rt->PopAxisAlignedClip();
         }
 
-        drawIdleQuickDivider(rt, w, layout.headerTop, content);
         drawIdleQuickHeader(rt, w, layout.headerTop, content, false);
         const float savedScrollOffset = idleScrollOffset;
         idleScrollOffset = categorySnapshot.idleScrollOffset;
@@ -1878,7 +1860,11 @@ struct MediaPopup::Impl {
                                              kPopupCornerDip, kPopupCornerDip);
         rt->FillRoundedRectangle(card, brushBackground);
         drawDynamicBackground(rt, w, h, dynamicBackgroundEnabledForPage(page));
-        rt->DrawRoundedRectangle(card, brushStroke, 1.0f);
+        // 描边放在表面以内，避免外半像素被裁切。
+        const float inset = 0.5f / scale();
+        rt->DrawRoundedRectangle(D2D1::RoundedRect(
+            D2D1::RectF(inset, inset, w - inset, h - inset),
+            kPopupCornerDip, kPopupCornerDip), brushStroke, 1.0f / scale());
 
         // 页面切换不再重建画笔；目标页的文字对比色要在普通交换链接管前
         // 由当前页面显式恢复，避免复用上一页画笔颜色。
@@ -2011,7 +1997,7 @@ struct MediaPopup::Impl {
     }
 
     // 快速打开展开/收起：render() 先把只包含卡片背景和返回按钮的基准帧绘制到
-    // 当前交换链后备缓冲，再把固定背景、一言区（含分隔线）和展开态的快速打开区
+    // 当前交换链后备缓冲，再把固定背景、一言区和展开态的快速打开区
     // 交给 DComp。固定背景覆盖交换链，避免背景随 Present 交接单独闪烁；内容层只
     // 做合成器位移、裁剪和透明度。展开时快速打开区整体上移并淡入，收起时整体下移
     // 并淡出。列表视口高度通过层内矩形裁剪底边收放（该底边在层内坐标系中与位移
@@ -2077,22 +2063,16 @@ struct MediaPopup::Impl {
             return false;
         }
 
-        // 层 0：一言区，原点即卡片原点；分隔线画在收起位置，随裁剪底边扫过
-        // 被隐藏/显露。当前交换链后备缓冲已经绘制成无内容基准帧，不会与旧内容重影。
+        // 层 0：一言区，原点即卡片原点，随裁剪底边扫过被隐藏/显露。
+        // 当前交换链后备缓冲已经绘制成无内容基准帧，不会与旧内容重影。
         if (auto* dc = renderer.beginTransitionLayerDraw(0)) {
             if (idle.showText) {
                 drawText(dc, idle.showQuote ? L"每日一言" : L"欢迎", fmtIdleHeader,
-                         D2D1::RectF(16.0f, kIdleHeaderTopDip, w - 16.0f,
+                         D2D1::RectF(20.0f, kIdleHeaderTopDip, w - 20.0f,
                                      kIdleHeaderBottomDip),
                          brushText);
                 drawIdleQuoteUnit(dc, w, idle, true);
                 drawIdleCopyButton(dc, w, idle, false);
-                if (brushProgressTrack) {
-                    const float dividerTop = collapsedButtonTop - 4.0f;
-                    dc->FillRectangle(
-                        D2D1::RectF(16.0f, dividerTop, w - 16.0f, dividerTop + 1.0f),
-                        brushProgressTrack);
-                }
             }
             if (!renderer.endTransitionLayerDraw(0, dc))
                 return false;
