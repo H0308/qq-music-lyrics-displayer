@@ -11,19 +11,50 @@
 #include <iterator>
 #include <memory>
 
+namespace {
+std::atomic<uint64_t> nextSharedDeviceId{0};
+std::atomic<unsigned> liveSharedDeviceWrappers{0};
+}
+
 struct CompositionSharedDevice {
+    uint64_t id = 0;
     ID3D11Device* d3d = nullptr;
     IDXGIDevice* dxgi = nullptr;
     std::atomic<bool> invalid{false};
     std::shared_ptr<std::atomic_bool> releasedNormally;
 
     ~CompositionSharedDevice() {
-        if (releasedNormally && !invalid && d3d && SUCCEEDED(d3d->GetDeviceRemovedReason()))
-            releasedNormally->store(true, std::memory_order_relaxed);
+        const HRESULT removed = d3d ? d3d->GetDeviceRemovedReason() : S_OK;
+        const bool healthy = d3d && !invalid && SUCCEEDED(removed);
+        // 只有最后一个共享持有者退出后才清空即时上下文；不能在某个窗口
+        // 单独隐藏或重建时清理，否则会影响同线程其他 D2D 绘制器。
+        if (healthy) {
+            ID3D11DeviceContext* immediate = nullptr;
+            d3d->GetImmediateContext(&immediate);
+            if (immediate) {
+                immediate->ClearState();
+                immediate->Flush();
+                immediate->Release();
+            }
+        }
         if (dxgi)
             dxgi->Release();
+        ULONG d3dReferences = 0;
         if (d3d)
-            d3d->Release();
+            d3dReferences = d3d->Release();
+        if (releasedNormally && healthy)
+            releasedNormally->store(true, std::memory_order_relaxed);
+        if (id != 0) {
+            const unsigned remaining =
+                liveSharedDeviceWrappers.fetch_sub(1, std::memory_order_relaxed) - 1;
+            // wrappers 只统计本程序共享持有者；Release 的返回值仅用于诊断，
+            // 不把它当作驱动资源或工作线程已经同步销毁的保证。
+            runtime_log::writef(
+                L"[dcomp] shared device retired id=%llu thread=%lu wrappers=%u "
+                L"healthy=%d removed=0x%08X d3d-release-refs=%lu",
+                static_cast<unsigned long long>(id), GetCurrentThreadId(), remaining,
+                healthy ? 1 : 0, static_cast<unsigned>(removed), d3dReferences);
+        }
     }
 };
 
@@ -79,7 +110,10 @@ std::shared_ptr<CompositionSharedDevice> acquireSharedDevice() {
 
     weak = shared;
     shared->releasedNormally = releasedNormally;
-    runtime_log::writef(L"[dcomp] thread device created thread=%lu", GetCurrentThreadId());
+    shared->id = nextSharedDeviceId.fetch_add(1, std::memory_order_relaxed) + 1;
+    const unsigned live = liveSharedDeviceWrappers.fetch_add(1, std::memory_order_relaxed) + 1;
+    runtime_log::writef(L"[dcomp] thread device created thread=%lu id=%llu wrappers=%u",
+                        GetCurrentThreadId(), static_cast<unsigned long long>(shared->id), live);
     return shared;
 }
 
@@ -1155,6 +1189,22 @@ void CompositionRenderer::discard() {
         }
     }
     releaseWindowResources();
+    // releaseWindowResources() 只记录合成树变更，普通隐藏仍由调用方提交。
+    // 完整销毁由设备拥有者提交撤层；借用者不能把父层的半帧一起提交。
+    // 父层已换代时，借用者持有的是旧合成设备，可以独立提交旧树的撤除。
+    if (dcomp_ && (!drawingDeviceSource_ || drawingDeviceSource_->dcomp_ != dcomp_) &&
+        (!sharedDevice_ || !sharedDevice_->invalid)) {
+        const HRESULT hr = dcomp_->Commit();
+        if (FAILED(hr)) {
+            const HRESULT removed = d3d_ ? d3d_->GetDeviceRemovedReason() : S_OK;
+            if (sharedDevice_ && (isDeviceLost(hr) || FAILED(removed)))
+                sharedDevice_->invalid = true;
+            runtime_log::writef(
+                L"[dcomp] teardown commit failed id=%llu thread=%lu hr=0x%08X removed=0x%08X",
+                static_cast<unsigned long long>(sharedDevice_ ? sharedDevice_->id : 0),
+                GetCurrentThreadId(), static_cast<unsigned>(hr), static_cast<unsigned>(removed));
+        }
+    }
     if (dcomp_) {
         dcomp_->Release();
         dcomp_ = nullptr;
