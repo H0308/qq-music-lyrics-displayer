@@ -2247,7 +2247,8 @@ struct MediaPopup::Impl {
         const int pxH = rc.bottom - rc.top;
         if (pxW <= 0 || pxH <= 0)
             return false;
-        if (!renderer.bind(hwnd, pxW, pxH))
+        CompositionRenderer::BindTimings bindTimings;
+        if (!renderer.bind(hwnd, pxW, pxH, &bindTimings))
             return false;
         const auto renderBound = runtime_log::uiTimeMs();
         if (deviceGeneration != renderer.deviceGeneration()) {
@@ -2365,13 +2366,17 @@ struct MediaPopup::Impl {
         if (renderPresented - renderStarted >= 24) {
             runtime_log::writef(
                 L"[ui][media-popup-render] bind=%llums resources=%llums backdrop=%llums "
-                L"content=%llums draw=%llums present=%llums",
+                L"content=%llums draw=%llums present=%llums "
+                L"bind-factories=%llums bind-device=%llums bind-surface=%llums",
                 static_cast<unsigned long long>(renderBound - renderStarted),
                 static_cast<unsigned long long>(resourcesReady - renderBound),
                 static_cast<unsigned long long>(backdropReady - resourcesReady),
                 static_cast<unsigned long long>(contentReady - backdropReady),
                 static_cast<unsigned long long>(renderDrawn - contentReady),
-                static_cast<unsigned long long>(renderPresented - renderDrawn));
+                static_cast<unsigned long long>(renderPresented - renderDrawn),
+                static_cast<unsigned long long>(bindTimings.factoriesMs),
+                static_cast<unsigned long long>(bindTimings.deviceMs),
+                static_cast<unsigned long long>(bindTimings.surfaceMs));
         }
         return true;
     }

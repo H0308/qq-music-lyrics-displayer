@@ -1,6 +1,7 @@
 #include "graphics/composition_renderer.h"
 
 #include "logging/runtime_logger.h"
+#include "logging/ui_timing.h"
 
 #include <algorithm>
 #include <atomic>
@@ -239,6 +240,8 @@ bool CompositionRenderer::createDevice() {
 }
 
 bool CompositionRenderer::ensureSwapchain(HWND hwnd, int width, int height) {
+    if (surface_)
+        releaseWindowResources();
     const auto fail = [this, hwnd, width, height](const wchar_t* stage, HRESULT hr) {
         const HRESULT removed = d3d_ ? d3d_->GetDeviceRemovedReason() : S_OK;
         runtime_log::writef(
@@ -372,19 +375,95 @@ void CompositionRenderer::releaseBackBuffer() {
     }
 }
 
-bool CompositionRenderer::bind(HWND hwnd, int width, int height) {
+bool CompositionRenderer::bind(HWND hwnd, int width, int height, BindTimings* timings) {
+    const auto started = timings ? runtime_log::uiTimeMs() : 0;
+    if (timings)
+        *timings = {};
     if (!createFactories()) {
         runtime_log::writef(L"[dcomp] factory create failed");
         return false;
     }
+    const auto factoriesReady = timings ? runtime_log::uiTimeMs() : 0;
     // 设备创建失败/重建节流由 acquireSharedDevice 按节流节奏记录日志，
     // 这里不能逐帧写，否则设备恢复前的等待期每帧都会刷一条。
     if (!createDevice())
         return false;
+    const auto deviceReady = timings ? runtime_log::uiTimeMs() : 0;
     if (!ensureSwapchain(hwnd, width, height)) {
         return false;
     }
+    if (timings) {
+        timings->factoriesMs = factoriesReady - started;
+        timings->deviceMs = deviceReady - factoriesReady;
+        timings->surfaceMs = runtime_log::uiTimeMs() - deviceReady;
+    }
     return true;
+}
+
+ID2D1DeviceContext* CompositionRenderer::beginSurfaceDraw(HWND hwnd, int width, int height) {
+    if (!hwnd || width <= 0 || height <= 0 || !createFactories() || !createDevice())
+        return nullptr;
+    if (swapchain_ || (hwnd_ && hwnd_ != hwnd))
+        releaseWindowResources();
+
+    const auto fail = [this](HRESULT hr) -> ID2D1DeviceContext* {
+        runtime_log::writef(L"[dcomp] surface draw failed: 0x%08X", static_cast<unsigned>(hr));
+        discard();
+        return nullptr;
+    };
+    if (!target_) {
+        HRESULT hr = dcomp_->CreateTargetForHwnd(hwnd, contentAboveChildren_ ? TRUE : FALSE,
+                                                &target_);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateVisual(&visual_);
+        if (SUCCEEDED(hr))
+            hr = dcomp_->CreateEffectGroup(&rootOpacity_);
+        if (SUCCEEDED(hr))
+            hr = rootOpacity_->SetOpacity(1.0f);
+        if (SUCCEEDED(hr))
+            hr = visual_->SetEffect(rootOpacity_);
+        if (SUCCEEDED(hr))
+            hr = target_->SetRoot(visual_);
+        if (FAILED(hr))
+            return fail(hr);
+        hwnd_ = hwnd;
+    }
+    if (!surface_ || width_ != width || height_ != height) {
+        IDCompositionSurface* replacement = nullptr;
+        const HRESULT hr = dcomp_->CreateSurface(static_cast<UINT>(width),
+            static_cast<UINT>(height), DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_PREMULTIPLIED, &replacement);
+        if (FAILED(hr))
+            return fail(hr);
+        // 根视觉继续持有旧表面；新表面画好后才挂载，并与偏移一起提交。
+        if (surface_)
+            surface_->Release();
+        surface_ = replacement;
+        width_ = width;
+        height_ = height;
+    }
+    POINT offset{};
+    ID2D1DeviceContext* dc = nullptr;
+    const HRESULT hr = surface_->BeginDraw(nullptr, __uuidof(ID2D1DeviceContext),
+                                          reinterpret_cast<void**>(&dc), &offset);
+    if (FAILED(hr)) {
+        if (dc)
+            dc->Release();
+        return fail(hr);
+    }
+    const float scale = static_cast<float>(dpi_) / 96.0f;
+    dc->SetDpi(static_cast<float>(dpi_), static_cast<float>(dpi_));
+    dc->SetTransform(D2D1::Matrix3x2F::Translation(offset.x / scale, offset.y / scale));
+    dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    return dc;
+}
+
+bool CompositionRenderer::endSurfaceDraw(ID2D1DeviceContext* dc) {
+    if (!dc)
+        return false;
+    const HRESULT hr = surface_ ? surface_->EndDraw() : E_UNEXPECTED;
+    dc->Release();
+    return SUCCEEDED(hr) && SUCCEEDED(visual_->SetContent(surface_));
 }
 
 bool CompositionRenderer::setWindowContent(HWND source) {
@@ -1017,9 +1096,8 @@ bool CompositionRenderer::animateRootScroll(float from, float to, float velocity
     return SUCCEEDED(hr);
 }
 
-void CompositionRenderer::commit() {
-    if (dcomp_)
-        dcomp_->Commit();
+bool CompositionRenderer::commit() {
+    return dcomp_ && SUCCEEDED(dcomp_->Commit());
 }
 
 void CompositionRenderer::waitForCommitCompletion() {
@@ -1038,16 +1116,7 @@ bool CompositionRenderer::setRootRoundedClip(float top, float bottom, float corn
     return SUCCEEDED(visual_->SetClip(rootClip_));
 }
 
-void CompositionRenderer::discard() {
-    // EndDraw 也可能先于 Present 报设备丢失；此时不能再次借回旧 D3D 设备。
-    if (sharedDevice_ && d3d_) {
-        const HRESULT reason = d3d_->GetDeviceRemovedReason();
-        if (FAILED(reason)) {
-            sharedDevice_->invalid = true;
-            runtime_log::writef(L"[dcomp] device removed on discard: 0x%08X thread=%lu",
-                                static_cast<unsigned>(reason), GetCurrentThreadId());
-        }
-    }
+void CompositionRenderer::releaseWindowResources() {
     releaseBackBuffer();
     releaseTransitionLayers();
     auto release = [](auto*& p) {
@@ -1060,20 +1129,47 @@ void CompositionRenderer::discard() {
         visual_->SetEffect(nullptr);
     if (visual_ && rootClip_)
         visual_->SetClip(nullptr);
+    if (visual_)
+        visual_->SetContent(nullptr);
+    if (target_)
+        target_->SetRoot(nullptr);
     release(rootOpacity_);
     release(rootClip_);
     release(visual_);
     release(target_);
     release(swapchain_);
-    release(dcomp_);
-    release(dc_);
-    release(d2dDevice_);
-    dxgiDevice_ = nullptr;
-    d3d_ = nullptr;
-    sharedDevice_.reset();
+    release(surface_);
     hwnd_ = nullptr;
     width_ = 0;
     height_ = 0;
+}
+
+void CompositionRenderer::discard() {
+    // EndDraw 也可能先于 Present 报设备丢失；此时不能再次借回旧 D3D 设备。
+    if (sharedDevice_ && d3d_) {
+        const HRESULT reason = d3d_->GetDeviceRemovedReason();
+        if (FAILED(reason)) {
+            sharedDevice_->invalid = true;
+            runtime_log::writef(L"[dcomp] device removed on discard: 0x%08X thread=%lu",
+                                static_cast<unsigned>(reason), GetCurrentThreadId());
+        }
+    }
+    releaseWindowResources();
+    if (dcomp_) {
+        dcomp_->Release();
+        dcomp_ = nullptr;
+    }
+    if (dc_) {
+        dc_->Release();
+        dc_ = nullptr;
+    }
+    if (d2dDevice_) {
+        d2dDevice_->Release();
+        d2dDevice_ = nullptr;
+    }
+    dxgiDevice_ = nullptr;
+    d3d_ = nullptr;
+    sharedDevice_.reset();
 }
 
 void CompositionRenderer::releaseAll() {

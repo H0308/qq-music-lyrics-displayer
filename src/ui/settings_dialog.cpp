@@ -152,6 +152,8 @@ struct SettingsDialog::Impl {
     CompositionRenderer contentRenderer;
     fluent::FluentDialogSurface::TextCache contentTextCache;
     bool contentLayerReady = false;
+    float contentCacheTop = 0.0f;
+    float contentCacheHeight = 0.0f;
     bool hintHeightsDirty = true;
     bool backdrop = false;
     SettingsSections sections_;
@@ -511,14 +513,61 @@ struct SettingsDialog::Impl {
                                       thumbTop + thumbHeight);
     }
 
+    bool contentCacheNeedsUpdate() const {
+        if (!contentLayerReady)
+            return true;
+        const float viewHeight = contentViewportRect.bottom - contentViewportRect.top;
+        const float target = contentScrollAnimating ? contentScrollTarget : contentScroll;
+        const float first = std::min(contentScroll, target);
+        const float last = std::max(contentScroll, target) + viewHeight;
+        const float tolerance = 1.0f / surface.dipScale();
+        return first < contentCacheTop - tolerance ||
+               last > contentCacheTop + contentCacheHeight + tolerance;
+    }
+
+    struct ContentScrollSample {
+        float offset;
+        float velocity;
+    };
+
+    ContentScrollSample sampleContentScroll(std::chrono::steady_clock::time_point now) const {
+        const float elapsed = std::chrono::duration<float>(now - contentScrollLastTick).count();
+        const float target = std::clamp(contentScrollTarget, 0.0f, contentMaxScroll);
+        const float displacement = contentScroll - target;
+        const float coefficient = contentScrollVelocity + kContentScrollFrequency * displacement;
+        const float decay = std::exp(-kContentScrollFrequency * elapsed);
+        return {std::clamp(target + (displacement + coefficient * elapsed) * decay,
+                           0.0f, contentMaxScroll),
+                (contentScrollVelocity - kContentScrollFrequency * coefficient * elapsed) * decay};
+    }
+
+    void applyContentLayerScroll() {
+        const float scale = surface.dipScale();
+        if (contentScrollAnimating) {
+            // 缓存绘制期间时钟仍在前进；用同一条曲线采样，不从绘制前的位置重启动画。
+            const auto sample = sampleContentScroll(std::chrono::steady_clock::now());
+            contentRenderer.animateRootScroll((contentCacheTop - sample.offset) * scale,
+                std::round((contentCacheTop - contentScrollTarget) * scale),
+                -sample.velocity * scale, kContentScrollFrequency);
+        } else {
+            contentRenderer.setRootOffsetY(std::round((contentCacheTop - contentScroll) * scale));
+        }
+    }
+
     void stopContentScroll() {
         if (hwnd)
             KillTimer(hwnd, kContentScrollTimer);
         contentScrollAnimating = false;
         contentScrollVelocity = 0.0f;
         contentScrollTarget = contentScroll;
-        contentRenderer.setRootOffsetY(-std::round(contentScroll * surface.dipScale()));
-        contentRenderer.commit();
+        const float viewHeight = contentViewportRect.bottom - contentViewportRect.top;
+        if (contentLayerReady && contentCacheHeight > viewHeight * 2.0f + 2.0f) {
+            // 长距离滚动结束后，释放为本次动画临时扩大的像素缓冲。
+            renderContentLayer();
+        } else if (contentLayerReady) {
+            applyContentLayerScroll();
+            contentRenderer.commit();
+        }
     }
 
     void applyContentScroll(float offset) {
@@ -527,10 +576,6 @@ struct SettingsDialog::Impl {
         const float scale = surface.dipScale();
         const float paintScroll = std::round(next * scale) / scale;
         const float displacement = contentPaintScroll - paintScroll;
-        if (!contentScrollAnimating) {
-            contentRenderer.setRootOffsetY(-std::round(contentScroll * scale));
-            contentRenderer.commit();
-        }
         if (displacement == 0.0f)
             return;
         contentPaintScroll = paintScroll;
@@ -553,6 +598,12 @@ struct SettingsDialog::Impl {
         }
         updateScrollBarGeometry();
         layoutSliderEditor();
+        if (contentCacheNeedsUpdate()) {
+            renderContentLayer();
+        } else if (!contentScrollAnimating) {
+            applyContentLayerScroll();
+            contentRenderer.commit();
+        }
         RECT dirty{};
         GetClientRect(hwnd, &dirty);
         dirty.left = static_cast<LONG>(std::floor((scrollTrackRect.left - kScrollBarHitWidth) * scale));
@@ -569,17 +620,12 @@ struct SettingsDialog::Impl {
         if (!contentScrollAnimating)
             return;
         const auto now = std::chrono::steady_clock::now();
-        const float elapsed = std::chrono::duration<float>(now - contentScrollLastTick).count();
+        const auto sample = sampleContentScroll(now);
         contentScrollLastTick = now;
         contentScrollTarget = std::clamp(contentScrollTarget, 0.0f, contentMaxScroll);
-        const float displacement = contentScroll - contentScrollTarget;
-        const float coefficient = contentScrollVelocity + kContentScrollFrequency * displacement;
-        const float decay = std::exp(-kContentScrollFrequency * elapsed);
-        const float next = contentScrollTarget + (displacement + coefficient * elapsed) * decay;
-        contentScrollVelocity =
-            (contentScrollVelocity - kContentScrollFrequency * coefficient * elapsed) * decay;
-        applyContentScroll(next);
-        if (std::fabs(next - contentScrollTarget) < 0.1f &&
+        contentScrollVelocity = sample.velocity;
+        applyContentScroll(sample.offset);
+        if (std::fabs(sample.offset - contentScrollTarget) < 0.1f &&
             std::fabs(contentScrollVelocity) < 2.0f) {
             applyContentScroll(contentScrollTarget);
             stopContentScroll();
@@ -636,11 +682,12 @@ struct SettingsDialog::Impl {
                 surface.invalidate();
                 UpdateWindow(hwnd);
             }
-            contentRenderer.animateRootScroll(-contentScroll * surface.dipScale(),
-                                              -std::round(contentScrollTarget * surface.dipScale()),
-                                              -contentScrollVelocity * surface.dipScale(),
-                                              kContentScrollFrequency);
-            contentRenderer.commit();
+            if (contentCacheNeedsUpdate()) {
+                renderContentLayer();
+            } else {
+                applyContentLayerScroll();
+                contentRenderer.commit();
+            }
         }
     }
 
@@ -2186,7 +2233,8 @@ struct SettingsDialog::Impl {
         drawScrollBar(painter);
     }
 
-    void paintContent(fluent::FluentDialogSurface::Painter& painter) {
+    void paintContent(fluent::FluentDialogSurface::Painter& painter,
+                      const D2D1_RECT_F& drawRegion) {
         const auto& p = painter.colors();
         drawSettingGroups(painter);
         const float locatedAlpha = searchLocatedAlpha();
@@ -2215,6 +2263,9 @@ struct SettingsDialog::Impl {
                 1.5f);
         }
         for (auto& row : sections_.rows[activePage]) {
+            const auto& bounds = row.kind == ControlKind::Header ? row.labelRect : row.cardRect;
+            if (bounds.bottom < drawRegion.top - 1.0f || bounds.top > drawRegion.bottom + 1.0f)
+                continue;
             if (row.kind == ControlKind::Header) {
                 painter.drawText(row.text, painter.textFormat(13.0f, 600), row.labelRect,
                                  p.text);
@@ -2279,50 +2330,57 @@ struct SettingsDialog::Impl {
         const float top = std::floor(contentViewportRect.top * scale) / scale;
         const int width = static_cast<int>(std::ceil(contentViewportRect.right * scale) -
                                            std::floor(contentViewportRect.left * scale));
-        const int height = static_cast<int>(std::ceil(
-            std::max(contentHeight + 2.0f,
-                     contentViewportRect.bottom - contentViewportRect.top) * scale));
+        const float viewHeight = std::max(1.0f, contentViewportRect.bottom - contentViewportRect.top);
+        const float totalHeight = std::max(viewHeight, contentHeight + 2.0f);
+        const float targetScroll = contentScrollAnimating ? contentScrollTarget : contentScroll;
+        // 静止时缓存两屏；动画时覆盖起点、终点及预绘范围，避免合成器滑出缓存。
+        const float cacheHeight = std::min(totalHeight,
+            viewHeight * 2.0f + std::fabs(targetScroll - contentScroll));
+        const float cacheTop = std::floor(std::clamp(
+            std::min(contentScroll, targetScroll) - viewHeight * 0.5f,
+            0.0f, totalHeight - cacheHeight) * scale) / scale;
+        const int height = std::max(1, static_cast<int>(std::ceil(cacheHeight * scale)));
         contentRenderer.setDpi(surface.dpi());
-        if (!contentRenderer.bind(contentWindow, std::max(1, width), std::max(1, height))) {
+        auto* target = contentRenderer.beginSurfaceDraw(contentWindow, std::max(1, width), height);
+        if (!target) {
             contentLayerReady = false;
             return;
         }
-        auto* target = contentRenderer.renderTarget();
         const auto bound = runtime_log::uiTimeMs();
-        target->BeginDraw();
-        target->SetTransform(D2D1::Matrix3x2F::Translation(-left, contentPaintScroll - top));
-        target->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+        D2D1_MATRIX_3X2_F surfaceTransform;
+        target->GetTransform(&surfaceTransform);
+        target->SetTransform(D2D1::Matrix3x2F::Translation(-left,
+            contentPaintScroll - top - cacheTop) * surfaceTransform);
         {
             fluent::FluentDialogSurface::Painter painter(target, contentRenderer.dwrite(),
                                                         &contentTextCache);
-            paintContent(painter);
+            paintContent(painter, D2D1::RectF(left, top + cacheTop - contentPaintScroll,
+                contentViewportRect.right, top + cacheTop + height / scale - contentPaintScroll));
         }
         const auto painted = runtime_log::uiTimeMs();
-        const HRESULT result = target->EndDraw();
+        const bool drawnSuccessfully = contentRenderer.endSurfaceDraw(target);
         const auto drawn = runtime_log::uiTimeMs();
-        if (FAILED(result)) {
+        if (!drawnSuccessfully) {
             contentRenderer.discard();
             contentLayerReady = false;
             return;
         }
-        if (contentScrollAnimating) {
-            advanceContentScroll();
-            contentRenderer.animateRootScroll(-contentScroll * scale, -std::round(contentScrollTarget * scale),
-                                               -contentScrollVelocity * scale,
-                                               kContentScrollFrequency);
-        } else {
-            contentRenderer.setRootOffsetY(-std::round(contentScroll * scale));
-        }
-        contentLayerReady = contentRenderer.present();
+        contentCacheTop = cacheTop;
+        contentCacheHeight = height / scale;
+        applyContentLayerScroll();
+        // 表面像素、缓存原点和滚动动画在同一合成事务中生效。
+        contentLayerReady = contentRenderer.commit();
         const auto presented = runtime_log::uiTimeMs();
         if (presented - started >= 24) {
             runtime_log::writef(
                 L"[ui][settings-content] page=%d size=%dx%d bind=%llums paint=%llums "
-                L"end-draw=%llums present=%llums", activePage, width, height,
+                L"end-draw=%llums present=%llums cache-top=%.1f content-height=%.1f",
+                activePage, width, height,
                 static_cast<unsigned long long>(bound - started),
                 static_cast<unsigned long long>(painted - bound),
                 static_cast<unsigned long long>(drawn - painted),
-                static_cast<unsigned long long>(presented - drawn));
+                static_cast<unsigned long long>(presented - drawn),
+                contentCacheTop, contentHeight);
         }
         if (!contentLayerReady)
             contentRenderer.discard();
@@ -2985,6 +3043,8 @@ struct SettingsDialog::Impl {
             destroy();
             return 0;
         case WM_DESTROY:
+            // 销毁期间只结束时钟；不再为临时扩大的缓存提交收缩帧。
+            contentLayerReady = false;
             KillTimer(hwnd, kSliderCaretTimer);
             stopContentScroll();
             stopNavIndicator();
@@ -2994,6 +3054,7 @@ struct SettingsDialog::Impl {
             contentRenderer.releaseAll();
             contentTextCache.clear();
             contentLayerReady = false;
+            contentCacheTop = contentCacheHeight = 0.0f;
             contentWindow = nullptr;
             surface.discard();
             hwnd = nullptr;

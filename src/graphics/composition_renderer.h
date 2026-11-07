@@ -13,7 +13,7 @@
 
 struct CompositionSharedDevice;
 
-// 窗口的 GPU 渲染与合成基础设施：D2D 画到 DXGI 组合交换链，
+// 窗口的 GPU 渲染与合成基础设施：D2D 画到 DXGI 组合交换链或合成表面，
 // 由 DirectComposition 提交到 DWM，并管理合成图层、动画与设备资源。
 class CompositionRenderer {
 public:
@@ -30,7 +30,17 @@ public:
     IDWriteFactory* dwrite() const;
 
     // 确保交换链/Visual 与窗口尺寸匹配并绑定后备缓冲（BeginDraw 前调用）。
-    bool bind(HWND hwnd, int width, int height);
+    struct BindTimings {
+        uint64_t factoriesMs = 0;
+        uint64_t deviceMs = 0;
+        uint64_t surfaceMs = 0;
+    };
+    bool bind(HWND hwnd, int width, int height, BindTimings* timings = nullptr);
+
+    // 合成表面绘制：返回的上下文已开始绘制，初始变换包含表面分配偏移。
+    // 与 bind()/present() 二选一；结束绘制后调用方更新视觉属性，再统一 commit()。
+    ID2D1DeviceContext* beginSurfaceDraw(HWND hwnd, int width, int height);
+    bool endSurfaceDraw(ID2D1DeviceContext* dc);
 
     // 每次成功创建窗口级设备链后递增；调用方据此重建设备相关的画刷、位图与图层。
     uint64_t deviceGeneration() const { return deviceGeneration_; }
@@ -40,6 +50,10 @@ public:
 
     // 用原生分层窗口的实时表面替换根内容，保留子控件绘制，由根视觉统一转场。
     bool setWindowContent(HWND source);
+
+    // 隐藏后释放窗口表面和转场层，保留所属线程的设备及工厂供下次显示复用。
+    // 合成树变更由调用方通过 commit() 随当前事务提交。
+    void releaseWindowResources();
 
     // 设备丢失：释放设备链全部对象，下次 bind() 惰性重建；保留工厂。
     void discard();
@@ -91,7 +105,7 @@ public:
     bool animateRootScroll(float from, float to, float velocity, float frequency);
     // 给窗口的根视觉设置物理像素圆角裁剪；未调用时根视觉保持矩形。
     bool setRootRoundedClip(float top, float bottom, float cornerRadius);
-    void commit();
+    bool commit();
     // 等待上一批 DComposition 命令被合成器处理完，用于交换链与覆盖层交接。
     void waitForCommitCompletion();
 
@@ -126,6 +140,7 @@ private:
     ID2D1Device* d2dDevice_ = nullptr;
     ID2D1DeviceContext* dc_ = nullptr;
     IDXGISwapChain1* swapchain_ = nullptr;
+    IDCompositionSurface* surface_ = nullptr;
     IDCompositionDevice* dcomp_ = nullptr;
     IDCompositionTarget* target_ = nullptr;
     IDCompositionVisual* visual_ = nullptr;

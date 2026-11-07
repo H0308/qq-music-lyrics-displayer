@@ -988,7 +988,9 @@ struct SongToast::Impl {
             return;
         killTimers();
         ShowWindow(hwnd, SW_HIDE);
-        renderer.resetRoot();
+        // 提示窗隐藏后不保留画面缓冲；设备及字体格式继续复用。
+        releaseDeviceResources();
+        renderer.releaseWindowResources();
         renderer.commit();
     }
 
